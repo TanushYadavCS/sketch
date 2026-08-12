@@ -65,6 +65,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
       config: deps.toolConfig,
+      encryptionKey: deps.settingsEncryptionKey,
       automationArtifactCollector: deps.automationArtifactCollector,
     }),
     ...createTeamTools(deps),

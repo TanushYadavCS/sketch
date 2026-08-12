@@ -21,12 +21,13 @@ import type { Selectable } from "kysely";
 import type { AutomationRunRow } from "../db/repositories/automation-runs";
 import type { StepContentRow } from "../db/repositories/automation-step-content";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
+import type { WebhookEndpointRow } from "../db/repositories/webhook-endpoints";
 import type { ScheduledTasksTable } from "../db/schema";
 import { parseOnceSchedule } from "../scheduler/parse-once";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import { resolveWorkflowDelivery } from "../workflows/delivery";
 import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "./action-script";
-import { addWebhookMetadata } from "./webhook";
+import { buildNativeWebhookUrl } from "./webhook-endpoints";
 
 export type BuilderValidationIssue = { code: string; message: string; path?: string };
 
@@ -59,6 +60,12 @@ const DEFAULT_SUPPORTED_TRIGGER_TYPES: readonly WorkflowTriggerConfig["type"][] 
   "canvas",
   "slack_channel_message",
 ];
+
+export function isCanvasWebhookTrigger(config: WorkflowTriggerConfig | undefined): boolean {
+  return (
+    config?.type === "canvas" && (config.componentKey === "webhook-trigger" || config.canvasEndpoint !== undefined)
+  );
+}
 
 function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
@@ -268,6 +275,45 @@ function parseRun(row: AutomationRunRow): AutomationRun {
   };
 }
 
+export function addWebhookEndpointMetadata(
+  config: WorkflowTriggerConfig,
+  taskId: string,
+  options: {
+    endpoint?: WebhookEndpointRow | null;
+    baseUrl?: string | null;
+    port?: number;
+  } = {},
+): WorkflowTriggerConfig {
+  if (config.type !== "webhook") return config;
+  if (options.endpoint) {
+    return {
+      ...config,
+      webhookUrl: buildNativeWebhookUrl(options.endpoint.id, {
+        baseUrl: options.baseUrl,
+        port: options.port,
+      }),
+      webhookEndpointId: options.endpoint.id,
+      webhookMethod: "POST",
+      webhookContentType: "application/json",
+      webhookAuthentication: "none",
+      webhookStatus: options.endpoint.status === "revoked" ? "revoked" : "active",
+    };
+  }
+  const {
+    webhookUrl: _legacyWebhookUrl,
+    webhookEndpointId: _legacyWebhookEndpointId,
+    webhookStatus: _legacyWebhookStatus,
+    ...withoutLegacyEndpoint
+  } = config;
+  return {
+    ...withoutLegacyEndpoint,
+    webhookMethod: "POST",
+    webhookContentType: "application/json",
+    webhookAuthentication: "none",
+    webhookStatus: "unavailable",
+  };
+}
+
 export function buildAutomationDefinition(params: {
   row: ScheduledTaskRow;
   stepContentRows: StepContentRow[];
@@ -277,12 +323,26 @@ export function buildAutomationDefinition(params: {
   lastEditedByName?: string | null;
   webhookBaseUrl?: string | null;
   webhookPort?: number;
+  webhookEndpoint?: WebhookEndpointRow | null;
+  includeWebhookMetadata?: boolean;
 }): AutomationDefinition {
   const steps = safeSteps(params.row, params.normalizeScheduleTriggers).map((step) => {
-    if (step.type !== "trigger" || !step.triggerConfig || params.webhookBaseUrl === undefined) return step;
+    if (step.type !== "trigger" || !step.triggerConfig) return step;
+    if (step.triggerConfig.type === "webhook") {
+      return {
+        ...step,
+        triggerConfig: addWebhookEndpointMetadata(step.triggerConfig, params.row.id, {
+          endpoint: params.webhookEndpoint,
+          baseUrl: params.webhookBaseUrl,
+          port: params.webhookPort,
+        }),
+      };
+    }
+    if (params.includeWebhookMetadata === false || params.webhookBaseUrl === undefined) return step;
     return {
       ...step,
-      triggerConfig: addWebhookMetadata(step.triggerConfig, params.row.id, {
+      triggerConfig: addWebhookEndpointMetadata(step.triggerConfig, params.row.id, {
+        endpoint: params.webhookEndpoint,
         baseUrl: params.webhookBaseUrl,
         port: params.webhookPort,
       }),
@@ -794,6 +854,15 @@ function validateTriggerSchedule(
     addIssue(issues, "TRIGGER_CONFIG_REQUIRED", "Trigger step requires trigger config", "steps");
     return;
   }
+  if (isCanvasWebhookTrigger(config)) {
+    addIssue(
+      issues,
+      "CANVAS_WEBHOOK_UNSUPPORTED",
+      "Canvas-managed webhook triggers are not supported; use the native Sketch webhook trigger",
+      "steps",
+    );
+    return;
+  }
   if (request.scheduleType === "external") {
     if (config.type !== "webhook" && config.type !== "canvas" && config.type !== "slack_channel_message") {
       addIssue(
@@ -802,6 +871,17 @@ function validateTriggerSchedule(
         "External automations require webhook, canvas, or Slack channel message trigger config",
         "steps",
       );
+    }
+    if (config.type === "webhook" && request.scheduleValue !== "webhook") {
+      addIssue(
+        issues,
+        "TRIGGER_CONFIG_MISMATCH",
+        "Native webhook triggers require schedule value webhook",
+        "scheduleValue",
+      );
+    }
+    if (config.type === "canvas" && request.scheduleValue !== "canvas") {
+      addIssue(issues, "TRIGGER_CONFIG_MISMATCH", "Canvas triggers require schedule value canvas", "scheduleValue");
     }
     if (config.type === "slack_channel_message") {
       if (request.scheduleValue !== "slack_channel_message") {

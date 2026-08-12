@@ -164,15 +164,25 @@ function workflowStepCount(task: ScheduledTaskListItem): number {
   return steps.length > 0 ? steps.length : task.stepCount;
 }
 
+function isNativeWebhook(task: ScheduledTaskListItem): boolean {
+  return (
+    task.triggerConfig?.type === "webhook" || (task.scheduleType === "external" && task.scheduleValue === "webhook")
+  );
+}
+
 function isCanvasManaged(task: ScheduledTaskListItem): boolean {
-  return task.triggerConfig?.type === "canvas" || (task.scheduleType === "external" && task.scheduleValue === "canvas");
+  return (
+    !isNativeWebhook(task) &&
+    (task.triggerConfig?.type === "canvas" || (task.scheduleType === "external" && task.scheduleValue === "canvas"))
+  );
 }
 
 function isTriggerBased(task: ScheduledTaskListItem): boolean {
-  return isCanvasManaged(task) || task.triggerConfig?.type === "slack_channel_message";
+  return isNativeWebhook(task) || isCanvasManaged(task) || task.triggerConfig?.type === "slack_channel_message";
 }
 
 function getTriggerDetail(task: ScheduledTaskListItem): string {
+  if (isNativeWebhook(task)) return "Sketch webhook";
   if (task.triggerConfig?.type === "slack_channel_message") {
     return `Slack channel message · ${task.triggerConfig.channelId}`;
   }
@@ -188,6 +198,7 @@ function getTriggerDetail(task: ScheduledTaskListItem): string {
 }
 
 function getTaskScheduleLabel(task: ScheduledTaskListItem): string {
+  if (isNativeWebhook(task)) return "Trigger · Sketch webhook";
   if (task.triggerConfig?.type === "slack_channel_message") {
     return `Trigger · Slack channel message · ${task.triggerConfig.channelId}`;
   }

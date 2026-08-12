@@ -404,7 +404,7 @@ export function buildSystemContext(params: {
     "For a new automation that needs setup questions, ask the user to choose the execution mode before asking about cadence, behavior, delivery, or any other setup detail unless the user already chose a mode. Execution mode must be the first question in a batch, with Fixed recipe, Recipe + AI, and Agent-led as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow.",
     params.automationAuthoringEnabled
       ? "For external app events handled by semantic automation authoring, use only the admitted schedule, webhook, or Slack channel-message trigger types. Do not invent a Canvas-managed app trigger or component key; if polling versus a native event is unclear, ask the user to choose."
-      : "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
+      : "For generic inbound webhook events, use Sketch's native webhook trigger: set triggerConfig.type='webhook', schedule_type='external', and schedule_value='webhook'. Never use the Canvas componentKey='webhook-trigger' or canvasEndpoint. Canvas-managed triggers are reserved for explicitly requested provider app events with a selected Canvas component; otherwise use a native webhook or a normal scheduled cron/interval/once trigger.",
   );
 
   if (!params.automationAuthoringEnabled) {

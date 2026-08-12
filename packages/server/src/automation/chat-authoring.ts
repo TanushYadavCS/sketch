@@ -82,6 +82,7 @@ export function createChatAutomationAuthoring(deps: {
   authoring: AutomationAuthoringService;
   scheduler: AuthoringScheduler;
   loadIntegrationProvider: () => Promise<Pick<IntegrationProvider, "isBrokerCapable"> | null>;
+  encryptionKey?: string;
   createId?: () => string;
   now?: () => Date;
 }): ChatAutomationAuthoring {
@@ -159,6 +160,7 @@ export function createChatAutomationAuthoring(deps: {
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        encryptionKey: deps.encryptionKey,
         ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
       });
     } catch (error) {
@@ -215,6 +217,7 @@ export function createChatAutomationAuthoring(deps: {
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        encryptionKey: deps.encryptionKey,
         ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
       });
     } catch (error) {

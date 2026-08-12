@@ -61,6 +61,54 @@ function requestForAction(
   };
 }
 
+describe("automation trigger validation", () => {
+  it("rejects Canvas-managed webhook triggers", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.status = "active";
+    request.scheduleType = "external";
+    request.scheduleValue = "canvas";
+    request.steps[0] = {
+      ...request.steps[0],
+      triggerConfig: {
+        type: "canvas",
+        app: "system",
+        componentKey: "webhook-trigger",
+        canvasEndpoint: {
+          url: "http://localhost:3000/api/workflows/test/nodes/system-1/events",
+          method: "POST",
+          authentication: "none",
+          contentType: "application/json",
+          payload: "Any JSON value",
+        },
+      },
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "CANVAS_WEBHOOK_UNSUPPORTED" })]),
+      }),
+    );
+  });
+
+  it("continues to allow provider-specific Canvas triggers", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.status = "active";
+    request.scheduleType = "external";
+    request.scheduleValue = "canvas";
+    request.steps[0] = {
+      ...request.steps[0],
+      triggerConfig: {
+        type: "canvas",
+        app: "clickup",
+        eventDescription: "new issue created",
+        componentKey: "clickup.issue.created",
+      },
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).not.toThrow();
+  });
+});
+
 describe("automation action capability validation", () => {
   it("rejects a final delivery action that returns an object", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });

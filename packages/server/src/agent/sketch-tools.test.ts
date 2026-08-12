@@ -19,6 +19,8 @@ import {
   handleUpdateInboxWorkflow,
 } from "./sketch-tools";
 
+const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 function makeUser(overrides: Partial<Selectable<UsersTable>> = {}): Selectable<UsersTable> {
   return {
     id: "user-1",
@@ -240,6 +242,75 @@ describe("createSketchMcpServer", () => {
         builderUrl: expect.stringMatching(/^http:\/\/localhost:3000\/scheduled-tasks\/[^/]+\/edit$/),
       }),
     );
+  });
+
+  it("passes the settings encryption key to native webhook automation persistence", async () => {
+    const uploadCollector = new UploadCollector();
+    const scheduler = {
+      refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({
+        id,
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        prompt: "Process inbound events.",
+        scheduleType: "external",
+        scheduleValue: "webhook",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: "user-1",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        title: "Inbound webhook",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: "D123",
+        outputPlatform: "slack",
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: {
+          platform: "slack",
+          targetType: "dm",
+          targetId: "D123",
+          threadTs: null,
+          mode: "deliver",
+        },
+      })),
+      executeTaskById: vi.fn().mockResolvedValue({ status: "completed", aborted: false }),
+    };
+    const server = createSketchMcpServer({
+      uploadCollector,
+      workspaceDir: tmpDir,
+      db,
+      settingsEncryptionKey: ENCRYPTION_KEY,
+      scheduler: scheduler as never,
+      taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (input: Record<string, unknown>) => Promise<{ content: { text: string }[] }> }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.ManageScheduledTasks.handler({
+      action: "add",
+      title: "Inbound webhook",
+      prompt: "Process inbound events.",
+      schedule_type: "external",
+      schedule_value: "webhook",
+    });
+
+    expect(result.content[0].text).toContain("Automation created:");
+    await expect(db.selectFrom("webhook_endpoints").select("status").executeTakeFirst()).resolves.toMatchObject({
+      status: "active",
+    });
   });
 
   it("SearchChatHistory searches the scoped conversation", async () => {

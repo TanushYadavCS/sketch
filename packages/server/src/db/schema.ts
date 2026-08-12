@@ -1571,11 +1571,41 @@ export interface QuestionInteractionDeliveriesTable {
   updated_at: Generated<string>;
 }
 
+export interface WebhookEndpointsTable {
+  id: string;
+  task_id: string;
+  status: string;
+  generation: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WebhookDeliveriesTable {
+  id: string;
+  endpoint_id: string;
+  task_id: string;
+  event_id: string;
+  payload_hash: string;
+  trigger_data: string;
+  status: string;
+  task_revision: Generated<number>;
+  endpoint_generation: Generated<number>;
+  run_id: string | null;
+  attempt_count: Generated<number>;
+  claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
 export interface DB {
   question_interactions: QuestionInteractionsTable;
   question_interaction_items: QuestionInteractionItemsTable;
   question_interaction_events: QuestionInteractionEventsTable;
   question_interaction_deliveries: QuestionInteractionDeliveriesTable;
+  webhook_endpoints: WebhookEndpointsTable;
+  webhook_deliveries: WebhookDeliveriesTable;
   users: UsersTable;
   channels: ChannelsTable;
   whatsapp_creds: WhatsAppCredsTable;

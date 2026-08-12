@@ -27,7 +27,7 @@ import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/
 import type { AutomationCapabilityCallEvent, AutomationCapabilityRegistry } from "../automation/capabilities";
 import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
-import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -35,6 +35,9 @@ import { createScheduledTaskRepository } from "../db/repositories/scheduled-task
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import { createWebhookDeliveryRepository } from "../db/repositories/webhook-deliveries";
+import type { WebhookDeliveryRow } from "../db/repositories/webhook-deliveries";
+import { createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
 import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
@@ -59,6 +62,19 @@ import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
 type AgentExecutionQueue = "interactive" | "scheduled";
+
+const WEBHOOK_DELIVERY_SWEEP_INTERVAL_MS = 60_000;
+const WEBHOOK_DELIVERY_HEARTBEAT_INTERVAL_MS = 60_000;
+const WEBHOOK_DELIVERY_STALE_AFTER_MS = 5 * 60_000;
+const WEBHOOK_DELIVERY_SWEEP_LIMIT = 100;
+
+function isTerminalWebhookDelivery(delivery: WebhookDeliveryRow): boolean {
+  return delivery.status === "completed" || delivery.status === "failed" || delivery.status === "cancelled";
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
 
 interface EnqueueTaskOptions {
   localFileRoot?: string;
@@ -225,6 +241,11 @@ export class TaskScheduler {
   private cronInstances: Map<string, Cron> = new Map();
   private inflightTaskRuns: Set<string> = new Set();
   private repo: ReturnType<typeof createScheduledTaskRepository>;
+  private webhookEndpoints: ReturnType<typeof createWebhookEndpointRepository>;
+  private webhookDeliveries: ReturnType<typeof createWebhookDeliveryRepository>;
+  private webhookDeliveryEnqueued = new Set<string>();
+  private webhookDeliverySweepTimer: ReturnType<typeof setInterval> | null = null;
+  private webhookDeliverySweepPromise: Promise<void> | null = null;
   private deliveryCapture: ReturnType<typeof createWorkflowDeliveryCapture>;
   private conversations: ReturnType<typeof createConversationRepository>;
   private deps: TaskSchedulerDeps;
@@ -232,6 +253,8 @@ export class TaskScheduler {
   constructor(deps: TaskSchedulerDeps) {
     this.deps = deps;
     this.repo = createScheduledTaskRepository(deps.db);
+    this.webhookEndpoints = createWebhookEndpointRepository(deps.db);
+    this.webhookDeliveries = createWebhookDeliveryRepository(deps.db);
     this.conversations = createConversationRepository(deps.db);
     this.deliveryCapture = createWorkflowDeliveryCapture({
       conversations: this.conversations,
@@ -254,6 +277,10 @@ export class TaskScheduler {
         await this.repo.updateStatus(task.id, "paused").catch(() => {});
       }
     }
+    await this.recoverWebhookDeliveries(true).catch((error) => {
+      this.deps.logger.warn({ err: error }, "TaskScheduler: webhook startup recovery failed");
+    });
+    this.startWebhookDeliverySweeper();
   }
 
   stop(): void {
@@ -262,6 +289,9 @@ export class TaskScheduler {
       this.deps.logger.debug({ taskId }, "TaskScheduler: stopped cron instance");
     }
     this.cronInstances.clear();
+    this.webhookDeliveryEnqueued.clear();
+    if (this.webhookDeliverySweepTimer) clearInterval(this.webhookDeliverySweepTimer);
+    this.webhookDeliverySweepTimer = null;
   }
 
   async scheduleTask(task: ScheduledTaskRow): Promise<void> {
@@ -701,6 +731,225 @@ export class TaskScheduler {
         "TaskScheduler: manual failure notification failed",
       );
     }
+  }
+
+  async enqueueWebhookDelivery(deliveryId: string): Promise<boolean> {
+    const delivery = await this.webhookDeliveries.getById(deliveryId);
+    if (!delivery || isTerminalWebhookDelivery(delivery)) return false;
+    if (delivery.status === "processing") return false;
+
+    const task = await this.repo.getById(delivery.task_id);
+    const endpoint = await this.webhookEndpoints.getById(delivery.endpoint_id);
+    if (!task || task.status !== "active") {
+      await this.webhookDeliveries.cancel(deliveryId, "Automation is no longer active");
+      return false;
+    }
+    if (!endpoint || endpoint.status !== "active") {
+      await this.webhookDeliveries.cancel(deliveryId, "Webhook endpoint is no longer active");
+      return false;
+    }
+
+    const wasPending = delivery.status === "pending";
+    const queued = wasPending ? await this.webhookDeliveries.markQueued(deliveryId) : delivery;
+    if (!queued || queued.status !== "queued") return false;
+    if (this.webhookDeliveryEnqueued.has(deliveryId)) return true;
+
+    this.webhookDeliveryEnqueued.add(deliveryId);
+    const accepted = this.deps.queueManager.getQueue(this.getQueueKey(task)).enqueue(async () => {
+      try {
+        await this.processWebhookDelivery(deliveryId);
+      } catch (error) {
+        this.deps.logger.error({ err: error, deliveryId }, "TaskScheduler: webhook delivery processing failed");
+      } finally {
+        this.webhookDeliveryEnqueued.delete(deliveryId);
+      }
+    });
+    if (!accepted) {
+      this.webhookDeliveryEnqueued.delete(deliveryId);
+      if (wasPending) {
+        await this.deps.db
+          .updateTable("webhook_deliveries")
+          .set({ status: "pending", updated_at: new Date().toISOString() })
+          .where("id", "=", deliveryId)
+          .where("status", "=", "queued")
+          .execute();
+      }
+    }
+    return accepted;
+  }
+
+  private async processWebhookDelivery(deliveryId: string): Promise<void> {
+    const runId = randomUUID();
+    const claimed = await this.webhookDeliveries.claim(deliveryId, { runId });
+    if (!claimed || claimed.status !== "processing" || claimed.run_id !== runId) return;
+
+    const execution = await this.deps.db.transaction().execute(async (trx) => {
+      const delivery = await trx
+        .selectFrom("webhook_deliveries")
+        .selectAll()
+        .where("id", "=", deliveryId)
+        .where("status", "=", "processing")
+        .where("run_id", "=", runId)
+        .executeTakeFirst();
+      if (!delivery) return { kind: "stale" as const };
+
+      const [task, endpoint] = await Promise.all([
+        trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", delivery.task_id).executeTakeFirst(),
+        trx.selectFrom("webhook_endpoints").selectAll().where("id", "=", delivery.endpoint_id).executeTakeFirst(),
+      ]);
+      if (
+        !task ||
+        task.status !== "active" ||
+        task.revision !== delivery.task_revision ||
+        !endpoint ||
+        endpoint.task_id !== task.id ||
+        endpoint.status !== "active" ||
+        endpoint.generation !== delivery.endpoint_generation
+      ) {
+        return { kind: "stale" as const };
+      }
+
+      let triggerData: unknown;
+      try {
+        triggerData = JSON.parse(delivery.trigger_data);
+      } catch {
+        return { kind: "invalid_trigger_data" as const };
+      }
+
+      await createAutomationRunsRepository(trx).create({ id: runId, taskId: task.id, triggerData });
+      return { kind: "started" as const, task, triggerData };
+    });
+
+    if (execution.kind === "stale") {
+      await this.webhookDeliveries.cancel(
+        deliveryId,
+        "Automation or webhook endpoint changed before delivery execution",
+        undefined,
+        runId,
+      );
+      return;
+    }
+    if (execution.kind === "invalid_trigger_data") {
+      await this.webhookDeliveries.fail(deliveryId, "Stored webhook trigger data is invalid", undefined, runId);
+      return;
+    }
+
+    const heartbeatTimer = setInterval(() => {
+      void this.webhookDeliveries.heartbeat(deliveryId, runId).catch((error) => {
+        this.deps.logger.warn({ err: error, deliveryId }, "TaskScheduler: webhook delivery heartbeat failed");
+      });
+    }, WEBHOOK_DELIVERY_HEARTBEAT_INTERVAL_MS);
+    heartbeatTimer.unref?.();
+
+    try {
+      const result = await this.executeTaskNow(
+        execution.task,
+        "scheduled",
+        { provided: true, data: execution.triggerData },
+        undefined,
+        true,
+        "production",
+        runId,
+      );
+      if (result.aborted) {
+        await this.webhookDeliveries.cancel(deliveryId, "Automation run aborted", undefined, runId);
+      } else if (result.status === "completed") {
+        await this.webhookDeliveries.complete(deliveryId, runId);
+      } else {
+        await this.webhookDeliveries.fail(deliveryId, "Automation run failed", undefined, runId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.deps.automationRunsRepo
+        .update(runId, {
+          status: "failed",
+          completedAt: new Date().toISOString(),
+          errorMessage: message,
+        })
+        .catch(() => {});
+      await this.webhookDeliveries.fail(deliveryId, message, undefined, runId);
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
+  }
+
+  private async recoverWebhookDeliveries(startup: boolean): Promise<void> {
+    const processing = startup
+      ? await this.webhookDeliveries.list({ statuses: ["processing"], limit: WEBHOOK_DELIVERY_SWEEP_LIMIT })
+      : await this.webhookDeliveries.listForRecovery({
+          before: new Date(Date.now() - WEBHOOK_DELIVERY_STALE_AFTER_MS).toISOString(),
+          limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
+        });
+    const pending = await this.webhookDeliveries.list({
+      statuses: ["pending", "queued"],
+      limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
+    });
+    for (const delivery of pending) {
+      await this.enqueueWebhookDelivery(delivery.id).catch((error) => {
+        this.deps.logger.warn(
+          { err: error, deliveryId: delivery.id },
+          "TaskScheduler: webhook recovery handoff failed",
+        );
+      });
+    }
+
+    for (const delivery of processing) await this.reconcileWebhookDelivery(delivery, startup);
+  }
+
+  private async reconcileWebhookDelivery(delivery: WebhookDeliveryRow, startup: boolean): Promise<void> {
+    const run = delivery.run_id ? await this.deps.automationRunsRepo.getById(delivery.run_id) : undefined;
+    if (!run) {
+      await this.webhookDeliveries.reset(
+        delivery.id,
+        "Recovered before an automation run was created",
+        delivery.run_id ?? undefined,
+      );
+      await this.enqueueWebhookDelivery(delivery.id).catch((error) => {
+        this.deps.logger.warn(
+          { err: error, deliveryId: delivery.id },
+          "TaskScheduler: orphaned webhook delivery requeue failed",
+        );
+      });
+      return;
+    }
+    if (run.status === "running") {
+      const errorMessage = startup ? "Interrupted by server restart" : "Webhook worker lease expired";
+      await this.deps.automationRunsRepo.update(run.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage,
+      });
+      await this.webhookDeliveries.fail(delivery.id, errorMessage, undefined, run.id);
+      return;
+    }
+    if (!isTerminalRunStatus(run.status)) return;
+    if (run.status === "completed") {
+      await this.webhookDeliveries.complete(delivery.id, run.id);
+    } else if (run.status === "cancelled") {
+      await this.webhookDeliveries.cancel(
+        delivery.id,
+        run.error_message ?? "Automation run cancelled",
+        undefined,
+        run.id,
+      );
+    } else {
+      await this.webhookDeliveries.fail(delivery.id, run.error_message ?? "Automation run failed", undefined, run.id);
+    }
+  }
+
+  private startWebhookDeliverySweeper(): void {
+    if (this.webhookDeliverySweepTimer) return;
+    this.webhookDeliverySweepTimer = setInterval(() => {
+      if (this.webhookDeliverySweepPromise) return;
+      const sweep = this.recoverWebhookDeliveries(false).catch((error) => {
+        this.deps.logger.warn({ err: error }, "TaskScheduler: webhook delivery sweep failed");
+      });
+      this.webhookDeliverySweepPromise = sweep;
+      void sweep.finally(() => {
+        if (this.webhookDeliverySweepPromise === sweep) this.webhookDeliverySweepPromise = null;
+      });
+    }, WEBHOOK_DELIVERY_SWEEP_INTERVAL_MS);
+    this.webhookDeliverySweepTimer.unref?.();
   }
 
   async enqueueTaskById(id: string, ...triggerData: [] | [unknown] | [unknown, EnqueueTaskOptions]): Promise<void> {

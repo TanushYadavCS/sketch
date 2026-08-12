@@ -14,6 +14,8 @@ import {
   updateAutomationDefinition,
 } from "./persistence";
 
+const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 function makeDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
     title: "Daily account brief",
@@ -190,6 +192,7 @@ describe("automation persistence", () => {
       }),
       context: createContext("automation-webhook"),
       brokerCapable: true,
+      encryptionKey: ENCRYPTION_KEY,
     });
 
     await expect(
@@ -197,19 +200,102 @@ describe("automation persistence", () => {
         db,
         taskId: "automation-webhook",
         webhookBaseUrl: "https://sketch.example/",
+        encryptionKey: ENCRYPTION_KEY,
       }),
     ).resolves.toMatchObject({
       steps: expect.arrayContaining([
         expect.objectContaining({
-          triggerConfig: {
+          triggerConfig: expect.objectContaining({
             type: "webhook",
-            webhookUrl: "https://sketch.example/api/webhooks/wf/automation-webhook",
+            webhookUrl: expect.stringMatching(/^https:\/\/sketch\.example\/api\/webhooks\/v1\//),
+            webhookEndpointId: expect.any(String),
             webhookMethod: "POST",
             webhookContentType: "application/json",
-          },
+            webhookAuthentication: "none",
+            webhookStatus: "active",
+          }),
         }),
       ]),
     });
+  });
+
+  it("normalizes a native webhook trigger replacement during an update", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-webhook-update"),
+      brokerCapable: true,
+    });
+
+    const nextDefinition = makeDefinition();
+    nextDefinition.steps[0] = {
+      ...nextDefinition.steps[0],
+      label: "Webhook",
+      icon: "webhook",
+      triggerConfig: { type: "webhook" },
+    };
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "automation-webhook-update",
+      patch: { expectedRevision: 0, steps: nextDefinition.steps },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+      encryptionKey: ENCRYPTION_KEY,
+    });
+
+    expect(saved).toMatchObject({
+      kind: "saved",
+      row: { revision: 1, schedule_type: "external", schedule_value: "webhook" },
+    });
+    await expect(
+      db
+        .selectFrom("webhook_endpoints")
+        .select(["status", "task_id"])
+        .where("task_id", "=", "automation-webhook-update")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ status: "active", task_id: "automation-webhook-update" });
+
+    const scheduled = await updateAutomationDefinition({
+      db,
+      taskId: "automation-webhook-update",
+      patch: {
+        expectedRevision: 1,
+        scheduleType: "interval",
+        scheduleValue: "120",
+        steps: makeDefinition().steps,
+      },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+      encryptionKey: ENCRYPTION_KEY,
+    });
+    expect(scheduled).toMatchObject({ kind: "saved", row: { revision: 2, schedule_type: "interval" } });
+    await expect(
+      db
+        .selectFrom("webhook_endpoints")
+        .select("status")
+        .where("task_id", "=", "automation-webhook-update")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ status: "revoked" });
+
+    const reenabled = await updateAutomationDefinition({
+      db,
+      taskId: "automation-webhook-update",
+      patch: { expectedRevision: 2, steps: nextDefinition.steps },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+      encryptionKey: ENCRYPTION_KEY,
+    });
+    expect(reenabled).toMatchObject({
+      kind: "saved",
+      row: { revision: 3, schedule_type: "external", schedule_value: "webhook" },
+    });
+    await expect(
+      db
+        .selectFrom("webhook_endpoints")
+        .select(["status", "generation"])
+        .where("task_id", "=", "automation-webhook-update")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ status: "active", generation: 3 });
   });
 
   it("validates the complete definition before creating a task row", async () => {

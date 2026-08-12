@@ -938,6 +938,7 @@ export function AutomationBuilderPage() {
 
       <NodeDrawer
         key={selectedStep?.id ?? "closed"}
+        taskId={taskId}
         draft={builderDraft}
         step={selectedStep}
         output={selectedOutput}
@@ -2923,6 +2924,7 @@ function formatRunDate(value: string): string {
 }
 
 function NodeDrawer({
+  taskId,
   draft,
   step,
   output,
@@ -2935,6 +2937,7 @@ function NodeDrawer({
   onUpdateAgentPrompt,
   savingPromptStepId,
 }: {
+  taskId: string;
   draft: DraftAutomation;
   step: WorkflowStep | null;
   output?: StepOutput;
@@ -3008,6 +3011,7 @@ function NodeDrawer({
       <div className="chat-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
         {tab === "input" ? (
           <NodeInputPanel
+            taskId={taskId}
             draft={draft}
             step={step}
             content={content}
@@ -3116,12 +3120,14 @@ function formatDuration(ms: number): string {
 }
 
 function NodeInputPanel({
+  taskId,
   draft,
   step,
   content,
   onUpdateAgentPrompt,
   savingPrompt,
 }: {
+  taskId: string;
   draft: DraftAutomation;
   step: WorkflowStep;
   content?: AutomationStepContent;
@@ -3140,7 +3146,7 @@ function NodeInputPanel({
         <Input value={step.label} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
       </Field>
 
-      {step.type === "trigger" ? <TriggerFields draft={draft} /> : null}
+      {step.type === "trigger" ? <TriggerFields draft={draft} taskId={taskId} /> : null}
 
       {step.type === "agent" ? (
         <>
@@ -3205,9 +3211,9 @@ function NodeInputPanel({
   );
 }
 
-function TriggerFields({ draft }: { draft: DraftAutomation }) {
+function TriggerFields({ draft, taskId }: { draft: DraftAutomation; taskId: string }) {
   const triggerStep = draft.steps.find((step) => step.type === "trigger");
-  const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
+  const config = (triggerStep?.triggerConfig as WorkflowTriggerConfig | undefined) ?? { type: "schedule" as const };
   const canvasConfig = config.type === "canvas" ? config : undefined;
   const triggerLabel = canvasConfig
     ? canvasConfig.componentKey === "webhook-trigger"
@@ -3226,6 +3232,7 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
           <Input value={config.channelId ?? ""} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
         </Field>
       ) : null}
+      {config.type === "webhook" ? <NativeWebhookFields config={config} /> : null}
       {canvasConfig ? (
         <CanvasWebhookFields
           endpoint={canvasConfig.canvasEndpoint}
@@ -3252,6 +3259,116 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
         </>
       ) : null}
     </>
+  );
+}
+
+function NativeWebhookFields({ config }: { config: WorkflowTriggerConfig }) {
+  const metadata = config;
+  const hasEndpoint = Boolean(metadata.webhookUrl);
+  const statusDetails = hasEndpoint
+    ? {
+        label: "Active",
+        guidance: "Send POST requests with JSON to the canonical URL above; no authentication is required.",
+        isError: false,
+        toneClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+      }
+    : {
+        label: "Setup pending",
+        guidance: "Sketch is still setting up this trigger. Refresh this automation before sending requests.",
+        isError: false,
+        toneClass: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+      };
+  const handleCopy = async () => {
+    if (!metadata.webhookUrl) return;
+    try {
+      await navigator.clipboard.writeText(metadata.webhookUrl);
+      toast.success("Sketch webhook URL copied");
+    } catch {
+      toast.error("Unable to copy Sketch webhook URL");
+    }
+  };
+
+  return (
+    <div
+      data-testid="native-webhook-details"
+      className="space-y-3 rounded-[8px] border border-brand-accent/25 bg-brand-accent/5 p-3"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium text-foreground">Webhook trigger</p>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Send JSON events to this endpoint to start the automation.
+          </p>
+        </div>
+        <Badge
+          className={cn(
+            "shrink-0 rounded-[5px] border px-1.5 py-0.5 text-[10px] font-semibold",
+            statusDetails.toneClass,
+          )}
+        >
+          {statusDetails.label}
+        </Badge>
+      </div>
+      <div
+        data-testid="native-webhook-guidance"
+        role={statusDetails.isError ? "alert" : "status"}
+        className={cn(
+          "rounded-[6px] border px-2.5 py-2 text-[11px] leading-4",
+          statusDetails.isError
+            ? "border-destructive/25 bg-destructive/10 text-destructive"
+            : "border-border/70 bg-background/55 text-muted-foreground",
+        )}
+      >
+        <p>{statusDetails.guidance}</p>
+      </div>
+      <Field label="Canonical URL">
+        <div className="flex gap-2">
+          <Input
+            value={metadata.webhookUrl ?? "Webhook endpoint is not available yet"}
+            className={cn(builderReadOnlyInputClass, "min-w-0 flex-1")}
+            readOnly
+            aria-readonly="true"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="size-10 shrink-0 rounded-[8px]"
+            aria-label="Copy canonical Sketch webhook URL"
+            disabled={!metadata.webhookUrl}
+            onClick={() => void handleCopy()}
+          >
+            <CopySimpleIcon size={15} />
+          </Button>
+        </div>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Method">
+          <Input
+            value={metadata.webhookMethod ?? "POST"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+        <Field label="Content type">
+          <Input
+            value={metadata.webhookContentType ?? "application/json"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Authentication mode">
+          <Input value="None required" className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
+        </Field>
+        <Field label="Payload shape">
+          <Input value="Any JSON value" className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
+        </Field>
+      </div>
+    </div>
   );
 }
 

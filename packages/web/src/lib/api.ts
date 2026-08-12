@@ -196,6 +196,9 @@ export interface ScheduledTaskConversationsResponse {
   transcriptAccess: "viewer";
 }
 
+export type WebhookAuthentication = "none";
+export type WebhookStatus = "active" | "revoked" | "unavailable";
+
 export interface WorkflowTriggerConfig {
   type: "webhook" | "schedule" | "canvas" | "slack_channel_message";
   channelId?: string;
@@ -206,8 +209,11 @@ export interface WorkflowTriggerConfig {
   eventDescription?: string;
   componentKey?: string;
   webhookUrl?: string;
+  webhookEndpointId?: string;
   webhookMethod?: "POST";
   webhookContentType?: "application/json";
+  webhookAuthentication?: WebhookAuthentication;
+  webhookStatus?: WebhookStatus;
   canvasEndpoint?: CanvasWebhookEndpoint;
   configuredProps?: Record<string, unknown>;
   status?: "pending_canvas_setup" | "active" | "error";

@@ -19,7 +19,6 @@ import { createTestConfig, createTestDb } from "../test-utils";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
 
 const config = createTestConfig();
-
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
   const users = createUserRepository(db);

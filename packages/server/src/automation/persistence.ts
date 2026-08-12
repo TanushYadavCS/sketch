@@ -18,6 +18,8 @@ import {
   type ScheduledTaskRow,
   createScheduledTaskRepository,
 } from "../db/repositories/scheduled-tasks";
+import { createWebhookDeliveryRepository } from "../db/repositories/webhook-deliveries";
+import { createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
 import type { DB } from "../db/schema";
 import { normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import {
@@ -119,6 +121,27 @@ function validatedRequest(
   const parsed = parseAutomationBuilderSaveRequest(request);
   validateAutomationBuilderSaveRequest({ request: parsed, brokerCapable, supportedTriggerTypes });
   return parsed;
+}
+
+function hasWebhookTriggerInSteps(steps: readonly WorkflowStep[]): boolean {
+  return steps.some((step) => step.type === "trigger" && step.triggerConfig?.type === "webhook");
+}
+
+function hasWebhookTrigger(request: AutomationBuilderSaveRequest): boolean {
+  return hasWebhookTriggerInSteps(request.steps);
+}
+
+async function ensureWebhookEndpoint(
+  db: Kysely<DB>,
+  taskId: string,
+  request: AutomationBuilderSaveRequest,
+): Promise<void> {
+  const repository = createWebhookEndpointRepository(db);
+  if (hasWebhookTrigger(request)) {
+    await repository.ensureForTask(taskId);
+    return;
+  }
+  await repository.deactivateForTask(taskId);
 }
 
 function contentEntries(request: AutomationBuilderSaveRequest) {
@@ -283,6 +306,9 @@ function applyDefinitionPatch(
   } else if (trigger?.type === "canvas") {
     scheduleType = "external";
     scheduleValue = "canvas";
+  } else if (trigger?.type === "webhook") {
+    scheduleType = "external";
+    scheduleValue = "webhook";
   } else if (
     (patch.scheduleType !== undefined || patch.scheduleValue !== undefined || patch.timezone !== undefined) &&
     scheduleType !== "external" &&
@@ -328,12 +354,14 @@ export async function getAutomationDefinition(params: {
   taskId: string;
   webhookBaseUrl?: string | null;
   webhookPort?: number;
+  encryptionKey?: string;
 }): Promise<AutomationDefinition | null> {
   const row = await createScheduledTaskRepository(params.db).getById(params.taskId);
   if (!row) return null;
-  const [stepContentRows, runRows] = await Promise.all([
+  const [stepContentRows, runRows, webhookEndpoint] = await Promise.all([
     createAutomationStepContentRepository(params.db).getByTask(params.taskId),
     createAutomationRunsRepository(params.db).list(params.taskId),
+    createWebhookEndpointRepository(params.db, params.encryptionKey).getByTaskId(params.taskId),
   ]);
   return buildAutomationDefinition({
     row,
@@ -341,6 +369,7 @@ export async function getAutomationDefinition(params: {
     runRows,
     webhookBaseUrl: params.webhookBaseUrl,
     webhookPort: params.webhookPort,
+    webhookEndpoint,
   });
 }
 
@@ -358,6 +387,7 @@ export async function deleteAutomation(params: {
   taskId: string;
   actor: AutomationEditActor;
   scheduler: AutomationDeletionScheduler;
+  encryptionKey?: string;
 }): Promise<AutomationDeletionResult> {
   let databaseResult: Extract<AutomationDeletionResult, { kind: "deleted" | "not_found" | "access_denied" }>;
   try {
@@ -376,6 +406,8 @@ export async function deleteAutomation(params: {
       await createScheduledTaskConversationRepository(trx).deleteByTaskId(params.taskId);
       await createAutomationStepContentRepository(trx).deleteByTaskId(params.taskId);
       await createAutomationRunsRepository(trx).deleteByTaskId(params.taskId);
+      await createWebhookDeliveryRepository(trx).deleteByTaskId(params.taskId);
+      await trx.deleteFrom("webhook_endpoints").where("task_id", "=", params.taskId).execute();
 
       const deleted = await trx.deleteFrom("scheduled_tasks").where("id", "=", params.taskId).executeTakeFirst();
       if (Number(deleted.numDeletedRows ?? 0) === 0) throw new AutomationDeletionRaceError();
@@ -408,6 +440,7 @@ export async function updateAutomationDefinition(params: {
   brokerCapable: boolean;
   supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
+  encryptionKey?: string;
 }): Promise<AutomationMutationResult> {
   return params.db.transaction().execute(async (trx) => {
     const current = await trx
@@ -426,6 +459,7 @@ export async function updateAutomationDefinition(params: {
       stepContentRows: await createAutomationStepContentRepository(trx).getByTask(params.taskId),
       runRows: [],
       normalizeScheduleTriggers: false,
+      includeWebhookMetadata: false,
     });
     const expectedRevision = params.patch.expectedRevision ?? current.revision;
     if (current.revision !== expectedRevision) {
@@ -459,6 +493,7 @@ export async function updateAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
+    await ensureWebhookEndpoint(trx, params.taskId, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: params.taskId,
@@ -481,6 +516,7 @@ export async function createAutomationDefinition(params: {
   brokerCapable: boolean;
   supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
+  encryptionKey?: string;
 }): Promise<AutomationCreateResult> {
   const request = validatedRequest(params.request, params.brokerCapable, params.supportedTriggerTypes);
   const id = params.context.id ?? randomUUID();
@@ -518,6 +554,7 @@ export async function createAutomationDefinition(params: {
     };
     const created = await createScheduledTaskRepository(trx).add(task);
     await replaceStepContent(trx, id, request);
+    await ensureWebhookEndpoint(trx, id, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: id,
@@ -600,6 +637,8 @@ export async function createAutomationDraft(params: {
           })),
         );
         await conversationsRepo.deleteByTaskId(candidate.id);
+        await createWebhookDeliveryRepository(trx).deleteByTaskId(candidate.id);
+        await trx.deleteFrom("webhook_endpoints").where("task_id", "=", candidate.id).execute();
         await trx.deleteFrom("scheduled_tasks").where("id", "=", candidate.id).execute();
       }
     }
@@ -671,6 +710,7 @@ export async function replaceAutomationDefinition(params: {
   brokerCapable: boolean;
   supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
+  encryptionKey?: string;
 }): Promise<AutomationReplaceResult> {
   const request = validatedRequest(params.request, params.brokerCapable, params.supportedTriggerTypes);
 
@@ -711,6 +751,7 @@ export async function replaceAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
+    await ensureWebhookEndpoint(trx, params.taskId, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: params.taskId,
