@@ -8,7 +8,7 @@
  * it — including the drops that leave no trace in the database.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { type DevTraceRunHeader, type UnifiedFile, api } from "@/lib/api";
+import { type DevTraceRunHeader, type DevTraceRunKind, type UnifiedFile, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import { FileDetailSheet } from "@/routes/files/file-detail-sheet";
 import { WarningIcon } from "@phosphor-icons/react";
@@ -30,7 +30,8 @@ export const devToolsRoute = createRoute({
 function DevToolsPage() {
   const auth = useDashboardAuth();
   const [traceFile, setTraceFile] = useState<{ id: string; name: string } | null>(null);
-  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const [traceKind, setTraceKind] = useState<DevTraceRunKind>("enrichment");
+  const [openRun, setOpenRun] = useState<{ id: string; kind: DevTraceRunKind } | null>(null);
   const isAdmin = auth.role === "admin";
 
   /**
@@ -47,9 +48,14 @@ function DevToolsPage() {
   });
   const mounted = isAdmin && !runsQuery.isError;
 
+  function startTrace(file: { id: string; name: string }, kind: DevTraceRunKind) {
+    setTraceKind(kind);
+    setTraceFile(file);
+  }
+
   function closeDialog() {
     setTraceFile(null);
-    setOpenRunId(null);
+    setOpenRun(null);
   }
 
   if (!isAdmin) {
@@ -66,8 +72,8 @@ function DevToolsPage() {
       <div>
         <h1 className="text-[22px] font-medium">Pipeline debug</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          One file through enrichment, stage by stage. Every model call, in and out. Internal only — not part of the
-          product.
+          One file through enrichment or task minting, stage by stage. Every model call, in and out. Internal only — not
+          part of the product.
         </p>
       </div>
 
@@ -81,9 +87,15 @@ function DevToolsPage() {
             </span>
           </div>
 
-          <FilePicker onTrace={setTraceFile} />
-          <PastRuns runs={runsQuery.data?.runs ?? []} onSelect={setOpenRunId} />
-          <TraceDialog file={traceFile} existingRunId={openRunId} onOpenChange={(next) => !next && closeDialog()} />
+          <FilePicker onTrace={startTrace} />
+          <PastRuns runs={runsQuery.data?.runs ?? []} onSelect={setOpenRun} />
+          <TraceDialog
+            file={traceFile}
+            existingRunId={openRun?.id ?? null}
+            existingRunKind={openRun?.kind}
+            kind={traceKind}
+            onOpenChange={(next) => !next && closeDialog()}
+          />
         </>
       ) : (
         <p className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
@@ -100,7 +112,7 @@ function DevToolsPage() {
  * a pipeline bug is usually specific to one connector's shape of content, and
  * the flat recent-files list buries everything but the noisiest source.
  */
-function FilePicker({ onTrace }: { onTrace: (file: { id: string; name: string }) => void }) {
+function FilePicker({ onTrace }: { onTrace: (file: { id: string; name: string }, kind: DevTraceRunKind) => void }) {
   const [source, setSource] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [inspectFileId, setInspectFileId] = useState<string | null>(null);
@@ -144,7 +156,9 @@ function FilePicker({ onTrace }: { onTrace: (file: { id: string; name: string })
           placeholder="Filter by name, or paste a file id"
           className="flex-1"
         />
-        {looksLikeId(trimmed) && <Button onClick={() => onTrace({ id: trimmed, name: trimmed })}>Trace this id</Button>}
+        {looksLikeId(trimmed) && (
+          <Button onClick={() => onTrace({ id: trimmed, name: trimmed }, "enrichment")}>Trace this id</Button>
+        )}
       </div>
 
       {filesQuery.isError && (
@@ -171,8 +185,15 @@ function FilePicker({ onTrace }: { onTrace: (file: { id: string; name: string })
                   {file.summaryStatus === "done" ? "enriched" : file.summaryStatus} · {file.id}
                 </p>
               </button>
-              <Button size="sm" variant="outline" onClick={() => onTrace({ id: file.id, name: file.fileName })}>
-                Trace
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onTrace({ id: file.id, name: file.fileName }, "enrichment")}
+              >
+                Enrich
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => onTrace({ id: file.id, name: file.fileName }, "mint")}>
+                Mint
               </Button>
             </div>
           ))
@@ -232,7 +253,13 @@ function looksLikeId(value: string) {
  * Runs are held in memory and evicted, so this list is short by design and
  * empties on a server restart.
  */
-function PastRuns({ runs, onSelect }: { runs: DevTraceRunHeader[]; onSelect: (runId: string) => void }) {
+function PastRuns({
+  runs,
+  onSelect,
+}: {
+  runs: DevTraceRunHeader[];
+  onSelect: (run: { id: string; kind: DevTraceRunKind }) => void;
+}) {
   if (runs.length === 0) return null;
 
   return (
@@ -243,10 +270,13 @@ function PastRuns({ runs, onSelect }: { runs: DevTraceRunHeader[]; onSelect: (ru
           <button
             key={run.id}
             type="button"
-            onClick={() => onSelect(run.id)}
+            onClick={() => onSelect({ id: run.id, kind: run.kind })}
             className="flex w-full items-center gap-3 px-3 py-2 text-left"
           >
             <RunStatusBadge status={run.status} />
+            <span className="shrink-0 font-mono text-[10px] uppercase text-muted-foreground">
+              {run.kind === "mint" ? "mint" : "enrich"}
+            </span>
             <span className="min-w-0 flex-1 truncate text-[13px]">{run.fileName}</span>
             <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
               {run.stepCount} steps · {run.startedAt.slice(11, 19)}

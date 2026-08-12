@@ -18,6 +18,7 @@ import type { TaskAccessOptions } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { buildMaterializeDeps, shouldMarkMaterialized } from "../entities/materialize";
 import { materializeLlmTask } from "../entities/materialize-llm-task";
+import type { StageOutcome, StageReporter } from "./enrichment-stage-report";
 import type { GeminiGenerator } from "./gemini-generate";
 import { LLM_TASK_CONTENT_LIMIT, LLM_TASK_PROMPT_VERSION, extractLlmTaskCandidates } from "./llm-task-extraction";
 import { normalizeName } from "./name-normalize";
@@ -96,6 +97,8 @@ interface MintTasksFromFileInput {
   model: string;
   dumpDir: string;
   llmTaskCorroborationThreshold?: number;
+  /** Set only by the dev trace route. Reports each stage as it completes. */
+  stageReport?: StageReporter;
 }
 
 interface NearestFile {
@@ -123,23 +126,89 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
   const sentContent = input.file.content.slice(0, LLM_TASK_CONTENT_LIMIT);
   const truncated = input.file.content.length > sentContent.length;
   const sourceDate = input.file.sourceCreatedAt ?? input.file.sourceUpdatedAt;
-  const candidates = await extractLlmTaskCandidates({
-    content: sentContent,
-    sourceDate: sourceDate ?? undefined,
-    attendees: attendees.items,
-    parentRefs: parentRefs.items,
-    priorTitles: priorTitles.items,
-    projects: projects.items,
-    existingTasks: existingTasks.items,
-    generator: input.generator,
-    promptVersion: LLM_TASK_PROMPT_VERSION,
-    dumpDir: input.dumpDir,
+
+  const context = buildMintContext({
+    file: input.file,
+    sentContent,
+    sourceDate,
+    attendees,
+    parentRefs,
+    priorTitles,
+    projects,
+    existingTasks,
+  });
+
+  input.stageReport?.({
+    stage: "neighbourhood",
+    label: "Nearest files",
+    kind: "code",
+    status: "done",
+    outcomes: similarFiles.map((file) => ({
+      subject: file.fileName,
+      kind: "file",
+      result: "kept" as const,
+      reason: `similarity ${file.similarity.toFixed(3)}`,
+    })),
+    summary: { source: neighbourhood.kind, nearestCount: neighbourhood.files.length },
+  });
+  input.stageReport?.({
+    stage: "gatherContext",
+    label: "Gather context",
+    kind: "code",
+    status: "done",
+    context,
+    summary: {
+      projectCount: projects.total,
+      existingTaskCount: existingTasks.total,
+      attendeeCount: attendees.total,
+    },
+  });
+
+  let candidates: Awaited<ReturnType<typeof extractLlmTaskCandidates>>;
+  try {
+    candidates = await extractLlmTaskCandidates({
+      content: sentContent,
+      sourceDate: sourceDate ?? undefined,
+      attendees: attendees.items,
+      parentRefs: parentRefs.items,
+      priorTitles: priorTitles.items,
+      projects: projects.items,
+      existingTasks: existingTasks.items,
+      generator: input.generator,
+      promptVersion: LLM_TASK_PROMPT_VERSION,
+      dumpDir: input.dumpDir,
+    });
+  } catch (err) {
+    input.stageReport?.({
+      stage: "extractCandidates",
+      label: "Extract candidates",
+      kind: "model",
+      status: "failed",
+      context,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  input.stageReport?.({
+    stage: "extractCandidates",
+    label: "Extract candidates",
+    kind: "model",
+    status: "done",
+    context,
+    outcomes: candidates.map((candidate) => ({
+      subject: candidate.title,
+      kind: "candidate",
+      result: "kept" as const,
+      reason: candidate.hasOwnerVerbObject ? undefined : "model did not claim owner, verb and object",
+    })),
+    summary: { candidateCount: candidates.length },
   });
   const materializeDeps = await buildMaterializeDeps(input.db, {
     logger: input.logger,
     llmTaskCorroborationThreshold: input.llmTaskCorroborationThreshold,
   });
   const responseCandidates: MintedTaskCandidate[] = [];
+  const writeOutcomes: StageOutcome[] = [];
 
   for (const [candidateIndex, candidate] of candidates.entries()) {
     let taskId: string | undefined;
@@ -176,8 +245,15 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
           .execute();
       }
       if (result.kind === "task_materialized") taskId = result.taskId;
+      writeOutcomes.push(mintWriteOutcome(candidate.title, result));
     } catch (err) {
       input.logger.warn({ err, fileId: input.file.id, candidateIndex }, "Minted task materialization failed");
+      writeOutcomes.push({
+        subject: candidate.title,
+        kind: "candidate",
+        result: "deferred",
+        reason: err instanceof Error ? err.message : String(err),
+      });
     }
     responseCandidates.push({
       title: candidate.title,
@@ -190,11 +266,73 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
     });
   }
 
-  const context: MintContextBlock[] = [
+  input.stageReport?.({
+    stage: "writeCandidates",
+    label: "Write candidates",
+    kind: "code",
+    status: "done",
+    outcomes: writeOutcomes,
+    summary: {
+      candidateCount: candidates.length,
+      written: writeOutcomes.filter((outcome) => outcome.result === "created").length,
+    },
+  });
+
+  return {
+    fileId: input.file.id,
+    fileName: input.file.fileName,
+    model: input.model,
+    contentLength: sentContent.length,
+    truncated,
+    context,
+    similarFiles,
+    candidates: responseCandidates,
+    written: responseCandidates.filter((candidate) => candidate.taskId).length,
+    dumpDir: input.dumpDir,
+  };
+}
+
+/**
+ * The context blocks, in prompt order. Built before the model call so the trace
+ * can show what was assembled even when the call itself fails.
+ */
+/**
+ * What the fact pipeline actually did with one candidate. Every branch other
+ * than `task_materialized` used to vanish — the caller kept only the task id,
+ * so a candidate that was suppressed or held below the corroboration threshold
+ * looked identical to one the model never proposed.
+ */
+function mintWriteOutcome(title: string, result: Awaited<ReturnType<typeof materializeLlmTask>>): StageOutcome {
+  const base = { subject: title, kind: "candidate" };
+  if (result.kind === "task_materialized") {
+    return { ...base, result: result.created ? "created" : "linked" };
+  }
+  if (result.kind === "deferred_below_threshold") {
+    return { ...base, result: "deferred", reason: result.reason };
+  }
+  if (result.kind === "skipped_missing_owner" || result.kind === "skipped") {
+    return { ...base, result: "suppressed", reason: result.reason };
+  }
+  return { ...base, result: "deferred", reason: result.kind };
+}
+
+function buildMintContext(args: {
+  file: { content: string };
+  sentContent: string;
+  sourceDate: string | null;
+  attendees: { total: number; labels: string[] };
+  parentRefs: { total: number; labels: string[] };
+  priorTitles: { total: number; items: string[] };
+  /** `items` is the model-facing shape; only its length is read here, for the truncation flag. */
+  projects: { total: number; labels: string[]; items: readonly unknown[] };
+  existingTasks: { total: number; items: string[]; selection: string };
+}): MintContextBlock[] {
+  const { file, sentContent, sourceDate, attendees, parentRefs, priorTitles, projects, existingTasks } = args;
+  return [
     {
       key: "content",
       label: "Content",
-      selection: `The first ${sentContent.length.toLocaleString()} of ${input.file.content.length.toLocaleString()} characters from the file body.`,
+      selection: `The first ${sentContent.length.toLocaleString()} of ${file.content.length.toLocaleString()} characters from the file body.`,
       total: 1,
       items: [sentContent],
       via: "prompt",
@@ -252,19 +390,6 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
       via: "prompt",
     },
   ];
-
-  return {
-    fileId: input.file.id,
-    fileName: input.file.fileName,
-    model: input.model,
-    contentLength: sentContent.length,
-    truncated,
-    context,
-    similarFiles,
-    candidates: responseCandidates,
-    written: responseCandidates.filter((candidate) => candidate.taskId).length,
-    dumpDir: input.dumpDir,
-  };
 }
 
 async function loadNearestFiles(db: Kysely<DB>, fileId: string): Promise<FileNeighbourhood> {
