@@ -1060,8 +1060,6 @@ export interface MintContextBlock {
   via?: "prompt" | "tool";
 }
 
-
-
 /**
  * One captured pino call from a traced enrichment run. Prompt and response
  * bodies are never included — those stay in the server-side dump directory.

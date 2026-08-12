@@ -331,7 +331,6 @@ function extractionContextBlocks(
   file: FileContext,
   knownEntities: KnownEntityForPrompt[] | undefined,
   participantBlock: string | undefined,
-  personCandidateBlock: string | undefined,
 ): MintContextBlock[] {
   const knownItems = (knownEntities ?? []).slice(0, 20).map(renderKnown);
   const blocks: MintContextBlock[] = [
@@ -363,17 +362,6 @@ function extractionContextBlocks(
       total: participantBlock.split("\n").filter(Boolean).length,
       items: participantBlock.split("\n").filter(Boolean).slice(0, 20),
       truncated: participantBlock.split("\n").filter(Boolean).length > 20,
-      via: "prompt",
-    });
-  }
-  if (personCandidateBlock) {
-    blocks.push({
-      key: "personCandidates",
-      label: "Person candidates",
-      selection: "Person-like names detected from file content and participant context.",
-      total: personCandidateBlock.split("\n").filter(Boolean).length,
-      items: personCandidateBlock.split("\n").filter(Boolean).slice(0, 20),
-      truncated: personCandidateBlock.split("\n").filter(Boolean).length > 20,
       via: "prompt",
     });
   }
@@ -1345,7 +1333,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       label: "Extract entities",
       kind: "model",
       status: "failed",
-      context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock, deps.personCandidateBlock),
+      context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock),
       error: errorMessage(err),
     });
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
@@ -1356,7 +1344,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     label: "Extract entities",
     kind: "model",
     status: "done",
-    context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock, deps.personCandidateBlock),
+    context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock),
     summary: { mentionCount: extraction.mentions.length, relationCount: extraction.relations.length },
   });
   logger.info(

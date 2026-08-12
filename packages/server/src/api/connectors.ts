@@ -37,6 +37,7 @@ import {
   resolveOpenRouterEnrichmentConfig,
 } from "../connectors/enrichment-providers";
 import { buildCredentialHint } from "../connectors/fireflies";
+import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
 import { buildOtterCredentialHint } from "../connectors/otter";
@@ -420,6 +421,10 @@ export function connectorRoutes(
       | "SLACK_ENTITY_SYNC"
     >
   >,
+  deps?: {
+    /** Overrides the settings-derived model, so tests can drive the per-file enrich route. */
+    enrichmentGenerator?: GeminiGenerator;
+  },
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
@@ -2519,7 +2524,7 @@ export function connectorRoutes(
     const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
     const providerConfig = buildEnrichmentProviderConfig(settings, appConfig, logger);
     const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
-    const generator = createEnrichmentGenerator(providerConfig);
+    const generator = deps?.enrichmentGenerator ?? createEnrichmentGenerator(providerConfig);
 
     // Enrich only this specific file.
     // This endpoint is the per-file "Enrich File" debug surface — always dump

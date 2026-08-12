@@ -161,6 +161,29 @@ function dumpWritingGenerator(opts: { throwOnEntityFacts?: boolean } = {}): Gemi
   };
 }
 
+/**
+ * Records the label of every model call, which is how a test tells "extraction
+ * ran" from "the endpoint returned success and skipped it".
+ */
+function labelRecordingGenerator(labels: string[]): GeminiGenerator {
+  return {
+    async generate(_prompt, options) {
+      labels.push(options?.label ?? "unlabeled");
+      return "Trace Product Notes discusses Trace Product 00.";
+    },
+    async generateJSON<T>(_prompt: string, options?: Omit<GenerateOptions, "responseMimeType">) {
+      labels.push(options?.label ?? "unlabeled");
+      const value = options?.label?.startsWith("extractEntities")
+        ? {
+            mentions: [{ mention: "Trace Product 00", type: "product", variations: [], confidence: 0.97 }],
+            relations: [],
+          }
+        : {};
+      return value as T;
+    },
+  };
+}
+
 async function startRun(app: ReturnType<typeof createApp>, cookie: string, fileId: string): Promise<string> {
   const start = await app.request("/api/dev/enrichment-runs", {
     method: "POST",
@@ -319,5 +342,47 @@ describe("Dev enrichment trace routes", () => {
     });
     expect(callRes.status).toBe(200);
     expect(((await callRes.json()) as { call: { prompt: string } }).call.prompt).toContain("Trace Product Notes");
+  });
+  it("re-extracts through the per-file enrich endpoint when the summary is already resolved", async () => {
+    const fileId = await seedTraceFile(db);
+    const labels: string[] = [];
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger,
+      enrichmentGenerator: labelRecordingGenerator(labels),
+    });
+    const cookie = await login(app, ADMIN_EMAIL);
+
+    for (const status of ["done", "skipped"] as const) {
+      labels.length = 0;
+      await db.updateTable("indexed_files").set({ summary_status: status }).where("id", "=", fileId).execute();
+
+      const res = await app.request(`/api/connectors/files/${fileId}/enrichments`, {
+        method: "POST",
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(200);
+
+      await vi.waitFor(() => expect(labels.some((label) => label.startsWith("extractEntities"))).toBe(true), {
+        timeout: 10_000,
+        interval: 25,
+      });
+
+      /**
+       * The endpoint answers before enrichment finishes. Wait for the run to
+       * settle rather than tearing the database down underneath it — these
+       * tests share a worker, so work that outlives its test fails another one.
+       */
+      await vi.waitFor(
+        async () => {
+          const row = await db
+            .selectFrom("indexed_files")
+            .select("summary_status")
+            .where("id", "=", fileId)
+            .executeTakeFirst();
+          expect(row?.summary_status).not.toBe("pending");
+        },
+        { timeout: 10_000, interval: 25 },
+      );
+    }
   });
 });

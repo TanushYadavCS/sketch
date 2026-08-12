@@ -36,6 +36,7 @@ import { settingsRoutes } from "./api/settings";
 import { setupRoutes } from "./api/setup";
 import { skillsRoutes } from "./api/skills";
 import { verifyJwt } from "./auth/jwt";
+import type { GeminiGenerator } from "./connectors/gemini-generate";
 import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes, resolveOrigin } from "./api/oauth";
@@ -152,6 +153,8 @@ interface AppDeps {
   onWhatsAppSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
   getWhatsAppHealth?: () => { missingProviderIdEvents: number };
   reconcileManagedMembers?: () => Promise<ManagedMemberReconciliationResult>;
+  /** Injected so the dev trace route, and its tests, can drive a specific model. */
+  enrichmentGenerator?: GeminiGenerator;
 }
 
 /**
@@ -631,7 +634,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   });
 
   if (deps?.logger) {
-    app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
+    app.route(
+      "/api/connectors",
+      connectorRoutes(connectors, db, deps.logger, users, config, {
+        enrichmentGenerator: deps.enrichmentGenerator,
+      }),
+    );
   }
 
   app.route("/api/identities", providerIdentityRoutes(identities, users));
