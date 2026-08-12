@@ -32,6 +32,7 @@ export interface ConversationSliceInsert {
   salienceSignals?: string | null;
   indexedFileId?: string | null;
   providerThreadId?: string | null;
+  status?: "open" | "closed";
 }
 
 export interface StreamCursorClaim {
@@ -113,6 +114,7 @@ function toSliceInsert(input: ConversationSliceInsert): Insertable<ConversationS
     salience_claimed_at: null,
     indexed_file_id: input.indexedFileId ?? null,
     provider_thread_id: input.providerThreadId ?? null,
+    status: input.status ?? "closed",
   };
 }
 
@@ -134,6 +136,70 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .executeTakeFirstOrThrow();
 
       return { row, created: Number(result.numInsertedOrUpdatedRows ?? 0) > 0 };
+    },
+
+    async getById(sliceId: string): Promise<ConversationSliceRow | undefined> {
+      return db.selectFrom("conversation_slices").selectAll().where("id", "=", sliceId).executeTakeFirst();
+    },
+
+    async getOpenSlice(conversationId: number): Promise<ConversationSliceRow | undefined> {
+      return db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .where("status", "=", "open")
+        .executeTakeFirst();
+    },
+
+    async updateOpenSlice(input: {
+      sliceId: string;
+      firstMessageId: number;
+      lastMessageId: number;
+      startedAt: string;
+      endedAt: string;
+      messageCount: number;
+      denoisedMessageIds: number[];
+      rosterSnapshot?: string;
+      indexedFileId?: string | null;
+    }): Promise<ConversationSliceRow | undefined> {
+      const result = await db
+        .updateTable("conversation_slices")
+        .set({
+          first_message_id: input.firstMessageId,
+          last_message_id: input.lastMessageId,
+          started_at: input.startedAt,
+          ended_at: input.endedAt,
+          message_count: input.messageCount,
+          denoised_message_ids: JSON.stringify(input.denoisedMessageIds),
+          ...(input.rosterSnapshot !== undefined ? { roster_snapshot: input.rosterSnapshot } : {}),
+          ...(input.indexedFileId !== undefined ? { indexed_file_id: input.indexedFileId } : {}),
+        })
+        .where("id", "=", input.sliceId)
+        .where("status", "=", "open")
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
+      return db.selectFrom("conversation_slices").selectAll().where("id", "=", input.sliceId).executeTakeFirstOrThrow();
+    },
+
+    async closeOpenSlice(sliceId: string): Promise<ConversationSliceRow | undefined> {
+      const result = await db
+        .updateTable("conversation_slices")
+        .set({ status: "closed", salience_verdict: "kept", flush_reason: "llm_boundary" })
+        .where("id", "=", sliceId)
+        .where("status", "=", "open")
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
+      return db.selectFrom("conversation_slices").selectAll().where("id", "=", sliceId).executeTakeFirstOrThrow();
+    },
+
+    async closeSlice(sliceId: string): Promise<ConversationSliceRow | undefined> {
+      const result = await db
+        .updateTable("conversation_slices")
+        .set({ status: "closed", salience_verdict: "kept", flush_reason: "llm_boundary" })
+        .where("id", "=", sliceId)
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
+      return db.selectFrom("conversation_slices").selectAll().where("id", "=", sliceId).executeTakeFirstOrThrow();
     },
 
     async claimSalienceIfPending(sliceId: string, input: ConversationSliceSalienceClaim): Promise<boolean> {
@@ -248,6 +314,16 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .executeTakeFirst();
 
       return Number(result.numUpdatedRows ?? 0) > 0;
+    },
+
+    async renewCursorClaim(input: { conversationId: number; claimToken: string; now: string }): Promise<boolean> {
+      const result = await db
+        .updateTable("conversation_slice_cursors")
+        .set({ claimed_at: input.now, updated_at: input.now })
+        .where("conversation_id", "=", input.conversationId)
+        .where("claim_token", "=", input.claimToken)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0) === 1;
     },
 
     async releaseCursorClaim(input: ConversationSliceCursorRelease): Promise<boolean> {
