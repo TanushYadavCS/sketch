@@ -22,6 +22,7 @@ import {
   hasDistinctiveOverlap,
   mergeKnownEntities,
   projectProductMentionNames,
+  purgeConversationalFactsForFile,
   smartEnrichFile,
 } from "./smart-enrichment";
 import { recoverStaleEnrichments } from "./sync";
@@ -400,6 +401,359 @@ describe("smartEnrichFile — LLM extraction facts", () => {
       },
     } as GeminiGenerator;
   }
+
+  async function seedOpenConversationFile(fileId: string, contentHash: string, content: string): Promise<void> {
+    await seedFile(db, fileId, { content, contentHash });
+    await db
+      .updateTable("indexed_files")
+      .set({ file_type: "whatsapp_conversation_slice" })
+      .where("id", "=", fileId)
+      .execute();
+    const conversation = await db
+      .insertInto("conversations")
+      .values({
+        platform: "whatsapp",
+        kind: "group",
+        provider_conversation_id: `group-${fileId}`,
+        display_name: "Test Group",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("conversation_slices")
+      .values({
+        id: randomUUID(),
+        conversation_id: conversation.id,
+        first_message_id: 1,
+        last_message_id: 2,
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString(),
+        message_count: 2,
+        denoised_message_ids: null,
+        flush_reason: "llm_boundary",
+        roster_snapshot: "{}",
+        salience_verdict: "kept",
+        indexed_file_id: fileId,
+        status: "open",
+      })
+      .execute();
+  }
+
+  it("re-enriches an open conversational file without content-hash churn or complement tombstones", async () => {
+    const fileId = randomUUID();
+    const supportFileId = randomUUID();
+    await seedFile(db, fileId, { content: "Sarah Chen joined the chat.", contentHash: "hash-one" });
+    await seedFile(db, supportFileId, { content: "Sarah Chen joined another chat.", contentHash: "hash-support" });
+    await db
+      .updateTable("indexed_files")
+      .set({ file_type: "whatsapp_conversation_slice" })
+      .where("id", "in", [fileId, supportFileId])
+      .execute();
+    const conversation = await db
+      .insertInto("conversations")
+      .values({
+        platform: "whatsapp",
+        kind: "group",
+        provider_conversation_id: `group-${fileId}`,
+        display_name: "Test Group",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("conversation_slices")
+      .values({
+        id: randomUUID(),
+        conversation_id: conversation.id,
+        first_message_id: 1,
+        last_message_id: 2,
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString(),
+        message_count: 2,
+        denoised_message_ids: null,
+        flush_reason: "llm_boundary",
+        roster_snapshot: "{}",
+        salience_verdict: "kept",
+        indexed_file_id: fileId,
+        status: "open",
+      })
+      .execute();
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "manual",
+      sourceId: "manual:sarah-chat",
+    });
+
+    let mentions = ["Sarah Chen"];
+    const generator: GeminiGenerator = {
+      generate: async () => "Sarah Chen joined the chat.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: mentions.map((mention) => ({ mention, type: "person", variations: [mention.split(" ")[0]] })),
+            relations: [],
+          } as T;
+        }
+        return {} as T;
+      },
+    };
+    const deps = { db, logger: createTestLogger(), generator, embeddingProvider: null };
+
+    await smartEnrichFile(deps, smartFileContext(fileId, "hash-one", { fileType: "whatsapp_conversation_slice" }));
+    await smartEnrichFile(
+      deps,
+      smartFileContext(supportFileId, "hash-support", { fileType: "whatsapp_conversation_slice" }),
+    );
+    const firstFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_key", "deleted_at"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    const firstRefs = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "llm_extraction")
+      .execute();
+
+    await db.updateTable("indexed_files").set({ content_hash: "hash-two" }).where("id", "=", fileId).execute();
+    await smartEnrichFile(deps, smartFileContext(fileId, "hash-two", { fileType: "whatsapp_conversation_slice" }));
+    const secondFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_key", "deleted_at"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    const secondRefs = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(secondFacts).toHaveLength(firstFacts.length);
+    expect(secondFacts.filter((fact) => fact.deleted_at !== null)).toHaveLength(0);
+    expect(secondRefs).toHaveLength(firstRefs.length);
+
+    mentions = ["Jane Doe"];
+    await entityRepo.upsertEntityFromTool({
+      name: "Jane Doe",
+      sourceType: "person",
+      source: "manual",
+      sourceId: "manual:jane-chat",
+    });
+    await db
+      .updateTable("indexed_files")
+      .set({ content: "Sarah Chen joined the chat. Jane Doe joined later." })
+      .where("id", "=", fileId)
+      .execute();
+    await db.updateTable("indexed_files").set({ content_hash: "hash-three" }).where("id", "=", fileId).execute();
+    await smartEnrichFile(
+      deps,
+      smartFileContext(fileId, "hash-three", {
+        content: "Sarah Chen joined the chat. Jane Doe joined later.",
+        fileType: "whatsapp_conversation_slice",
+      }),
+    );
+    const thirdFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["subject_name", "deleted_at"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    expect(thirdFacts.find((fact) => fact.subject_name === "Sarah Chen")?.deleted_at).toBeNull();
+    expect(thirdFacts.find((fact) => fact.subject_name === "Jane Doe")?.deleted_at).toBeNull();
+  });
+
+  it("tombstones an explicit conversational retraction and removes its learned fact", async () => {
+    const fileId = randomUUID();
+    await seedOpenConversationFile(fileId, "hash-retraction-one", "Sarah Chen owns the launch plan.");
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "manual",
+      sourceId: "manual:sarah-retraction",
+    });
+    const initialGenerator = factGenerator(entity.id, ["Owns the launch plan"]);
+    const file = smartFileContext(fileId, "hash-retraction-one", {
+      content: "Sarah Chen owns the launch plan.",
+      fileType: "whatsapp_conversation_slice",
+    });
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator: initialGenerator, embeddingProvider: null },
+      file,
+    );
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select("fact_key")
+      .where("indexed_file_id", "=", fileId)
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+
+    const retractingGenerator: GeminiGenerator = {
+      generate: async () => "Sarah Chen no longer owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+            relations: [],
+          } as T;
+        }
+        return {
+          facts: {},
+          retractions: [{ fact_key: fact.fact_key, entity_id: entity.id, fact: "Owns the launch plan" }],
+        } as T;
+      },
+    };
+    await db
+      .updateTable("indexed_files")
+      .set({ content: "Sarah Chen no longer owns the launch plan.", content_hash: "hash-retraction-two" })
+      .where("id", "=", fileId)
+      .execute();
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator: retractingGenerator, embeddingProvider: null },
+      smartFileContext(fileId, "hash-retraction-two", {
+        content: "Sarah Chen no longer owns the launch plan.",
+        fileType: "whatsapp_conversation_slice",
+      }),
+    );
+
+    const retracted = await db
+      .selectFrom("indexed_file_facts")
+      .select("deleted_at")
+      .where("fact_key", "=", fact.fact_key)
+      .executeTakeFirstOrThrow();
+    const entityAfter = await db
+      .selectFrom("entities")
+      .select("metadata")
+      .where("id", "=", entity.id)
+      .executeTakeFirstOrThrow();
+    expect(retracted.deleted_at).not.toBeNull();
+    expect(JSON.parse(entityAfter.metadata ?? "{}").learned_facts ?? []).toEqual([]);
+  });
+
+  it("leaves a conversational file pending when the facts pass fails", async () => {
+    const fileId = randomUUID();
+    await seedOpenConversationFile(fileId, "hash-facts-fail", "Sarah Chen joined the chat.");
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "manual",
+      sourceId: "manual:sarah-facts-fail",
+    });
+    const generator: GeminiGenerator = {
+      generate: async () => "Sarah Chen joined the chat.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+            relations: [],
+          } as T;
+        }
+        throw new Error("facts unavailable");
+      },
+    };
+    await expect(
+      smartEnrichFile(
+        { db, logger: createTestLogger(), generator, embeddingProvider: null },
+        smartFileContext(fileId, "hash-facts-fail", { fileType: "whatsapp_conversation_slice" }),
+      ),
+    ).rejects.toThrow("facts unavailable");
+    const status = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    const slice = await db
+      .selectFrom("conversation_slices")
+      .select("facts_enriched_content_hash")
+      .where("indexed_file_id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    expect(status.embedding_status).toBe("pending");
+    expect(slice.facts_enriched_content_hash).toBeNull();
+    expect(entity.id).toBeTruthy();
+  });
+
+  it("records the current content hash after a successful conversational facts pass", async () => {
+    const fileId = randomUUID();
+    await seedOpenConversationFile(fileId, "hash-facts-success", "A short chat.");
+    const generator: GeminiGenerator = {
+      generate: async () => "A short chat.",
+      generateJSON: async <T>() => ({ mentions: [], relations: [] }) as T,
+    };
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      smartFileContext(fileId, "hash-facts-success", {
+        content: "A short chat.",
+        fileType: "whatsapp_conversation_slice",
+      }),
+    );
+    const slice = await db
+      .selectFrom("conversation_slices")
+      .select("facts_enriched_content_hash")
+      .where("indexed_file_id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    expect(slice.facts_enriched_content_hash).toBe("hash-facts-success");
+  });
+
+  it("purges all conversational facts, learned facts, mentions, and source refs for a shrinking file", async () => {
+    const fileId = randomUUID();
+    await seedOpenConversationFile(fileId, "hash-purge", "Sarah Chen joined the chat.");
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "manual",
+      sourceId: "manual:sarah-purge",
+    });
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator: factGenerator(entity.id, ["Joined the chat"]),
+        embeddingProvider: null,
+      },
+      smartFileContext(fileId, "hash-purge", { fileType: "whatsapp_conversation_slice" }),
+    );
+    await db
+      .insertInto("entity_source_refs")
+      .values({
+        id: "purge-source-ref",
+        entity_id: entity.id,
+        source: "llm_extraction",
+        source_id: `${fileId}:llm-extraction-v13:Sarah Chen`,
+        last_seen_at: new Date().toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "purge-mention",
+        entity_id: entity.id,
+        indexed_file_id: fileId,
+        confidence: "EXTRACTED",
+        source: "llm_relation",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+
+    await purgeConversationalFactsForFile(db, fileId);
+
+    const activeFacts = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", fileId)
+      .where("deleted_at", "is", null)
+      .execute();
+    const learnedFacts = JSON.parse(
+      (await db.selectFrom("entities").select("metadata").where("id", "=", entity.id).executeTakeFirstOrThrow())
+        .metadata ?? "{}",
+    ).learned_facts;
+    expect(activeFacts).toEqual([]);
+    expect(learnedFacts).toEqual([]);
+    expect(await db.selectFrom("entity_mentions").selectAll().where("indexed_file_id", "=", fileId).execute()).toEqual(
+      [],
+    );
+    expect(
+      await db.selectFrom("entity_source_refs").selectAll().where("source_id", "like", `${fileId}:%`).execute(),
+    ).toEqual([]);
+  });
 
   it("does not change learned facts when re-enrichment returns the same facts", async () => {
     const fileId = randomUUID();

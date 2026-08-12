@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type RawBuilder, sql } from "kysely";
-import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
+import {
+  type IndexedFileFactRaw,
+  type LlmTaskCandidate,
+  type LlmTaskFactRaw,
+  SLACK_CONVERSATION_SLICE_FILE_TYPE,
+  WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
+} from "../../connectors/types";
 import { readJsonObject } from "../../entities/materialize-json";
 import {
   projectFeatureCorroborationKey,
@@ -8,6 +14,7 @@ import {
 } from "../../entities/normalization-projection";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
+import { createEntityDomainsRepository } from "./entity-domains";
 
 export type IndexedFileFactType =
   | "attendee"
@@ -60,6 +67,7 @@ export type IndexedFileFactRelation =
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;
+  fileType?: string | null;
   connectorConfigId?: string | null;
   createdByUserId?: string | null;
   lastSeenSyncRunId?: string | null;
@@ -73,6 +81,43 @@ export interface UpsertIndexedFileFactInput {
   subjectSourceId?: string | null;
   contextSnippet?: string | null;
   raw?: IndexedFileFactRaw;
+}
+
+function isConversationalFileType(fileType: string | null | undefined): boolean {
+  return fileType === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE || fileType === SLACK_CONVERSATION_SLICE_FILE_TYPE;
+}
+
+function llmSourceRefsForFact(fact: {
+  indexed_file_id: string | null;
+  fact_type: string;
+  subject_name: string | null;
+  subject_source_id: string | null;
+  raw: string | null;
+  content_hash: string | null;
+  file_type: string | null;
+}): Array<{ source: string; sourceId: string }> {
+  if (!fact.indexed_file_id) return [];
+  if (fact.fact_type === "llm_extracted") {
+    return [
+      {
+        source: "llm_extraction",
+        sourceId: fact.subject_source_id ?? `${fact.indexed_file_id}:${fact.subject_name ?? ""}`,
+      },
+    ];
+  }
+  if (fact.fact_type !== "llm_relation" || !fact.raw) return [];
+  const raw = readJsonObject(fact.raw);
+  const refs: Array<{ source: string; sourceId: string }> = [];
+  for (const role of ["source", "target"] as const) {
+    const endpoint = raw[role];
+    if (!isRecord(endpoint) || typeof endpoint.name !== "string") continue;
+    const hashPart = isConversationalFileType(fact.file_type) ? "" : `${fact.content_hash ?? "no-hash"}:`;
+    refs.push({
+      source: "llm_relation",
+      sourceId: `${fact.indexed_file_id}:${hashPart}${role}:${endpoint.name}`,
+    });
+  }
+  return refs;
 }
 
 export type ReconcileScope =
@@ -91,6 +136,13 @@ export interface ReconcileResult {
   affectedIndexedFileIds: string[];
   tombstonedFactIds: string[];
   skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
+}
+
+export interface TombstoneByFactKeysResult {
+  requestedFactKeys: string[];
+  tombstoned: number;
+  affectedIndexedFileIds: string[];
+  tombstonedFactIds: string[];
 }
 
 const LLM_TASK_ID_SEPARATOR = "\u001f";
@@ -181,15 +233,18 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
       .update([input.connectorConfigId ?? "", input.factType, input.source, candidateId].join("|"))
       .digest("hex");
   }
+  const conversational = isConversationalFileType(input.fileType);
   const parts = [
     input.connectorConfigId ?? "",
     input.source,
     input.factType,
     input.relation,
     input.indexedFileId ?? "",
-    input.factType === "llm_extracted" ? (input.contentHash ?? "") : "",
+    input.factType === "llm_extracted" && !conversational ? (input.contentHash ?? "") : "",
     input.subjectSource ?? "",
-    input.subjectSourceId ?? "",
+    conversational && (input.factType === "llm_extracted" || input.factType === "llm_relation")
+      ? ""
+      : (input.subjectSourceId ?? ""),
     normalizeEmail(input.subjectEmail),
     normalizeName(input.subjectName),
   ];
@@ -867,6 +922,155 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
           }),
         )
         .execute();
+    },
+
+    async tombstoneByFactKeys(factKeys: string[]): Promise<TombstoneByFactKeysResult> {
+      const requestedFactKeys = [...new Set(factKeys.filter((key) => key.length > 0))];
+      if (requestedFactKeys.length === 0) {
+        return { requestedFactKeys, tombstoned: 0, affectedIndexedFileIds: [], tombstonedFactIds: [] };
+      }
+
+      const facts = await db
+        .selectFrom("indexed_file_facts")
+        .leftJoin("indexed_files", "indexed_files.id", "indexed_file_facts.indexed_file_id")
+        .select([
+          "indexed_file_facts.id",
+          "indexed_file_facts.indexed_file_id",
+          "indexed_file_facts.fact_type",
+          "indexed_file_facts.subject_name",
+          "indexed_file_facts.subject_source_id",
+          "indexed_file_facts.raw",
+          "indexed_file_facts.content_hash",
+          "indexed_files.file_type as file_type",
+        ])
+        .where("indexed_file_facts.fact_key", "in", requestedFactKeys)
+        .where("indexed_file_facts.deleted_at", "is", null)
+        .execute();
+      if (facts.length === 0) {
+        return { requestedFactKeys, tombstoned: 0, affectedIndexedFileIds: [], tombstonedFactIds: [] };
+      }
+
+      const factIds = facts.map((fact) => fact.id);
+      const affectedIndexedFileIds = [
+        ...new Set(facts.map((fact) => fact.indexed_file_id).filter((id): id is string => Boolean(id))),
+      ];
+      const now = new Date().toISOString();
+      const updateResult = await db
+        .updateTable("indexed_file_facts")
+        .set({ deleted_at: now, materialized_at: null, updated_at: now })
+        .where("fact_key", "in", requestedFactKeys)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+
+      const selectedRefs = facts.flatMap((fact) =>
+        llmSourceRefsForFact(fact).map((ref) => ({ ...ref, indexedFileId: fact.indexed_file_id })),
+      );
+      const selectedRefKeys = new Set(selectedRefs.map((ref) => `${ref.source}\u0000${ref.sourceId}`));
+      const activeFacts =
+        affectedIndexedFileIds.length > 0
+          ? await db
+              .selectFrom("indexed_file_facts")
+              .leftJoin("indexed_files", "indexed_files.id", "indexed_file_facts.indexed_file_id")
+              .select([
+                "indexed_file_facts.indexed_file_id",
+                "indexed_file_facts.fact_type",
+                "indexed_file_facts.subject_name",
+                "indexed_file_facts.subject_source_id",
+                "indexed_file_facts.raw",
+                "indexed_file_facts.content_hash",
+                "indexed_files.file_type as file_type",
+              ])
+              .where("indexed_file_facts.indexed_file_id", "in", affectedIndexedFileIds)
+              .where("indexed_file_facts.source", "=", "llm_extraction")
+              .where("indexed_file_facts.fact_type", "in", ["llm_extracted", "llm_relation"])
+              .where("indexed_file_facts.deleted_at", "is", null)
+              .execute()
+          : [];
+      const activeRefKeys = new Set(
+        activeFacts.flatMap((fact) => llmSourceRefsForFact(fact).map((ref) => `${ref.source}\u0000${ref.sourceId}`)),
+      );
+      const sourceRefsToDelete = selectedRefs.filter((ref) => !activeRefKeys.has(`${ref.source}\u0000${ref.sourceId}`));
+      const sourceRefRows =
+        sourceRefsToDelete.length > 0
+          ? await db
+              .selectFrom("entity_source_refs")
+              .select(["entity_id", "source", "source_id"])
+              .where((eb) =>
+                eb.or(
+                  sourceRefsToDelete.map((ref) =>
+                    eb.and([eb("source", "=", ref.source), eb("source_id", "=", ref.sourceId)]),
+                  ),
+                ),
+              )
+              .execute()
+          : [];
+      const protectedEntityKeys = new Set(
+        selectedRefs
+          .filter((ref) => activeRefKeys.has(`${ref.source}\u0000${ref.sourceId}`))
+          .map((ref) => `${ref.indexedFileId}\u0000${ref.source}`),
+      );
+      const sourceRefEntityKeysToDelete = new Set(
+        sourceRefRows
+          .filter((ref) => selectedRefKeys.has(`${ref.source}\u0000${ref.source_id}`))
+          .map((ref) => `${ref.source}\u0000${ref.source_id}`),
+      );
+
+      if (sourceRefsToDelete.length > 0) {
+        await db
+          .deleteFrom("entity_source_refs")
+          .where((eb) =>
+            eb.or(
+              sourceRefsToDelete.map((ref) =>
+                eb.and([eb("source", "=", ref.source), eb("source_id", "=", ref.sourceId)]),
+              ),
+            ),
+          )
+          .execute();
+      }
+
+      const sourceScopesByFile = new Map<string, Set<string>>();
+      for (const fact of facts) {
+        if (!fact.indexed_file_id) continue;
+        const scopes = sourceScopesByFile.get(fact.indexed_file_id) ?? new Set<string>();
+        scopes.add(fact.fact_type === "llm_relation" ? "llm_relation" : "llm_extraction");
+        sourceScopesByFile.set(fact.indexed_file_id, scopes);
+      }
+      if (sourceRefRows.length > 0 && sourceScopesByFile.size > 0) {
+        const mentionRows = await db
+          .selectFrom("entity_mentions")
+          .select(["id", "entity_id", "indexed_file_id", "source"])
+          .where("indexed_file_id", "in", [...sourceScopesByFile.keys()])
+          .where("source", "in", ["llm_extraction", "llm_relation"])
+          .execute();
+        const mentionIdsToDelete = mentionRows
+          .filter((mention) => {
+            const scopes = sourceScopesByFile.get(mention.indexed_file_id);
+            if (!scopes?.has(mention.source)) return false;
+            const matchingRef = sourceRefRows.find(
+              (ref) => ref.entity_id === mention.entity_id && ref.source === mention.source,
+            );
+            if (
+              !matchingRef ||
+              !sourceRefEntityKeysToDelete.has(`${matchingRef.source}\u0000${matchingRef.source_id}`)
+            ) {
+              return false;
+            }
+            return !protectedEntityKeys.has(`${mention.indexed_file_id}\u0000${mention.source}`);
+          })
+          .map((mention) => mention.id);
+        if (mentionIdsToDelete.length > 0) {
+          await db.deleteFrom("entity_mentions").where("id", "in", mentionIdsToDelete).execute();
+        }
+      }
+
+      await createEntityDomainsRepository(db).deleteEvidenceForSourceFacts(factIds);
+      await createEntityDomainsRepository(db).cleanupEmptyRelationships();
+      return {
+        requestedFactKeys,
+        tombstoned: Number(updateResult.numUpdatedRows ?? 0),
+        affectedIndexedFileIds,
+        tombstonedFactIds: factIds,
+      };
     },
 
     async reconcileStaleFacts(

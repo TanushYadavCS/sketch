@@ -232,6 +232,46 @@ describe("createEntityRepository createMention", () => {
 
     await db.destroy();
   });
+
+  it("deletes EXTRACTED LLM-derived mentions but preserves connector-fact mentions", async () => {
+    const db = await createTestDb();
+    await seedConnectorConfig(db);
+    await seedIndexedFile(db, "file-1");
+    const repo = createEntityRepository(db);
+    const entity = await repo.upsertPersonEntity({
+      name: "Saurabh",
+      email: "saurabh@canvasx.ai",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:saurabh",
+    });
+
+    await repo.createMention({
+      entityId: entity.id,
+      indexedFileId: "file-1",
+      confidence: "EXTRACTED",
+      source: "llm_relation",
+      relation: "mentioned",
+    });
+    await repo.createMention({
+      entityId: entity.id,
+      indexedFileId: "file-1",
+      confidence: "EXTRACTED",
+      source: "assignee",
+      relation: "assigned",
+    });
+
+    await repo.deleteMentionsForFile("file-1");
+
+    const remaining = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "relation"])
+      .where("indexed_file_id", "=", "file-1")
+      .execute();
+    expect(remaining).toEqual([{ source: "assignee", relation: "assigned" }]);
+
+    await db.destroy();
+  });
 });
 
 describe("createEntityRepository hotness", () => {
