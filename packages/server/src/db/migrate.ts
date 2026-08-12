@@ -175,6 +175,11 @@ import * as m172 from "./migrations/172-whatsapp-identity-observations";
 import * as m173 from "./migrations/173-native-webhook-endpoints";
 import * as m174 from "./migrations/174-webhook-delivery-generation-fencing";
 import * as m175 from "./migrations/175-native-webhook-no-credentials";
+import * as m176 from "./migrations/176-whatsapp-llm-flush-reason";
+import * as m177 from "./migrations/177-whatsapp-topic-tables";
+import * as m178 from "./migrations/178-whatsapp-chunk-knobs";
+import * as m179 from "./migrations/179-whatsapp-open-slices";
+import * as m180 from "./migrations/180-whatsapp-chunk-conversion-state";
 import type { DB } from "./schema";
 
 /**
@@ -359,6 +364,11 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "173-native-webhook-endpoints": m173,
           "174-webhook-delivery-generation-fencing": m174,
           "175-native-webhook-no-credentials": m175,
+          "176-whatsapp-llm-flush-reason": m176,
+          "177-whatsapp-topic-tables": m177,
+          "178-whatsapp-chunk-knobs": m178,
+          "179-whatsapp-open-slices": m179,
+          "180-whatsapp-chunk-conversion-state": m180,
         };
       },
     },

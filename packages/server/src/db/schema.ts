@@ -58,6 +58,24 @@ export interface WhatsAppGroupsTable {
   slice_gap_minutes: number | null;
   slice_max_age_minutes: number | null;
   slice_max_messages: number | null;
+  chunk_window_messages: number | null;
+  chunk_window_tokens: number | null;
+  chunk_min_messages: number | null;
+  chunk_target_messages: number | null;
+  chunk_max_messages: number | null;
+  chunk_max_tokens: number | null;
+  chunk_tick_minutes: number | null;
+  chunk_idle_close_hours: number | null;
+  chunk_provisional_refresh_messages: number | null;
+  chunk_model: string | null;
+  chunk_reasoning_effort: string | null;
+  chunk_burst_threshold_messages: number | null;
+  chunk_topic_registry_cap: number | null;
+  chunk_group_worker_pool: number | null;
+  chunk_last_llm_attempt_at: string | null;
+  chunker_mode: Generated<string>;
+  chunker_conversion_claim: string | null;
+  chunker_conversion_claimed_at: string | null;
   updated_at: Generated<string>;
 }
 
@@ -611,6 +629,8 @@ export interface ConversationSlicesTable {
   salience_claimed_at: string | null;
   indexed_file_id: string | null;
   provider_thread_id: string | null;
+  status: Generated<string>;
+  facts_enriched_content_hash: string | null;
   created_at: Generated<string>;
 }
 
@@ -645,6 +665,39 @@ export interface WhatsAppIdentityCandidatesTable {
   last_slice_id: string;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+}
+
+export interface ConversationTopicsTable {
+  id: string;
+  conversation_id: number;
+  name: string;
+  one_liner: string | null;
+  status: Generated<string>;
+  last_activity_at: string;
+  canonical_topic_id: string | null;
+}
+
+export interface SliceTopicsTable {
+  slice_id: string;
+  topic_id: string;
+}
+
+export interface TopicMergesTable {
+  merged_topic_id: string;
+  canonical_topic_id: string;
+  merged_at: Generated<string>;
+  reason: string;
+}
+
+export interface ChunkConversionManifestTable {
+  id: string;
+  group_jid: string;
+  artifact_type: string;
+  artifact_id: string;
+  action: string;
+  payload: string;
+  created_at: Generated<string>;
+  restored_at: string | null;
 }
 
 export interface WhatsAppGroupMemberLabelsTable {
@@ -1659,6 +1712,10 @@ export interface DB {
   conversation_slices: ConversationSlicesTable;
   conversation_slice_cursors: ConversationSliceCursorsTable;
   conversation_slice_stream_cursors: ConversationSliceStreamCursorsTable;
+  conversation_topics: ConversationTopicsTable;
+  slice_topics: SliceTopicsTable;
+  topic_merges: TopicMergesTable;
+  chunk_conversion_manifest: ChunkConversionManifestTable;
   whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
