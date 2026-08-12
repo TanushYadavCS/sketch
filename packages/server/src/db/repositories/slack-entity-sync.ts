@@ -152,6 +152,20 @@ function parseAliases(raw: string | null): string[] {
   }
 }
 
+function mergeAliases(raw: string | null, candidates: Array<string | null | undefined>): string[] {
+  const aliases = parseAliases(raw);
+  const normalized = new Set(aliases.map((alias) => alias.trim().toLowerCase()).filter(Boolean));
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (normalized.has(key)) continue;
+    aliases.push(trimmed);
+    normalized.add(key);
+  }
+  return aliases;
+}
+
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
@@ -261,6 +275,7 @@ async function updateEntityFromSlackProfile(
   const metadata = parseMetadata(entity.metadata);
   if (slackOwned && email) metadata.email = email;
   const updates: Record<string, unknown> = {
+    aliases: JSON.stringify(mergeAliases(entity.aliases, [profile.name, profile.realName, profile.displayName, email])),
     updated_at: now,
   };
   if (!isHumanSubtypeOverride(entity.provenance_tier)) updates.subtype = classification;

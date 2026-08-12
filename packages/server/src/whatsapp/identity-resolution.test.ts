@@ -56,7 +56,7 @@ async function seedGroup(groupJid = "120363000000001@g.us") {
   return repo;
 }
 
-async function seedEntity(args: { id: string; name: string; sourceType?: string }): Promise<void> {
+async function seedEntity(args: { id: string; name: string; sourceType?: string; aliases?: string[] }): Promise<void> {
   const now = "2026-07-07T09:00:00.000Z";
   await db
     .insertInto("entities")
@@ -65,7 +65,7 @@ async function seedEntity(args: { id: string; name: string; sourceType?: string 
       name: args.name,
       source_type: args.sourceType ?? "person",
       subtype: args.sourceType === "company" ? null : "external",
-      aliases: null,
+      aliases: args.aliases ? JSON.stringify(args.aliases) : null,
       metadata: null,
       source_ref_id: null,
       status: "confirmed",
@@ -255,6 +255,78 @@ describe("WhatsApp identity resolution", () => {
 });
 
 describe("WhatsApp roster snapshot", () => {
+  it("enriches existing entity aliases from sanitized push names and group labels", async () => {
+    const groupJid = "120363000000009@g.us";
+    const groups = await seedGroup(groupJid);
+    await seedLabeler();
+    await seedEntity({ id: "entity-aliases", name: "CRM Contact", aliases: ["Existing Alias", "PUSH NAME"] });
+    await seedContactPoint("entity-aliases", "+15550000901");
+    await seedContactPoint("entity-aliases", "+15550000902");
+    await seedContactPoint("entity-aliases", "+15550000903");
+    await groups.upsertMemberLabel({
+      groupJid,
+      phoneE164: "+15550000901",
+      displayName: "Group Label +91 99804 70200",
+      companyName: null,
+      createdBy: "labeler",
+    });
+    await groups.refreshParticipants(groupJid, [
+      { participantJid: "15550000901@s.whatsapp.net", phoneE164: "+15550000901", adminRole: null },
+      { participantJid: "15550000902@s.whatsapp.net", phoneE164: "+15550000902", adminRole: null },
+      { participantJid: "15550000903@s.whatsapp.net", phoneE164: "+15550000903", adminRole: null },
+    ]);
+    const conversation = await createConversationRepository(db).getOrCreate({
+      platform: "whatsapp",
+      kind: "group",
+      providerConversationId: groupJid,
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "entity-alias-push-name",
+      senderJid: "15550000901@s.whatsapp.net",
+      senderName: "Unknown",
+      text: "hello",
+      receivedAt: "2026-07-07T09:00:00.000Z",
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "entity-alias-second-push-name",
+      senderJid: "15550000902@s.whatsapp.net",
+      senderName: "Second Push Name",
+      text: "hello again",
+      receivedAt: "2026-07-07T09:01:00.000Z",
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "entity-alias-provider-id",
+      senderJid: "15550000903@s.whatsapp.net",
+      senderName: "12345",
+      text: "provider fallback",
+      receivedAt: "2026-07-07T09:02:00.000Z",
+    });
+    const logger = { info: vi.fn() } as unknown as Logger;
+
+    const snapshot = await buildWhatsAppRosterSnapshot({ db, groupJid, conversationId: conversation.id, logger });
+    expect(snapshot.snapshot.participants[0]).toMatchObject({ resolutionKind: "entity", entityId: "entity-aliases" });
+
+    const entity = await db
+      .selectFrom("entities")
+      .select("aliases")
+      .where("id", "=", "entity-aliases")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(entity.aliases ?? "[]")).toEqual([
+      "Existing Alias",
+      "PUSH NAME",
+      "Group Label +**********00",
+      "Second Push Name",
+    ]);
+    expect(entity.aliases).not.toContain("15550000901");
+    expect(entity.aliases).not.toContain("15550000901@s.whatsapp.net");
+    expect(entity.aliases).not.toContain("@lid");
+    expect(entity.aliases).not.toContain("12345");
+    expect(entity.aliases).not.toContain("Unknown");
+  });
+
   it("serializes display context without raw phone numbers or phone JIDs", async () => {
     const groupJid = "120363000000004@g.us";
     const groups = await seedGroup(groupJid);

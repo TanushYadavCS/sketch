@@ -633,7 +633,7 @@ describe("upsertSlackPersonEntity", () => {
         name: "Existing Canonical Name",
         source_type: "person",
         subtype: "internal",
-        aliases: null,
+        aliases: JSON.stringify(["Existing Alias", "slack display name"]),
         metadata: JSON.stringify({ email: "linked@example.com", owner: "human" }),
         source_ref_id: null,
         status: "confirmed",
@@ -680,6 +680,13 @@ describe("upsertSlackPersonEntity", () => {
       .where("id", "=", "linked-person")
       .executeTakeFirstOrThrow();
     expect(entity.name).toBe("Existing Canonical Name");
+    expect(JSON.parse(entity.aliases ?? "[]")).toEqual([
+      "Existing Alias",
+      "slack display name",
+      "deprecated.handle",
+      "Slack Real Name",
+      "linked@example.com",
+    ]);
     expect(JSON.parse(entity.metadata ?? "{}")).toEqual({ email: "linked@example.com", owner: "human" });
     const contactPoints = await db
       .selectFrom("entity_contact_points")

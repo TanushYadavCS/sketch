@@ -5,6 +5,7 @@ import { createUserWhatsAppLidRepository } from "../db/repositories/user-whatsap
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
+import { parseAliasesString } from "../entities/materialize-json";
 import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
 import { safeWhatsAppErrorFields, sanitizeWhatsAppDisplayText } from "./privacy";
 import { phoneE164ToWhatsAppJid } from "./provider";
@@ -129,7 +130,81 @@ function unresolvedDisplayName(phoneE164: string | null): string {
 function safePushName(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const sanitized = sanitizeWhatsAppDisplayText(value);
-  return sanitized.length > 0 ? sanitized : undefined;
+  return isHumanReadableAlias(value, sanitized) ? sanitized : undefined;
+}
+
+function isHumanReadableAlias(raw: string, sanitized: string): boolean {
+  if (!sanitized || sanitized.includes("[whatsapp-id]")) return false;
+  const trimmed = raw.trim();
+  if (/^(?:unknown|unknown group|unresolved whatsapp participant)$/iu.test(trimmed)) return false;
+  if (/^\+?\d+$/u.test(trimmed)) return false;
+  return normalizeWhatsAppIdentityPhone(trimmed) === null && !/@(?:lid|s\.whatsapp\.net)$/iu.test(trimmed);
+}
+
+function mergeAliases(existing: string | null, additions: Array<string | undefined>): string[] {
+  const aliases = parseAliasesString(existing);
+  const seen = new Set(aliases.map((alias) => alias.trim().toLowerCase()));
+  for (const addition of additions) {
+    if (!addition) continue;
+    const value = addition.trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    aliases.push(value);
+    seen.add(key);
+  }
+  return aliases;
+}
+
+async function enrichResolvedEntityAliases(
+  db: Kysely<DB>,
+  groupJid: string,
+  participants: Array<{ phone_e164: string | null; resolution: WhatsAppIdentityResolution; pushName?: string }>,
+): Promise<void> {
+  const candidates = participants.filter(
+    (
+      participant,
+    ): participant is typeof participant & { resolution: Extract<WhatsAppIdentityResolution, { kind: "entity" }> } =>
+      participant.resolution.kind === "entity",
+  );
+  if (candidates.length === 0) return;
+
+  const labels = await createWhatsAppGroupRepository(db).listMemberLabels(groupJid);
+  const labelByPhone = new Map(
+    labels.map((label) => [normalizeWhatsAppIdentityPhone(label.phone_e164), safePushName(label.display_name)]),
+  );
+  const additionsByEntityId = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    const phone = normalizeWhatsAppIdentityPhone(candidate.phone_e164);
+    const additions = additionsByEntityId.get(candidate.resolution.entityId) ?? [];
+    additions.push(candidate.pushName ?? "", phone ? (labelByPhone.get(phone) ?? "") : "");
+    additionsByEntityId.set(candidate.resolution.entityId, additions);
+  }
+
+  for (const [entityId, additions] of additionsByEntityId) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const entity = await db
+        .selectFrom("entities")
+        .select(["id", "aliases"])
+        .where("id", "=", entityId)
+        .where("source_type", "=", "person")
+        .where("status", "!=", "archived")
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      if (!entity) break;
+
+      const aliases = mergeAliases(entity.aliases, additions);
+      if (aliases.length === parseAliasesString(entity.aliases).length) break;
+
+      let update = db
+        .updateTable("entities")
+        .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
+        .where("id", "=", entity.id);
+      update =
+        entity.aliases === null ? update.where("aliases", "is", null) : update.where("aliases", "=", entity.aliases);
+      const result = await update.executeTakeFirst();
+      if (result.numUpdatedRows > 0n) break;
+    }
+  }
 }
 
 function displayNameForResolution(
@@ -441,14 +516,24 @@ export async function buildWhatsAppRosterSnapshot({
   const pushNamesBySenderJid = await loadPushNamesBySenderJid(db, conversationId);
   const counts = emptyCounts(participants.length);
 
-  const snapshotParticipants = participants.map((participant) => {
+  const snapshotInputs = participants.map((participant) => {
     const resolution = resolutions.get(participant.participant_jid) ?? { kind: "unresolved" };
-    incrementCount(counts, resolution.kind);
-    return snapshotParticipant(
-      participant,
+    const pushName = pushNameForParticipant(pushNamesBySenderJid, participant.participant_jid, participant.phone_e164);
+    return { participant, resolution, pushName };
+  });
+  await enrichResolvedEntityAliases(
+    db,
+    groupJid,
+    snapshotInputs.map(({ participant, resolution, pushName }) => ({
+      phone_e164: participant.phone_e164,
       resolution,
-      pushNameForParticipant(pushNamesBySenderJid, participant.participant_jid, participant.phone_e164),
-    );
+      pushName,
+    })),
+  );
+
+  const snapshotParticipants = snapshotInputs.map(({ participant, resolution, pushName }) => {
+    incrementCount(counts, resolution.kind);
+    return snapshotParticipant(participant, resolution, pushName);
   });
 
   logger.info(
