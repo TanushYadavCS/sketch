@@ -32,6 +32,7 @@ import type { StageReport, StageReporter } from "./enrichment-stage-report";
 import { type KnownEntityForPrompt, buildFileScopedKnownEntities } from "./file-scope-context";
 import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { buildParticipantBlock } from "./participant-block";
+import { type PersonCandidateScan, buildPersonCandidateBlock, buildPersonCandidateScan } from "./person-candidate-scan";
 import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
 
@@ -383,6 +384,7 @@ export interface EnrichmentDeps {
    * is built on top of this by `buildFileScopedKnownEntities`.
    */
   knownEntities?: KnownEntityForPrompt[];
+  personCandidateScan?: PersonCandidateScan;
   /**
    * Fires once at the start of the run and once after each file is processed
    * (success, skip, or failure), with `completed` and `total` reflecting the
@@ -466,6 +468,11 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     deps.knownEntities = await loadBaselineKnownEntities(db);
   } catch {
     // entities table may not exist yet — ignore
+  }
+  try {
+    deps.personCandidateScan = await buildPersonCandidateScan(db);
+  } catch {
+    deps.personCandidateScan = undefined;
   }
 
   let generatorForRun: GeminiGenerator | null = deps.generator ?? null;
@@ -601,6 +608,9 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 { db, logger },
                 { fileId: file.id, fileContent: file.content },
               );
+              const personCandidateBlock = buildPersonCandidateBlock(deps.personCandidateScan, file.content, {
+                participantBlock,
+              });
               await smartEnrichFile(
                 {
                   db,
@@ -610,6 +620,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   orgContext: deps.orgContext,
                   knownEntities,
                   participantBlock,
+                  personCandidateBlock,
                   debugDumpDir: deps.debugDumpDir,
                   stageReport: deps.stageReport,
                   ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
@@ -912,6 +923,9 @@ async function enrichTextDocument(
         { db, logger },
         { fileId: file.id, fileContent: file.content },
       );
+      const personCandidateBlock = buildPersonCandidateBlock(deps.personCandidateScan, file.content, {
+        participantBlock,
+      });
       await smartEnrichFile(
         {
           db,
@@ -921,6 +935,7 @@ async function enrichTextDocument(
           orgContext: deps.orgContext,
           knownEntities,
           participantBlock,
+          personCandidateBlock,
           debugDumpDir: deps.debugDumpDir,
           stageReport: deps.stageReport,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),

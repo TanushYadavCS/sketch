@@ -97,7 +97,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v14";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v15";
 const DEDUP_PROMPT_VERSION = "dedup-adjudication-v1";
 const GENERIC_DEDUP_TOKENS = new Set([
   "a",
@@ -204,6 +204,7 @@ interface SmartEnrichmentDeps {
    * attendee metadata. Caller (enrichment.ts) builds via `buildParticipantBlock`.
    */
   participantBlock?: string;
+  personCandidateBlock?: string;
   /**
    * When set, every LLM call inside this run writes a dump file (prompt + raw
    * response + token usage) under this directory. Set only by the per-file
@@ -380,6 +381,7 @@ export async function extractEntities(
   orgContext?: ExtractionOrgContext | null,
   knownEntities?: KnownEntityForPrompt[],
   participantBlock?: string,
+  personCandidateBlock?: string,
   dumpDir?: string,
   allowedTypes = extractionValidTypes(file.fileType),
 ): Promise<EntityExtractionResult> {
@@ -398,6 +400,7 @@ export async function extractEntities(
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
+  const personCandidateSection = personCandidateBlock && personCandidateBlock.length > 0 ? personCandidateBlock : "";
   const threadSection = file.threadContext
     ? `\nEmail thread context for resolving references only. Do not emit entities or relationships that appear only in this context; emitted mentions and relationships must be supported by the current message content below.\n${file.threadContext}\n`
     : "";
@@ -420,7 +423,7 @@ export async function extractEntities(
     'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON working with a company.';
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${disambiguationSection}${knownSection}${participantSection}${threadSection}
+${orgSection}${disambiguationSection}${knownSection}${personCandidateSection}${participantSection}${threadSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -1311,6 +1314,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       deps.orgContext,
       deps.knownEntities,
       deps.participantBlock,
+      deps.personCandidateBlock,
       deps.debugDumpDir,
       validExtractionTypes,
     );

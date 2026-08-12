@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
@@ -9,6 +10,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { configureMaterializeDefaults } from "../entities/materialize";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger, createTestPgDb } from "../test-utils";
 
@@ -46,6 +48,13 @@ function syncedItem(id: string, content: string): SyncedItem {
     sourceCreatedAt: "2026-08-11T00:00:00.000Z",
     sourceUpdatedAt: "2026-08-11T00:00:00.000Z",
   };
+}
+
+function promptDocument(core: string): string {
+  return Array.from(
+    { length: 120 },
+    (_, index) => `${core} Followup note ${index} records customer context and delivery planning.`,
+  ).join(" ");
 }
 
 function longDocument(id: string): string {
@@ -158,6 +167,94 @@ async function seedHarness(db: Kysely<DB>) {
   return { adminId: admin.id, fileAId: fileA.id, fileBId: fileB.id };
 }
 
+async function seedPerson(db: Kysely<DB>, name: string): Promise<string> {
+  const id = `person-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${randomUUID()}`;
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      status: "confirmed",
+      aliases: JSON.stringify([]),
+      metadata: JSON.stringify({}),
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .execute();
+  return id;
+}
+
+async function updateFileContent(db: Kysely<DB>, fileId: string, content: string, suffix: string): Promise<void> {
+  await db
+    .updateTable("indexed_files")
+    .set({
+      content,
+      content_hash: `hash-${suffix}`,
+      embedding_status: "pending",
+      summary_status: "pending",
+    })
+    .where("id", "=", fileId)
+    .execute();
+}
+
+async function addFile(db: Kysely<DB>, id: string, content: string): Promise<string> {
+  const connectorRepo = createConnectorRepository(db);
+  const file = await connectorRepo.upsertFile({
+    ...syncedItem(id, content),
+    source: "gmail",
+    connectorConfigId: CONNECTOR_ID,
+  });
+  await connectorRepo.linkConnectorFile(CONNECTOR_ID, file.id);
+  return file.id;
+}
+
+function promptCapturingGenerator(
+  prompts: string[],
+  mentionsForPrompt: (prompt: string) => Array<{ mention: string; variations?: string[] }>,
+): GeminiGenerator {
+  return {
+    async generate() {
+      return "Summary.";
+    },
+    async generateJSON<T>(prompt: string, opts?: Omit<GenerateOptions, "responseMimeType">) {
+      if (opts?.label?.startsWith("extractEntities:")) {
+        prompts.push(prompt);
+        return {
+          mentions: mentionsForPrompt(prompt).map((mention) => ({
+            mention: mention.mention,
+            type: "person",
+            variations: mention.variations ?? [],
+            confidence: 0.95,
+          })),
+          relations: [],
+        } as T;
+      }
+      return {} as T;
+    },
+  };
+}
+
+function personCandidateLines(prompt: string): string[] {
+  const match = prompt.match(
+    /Known people already in the register[\s\S]*?(?=\n(?:## Meeting participants|Email thread context|File:))/,
+  );
+  if (!match) return [];
+  return match[0]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "));
+}
+
+async function enrichFile(app: ReturnType<typeof createApp>, cookie: string, fileId: string): Promise<void> {
+  const enrich = await app.request(`/api/connectors/files/${fileId}/enrichments`, {
+    method: "POST",
+    headers: { Cookie: cookie },
+  });
+  expect(enrich.status).toBe(200);
+}
+
 async function login(app: ReturnType<typeof createApp>): Promise<string> {
   const response = await app.request("/api/auth/login", {
     method: "POST",
@@ -201,6 +298,7 @@ describe("POST /api/connectors/files/:fileId/enrichments materialization scope",
 
   afterEach(async () => {
     connectorFactories.gmail = originalGmailFactory;
+    configureMaterializeDefaults({ llmPromotionThreshold: 2 });
     if (db) await db.destroy();
     db = null;
   });
@@ -302,5 +400,201 @@ describe("POST /api/connectors/files/:fileId/enrichments materialization scope",
     expect(
       genericFeatureRows.map((row) => JSON.parse(row.raw ?? "{}")).filter((raw) => raw.type === "feature"),
     ).toEqual([]);
+  });
+
+  it("offers a canonical person candidate and renders personal-domain participants in the prompt", async () => {
+    configureMaterializeDefaults({ llmPromotionThreshold: 1 });
+    db = await createTestPgDb();
+    const { fileAId } = await seedHarness(db);
+    await seedPerson(db, "Himanshu Kalra");
+    await updateFileContent(
+      db,
+      fileAId,
+      promptDocument("Kalra, Himanshu reviewed the discovery agenda with the delivery team."),
+      "himanshu-kalra",
+    );
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: fileAId,
+      connectorConfigId: CONNECTOR_ID,
+      contentHash: "hash-himanshu-kalra",
+      source: "sync",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Priya Nair",
+      subjectEmail: "priya.nair@gmail.com",
+      subjectSource: "calendar",
+      subjectSourceId: "attendee:priya",
+      raw: { providerFileId: fileAId, attendee: { name: "Priya Nair", email: "priya.nair@gmail.com" } },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: fileAId,
+      connectorConfigId: CONNECTOR_ID,
+      contentHash: "hash-himanshu-kalra",
+      source: "sync",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Support Desk",
+      subjectEmail: "support@gmail.com",
+      subjectSource: "calendar",
+      subjectSourceId: "attendee:support",
+      raw: { providerFileId: fileAId, attendee: { name: "Support Desk", email: "support@gmail.com" } },
+    });
+
+    const prompts: string[] = [];
+    const generator = promptCapturingGenerator(prompts, (prompt) =>
+      prompt.includes("- Himanshu Kalra (person)")
+        ? [{ mention: "Himanshu Kalra", variations: ["Kalra, Himanshu"] }]
+        : [],
+    );
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), {
+      logger: createTestLogger(),
+      enrichmentGenerator: generator,
+    });
+    const cookie = await login(app);
+
+    await enrichFile(app, cookie, fileAId);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 20_000, interval: 25 });
+    expect.soft(personCandidateLines(prompts[0])).toContain("- Himanshu Kalra (person)");
+    expect.soft(prompts[0]).toContain("- Priya Nair — external (no resolved company) (priya.nair@gmail.com)");
+    expect.soft(prompts[0]).not.toContain("Support Desk");
+    expect.soft(prompts[0]).not.toContain("support@gmail.com");
+
+    await vi.waitFor(
+      async () => {
+        const rows = await db
+          ?.selectFrom("entities")
+          .select(["name", "aliases"])
+          .where("source_type", "=", "person")
+          .where("name", "=", "Himanshu Kalra")
+          .execute();
+        expect(rows).toHaveLength(1);
+        expect(JSON.parse(rows?.[0]?.aliases ?? "[]")).toContain("Kalra, Himanshu");
+      },
+      { timeout: 20_000, interval: 25 },
+    );
+
+    const queued = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("entity_type", "=", "person")
+      .where("proposed_name", "=", "Himanshu Kalra")
+      .execute();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("offers common-name person candidates only on distinctive or adjacent whole-token evidence", async () => {
+    db = await createTestPgDb();
+    await seedHarness(db);
+    for (const name of [
+      "Rahul Sharma",
+      "Rahul Verma",
+      "Rahul Bose",
+      "Rahul Mehta",
+      "Rahul Kapoor",
+      "Rahul Iyer",
+      "Rahul Batra",
+      "Rahul Kumar",
+      "Anil Sharma",
+      "Priya Sharma",
+      "Neha Sharma",
+      "Kabir Sharma",
+      "Dev Sharma",
+      "Rohan Sharma",
+      "Anil Kumar",
+      "Priya Kumar",
+      "Neha Kumar",
+      "Kabir Kumar",
+      "Dev Kumar",
+      "Rohan Kumar",
+    ]) {
+      await seedPerson(db, name);
+    }
+    for (let i = 0; i < 5; i++) await seedPerson(db, "Megha Mukherji");
+    for (let i = 0; i < 3; i++) await seedPerson(db, "Megha");
+
+    const prompts: string[] = [];
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), {
+      logger: createTestLogger(),
+      enrichmentGenerator: promptCapturingGenerator(prompts, () => []),
+    });
+    const cookie = await login(app);
+
+    const cases = [
+      {
+        id: "rahul-sharma-adjacent",
+        core: "Rahul Sharma discussed the onboarding plan.",
+        assert: (lines: string[]) => {
+          expect(lines).toContain("- Rahul Sharma (person)");
+          expect(lines).not.toContain("- Rahul Verma (person)");
+          expect(lines).not.toContain("- Rahul Bose (person)");
+          expect(lines).not.toContain("- Rahul Kumar (person)");
+        },
+      },
+      {
+        id: "bare-rahul",
+        core: "Rahul discussed the onboarding plan.",
+        assert: (lines: string[]) => {
+          expect(lines.some((line) => line.includes("Rahul"))).toBe(false);
+        },
+      },
+      {
+        id: "rahul-kumar-far",
+        core: "Rahul Sharma discussed onboarding.\n\nAnil Kumar reviewed implementation risks.",
+        assert: (lines: string[]) => {
+          expect(lines).not.toContain("- Rahul Kumar (person)");
+        },
+      },
+      {
+        id: "substring-shapes",
+        core: "Rahulson Sharmaji discussed onboarding.",
+        assert: (lines: string[]) => {
+          expect(lines).toEqual([]);
+        },
+      },
+      {
+        id: "megha-distinct-name-holders",
+        core: "Megha discussed onboarding.",
+        assert: (lines: string[]) => {
+          expect(lines).toContain("- Megha (person)");
+          expect(lines).toContain("- Megha Mukherji (person)");
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const fileId = await addFile(db, testCase.id, promptDocument(testCase.core));
+      await enrichFile(app, cookie, fileId);
+      await vi.waitFor(() => expect(prompts.length).toBeGreaterThan(0), { timeout: 20_000, interval: 25 });
+      const prompt = prompts.shift();
+      if (!prompt) throw new Error("expected captured prompt");
+      testCase.assert(personCandidateLines(prompt));
+    }
+  });
+
+  it("caps rendered person candidates at fifty names", async () => {
+    configureMaterializeDefaults({ llmPromotionThreshold: 1 });
+    db = await createTestPgDb();
+    await seedHarness(db);
+    const words = Array.from({ length: 55 }, (_, index) => {
+      const first = String.fromCharCode(97 + Math.floor(index / 26));
+      const second = String.fromCharCode(97 + (index % 26));
+      return `cap${first}${second}`;
+    });
+    for (const word of words) await seedPerson(db, `Candidate ${word}`);
+
+    const prompts: string[] = [];
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), {
+      logger: createTestLogger(),
+      enrichmentGenerator: promptCapturingGenerator(prompts, () => []),
+    });
+    const cookie = await login(app);
+    const fileId = await addFile(db, "person-cap", promptDocument(words.map((word) => `Candidate ${word}`).join(". ")));
+
+    await enrichFile(app, cookie, fileId);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 20_000, interval: 25 });
+    expect(personCandidateLines(prompts[0])).toHaveLength(50);
   });
 });

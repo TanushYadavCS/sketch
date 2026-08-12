@@ -240,8 +240,8 @@ Task B (01:00)
     );
     expect(block).toContain("Vedant Parikh — Canvas (vedant@canvasx.ai)");
     expect(block).toContain("Unknown Client — external (no resolved company) (client@somebodyelse.com)");
+    expect(block).toContain("Personal Acct — external (no resolved company) (stranger@gmail.com)");
     expect(block).not.toContain("Role Mailbox");
-    expect(block).not.toContain("Personal Acct");
   });
 });
 
