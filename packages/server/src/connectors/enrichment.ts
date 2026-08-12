@@ -665,6 +665,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   stageReport: deps.stageReport,
                   indexedFileIds: [file.id],
                 });
+              } else {
+                reportMaterializeNoop(deps.stageReport);
               }
               await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
@@ -980,6 +982,8 @@ async function enrichTextDocument(
           stageReport: deps.stageReport,
           indexedFileIds: [file.id],
         });
+      } else {
+        reportMaterializeNoop(deps.stageReport);
       }
       await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;
@@ -1111,6 +1115,16 @@ function reportPostSmartSkipped(stageReport: StageReporter | undefined, err: unk
     kind: "code",
     status: "skipped",
     error: err instanceof Error ? err.message : String(err),
+  });
+}
+
+function reportMaterializeNoop(stageReport: StageReporter | undefined): void {
+  stageReport?.({
+    stage: "materialize",
+    label: "Materialise",
+    kind: "code",
+    status: "done",
+    materializeSummary: { eligibleFacts: 0, indexBuilds: 0, scopeKeyReads: 0 },
   });
 }
 
