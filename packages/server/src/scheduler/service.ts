@@ -874,6 +874,12 @@ export class TaskScheduler {
   }
 
   private async recoverWebhookDeliveries(startup: boolean): Promise<void> {
+    const processing = startup
+      ? await this.webhookDeliveries.list({ statuses: ["processing"], limit: WEBHOOK_DELIVERY_SWEEP_LIMIT })
+      : await this.webhookDeliveries.listForRecovery({
+          before: new Date(Date.now() - WEBHOOK_DELIVERY_STALE_AFTER_MS).toISOString(),
+          limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
+        });
     const pending = await this.webhookDeliveries.list({
       statuses: ["pending", "queued"],
       limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
@@ -887,12 +893,6 @@ export class TaskScheduler {
       });
     }
 
-    const processing = startup
-      ? await this.webhookDeliveries.list({ statuses: ["processing"], limit: WEBHOOK_DELIVERY_SWEEP_LIMIT })
-      : await this.webhookDeliveries.listForRecovery({
-          before: new Date(Date.now() - WEBHOOK_DELIVERY_STALE_AFTER_MS).toISOString(),
-          limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
-        });
     for (const delivery of processing) await this.reconcileWebhookDelivery(delivery, startup);
   }
 

@@ -46,7 +46,7 @@ function webhookSteps() {
 
 function buildScheduler(
   db: Kysely<DB>,
-  options: { queueAccepted?: boolean } = {},
+  options: { queueAccepted?: boolean; runImmediately?: boolean } = {},
 ): {
   scheduler: TaskScheduler;
   callbacks: Array<() => Promise<void>>;
@@ -57,7 +57,11 @@ function buildScheduler(
     getQueue: vi.fn(() => ({
       enqueue: (callback: () => Promise<void>) => {
         if (!queueAccepted) return false;
-        callbacks.push(callback);
+        if (options.runImmediately) {
+          void callback();
+        } else {
+          callbacks.push(callback);
+        }
         return true;
       },
     })),
@@ -136,6 +140,22 @@ describe("TaskScheduler native webhook delivery", () => {
     });
     return delivery.delivery;
   }
+
+  it("recovers a pending delivery without racing its startup queue handoff", async () => {
+    const delivery = await createDelivery();
+    const { scheduler } = buildScheduler(db, { runImmediately: true });
+
+    try {
+      await scheduler.start();
+      await vi.waitFor(async () => {
+        await expect(createWebhookDeliveriesRepository(db).getById(delivery.id)).resolves.toMatchObject({
+          status: "completed",
+        });
+      });
+    } finally {
+      scheduler.stop();
+    }
+  });
 
   it("queues and processes one durable delivery without changing schedule state", async () => {
     const delivery = await createDelivery();
