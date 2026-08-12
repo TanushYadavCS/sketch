@@ -2525,6 +2525,16 @@ export function connectorRoutes(
     // This endpoint is the per-file "Enrich File" debug surface — always dump
     // LLM calls to disk for inspection. Each call gets its own dated subdir
     // under data/llm-dumps/ so runs don't clobber each other.
+    //
+    // Clear summary_status first. Smart enrichment — extraction, dedup and
+    // fact materialisation — is gated on it being unresolved
+    // (enrichment.ts `summaryAlreadyResolved`), so on an already-enriched file
+    // this endpoint would re-embed, report success, and silently skip the
+    // half a caller actually asked for. runEnrichment's fileIds path already
+    // treats an explicit rerun as a manual override for embedding_status;
+    // this makes summary_status agree.
+    await db.updateTable("indexed_files").set({ summary_status: "pending" }).where("id", "=", fileId).execute();
+
     const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
     const debugDumpDir = `data/llm-dumps/${fileId}__${dumpStamp}`;
     runEnrichment({
