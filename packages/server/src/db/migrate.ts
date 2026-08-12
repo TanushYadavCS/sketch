@@ -172,11 +172,14 @@ import * as m169 from "./migrations/169-scheduled-task-execution-mode";
 import * as m170 from "./migrations/170-question-interactions";
 import * as m171 from "./migrations/171-question-interaction-active-keys";
 import * as m172 from "./migrations/172-whatsapp-identity-observations";
-import * as m173 from "./migrations/173-whatsapp-llm-flush-reason";
-import * as m174 from "./migrations/174-whatsapp-topic-tables";
-import * as m175 from "./migrations/175-whatsapp-chunk-knobs";
-import * as m176 from "./migrations/176-whatsapp-open-slices";
-import * as m177 from "./migrations/177-whatsapp-chunk-conversion-state";
+import * as m173 from "./migrations/173-native-webhook-endpoints";
+import * as m174 from "./migrations/174-webhook-delivery-generation-fencing";
+import * as m175 from "./migrations/175-native-webhook-no-credentials";
+import * as m176 from "./migrations/176-whatsapp-llm-flush-reason";
+import * as m177 from "./migrations/177-whatsapp-topic-tables";
+import * as m178 from "./migrations/178-whatsapp-chunk-knobs";
+import * as m179 from "./migrations/179-whatsapp-open-slices";
+import * as m180 from "./migrations/180-whatsapp-chunk-conversion-state";
 import type { DB } from "./schema";
 
 /**
@@ -358,11 +361,14 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "170-question-interactions": m170,
           "171-question-interaction-active-keys": m171,
           "172-whatsapp-identity-observations": m172,
-          "173-whatsapp-llm-flush-reason": m173,
-          "174-whatsapp-topic-tables": m174,
-          "175-whatsapp-chunk-knobs": m175,
-          "176-whatsapp-open-slices": m176,
-          "177-whatsapp-chunk-conversion-state": m177,
+          "173-native-webhook-endpoints": m173,
+          "174-webhook-delivery-generation-fencing": m174,
+          "175-native-webhook-no-credentials": m175,
+          "176-whatsapp-llm-flush-reason": m176,
+          "177-whatsapp-topic-tables": m177,
+          "178-whatsapp-chunk-knobs": m178,
+          "179-whatsapp-open-slices": m179,
+          "180-whatsapp-chunk-conversion-state": m180,
         };
       },
     },

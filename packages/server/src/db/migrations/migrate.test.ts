@@ -28,7 +28,7 @@ import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-syn
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 
-const EXPECTED_MIGRATION_COUNT = 173;
+const EXPECTED_MIGRATION_COUNT = 176;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -240,11 +240,14 @@ describe("runMigrations — full sequence", () => {
     expect(names[165]).toBe("170-question-interactions");
     expect(names[166]).toBe("171-question-interaction-active-keys");
     expect(names[167]).toBe("172-whatsapp-identity-observations");
-    expect(names[168]).toBe("173-whatsapp-llm-flush-reason");
-    expect(names[169]).toBe("174-whatsapp-topic-tables");
-    expect(names[170]).toBe("175-whatsapp-chunk-knobs");
-    expect(names[171]).toBe("176-whatsapp-open-slices");
-    expect(names[172]).toBe("177-whatsapp-chunk-conversion-state");
+    expect(names[168]).toBe("173-native-webhook-endpoints");
+    expect(names[169]).toBe("174-webhook-delivery-generation-fencing");
+    expect(names[170]).toBe("175-native-webhook-no-credentials");
+    expect(names[171]).toBe("176-whatsapp-llm-flush-reason");
+    expect(names[172]).toBe("177-whatsapp-topic-tables");
+    expect(names[173]).toBe("178-whatsapp-chunk-knobs");
+    expect(names[174]).toBe("179-whatsapp-open-slices");
+    expect(names[175]).toBe("180-whatsapp-chunk-conversion-state");
   });
 
   it("backfills only exact web origin task conversations", async () => {

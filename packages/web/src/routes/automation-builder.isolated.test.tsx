@@ -3,6 +3,7 @@ import type {
   WebChatQuestion,
   WebChatQuestionBatch,
   WebChatQuestionBatchAnswer,
+  WorkflowTriggerConfig,
 } from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
@@ -753,10 +754,13 @@ describe("AutomationBuilderPage", () => {
           label: "Sketch webhook",
           triggerConfig: {
             type: "webhook",
-            webhookUrl: "https://sketch.example/api/webhooks/wf/task-123",
+            webhookUrl: "https://sketch.example/api/webhooks/v1/endpoint-123",
+            webhookEndpointId: "endpoint-123",
             webhookMethod: "POST",
             webhookContentType: "application/json",
-          },
+            webhookAuthentication: "none",
+            webhookStatus: "active",
+          } as WorkflowTriggerConfig,
         },
         ...automation.steps.slice(1),
       ],
@@ -767,6 +771,78 @@ describe("AutomationBuilderPage", () => {
 
     expect(await screen.findByDisplayValue("webhook")).toBeInTheDocument();
     expect(screen.queryByTestId("canvas-trigger-details")).not.toBeInTheDocument();
+  });
+
+  it("renders the native webhook with the same simple contract as the Canvas webhook", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "webhook",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Sketch webhook",
+          triggerConfig: {
+            type: "webhook",
+            webhookUrl: "https://sketch.example/api/webhooks/v1/endpoint-123",
+            webhookEndpointId: "endpoint-123",
+            webhookMethod: "POST",
+            webhookContentType: "application/json",
+            webhookAuthentication: "none",
+            webhookStatus: "active",
+          } as WorkflowTriggerConfig,
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+
+    renderBuilder();
+    await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
+
+    const panel = await screen.findByTestId("native-webhook-details");
+    expect(panel).toHaveTextContent("Active");
+    expect(panel).toHaveTextContent(
+      "Send POST requests with JSON to the canonical URL above; no authentication is required.",
+    );
+    expect(screen.getByDisplayValue("POST")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("application/json")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("None required")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Any JSON value")).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("HMAC");
+    expect(panel).not.toHaveTextContent("Bearer");
+    expect(screen.queryByRole("button", { name: "Generate secret" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke endpoint" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy canonical Sketch webhook URL" }));
+    expect(writeText).toHaveBeenCalledWith("https://sketch.example/api/webhooks/v1/endpoint-123");
+  });
+
+  it("shows setup pending when the native webhook endpoint is unavailable", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "webhook",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Sketch webhook",
+          triggerConfig: { type: "webhook", webhookStatus: "unavailable" } as WorkflowTriggerConfig,
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+
+    renderBuilder();
+    await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
+
+    const panel = await screen.findByTestId("native-webhook-details");
+    expect(panel).toHaveTextContent("Setup pending");
+    expect(panel).toHaveTextContent("Sketch is still setting up this trigger");
+    expect(screen.getByDisplayValue("Webhook endpoint is not available yet")).toBeInTheDocument();
   });
 
   it("opens the selected associated chat and sends the active automation id", async () => {
