@@ -24,6 +24,7 @@ import {
   projectProductMentionNames,
   smartEnrichFile,
 } from "./smart-enrichment";
+import { recoverStaleEnrichments } from "./sync";
 
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 
@@ -375,6 +376,128 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     } catch {
       // already destroyed
     }
+  });
+
+  async function readLearnedFacts(entityId: string): Promise<unknown[]> {
+    const row = await db.selectFrom("entities").select("metadata").where("id", "=", entityId).executeTakeFirstOrThrow();
+    const metadata = JSON.parse(row.metadata ?? "{}");
+    return metadata.learned_facts ?? [];
+  }
+
+  function factGenerator(entityId: string, facts: string[]): GeminiGenerator {
+    return {
+      generate: async () => "Sarah Chen owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        if (opts?.label?.startsWith("extractEntityFacts")) {
+          return { [entityId]: facts.map((fact) => ({ fact })) } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+  }
+
+  it("does not change learned facts when re-enrichment returns the same facts", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, { content: "Sarah Chen owns the launch plan.", contentHash: "hash-idempotent" });
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "google_drive",
+      sourceId: "person:sarah-chen-idempotent",
+    });
+    const file = smartFileContext(fileId, "hash-idempotent", { content: "Sarah Chen owns the launch plan." });
+
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator: factGenerator(entity.id, ["Owns the launch plan"]),
+        embeddingProvider: null,
+      },
+      file,
+    );
+    const firstFacts = await readLearnedFacts(entity.id);
+
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator: factGenerator(entity.id, ["  owns   the launch plan  "]),
+        embeddingProvider: null,
+      },
+      file,
+    );
+
+    expect(await readLearnedFacts(entity.id)).toEqual(firstFacts);
+  });
+
+  it("appends only new learned facts and preserves existing entries", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, { content: "Sarah Chen owns the launch plan.", contentHash: "hash-partial" });
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "google_drive",
+      sourceId: "person:sarah-chen-partial",
+    });
+    const file = smartFileContext(fileId, "hash-partial", { content: "Sarah Chen owns the launch plan." });
+
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator: factGenerator(entity.id, ["Owns the launch plan", "Works at Acme"]),
+        embeddingProvider: null,
+      },
+      file,
+    );
+    const existingFacts = await readLearnedFacts(entity.id);
+
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator: factGenerator(entity.id, ["owns the launch plan", "Works at Acme", "Leads sales"]),
+        embeddingProvider: null,
+      },
+      file,
+    );
+
+    expect(await readLearnedFacts(entity.id)).toEqual([
+      ...existingFacts,
+      { fact: "Leads sales", source_file_id: fileId, learned_at: expect.any(String) },
+    ]);
+  });
+
+  it("does not duplicate learned facts when stale recovery retries enrichment after a crash", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, { content: "Sarah Chen owns the launch plan.", contentHash: "hash-crash-retry" });
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "google_drive",
+      sourceId: "person:sarah-chen-crash-retry",
+    });
+    const file = smartFileContext(fileId, "hash-crash-retry", { content: "Sarah Chen owns the launch plan." });
+    const generator = factGenerator(entity.id, ["Owns the launch plan"]);
+
+    await smartEnrichFile({ db, logger: createTestLogger(), generator, embeddingProvider: null }, file);
+    const firstFacts = await readLearnedFacts(entity.id);
+
+    await db
+      .updateTable("indexed_files")
+      .set({ embedding_status: "processing", synced_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() })
+      .where("id", "=", fileId)
+      .execute();
+    await recoverStaleEnrichments(db, createTestLogger());
+    await smartEnrichFile({ db, logger: createTestLogger(), generator, embeddingProvider: null }, file);
+
+    expect(await readLearnedFacts(entity.id)).toEqual(firstFacts);
   });
 
   it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
