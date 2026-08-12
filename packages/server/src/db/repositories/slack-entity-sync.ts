@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { parseAliasesString } from "../../entities/materialize-json";
 import { upsertSlackIdentity } from "../../slack/upsert-identity";
 import type { DB, EntitiesTable, SlackUserSyncStateTable, UsersTable } from "../schema";
 import { createEntityRepository, isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
+import { mergeEntityAliases } from "./entity-aliases";
 import { createEntityReviewRepo } from "./entity-review";
 import { ensureUserEntityLinkForEntity } from "./user-entity-linking";
 import { createUserRepository } from "./users";
@@ -142,30 +144,6 @@ function profileName(profile: SlackUserProfile): string | null {
   return name.length > 0 ? name : null;
 }
 
-function parseAliases(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const value = JSON.parse(raw) as unknown;
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function mergeAliases(raw: string | null, candidates: Array<string | null | undefined>): string[] {
-  const aliases = parseAliases(raw);
-  const normalized = new Set(aliases.map((alias) => alias.trim().toLowerCase()).filter(Boolean));
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (!trimmed) continue;
-    const key = trimmed.toLowerCase();
-    if (normalized.has(key)) continue;
-    aliases.push(trimmed);
-    normalized.add(key);
-  }
-  return aliases;
-}
-
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
@@ -275,7 +253,6 @@ async function updateEntityFromSlackProfile(
   const metadata = parseMetadata(entity.metadata);
   if (slackOwned && email) metadata.email = email;
   const updates: Record<string, unknown> = {
-    aliases: JSON.stringify(mergeAliases(entity.aliases, [profile.name, profile.realName, profile.displayName, email])),
     updated_at: now,
   };
   if (!isHumanSubtypeOverride(entity.provenance_tier)) updates.subtype = classification;
@@ -283,6 +260,7 @@ async function updateEntityFromSlackProfile(
   if (slackOwned && email) updates.metadata = JSON.stringify(metadata);
 
   await trx.updateTable("entities").set(updates).where("id", "=", entity.id).execute();
+  await mergeEntityAliases(trx, entity.id, [profile.realName, profile.displayName], now);
   if (email) {
     await updateSlackContactPoint(trx, entity.id, "email", email, connectorConfigId, slackOwned, now);
   }
@@ -652,7 +630,7 @@ async function runUpsertBody(
     const exactCandidates = candidates.filter(
       (candidate) =>
         normalizeName(candidate.name) === normalizedProfileName ||
-        parseAliases(candidate.aliases).some((alias) => normalizeName(alias) === normalizedProfileName),
+        parseAliasesString(candidate.aliases).some((alias) => normalizeName(alias) === normalizedProfileName),
     );
     if (exactCandidates.length > 0) {
       reviewReason = {

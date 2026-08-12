@@ -304,9 +304,29 @@ describe("WhatsApp roster snapshot", () => {
       text: "provider fallback",
       receivedAt: "2026-07-07T09:02:00.000Z",
     });
-    const logger = { info: vi.fn() } as unknown as Logger;
+    const logger = { info: vi.fn(), warn: vi.fn() } as unknown as Logger;
 
-    const snapshot = await buildWhatsAppRosterSnapshot({ db, groupJid, conversationId: conversation.id, logger });
+    const snapshotWithoutEnrichment = await buildWhatsAppRosterSnapshot({
+      db,
+      groupJid,
+      conversationId: conversation.id,
+      logger,
+    });
+    expect(snapshotWithoutEnrichment.snapshot.participants[0]).toMatchObject({
+      resolutionKind: "entity",
+      entityId: "entity-aliases",
+    });
+    await expect(
+      db.selectFrom("entities").select("aliases").where("id", "=", "entity-aliases").executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ aliases: JSON.stringify(["Existing Alias", "PUSH NAME"]) });
+
+    const snapshot = await buildWhatsAppRosterSnapshot({
+      db,
+      groupJid,
+      conversationId: conversation.id,
+      logger,
+      enrichEntityAliases: true,
+    });
     expect(snapshot.snapshot.participants[0]).toMatchObject({ resolutionKind: "entity", entityId: "entity-aliases" });
 
     const entity = await db
@@ -317,7 +337,7 @@ describe("WhatsApp roster snapshot", () => {
     expect(JSON.parse(entity.aliases ?? "[]")).toEqual([
       "Existing Alias",
       "PUSH NAME",
-      "Group Label +**********00",
+      "Group Label",
       "Second Push Name",
     ]);
     expect(entity.aliases).not.toContain("15550000901");

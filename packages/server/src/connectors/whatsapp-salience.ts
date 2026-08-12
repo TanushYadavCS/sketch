@@ -406,6 +406,7 @@ async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger
     groupJid: context.groupJid,
     conversationId: context.conversationId,
     logger,
+    enrichEntityAliases: true,
   });
   const messages = await listSliceMessages(db, context.slice);
   const rosterBlock = renderWhatsAppRosterBlock(roster.snapshot);
