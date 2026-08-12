@@ -21,3 +21,4 @@ docs/superpowers/specs/
 # Created by ./.planning/dev-skills/link.sh — never commit these.
 .claude/skills/implement-story
 .claude/skills/remote-tenant-debugging
+.claude/skills/run-canvas-sketch
