@@ -157,7 +157,6 @@ interface AppDeps {
   /** Injected so the dev trace route, and its tests, can drive a specific model. */
   enrichmentGenerator?: GeminiGenerator;
   taskMintingGenerator?: GeminiGenerator;
-  enrichmentGenerator?: GeminiGenerator;
 }
 
 /**
@@ -484,7 +483,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
   if (config.DEV_TOOLS_ENABLED) {
-    app.route("/api/dev", devEnrichmentRoutes(db, logger, config, { enrichmentGenerator: deps?.enrichmentGenerator }));
+    app.route(
+      "/api/dev",
+      devEnrichmentRoutes(db, logger, config, {
+        enrichmentGenerator: deps?.enrichmentGenerator,
+        taskMintingGenerator: deps?.taskMintingGenerator,
+      }),
+    );
   }
   app.route("/api/graph-passes", graphPassRoutes(db, logger));
   app.route("/api/skills", skillsRoutes(config));
@@ -641,7 +646,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route(
       "/api/connectors",
       connectorRoutes(connectors, db, deps.logger, users, config, {
-        enrichmentGenerator: deps.enrichmentGenerator,
         taskMintingGenerator: deps.taskMintingGenerator,
         enrichmentGenerator: deps.enrichmentGenerator,
       }),

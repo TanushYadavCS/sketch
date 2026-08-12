@@ -62,7 +62,7 @@ export function devEnrichmentRoutes(
     LLM_TASK_CORROBORATION_THRESHOLD?: number;
     TASK_MINTING_MODEL?: string;
   },
-  deps: { enrichmentGenerator?: GeminiGenerator } = {},
+  deps: { enrichmentGenerator?: GeminiGenerator; taskMintingGenerator?: GeminiGenerator } = {},
 ) {
   const routes = new Hono();
 
@@ -97,23 +97,15 @@ export function devEnrichmentRoutes(
     const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
     const providerConfig = buildEnrichmentProviderConfig(settings, appConfig, logger);
     const generator = deps.enrichmentGenerator ?? createEnrichmentGenerator(providerConfig);
-    if (!generator) {
-      return c.json(
-        { error: { code: "LLM_NOT_CONFIGURED", message: "Configure an enrichment model before tracing a run" } },
-        503,
-      );
-    }
-    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
 
     const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
     const dumpDir = `${appConfig?.DATA_DIR ?? "data"}/llm-dumps/${file.id}__${dumpStamp}`;
-    const run = startTraceRun({ kind: parsed.data.kind, fileId: file.id, fileName: file.file_name, dumpDir });
 
     if (parsed.data.kind === "mint") {
       const openRouter = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
       const mintModel = appConfig?.TASK_MINTING_MODEL;
       const mintGenerator =
-        deps.enrichmentGenerator ??
+        deps.taskMintingGenerator ??
         (mintModel
           ? openRouter.openRouterApiKey
             ? createOpenRouterGenerator(openRouter.openRouterApiKey, { model: mintModel })
@@ -125,6 +117,7 @@ export function devEnrichmentRoutes(
           503,
         );
       }
+      const run = startTraceRun({ kind: "mint", fileId: file.id, fileName: file.file_name, dumpDir });
       const model =
         mintModel ??
         (settings?.gemini_api_key ? "gemini-2.5-flash" : openRouter.openRouterModel || "google/gemini-2.5-flash");
@@ -141,6 +134,15 @@ export function devEnrichmentRoutes(
       });
       return c.json({ runId: run.id, fileId: file.id, fileName: file.file_name }, 201);
     }
+
+    if (!generator) {
+      return c.json(
+        { error: { code: "LLM_NOT_CONFIGURED", message: "Configure an enrichment model before tracing a run" } },
+        503,
+      );
+    }
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const run = startTraceRun({ kind: "enrichment", fileId: file.id, fileName: file.file_name, dumpDir });
 
     void (async () => {
       try {

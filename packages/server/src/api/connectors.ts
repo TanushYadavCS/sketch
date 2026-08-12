@@ -2625,7 +2625,16 @@ export function connectorRoutes(
     const model =
       configuredModel ??
       (settings?.gemini_api_key ? "gemini-2.5-flash" : openRouterConfig.openRouterModel || "google/gemini-2.5-flash");
-    const result = await mintTasksFromFile({
+    /**
+     * Runs in the background, like the enrich route above it.
+     *
+     * The report `mintTasksFromFile` returns is pipeline detail — the context
+     * blocks it assembled, a slice of the file body, the model's candidates —
+     * and it belongs on the dev trace, not on a tenant surface. Nothing is lost
+     * by dropping it here: minting writes its facts and materialises its tasks
+     * before it returns, so this was never a preview anyone approved.
+     */
+    void mintTasksFromFile({
       db,
       logger: logger.child({ component: "task-minting", fileId }),
       file: {
@@ -2645,8 +2654,11 @@ export function connectorRoutes(
       model,
       dumpDir,
       llmTaskCorroborationThreshold: appConfig?.LLM_TASK_CORROBORATION_THRESHOLD,
+    }).catch((err) => {
+      logger.error({ err, fileId }, "Task minting failed");
     });
-    return c.json(result);
+
+    return c.json({ success: true, fileId, fileName: file.file_name });
   });
 
   return routes;

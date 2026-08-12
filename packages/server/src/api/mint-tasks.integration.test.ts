@@ -1,5 +1,5 @@
 import { type Kysely, sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { TASK_MINTING_NO_EMBEDDING_SELECTION } from "../connectors/task-minting";
@@ -15,7 +15,11 @@ import { createTestConfig, createTestLogger, createTestPgDb } from "../test-util
 const PASSWORD = "testpassword123";
 const PROJECT_ID = "mint-project";
 const logger = createTestLogger();
-const config = createTestConfig({ DB_TYPE: "postgres", TASK_MINTING_MODEL: "test/stub-model" });
+const config = createTestConfig({
+  DB_TYPE: "postgres",
+  TASK_MINTING_MODEL: "test/stub-model",
+  DEV_TOOLS_ENABLED: true,
+});
 
 describe("POST /api/connectors/files/:fileId/tasks", () => {
   let db: Kysely<DB>;
@@ -24,8 +28,10 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
   let fileId: string;
   let connectorConfigId: string;
   let ownerId: string;
+  let adminId: string;
   let generatorCalls: number;
   let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
 
   beforeEach(async () => {
     db = await createTestPgDb();
@@ -33,6 +39,7 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
     fileId = fixture.fileId;
     connectorConfigId = fixture.connectorConfigId;
     ownerId = fixture.ownerId;
+    adminId = fixture.adminId;
     generatorCalls = 0;
     const generator: GeminiGenerator = {
       async generate() {
@@ -63,6 +70,7 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
     };
     app = createApp(db, config, { logger, taskMintingGenerator: generator });
     ownerCookie = await login(app, "owner@example.com");
+    adminCookie = await login(app, "admin@example.com");
     otherCookie = await login(app, "other@example.com");
   });
 
@@ -75,37 +83,19 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
       method: "POST",
       headers: { Cookie: ownerCookie },
     });
-    const body = (await response.json()) as {
-      candidates: Array<{ title: string; taskId?: string; projectName?: string | null }>;
-      written: number;
-      context: Array<{ key: string; via?: string }>;
-    };
-
     expect(response.status).toBe(200);
-    expect(body.written).toBe(2);
-    expect(body.candidates).toEqual([
-      expect.objectContaining({
-        title: "Send the launch plan",
-        taskId: expect.any(String),
-        projectName: "Mint Project",
-      }),
-      expect.objectContaining({
-        title: "Publish release notes",
-        taskId: expect.any(String),
-        projectName: "Mint Project",
-      }),
-    ]);
-    expect(body.context.every((block) => block.via === "prompt")).toBe(true);
+    expect(await response.json()).toEqual({ success: true, fileId, fileName: expect.any(String) });
+    await waitForMintedTasks(db, 2);
 
     const tasksResponse = await app.request(`/api/entities/${PROJECT_ID}/tasks`, {
       headers: { Cookie: ownerCookie },
     });
-    const tasksBody = (await tasksResponse.json()) as { tasks: Array<{ id: string; provenance: string }> };
+    const tasksBody = (await tasksResponse.json()) as {
+      tasks: Array<{ id: string; title: string; provenance: string }>;
+    };
     expect(tasksResponse.status).toBe(200);
     expect(tasksBody.tasks).toHaveLength(2);
-    expect(tasksBody.tasks.map((task) => task.id).sort()).toEqual(
-      body.candidates.flatMap((candidate) => (candidate.taskId ? [candidate.taskId] : [])).sort(),
-    );
+    expect(tasksBody.tasks.map((task) => task.title).sort()).toEqual(["Publish release notes", "Send the launch plan"]);
     expect(tasksBody.tasks.every((task) => task.provenance === "llm")).toBe(true);
   });
 
@@ -115,6 +105,7 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
       headers: { Cookie: ownerCookie },
     });
     expect(mintResponse.status).toBe(200);
+    await waitForMintedTasks(db, 2);
 
     const ownerResponse = await app.request(`/api/entities/${PROJECT_ID}/tasks`, {
       headers: { Cookie: ownerCookie },
@@ -153,40 +144,77 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
 
   it("selects existing tasks from the embedding neighbourhood and excludes a task outside K=20", async () => {
     const { neighbourFileId, unrelatedFileId } = await seedEmbeddingCorpus(db, fileId, connectorConfigId);
-    await seedVisibleTask(db, "Neighbourhood follow-up", "neighbourhood-task", neighbourFileId, ownerId);
-    await seedVisibleTask(db, "Unrelated follow-up", "unrelated-task", unrelatedFileId, ownerId);
+    await seedVisibleTask(db, "Neighbourhood follow-up", "neighbourhood-task", neighbourFileId, adminId);
+    await seedVisibleTask(db, "Unrelated follow-up", "unrelated-task", unrelatedFileId, adminId);
 
-    const response = await app.request(`/api/connectors/files/${fileId}/tasks`, {
-      method: "POST",
-      headers: { Cookie: ownerCookie },
-    });
-    const body = (await response.json()) as {
-      context: Array<{ key: string; items: string[] }>;
-    };
-    const existingTasks = body.context.find((block) => block.key === "existing_tasks");
+    const context = await mintTraceContext(app, adminCookie, fileId);
+    const existingTasks = context.find((block) => block.key === "existing_tasks");
 
-    expect(response.status).toBe(200);
     expect(existingTasks?.items).toContain("Neighbourhood follow-up");
     expect(existingTasks?.items).not.toContain("Unrelated follow-up");
   });
 
   it("falls back to this file when it has no embedding and reports the degraded selection", async () => {
-    const response = await app.request(`/api/connectors/files/${fileId}/tasks`, {
-      method: "POST",
-      headers: { Cookie: ownerCookie },
-    });
-    const body = (await response.json()) as {
-      context: Array<{ key: string; selection: string }>;
-      similarFiles: unknown[];
-    };
+    const context = await mintTraceContext(app, adminCookie, fileId);
 
-    expect(response.status).toBe(200);
-    expect(body.context.find((block) => block.key === "existing_tasks")?.selection).toBe(
+    expect(context.find((block) => block.key === "existing_tasks")?.selection).toBe(
       TASK_MINTING_NO_EMBEDDING_SELECTION,
     );
-    expect(body.similarFiles).toEqual([]);
+    expect(context.every((block) => block.via === "prompt")).toBe(true);
   });
 });
+
+/** The product route answers before minting finishes, so wait for the facts it writes. */
+async function waitForMintedTasks(db: Kysely<DB>, expected: number) {
+  await vi.waitFor(
+    async () => {
+      const row = await db
+        .selectFrom("indexed_file_facts")
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .where("fact_type", "=", "llm_task")
+        .executeTakeFirstOrThrow();
+      expect(Number(row.count)).toBe(expected);
+    },
+    { timeout: 20_000, interval: 25 },
+  );
+}
+
+/**
+ * The context blocks moved to the dev trace when the product route stopped
+ * returning its report. Same assembly, read from where it now surfaces.
+ */
+async function mintTraceContext(
+  app: ReturnType<typeof createApp>,
+  cookie: string,
+  fileId: string,
+): Promise<Array<{ key: string; items: string[]; selection: string; via?: string }>> {
+  const start = await app.request("/api/dev/runs", {
+    method: "POST",
+    headers: { Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ fileId, kind: "mint" }),
+  });
+  expect(start.status).toBe(201);
+  const runId = ((await start.json()) as { runId: string }).runId;
+
+  let reports: Array<{
+    stage: string;
+    status: string;
+    context?: Array<{ key: string; items: string[]; selection: string; via?: string }>;
+  }> = [];
+  await vi.waitFor(
+    async () => {
+      const res = await app.request(`/api/dev/runs/${runId}`, { headers: { Cookie: cookie } });
+      const body = (await res.json()) as {
+        run: { status: string };
+        stageReports: typeof reports;
+      };
+      expect(body.run.status).not.toBe("running");
+      reports = body.stageReports;
+    },
+    { timeout: 20_000, interval: 25 },
+  );
+  return reports.find((report) => report.stage === "gatherContext")?.context ?? [];
+}
 
 async function seedFixture(db: Kysely<DB>) {
   const users = createUserRepository(db);
@@ -194,7 +222,7 @@ async function seedFixture(db: Kysely<DB>) {
   const passwordHash = await hashPassword(PASSWORD);
   await settings.ensure();
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-  await users.create({
+  const admin = await users.create({
     name: "Admin",
     email: "admin@example.com",
     emailVerified: true,
@@ -259,7 +287,7 @@ async function seedFixture(db: Kysely<DB>) {
       merged_into_entity_id: null,
     })
     .execute();
-  return { fileId: file.id, connectorConfigId: connector.id, ownerId: owner.id };
+  return { fileId: file.id, connectorConfigId: connector.id, ownerId: owner.id, adminId: admin.id };
 }
 
 async function seedEmbeddingCorpus(db: Kysely<DB>, targetFileId: string, connectorConfigId: string) {

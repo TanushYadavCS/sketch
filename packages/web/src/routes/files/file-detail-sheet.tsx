@@ -9,7 +9,6 @@ import type { ConnectorConfig, EmailAddr, EmailThreadMessage, FileAccess, FileCo
 import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
-import { MintTasksDialog } from "@/routes/files/mint-tasks-dialog";
 import {
   ArrowSquareOutIcon,
   GlobeIcon,
@@ -449,7 +448,6 @@ function FileDetailFooter({
   const canManageShares = connector?.canManage === true;
   const canEnrich = connector?.canEnrich === true;
   const [shareOpen, setShareOpen] = useState(false);
-  const [mintOpen, setMintOpen] = useState(false);
 
   const canMint = connector?.canMint === true;
 
@@ -459,6 +457,13 @@ function FileDetailFooter({
       toast.success("Enrichment started — check server logs");
       queryClient.invalidateQueries({ queryKey: ["file-content", fileId] });
     },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  /** Fire and forget, like enrichment. The stage-by-stage story lives in /dev-tools. */
+  const mintMutation = useMutation({
+    mutationFn: () => api.integrations.mintTasks(fileId),
+    onSuccess: () => toast.success("Minting started — tasks appear when it finishes"),
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -498,14 +503,22 @@ function FileDetailFooter({
           size="sm"
           variant="outline"
           className="flex-1 gap-1.5 text-xs"
-          onClick={() => setMintOpen(true)}
-          disabled={mintOpen}
+          onClick={() => mintMutation.mutate()}
+          disabled={mintMutation.isPending}
         >
-          <ListChecksIcon size={12} />
-          Mint tasks
+          {mintMutation.isPending ? (
+            <>
+              <SpinnerGapIcon size={12} className="animate-spin" />
+              Minting...
+            </>
+          ) : (
+            <>
+              <ListChecksIcon size={12} />
+              Mint tasks
+            </>
+          )}
         </Button>
       )}
-      {canMint && <MintTasksDialog fileId={fileId} fileName={fileName} open={mintOpen} onOpenChange={setMintOpen} />}
       {canManageShares && (
         <FileShareDialog
           fileId={fileId}
