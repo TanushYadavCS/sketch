@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { type EmbeddingProvider, createEmbeddingProvider, createQueryEmbedder } from "./embeddings";
-import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
+import { type GeminiGenerator, type GenerateOptions, createGeminiGenerator } from "./gemini-generate";
 import { createOpenRouterGenerator } from "./openrouter-generate";
 import { isRetryableProviderError, withProviderFallback } from "./provider-fallback";
 
@@ -52,8 +52,35 @@ export function createEnrichmentGenerator(config: EnrichmentProviderConfig): Gem
     ? createOpenRouterGenerator(config.openRouterApiKey, { model: config.openRouterModel })
     : null;
 
+  /**
+   * A per-call model override can only be honored by the OpenRouter path — Gemini's client is
+   * pinned to its own model. Returns the generator to route to, or null to use the normal path,
+   * warning when an override was genuinely asked for and cannot be served.
+   */
+  function routeModelOverride(opts: GenerateOptions | undefined, operation: string): GeminiGenerator | null {
+    const model = opts?.model?.trim();
+    if (!model) return null;
+    if (fallback) return fallback;
+    config.logger?.warn(
+      { model, operation },
+      "Per-call model override needs an OpenRouter API key; using the configured enrichment provider",
+    );
+    return null;
+  }
+
   if (!primary) return fallback;
-  if (!fallback) return primary;
+  if (!fallback) {
+    return {
+      generate(prompt, opts) {
+        routeModelOverride(opts, opts?.label ?? "generate");
+        return primary.generate(prompt, opts);
+      },
+      generateJSON(prompt, opts) {
+        routeModelOverride(opts, opts?.label ?? "generateJSON");
+        return primary.generateJSON(prompt, opts);
+      },
+    };
+  }
 
   let primaryDisabled = false;
   let fallbackFailures = 0;
@@ -89,15 +116,21 @@ export function createEnrichmentGenerator(config: EnrichmentProviderConfig): Gem
 
   return {
     generate(prompt, opts) {
+      const operation = opts?.label ?? "generate";
+      const override = routeModelOverride(opts, operation);
+      if (override) return override.generate(prompt, opts);
       return runWithCircuit(
-        opts?.label ?? "generate",
+        operation,
         () => primary.generate(prompt, opts),
         () => fallback.generate(prompt, opts),
       );
     },
     generateJSON(prompt, opts) {
+      const operation = opts?.label ?? "generateJSON";
+      const override = routeModelOverride(opts, operation);
+      if (override) return override.generateJSON(prompt, opts);
       return runWithCircuit(
-        opts?.label ?? "generateJSON",
+        operation,
         () => primary.generateJSON(prompt, opts),
         () => fallback.generateJSON(prompt, opts),
       );

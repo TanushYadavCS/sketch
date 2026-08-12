@@ -75,6 +75,8 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60_000);
     const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const requestedModel = opts?.model?.trim();
+    const modelForCall = requestedModel || model;
 
     try {
       const response = await fetch(OPENROUTER_CHAT_URL, {
@@ -85,7 +87,7 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model,
+          model: modelForCall,
           usage: { include: true },
           messages: [
             ...(opts?.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
@@ -93,6 +95,7 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
           ],
           max_tokens: maxTokens,
           temperature: 0,
+          ...(opts?.reasoningEffort ? { reasoning: { effort: opts.reasoningEffort } } : {}),
           ...(opts?.responseMimeType === "application/json"
             ? {
                 provider: { require_parameters: true },
