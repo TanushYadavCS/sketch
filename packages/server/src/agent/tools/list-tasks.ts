@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 import { type TaskStatus, createTaskRepository } from "../../db/repositories/tasks";
+import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const listTasksToolDescription =
@@ -31,6 +32,7 @@ export async function handleListTasks(
     phone: user?.whatsapp_number ?? null,
     slackUserId: user?.slack_user_id ?? null,
     whatsappLid: user?.whatsapp_lid ?? null,
+    whatsappLids: user ? await getWhatsAppLidsForUser(deps.db, user.id) : [],
     isAdmin: false,
   };
   const repo = createTaskRepository(deps.db);

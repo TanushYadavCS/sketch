@@ -202,7 +202,7 @@ function reconcilePersonSubtype(
   return { subtype: incomingSubtype, provenanceTier: existingProvenanceTier };
 }
 
-export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp";
+export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp" | "whatsapp_lid";
 
 export interface UpsertContactPointData {
   entityId: string;
@@ -302,6 +302,11 @@ export function normalizeContactPointValue(kind: EntityContactPointKind, value: 
     return normalized;
   }
   if (kind === "phone" || kind === "whatsapp") return normalizePhoneLike(value);
+  if (kind === "whatsapp_lid") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized.endsWith("@lid")) throw new Error("WhatsApp LID contact point must end with @lid");
+    return normalized;
+  }
   return normalizeLinkedin(value);
 }
 

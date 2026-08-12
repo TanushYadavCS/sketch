@@ -38,6 +38,7 @@ function createMockBot(onLogout?: () => Promise<void>) {
     })),
     syncAllGroups: vi.fn(async () => 1),
     resolveJidToPhone: vi.fn(async () => "+15551234567"),
+    resolvePhoneToLid: vi.fn(async () => ({ lid: "12345@lid", source: "provider-current" as const })),
     fetchMessageHistory: vi.fn(async () => "request-session-9"),
   };
   return { bot, facade: new InProcessSocketFacade(bot as unknown as WhatsAppBot, createTestLogger(), onLogout) };
@@ -74,6 +75,10 @@ describe("InProcessSocketFacade", () => {
     expect(bot.getProviderGroupMetadata).toHaveBeenCalledWith("group@g.us", { refresh: true });
     await expect(facade.syncAllGroups({ force: true })).resolves.toEqual({ synced: 1 });
     await expect(facade.resolveLid("86702773280883@lid")).resolves.toBe("15551234567@s.whatsapp.net");
+    await expect(facade.resolvePhoneToLid("+15551234567")).resolves.toEqual({
+      lid: "12345@lid",
+      source: "provider-current",
+    });
     const historyRequest = {
       count: 50,
       oldestMessageKey: { remoteJid: "group@g.us", id: "oldest-1", fromMe: false },

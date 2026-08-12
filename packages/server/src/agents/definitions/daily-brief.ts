@@ -23,6 +23,7 @@ import {
 } from "../../db/repositories/task-durability-transition";
 import { type PromoteBriefTaskResult, createTaskRepository } from "../../db/repositories/tasks";
 import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
+import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createLogger } from "../../logger";
@@ -320,6 +321,7 @@ export async function buildTodaysMeetings({
         phone: reader.whatsapp_number,
         slackUserId: reader.slack_user_id,
         whatsappLid: reader.whatsapp_lid,
+        whatsappLids: await getWhatsAppLidsForUser(db, reader.id),
         isAdmin: false,
         slackEntitySyncEnabled,
       })
@@ -1505,6 +1507,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     phone: user.whatsapp_number,
     slackUserId: user.slack_user_id,
     whatsappLid: user.whatsapp_lid,
+    whatsappLids: await getWhatsAppLidsForUser(args.db, user.id),
     isAdmin: false,
     slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
   });

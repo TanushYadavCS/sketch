@@ -62,6 +62,7 @@ import { createInboxMessagesRepository } from "./db/repositories/inbox-messages"
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
+import { getWhatsAppLidsForUser } from "./db/repositories/user-whatsapp-lids";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
@@ -115,6 +116,7 @@ interface AppDeps {
   onSlackDisconnect?: () => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
+  captureWhatsAppLid?: (userId: string, phoneE164: string) => void;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
     Partial<Pick<TaskScheduler, "enqueueTaskById" | "enqueueWebhookDelivery">> &
     Partial<Pick<TaskScheduler, "removeTaskRuntime">> &
@@ -353,6 +355,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           whatsappNumber: user.whatsapp_number,
           slackUserId: user.slack_user_id,
           whatsappLid: user.whatsapp_lid,
+          whatsappLids: await getWhatsAppLidsForUser(db, user.id),
         };
       },
       findUserByEmail: config.MANAGED_AUTH_SECRET
@@ -367,6 +370,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
               whatsappNumber: user.whatsapp_number,
               slackUserId: user.slack_user_id,
               whatsappLid: user.whatsapp_lid,
+              whatsappLids: await getWhatsAppLidsForUser(db, user.id),
             };
           }
         : undefined,
@@ -486,6 +490,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       registerManagedMember: (input) => registerManagedTenantMember(config, input),
       syncManagedMemberMapping,
       removeManagedMember: (input) => removeManagedTenantMember(config, input),
+      captureWhatsAppLid: deps?.captureWhatsAppLid,
     }),
   );
   app.route(

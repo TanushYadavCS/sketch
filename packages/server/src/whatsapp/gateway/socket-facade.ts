@@ -6,6 +6,7 @@ import {
   type WhatsAppHistorySyncRequest,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
+  type WhatsAppPhoneLidResolution,
   type WhatsAppQuotedRef,
   type WhatsAppReactionResult,
   type WhatsAppSendContent,
@@ -135,6 +136,15 @@ export class GatewaySocketFacade implements WhatsAppSocketFacade, InProcessMessa
 
   resolveLid(jid: string): Promise<string | null> {
     return withTimeout(this.deps.delegate.resolveLid(jid), QUERY_TIMEOUT_MS, "WhatsApp LID resolution");
+  }
+
+  resolvePhoneToLid(phoneE164: string): Promise<WhatsAppPhoneLidResolution | null> {
+    if (!this.deps.delegate.resolvePhoneToLid) return Promise.resolve(null);
+    return withTimeout(
+      this.deps.delegate.resolvePhoneToLid(phoneE164),
+      QUERY_TIMEOUT_MS,
+      "WhatsApp phone-to-LID resolution",
+    );
   }
 
   fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {

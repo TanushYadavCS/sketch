@@ -19,6 +19,7 @@ import type {
   PersistedAgentOutputItemRef,
 } from "../../db/repositories/agent-outputs";
 import { viewerPrincipals } from "../../db/repositories/connectors";
+import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import { requireAgentDefinition } from "../registry";
 import type { AgentDefinition } from "../types";
 import { AgentDeliveryTargetError } from "./contracts";
@@ -130,6 +131,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
               phone: user.whatsapp_number,
               slackUserId: user.slack_user_id,
               whatsappLid: user.whatsapp_lid,
+              whatsappLids: await getWhatsAppLidsForUser(this.deps.db, user.id),
               isAdmin: false,
               slackEntitySyncEnabled: this.deps.config.SLACK_ENTITY_SYNC,
             });

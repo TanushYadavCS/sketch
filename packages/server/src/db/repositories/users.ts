@@ -4,6 +4,7 @@ import { storedWhatsAppNumber, whatsappNumberLookupValues } from "../../identity
 import type { DB, UsersTable } from "../schema";
 import { invalidateSettingsCache } from "./settings";
 import { ensureEntityForUser } from "./user-entity-linking";
+import { projectUserWhatsAppIdentityToEntity } from "./user-whatsapp-entity-projection";
 
 type UserDb = Kysely<DB> | Transaction<DB>;
 type UserRow = Selectable<UsersTable>;
@@ -370,7 +371,15 @@ function createUserRepositoryWithContext(
       }
       if (data.passwordHash !== undefined) values.password_hash = data.passwordHash;
       if (data.authRole !== undefined) values.auth_role = data.authRole;
-      if (data.whatsappNumber !== undefined) values.whatsapp_number = storedWhatsAppNumber(data.whatsappNumber);
+      if (data.whatsappNumber !== undefined) {
+        const nextNumber = storedWhatsAppNumber(data.whatsappNumber);
+        const existing = await db.selectFrom("users").select("whatsapp_number").where("id", "=", id).executeTakeFirst();
+        values.whatsapp_number = nextNumber;
+        if (existing && existing.whatsapp_number !== nextNumber) {
+          values.whatsapp_lid_attempted_at = null;
+          values.whatsapp_lid_checked_at = null;
+        }
+      }
       if (data.slackUserId !== undefined) values.slack_user_id = data.slackUserId;
       if (data.description !== undefined) values.description = data.description;
       if (data.role !== undefined) values.role = data.role;
@@ -393,8 +402,12 @@ function createUserRepositoryWithContext(
       }
 
       const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      if (slackEntitySyncEnabled && user.type === "human" && identityChanged && !data.skipEntityLinking) {
-        await ensureEntityForUser(db, id);
+      if (user.type === "human" && identityChanged && !data.skipEntityLinking) {
+        if (slackEntitySyncEnabled) {
+          await ensureEntityForUser(db, id);
+        } else if (data.whatsappNumber !== undefined) {
+          await projectUserWhatsAppIdentityToEntity(db, id);
+        }
       }
       return user;
     },

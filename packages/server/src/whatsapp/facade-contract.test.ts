@@ -28,7 +28,7 @@ import {
 
 describe("WhatsApp socket facade contract", () => {
   it("advertises the history-sync facade contract revision", () => {
-    expect(WHATSAPP_FACADE_CONTRACT_VERSION).toBe("1.2");
+    expect(WHATSAPP_FACADE_CONTRACT_VERSION).toBe("1.3");
     expect(
       whatsAppHistorySyncRequestSchema.parse({
         count: 50,
