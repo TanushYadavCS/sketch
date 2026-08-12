@@ -11,7 +11,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, matchesGlob, relative, resolve } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME, cliSkillRequiredEnv } from "@sketch/shared";
 import type { Logger } from "../logger";
 import {
   SHELL_PATH_EXPANSION_DENY_MESSAGE,
@@ -27,6 +27,7 @@ export const READ_ONLY_FILE_TOOLS = ["Read", "Glob", "Grep"];
 
 export interface CanUseToolOptions {
   agentAllowedTools?: string[] | null;
+  agentEnv?: Record<string, string>;
   blockedReadPaths?: Iterable<string> | null;
   blockImageReads?: boolean;
 }
@@ -204,6 +205,18 @@ export function createCanUseTool(
     if (agentAllowlist && !agentAllowlist.has(toolName)) {
       logger.warn({ toolName }, "Blocked tool call outside agent allowlist");
       return { behavior: "deny", message: `Tool ${toolName} is not in this agent's allowlist` };
+    }
+
+    if (toolName === "Skill" || toolName.endsWith("__Skill")) {
+      const skillName = typeof input.skill === "string" ? input.skill.trim() : "";
+      const requiredEnv = cliSkillRequiredEnv(skillName);
+      const unavailable = requiredEnv.some((name) => !options.agentEnv?.[name]);
+      if (unavailable) {
+        return {
+          behavior: "deny",
+          message: `Skill "${skillName}" is unavailable because its integration is not connected. Reconnect it from Integrations in Sketch.`,
+        };
+      }
     }
 
     if (FILE_TOOLS.includes(toolName)) {

@@ -343,6 +343,11 @@ export interface ManageScheduledTasksDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo?: SearchableUserRepo;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
   config?: { BASE_URL?: string; PORT: number };
@@ -1037,6 +1042,24 @@ export async function handleManageScheduledTasks(
     return null;
   };
 
+  const ensureAgentSkillsAvailable = async (
+    candidateSteps: WorkflowStepInput[] | undefined,
+  ): Promise<ReturnType<typeof text> | null> => {
+    if (!deps.validateAgentSkills || !ctx.createdBy || !candidateSteps) return null;
+    const requestedSkills = candidateSteps.flatMap((step) => (step.type === "agent" ? (step.agentSkills ?? []) : []));
+    if (requestedSkills.length === 0) return null;
+    const unavailableSkills = await deps.validateAgentSkills(ctx.createdBy, requestedSkills, {
+      platform: ctx.platform,
+      contextType: ctx.contextType,
+      deliveryTarget: ctx.deliveryTarget,
+      createdBy: ctx.createdBy,
+    });
+    if (unavailableSkills.length === 0) return null;
+    return text(
+      `Error: connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+    );
+  };
+
   const OWNERSHIP_GUARDED_ACTIONS = [
     "update",
     "get",
@@ -1209,6 +1232,9 @@ export async function handleManageScheduledTasks(
         }
       }
 
+      const agentSkillError = await ensureAgentSkillsAvailable(params.steps);
+      if (agentSkillError) return agentSkillError;
+
       // Schedule validation
       if (params.schedule_type === "interval") {
         const seconds = Number(params.schedule_value);
@@ -1366,6 +1392,8 @@ export async function handleManageScheduledTasks(
           "Error: Canvas-managed webhook triggers are not supported; use the Sketch-native webhook trigger instead.",
         );
       }
+      const agentSkillError = await ensureAgentSkillsAvailable(params.steps);
+      if (agentSkillError) return agentSkillError;
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;

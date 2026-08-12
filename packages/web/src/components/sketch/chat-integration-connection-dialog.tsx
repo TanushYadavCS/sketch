@@ -49,6 +49,11 @@ export function ChatIntegrationConnectionFrame({
       return;
     }
 
+    if (connection.executionMode === "cli") {
+      onOpenChange(false);
+      return;
+    }
+
     if (!providerId) {
       latestStatusRef.current = "unavailable";
       onStatusChange(connection.requestId, "unavailable");

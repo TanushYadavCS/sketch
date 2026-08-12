@@ -1,4 +1,5 @@
 export * from "./agent-environment";
+export * from "./cli-integrations";
 export * from "./agent-tools";
 export * from "./automation";
 export * from "./automation-handoff";

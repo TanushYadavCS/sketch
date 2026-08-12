@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WebChatQuestion, WebChatQuestionBatch } from "@sketch/shared";
+import type { CliIntegrationConnection, WebChatQuestion, WebChatQuestionBatch } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import type { createCliIntegrationService } from "../integrations/cli/service";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
 function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string[] = []) {
@@ -2124,7 +2125,7 @@ describe("web chat API", () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
-  it("streams connected account cards from provider state for account enquiries", async () => {
+  it("streams connected CLI account cards before filtering Canvas GitHub connections", async () => {
     const admin = await seedAdmin(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult("You have GitHub connected."));
     const loadIntegrationProvider = vi.fn().mockResolvedValue({
@@ -2142,11 +2143,36 @@ describe("web chat API", () => {
         },
       ]),
     });
+    const cliConnection: CliIntegrationConnection = {
+      id: "cli-1",
+      appId: "github",
+      appName: "GitHub",
+      executionMode: "cli",
+      ownerUserId: admin.id,
+      accountExternalId: "123",
+      accountLogin: "karan",
+      accountAvatarUrl: null,
+      accountType: "User",
+      status: "active",
+      verifiedAt: "2026-01-01T00:00:00Z",
+      lastVerificationError: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isOwnedByViewer: true,
+      canUse: true,
+      canManage: true,
+      shares: [],
+    };
+    const cliIntegrations = {
+      listCatalog: () => [],
+      listConnections: vi.fn().mockResolvedValue([cliConnection]),
+    } as unknown as ReturnType<typeof createCliIntegrationService>;
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       runAgent,
       buildMcpServers: vi.fn().mockResolvedValue({}),
       loadIntegrationProvider,
+      cliIntegrations,
     });
     const cookie = await login(app);
 
@@ -2164,8 +2190,9 @@ describe("web chat API", () => {
         appId: "github",
         appName: "GitHub",
         state: "connected",
-        accountName: "Karan GitHub",
-        connectionId: "conn-1",
+        accountName: "@karan",
+        connectionId: "cli-1",
+        executionMode: "cli",
       },
     });
     const transcript = JSON.parse(
@@ -2177,7 +2204,7 @@ describe("web chat API", () => {
         data: expect.objectContaining({
           appId: "github",
           state: "connected",
-          accountName: "Karan GitHub",
+          accountName: "@karan",
         }),
       }),
     );

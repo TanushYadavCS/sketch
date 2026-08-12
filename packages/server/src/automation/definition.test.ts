@@ -199,6 +199,38 @@ describe("automation action capability validation", () => {
 });
 
 describe("automation execution mode validation", () => {
+  it("requires GitHub skill aliases to run in full Sketch mode", () => {
+    const request = requestForAction();
+    request.steps = [
+      request.steps[0],
+      {
+        id: "agent",
+        type: "agent",
+        label: "Use GitHub",
+        icon: "robot",
+        position: { x: 260, y: 0 },
+        agentMode: "light",
+        agentSkills: ["GitHub CLI"],
+      },
+    ];
+    request.edges = [{ id: "trigger-agent", from: "trigger", to: "agent" }];
+    request.stepContent = {
+      agent: {
+        taskId: "task-1",
+        stepId: "agent",
+        contentType: "prompt",
+        content: "List repositories.",
+        apps: null,
+      },
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "CLI_INTEGRATION_REQUIRES_SKETCH" })]),
+      }),
+    );
+  });
+
   it("allows a fixed recipe with deterministic action and existing agent steps", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.executionMode = "deterministic";

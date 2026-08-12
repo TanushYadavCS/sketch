@@ -65,6 +65,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       automationRunsRepo: deps.automationRunsRepo,
       userRepo: deps.userRepo,
       loadIntegrationProvider: deps.loadIntegrationProvider,
+      validateAgentSkills: deps.validateAgentSkills,
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
       config: deps.toolConfig,

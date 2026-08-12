@@ -882,13 +882,43 @@ describe("integration cards", () => {
         },
       ],
       loadIntegrationProvider: async () => provider,
+      cliIntegrations: {
+        listCatalog: () => [
+          {
+            id: "github",
+            name: "GitHub",
+            description: "Use GitHub through Sketch.",
+            icon: "https://github.com/favicon.svg",
+            executionMode: "cli",
+            connected: true,
+            connectionId: "cli-1",
+          },
+        ],
+        listConnections: async () => [
+          {
+            id: "cli-1",
+            appId: "github",
+            appName: "GitHub",
+            executionMode: "cli",
+            ownerUserId: "alice",
+            accountExternalId: "1",
+            accountLogin: "alice",
+            status: "active",
+            verifiedAt: "2026-01-01T00:00:00Z",
+            lastVerificationError: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            shares: [],
+            canUse: true,
+          },
+        ],
+      },
+      currentUserId: "alice",
       userEmail: "alice@example.com",
       userName: "Alice",
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(cards).toMatchObject([
-      { appId: "github", appName: "GitHub", state: "connected", accountName: "Alice GitHub" },
-    ]);
+    expect(cards).toMatchObject([{ appId: "github", appName: "GitHub", state: "connected", executionMode: "cli" }]);
   });
 });

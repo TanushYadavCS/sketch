@@ -12,6 +12,9 @@ export interface McpServerRecord {
   updatedAt: string;
 }
 
+/** Execution path used by an integration catalog result. */
+export type IntegrationExecutionMode = "canvas" | "cli";
+
 /** App from an integration provider's catalog. */
 export interface IntegrationApp {
   id: string;
@@ -19,6 +22,7 @@ export interface IntegrationApp {
   description: string;
   icon?: string;
   category?: string;
+  executionMode?: IntegrationExecutionMode;
   connected?: boolean;
   connectionStatus?: string;
   connectionId?: string | null;
@@ -29,6 +33,7 @@ export interface IntegrationConnection {
   id: string;
   providerId: string;
   source?: "canvas_user_secrets" | "pipedream" | string;
+  executionMode?: IntegrationExecutionMode;
   appId: string;
   appName: string;
   app?: { name: string; nameSlug: string; imgSrc?: string };

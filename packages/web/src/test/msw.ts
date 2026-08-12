@@ -217,6 +217,18 @@ export const handlers = [
     return HttpResponse.json({ connections: [] });
   }),
 
+  http.get("/api/integration-apps", () => {
+    return HttpResponse.json({ apps: [], executionMode: "cli" });
+  }),
+
+  http.get("/api/integration-apps/connections", () => {
+    return HttpResponse.json({ connections: [] });
+  }),
+
+  http.get("/api/agent-environment-variables", () => {
+    return HttpResponse.json({ variables: [] });
+  }),
+
   http.get("/api/users", () => {
     return HttpResponse.json({
       users: [

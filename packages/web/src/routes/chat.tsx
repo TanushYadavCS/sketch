@@ -3,6 +3,7 @@ import {
   isOwnedOrPersonalAppConnection,
 } from "@/components/connections/connection-status";
 import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
+import { GithubIntegrationDialog } from "@/components/connections/github-integration-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
 import {
@@ -48,14 +49,14 @@ import {
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY, buildWebChatRecents } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
+import type { CliIntegrationConnection, IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type CreateUIMessage, DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { dashboardRoute } from "./dashboard";
+import { dashboardRoute, useDashboardAuth } from "./dashboard";
 
 export { buildWebChatRecents };
 
@@ -84,6 +85,7 @@ type WebChatDataParts = {
     requestId: string;
     appId: string;
     appName: string;
+    executionMode?: "canvas" | "cli";
     state?: "connect" | "connected";
     icon?: string;
     reason?: string;
@@ -995,6 +997,7 @@ function ChatIndexPage() {
 
 export function ChatPage() {
   const navigate = useNavigate();
+  const dashboardAuth = useDashboardAuth();
   const { conversationId } = useParams({ from: chatRoute.id });
   const search = useSearch({ from: chatRoute.id }) as ChatSearch;
   const sentInitialMessage = useRef<string | null>(null);
@@ -1018,6 +1021,8 @@ export function ChatPage() {
   const [activeIntegrationConnection, setActiveIntegrationConnection] = useState<ActiveIntegrationConnection | null>(
     null,
   );
+  const [githubSetupOpen, setGithubSetupOpen] = useState(false);
+  const [githubRetryText, setGithubRetryText] = useState<string | null>(null);
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
@@ -1091,21 +1096,42 @@ export function ChatPage() {
     () => threadMessages.flatMap((message) => message.integrationConnections ?? []),
     [threadMessages],
   );
-  const hasIntegrationConnectionCards = integrationConnectionCards.length > 0;
+  const hasCanvasIntegrationConnectionCards = integrationConnectionCards.some(
+    (connection) => connection.executionMode !== "cli",
+  );
+  const hasCliIntegrationConnectionCards = integrationConnectionCards.some(
+    (connection) => connection.executionMode === "cli" && connection.appId === "github",
+  );
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => api.mcpServers.list(),
-    enabled: hasIntegrationConnectionCards,
+    enabled: hasCanvasIntegrationConnectionCards,
   });
   const provider = useMemo(
     () => (serversQuery.data ?? []).find((server) => server.type != null) ?? null,
     [serversQuery.data],
   );
-  const providerLoading = hasIntegrationConnectionCards && serversQuery.isLoading;
+  const providerLoading = hasCanvasIntegrationConnectionCards && serversQuery.isLoading;
   const connectionsQuery = useQuery({
     queryKey: ["connections", provider?.id],
     queryFn: () => api.mcpServers.listConnections(provider?.id ?? ""),
-    enabled: hasIntegrationConnectionCards && !!provider,
+    enabled: hasCanvasIntegrationConnectionCards && !!provider,
+  });
+  const cliUsersQuery = useQuery({
+    queryKey: ["users", "chat-github"],
+    queryFn: () => api.users.list(),
+    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
+  });
+  const cliSlackChannelsQuery = useQuery({
+    queryKey: ["slack-channels", "chat-github"],
+    queryFn: () => api.channels.listSlack(),
+    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
+    retry: false,
+  });
+  const cliWhatsappGroupsQuery = useQuery({
+    queryKey: ["whatsapp-groups", "chat-github"],
+    queryFn: () => api.channels.listWhatsAppGroups(),
+    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
   });
   const connectedAppIds = useMemo(
     () =>
@@ -1119,9 +1145,16 @@ export function ChatPage() {
   const integrationConnectionStatuses = useMemo(() => {
     const statuses: Record<string, ChatThreadIntegrationConnectionStatus> = {};
     const providerUnavailable =
-      hasIntegrationConnectionCards &&
+      hasCanvasIntegrationConnectionCards &&
       (serversQuery.isError || (!serversQuery.isLoading && serversQuery.isFetched && !provider));
     for (const connection of integrationConnectionCards) {
+      if (connection.executionMode === "cli") {
+        statuses[connection.requestId] =
+          connection.state === "connected"
+            ? "connected"
+            : (localIntegrationConnectionStatuses[connection.requestId] ?? "idle");
+        continue;
+      }
       statuses[connection.requestId] =
         connection.state === "connected" || connectedAppIds.has(connection.appId)
           ? "connected"
@@ -1134,7 +1167,7 @@ export function ChatPage() {
     return statuses;
   }, [
     connectedAppIds,
-    hasIntegrationConnectionCards,
+    hasCanvasIntegrationConnectionCards,
     integrationConnectionCards,
     localIntegrationConnectionStatuses,
     provider,
@@ -1271,6 +1304,12 @@ export function ChatPage() {
 
   const handleConnectIntegration = useCallback(
     (connection: ChatThreadIntegrationConnection) => {
+      if (connection.executionMode === "cli" && connection.appId === "github") {
+        const retryMessage = [...chat.messages].reverse().find((message) => message.role === "user");
+        setGithubRetryText(retryMessage ? textFromMessage(retryMessage) : null);
+        setGithubSetupOpen(true);
+        return;
+      }
       if (providerLoading) return;
       if (!provider) {
         setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "unavailable" }));
@@ -1286,7 +1325,30 @@ export function ChatPage() {
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
       setActiveIntegrationConnection({ connection, popupWindow });
     },
-    [provider, providerLoading],
+    [chat.messages, provider, providerLoading],
+  );
+
+  const handleGithubIntegrationSuccess = useCallback(
+    (connection: CliIntegrationConnection) => {
+      setLocalIntegrationConnectionStatuses((current) => {
+        const next = { ...current };
+        for (const card of integrationConnectionCards) {
+          if (card.appId === connection.appId) next[card.requestId] = "connected";
+        }
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["cli-integration-connections"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+      if (githubRetryText) {
+        queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+        void Promise.resolve(chat.sendMessage(outgoingTextMessage(githubRetryText))).then(() =>
+          queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+        );
+        setGithubRetryText(null);
+      }
+    },
+    [chat.sendMessage, conversationId, githubRetryText, integrationConnectionCards, queryClient],
   );
 
   const handleIntegrationConnected = useCallback(
@@ -1473,6 +1535,17 @@ export function ChatPage() {
           />
         </div>
       </div>
+
+      <GithubIntegrationDialog
+        open={githubSetupOpen}
+        onOpenChange={setGithubSetupOpen}
+        users={cliUsersQuery.data?.users ?? []}
+        slackChannels={cliSlackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={cliWhatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={dashboardAuth.userId ?? ""}
+        isAdmin={dashboardAuth.role === "admin"}
+        onSuccess={handleGithubIntegrationSuccess}
+      />
 
       <ChatIntegrationConnectionFrame
         open={activeIntegrationConnection !== null}

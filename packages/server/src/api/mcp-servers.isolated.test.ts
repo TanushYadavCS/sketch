@@ -594,6 +594,36 @@ describe("MCP Servers API", () => {
   // --- POST /api/mcp-servers/:id/connections/intents ---
 
   describe("POST /api/mcp-servers/:id/connections/intents", () => {
+    it("routes Canvas GitHub intents to the CLI integration without calling Canvas", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ appId: "github" }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: { code: "CLI_INTEGRATION" } });
+      expect(mockProvider.initiateConnection).not.toHaveBeenCalled();
+      expect(mockProvider.listApps).not.toHaveBeenCalled();
+    });
+
     it("uses the requested safe app slug directly before catalog lookup", async () => {
       await seedAdmin(db);
       const server = await createCanvasProviderServer(db);
@@ -601,12 +631,12 @@ describe("MCP Servers API", () => {
         type: "canvas",
         listApps: vi.fn().mockResolvedValue({
           apps: [
-            { id: "github", name: "GitHub Enterprise", description: "" },
-            { id: "github-oauth", name: "GitHub", description: "" },
+            { id: "notion", name: "Notion Enterprise", description: "" },
+            { id: "notion-oauth", name: "Notion", description: "" },
           ],
           pageInfo: { endCursor: null, hasMore: false },
         }),
-        initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/github" }),
+        initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/notion" }),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
         isBrokerCapable: () => false,
@@ -623,8 +653,8 @@ describe("MCP Servers API", () => {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
         body: JSON.stringify({
-          appId: "GitHub",
-          appName: "GitHub",
+          appId: "Notion",
+          appName: "Notion",
           callbackUrl: "https://sketch.example.com/integrations/callback",
         }),
       });
@@ -632,14 +662,14 @@ describe("MCP Servers API", () => {
 
       const body = await res.json();
       expect(body).toEqual({
-        app: { id: "github", name: "GitHub", description: "" },
-        redirectUrl: "https://auth.example.com/github",
+        app: { id: "notion", name: "Notion", description: "" },
+        redirectUrl: "https://auth.example.com/notion",
       });
       expect(mockProvider.listApps).not.toHaveBeenCalled();
       expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
         "member@test.com",
-        "github",
-        "https://sketch.example.com/integrations/callback?app=github",
+        "notion",
+        "https://sketch.example.com/integrations/callback?app=notion",
         "Test Member",
         "member",
       );
@@ -652,7 +682,7 @@ describe("MCP Servers API", () => {
         type: "canvas",
         listApps: vi.fn().mockResolvedValue({
           apps: [
-            { id: "github-oauth", name: "GitHub", description: "" },
+            { id: "notion-oauth", name: "Notion", description: "" },
             { id: "slack", name: "Slack", description: "" },
           ],
           pageInfo: { endCursor: null, hasMore: false },
@@ -660,7 +690,7 @@ describe("MCP Servers API", () => {
         initiateConnection: vi
           .fn()
           .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
-          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/github" }),
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/notion" }),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
         isBrokerCapable: () => false,
@@ -676,17 +706,17 @@ describe("MCP Servers API", () => {
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ appId: "github" }),
+        body: JSON.stringify({ appId: "notion" }),
       });
       expect(res.status).toBe(200);
 
       const body = await res.json();
-      expect(body.app).toEqual({ id: "github-oauth", name: "GitHub", description: "" });
-      expect(body.redirectUrl).toBe("https://auth.example.com/github");
+      expect(body.app).toEqual({ id: "notion-oauth", name: "Notion", description: "" });
+      expect(body.redirectUrl).toBe("https://auth.example.com/notion");
       expect(mockProvider.initiateConnection).toHaveBeenNthCalledWith(
         1,
         "member@test.com",
-        "github",
+        "notion",
         "",
         "Test Member",
         "member",
@@ -694,7 +724,7 @@ describe("MCP Servers API", () => {
       expect(mockProvider.initiateConnection).toHaveBeenNthCalledWith(
         2,
         "member@test.com",
-        "github-oauth",
+        "notion-oauth",
         "",
         "Test Member",
         "member",
@@ -728,7 +758,7 @@ describe("MCP Servers API", () => {
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ appId: "github" }),
+        body: JSON.stringify({ appId: "notion" }),
       });
       expect(res.status).toBe(404);
 
@@ -744,8 +774,8 @@ describe("MCP Servers API", () => {
         type: "canvas",
         listApps: vi.fn().mockResolvedValue({
           apps: [
-            { id: "github-oauth", name: "GitHub", description: "" },
-            { id: "github-enterprise", name: "Git Hub", description: "" },
+            { id: "notion-oauth", name: "Notion", description: "" },
+            { id: "notion-enterprise", name: "Notion", description: "" },
           ],
           pageInfo: { endCursor: null, hasMore: false },
         }),
@@ -767,7 +797,7 @@ describe("MCP Servers API", () => {
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ appId: "github" }),
+        body: JSON.stringify({ appId: "notion" }),
       });
       expect(res.status).toBe(409);
 
@@ -1361,11 +1391,11 @@ describe("MCP Servers API", () => {
         initiateConnection: vi.fn(),
         listConnections: vi.fn().mockResolvedValue([
           {
-            id: "secrets:owner-1:github:github",
+            id: "secrets:owner-1:linear:linear",
             providerId: server.id,
             source: "canvas_user_secrets",
-            appId: "github",
-            appName: "GitHub",
+            appId: "linear",
+            appName: "Linear",
             status: "active",
             accessLevel: "organization",
             isOwnedByViewer: false,
@@ -1383,7 +1413,7 @@ describe("MCP Servers API", () => {
       const app = createApp(db, config);
       const memberCookie = await getMemberCookie(db);
 
-      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Agithub%3Agithub`, {
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Alinear%3Alinear`, {
         method: "DELETE",
         headers: { Cookie: memberCookie },
       });
@@ -1458,7 +1488,7 @@ describe("MCP Servers API", () => {
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
-        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Agithub%3Agithub/access`,
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Alinear%3Alinear/access`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -1469,7 +1499,7 @@ describe("MCP Servers API", () => {
       expect(res.status).toBe(200);
       expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
         "member@test.com",
-        "secrets:owner:github:github",
+        "secrets:owner:linear:linear",
         "organization",
         "Test Member",
       );
@@ -1504,7 +1534,7 @@ describe("MCP Servers API", () => {
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
-        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Agithub%3Agithub/access`,
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Alinear%3Alinear/access`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -1517,7 +1547,7 @@ describe("MCP Servers API", () => {
       expect(body.success).toBe(true);
       expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
         "member@test.com",
-        "secrets:owner:github:github",
+        "secrets:owner:linear:linear",
         "organization",
         "Test Member",
       );

@@ -60,6 +60,7 @@ import type { DB } from "../db/schema";
 import type { Attachment } from "../files";
 import { extensionToMime } from "../files";
 import {
+  type CliIntegrationCardResolver,
   connectedAccountCardsForUser,
   dedupeIntegrationCards,
   isConnectedAccountsInquiry,
@@ -94,6 +95,7 @@ interface WebChatRouteDeps {
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: CliIntegrationCardResolver;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -1479,7 +1481,7 @@ function sanitizeWebProgressItem(value: unknown): WebProgressItem | null {
 
 function sanitizeIntegrationConnectionData(value: unknown): WebChatIntegrationConnectionData | null {
   if (!isRecord(value)) return null;
-  const { requestId, appId, appName, state, icon, reason, accountName, connectionId } = value;
+  const { requestId, appId, appName, executionMode, state, icon, reason, accountName, connectionId } = value;
   if (typeof requestId !== "string" || !requestId.trim()) return null;
   if (typeof appId !== "string" || !appId.trim()) return null;
   if (typeof appName !== "string" || !appName.trim()) return null;
@@ -1494,6 +1496,7 @@ function sanitizeIntegrationConnectionData(value: unknown): WebChatIntegrationCo
     appName: appName.trim(),
     ...(state === "connect" || state === "connected" ? { state } : {}),
     ...(typeof icon === "string" && icon.trim() ? { icon: icon.trim() } : {}),
+    ...(executionMode === "cli" ? { executionMode: "cli" as const } : {}),
     ...(typeof reason === "string" && reason.trim() ? { reason: reason.trim() } : {}),
     ...(typeof accountName === "string" && accountName.trim() ? { accountName: accountName.trim() } : {}),
     ...(typeof connectionId === "string" && connectionId.trim()
@@ -1729,6 +1732,7 @@ function createInterruptedAssistantTranscriptMessage(finalText: string): WebChat
 
 async function deterministicIntegrationCardsForWebChat(params: {
   deps: WebChatRouteDeps;
+  userId: string;
   userMessage: string;
   userEmail: string | null;
   userName: string | null;
@@ -1738,6 +1742,8 @@ async function deterministicIntegrationCardsForWebChat(params: {
   try {
     return await connectedAccountCardsForUser({
       loadIntegrationProvider: params.deps.loadIntegrationProvider,
+      cliIntegrations: params.deps.cliIntegrations,
+      currentUserId: params.userId,
       userEmail: params.userEmail,
       userName: params.userName,
     });
@@ -2841,6 +2847,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         }
         const deterministicIntegrationCards = await deterministicIntegrationCardsForWebChat({
           deps,
+          userId: currentUser.id,
           userMessage,
           userEmail: currentUser.email,
           userName: currentUser.name,

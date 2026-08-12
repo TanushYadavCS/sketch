@@ -17,6 +17,7 @@ import {
   type AutomationSketchToolName,
   automationExecutionModeAllowsStep,
   automationExecutionModeSchema,
+  cliSkillRequiredEnv,
   workflowEdgeSchema,
   workflowStepSchema,
   workflowStepUsesIntegrationActions,
@@ -77,6 +78,7 @@ export interface ExecuteAutomationParams {
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -723,6 +725,8 @@ async function executeWorkflowStep(params: {
       buildMcpServers: runtimeParams.buildMcpServers,
       getSlack: runtimeParams.getSlack,
       loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
+      listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
+      cliIntegrations: runtimeParams.cliIntegrations,
       userRepo: runtimeParams.userRepo,
       inboxMessagesRepo: runtimeParams.inboxMessagesRepo,
       sendDm: runtimeParams.sendDm,
@@ -1137,9 +1141,13 @@ async function buildScriptEnv(params: {
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   integrationEnv: Record<string, string>;
 }): Promise<Readonly<Record<string, string>>> {
-  const userEnv = params.listAgentEnvForRuntime
-    ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.runtimeContext))
-    : {};
+  const userEnv = Object.fromEntries(
+    Object.entries(
+      params.listAgentEnvForRuntime
+        ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.runtimeContext))
+        : {},
+    ).filter(([name]) => name !== "GH_TOKEN"),
+  );
   const env: Record<string, string> = {
     PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
     NODE_NO_WARNINGS: "1",
@@ -1255,6 +1263,8 @@ interface AgentStepParams {
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   getSlack?: RunAgentParams["getSlack"];
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
@@ -1275,6 +1285,10 @@ interface AgentStepParams {
  */
 async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   const { prompt, step, input, task, logger, workspaceDir, outputPlatform, recordWorkflowStep } = params;
+
+  if (step.agentMode === "light" && step.agentSkills?.some((skill) => cliSkillRequiredEnv(skill).length > 0)) {
+    throw new Error("GitHub integration skills require a full Sketch-mode workflow agent step.");
+  }
 
   if (step.agentMode !== "light") {
     return executeSketchAgentStep(params);
@@ -1479,6 +1493,20 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     throw new Error("Sketch-mode workflow agent is not available.");
   }
 
+  if (step.agentSkills?.some((skill) => cliSkillRequiredEnv(skill).length > 0)) {
+    const env = params.listAgentEnvForRuntime
+      ? await params.listAgentEnvForRuntime({
+          currentUserId: task.created_by,
+          contextType: "scheduled_task",
+          allowOrgSharedEnv: true,
+          taskContext: buildRunAgentTaskContext(task),
+        })
+      : {};
+    if (!env.GH_TOKEN) {
+      throw new Error("GitHub connection required for this automation step. Reconnect GitHub in Sketch Integrations.");
+    }
+  }
+
   const userMessage = buildSketchContext({
     messages: [],
     currentUserName: creator?.name ?? "Automation creator",
@@ -1526,10 +1554,12 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
       integrationMcpServers,
       getSlack: params.getSlack,
       loadIntegrationProvider: params.loadIntegrationProvider,
+      cliIntegrations: params.cliIntegrations,
       sessionMode: "fresh",
       contextType: "scheduled_task",
       currentUserId: task.created_by,
       taskContext: buildRunAgentTaskContext(task),
+      agentSkillIds: step.agentSkills ?? null,
       userRepo: params.userRepo,
       inboxMessagesRepo: params.inboxMessagesRepo,
       sendDm: params.sendDm,

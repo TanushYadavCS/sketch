@@ -171,6 +171,24 @@ describe("startIntegrationAccess", () => {
     await cleanupIntegrationAccess(access);
   });
 
+  it("rejects GitHub references inside raw Canvas search JSON before spawning the CLI", async () => {
+    const { access } = await createAccess();
+
+    const result = await spawnText(
+      access.envVars.CANVAS_CLI,
+      ["search", "--query", '{"apps":[{"name":"GitHub","nameSlug":"github"}]}'],
+      {
+        env: { ...process.env, ...access.envVars },
+        cwd: tmpdir(),
+      },
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("managed by Sketch");
+    expect(result.stdout).toBe("");
+    await cleanupIntegrationAccess(access);
+  });
+
   it("pins the real CLI child cwd to the trusted workspace", async () => {
     const { access, workspaceDir } = await createAccess();
 
@@ -235,6 +253,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
       CANVAS_API_KEY_MCP: "key-1",
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
       CANVAS_USER_EMAIL: "u@example.com",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
     });
   });
 
@@ -250,6 +269,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
     expect(spec.credentialEnv).toEqual({
       CANVAS_API_KEY_MCP: "key-1",
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
     });
   });
 
@@ -259,6 +279,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
     expect(spec.credentialEnv).toEqual({
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
       CANVAS_USER_EMAIL: "u@example.com",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
     });
   });
 });

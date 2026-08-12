@@ -15,6 +15,8 @@ import type {
   AutomationShare,
   AutomationStepContent,
   CanvasWebhookEndpoint,
+  CliIntegrationCatalogApp,
+  CliIntegrationConnection,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
@@ -2755,6 +2757,58 @@ export const api = {
     },
     remove(id: string) {
       return request<{ success: true }>(`/api/skills/${id}`, { method: "DELETE" });
+    },
+  },
+  cliIntegrations: {
+    list(query?: string) {
+      const params = query?.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+      return request<{ apps: Array<CliIntegrationCatalogApp | IntegrationApp> }>(`/api/integration-apps${params}`);
+    },
+    connections() {
+      return request<{ connections: CliIntegrationConnection[] }>("/api/integration-apps/connections");
+    },
+    verifyGitHubToken(token: string) {
+      return request<{
+        identity: {
+          externalId: string;
+          login: string;
+          avatarUrl: string | null;
+          accountType: string | null;
+        };
+      }>("/api/integration-apps/github/verification", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    connectGitHub(token: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>("/api/integration-apps/github/connections", {
+        method: "POST",
+        body: JSON.stringify({ token, targets }),
+      });
+    },
+    updateGitHubToken(connectionId: string, token: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token }) },
+      );
+    },
+    reverifyGitHub(connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    replaceShares(connectionId: string, targets: AgentEnvironmentShareTargetInput[]) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/shares`,
+        { method: "PUT", body: JSON.stringify({ targets }) },
+      );
+    },
+    disconnect(connectionId: string) {
+      return request<{ success: true }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}`,
+        { method: "DELETE" },
+      );
     },
   },
   mcpServers: {

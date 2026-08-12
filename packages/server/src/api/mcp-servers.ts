@@ -13,8 +13,14 @@ import { z } from "zod";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createUserRepository } from "../db/repositories/users";
 import { CanvasProviderRequestError } from "../integrations/canvas";
+import {
+  canvasBlockedIntegrationMessage,
+  isCanvasBlockedAppId,
+  isCanvasBlockedConnectionId,
+} from "../integrations/cli/policy";
 import { createProvider } from "../integrations/factory";
 import { type IntegrationProvider, canvasCredentialsSchema } from "../integrations/types";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 type McpServerRepo = ReturnType<typeof createMcpServerRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -24,10 +30,13 @@ function maskCredentials(rawCredentials: string): Record<string, string> {
     const parsed = JSON.parse(rawCredentials) as Record<string, string>;
     const masked: Record<string, string> = {};
     for (const [key, value] of Object.entries(parsed)) {
-      if (typeof value === "string" && (key.toLowerCase().includes("key") || key.toLowerCase().includes("secret"))) {
-        masked[key] = value.length > 8 ? `${value.slice(0, 4)}****${value.slice(-4)}` : "****";
-      } else {
+      if (/(token|key|secret|bearer|password|credential|authorization)/i.test(key)) {
+        masked[key] =
+          typeof value === "string" && value.length > 8 ? `${value.slice(0, 4)}****${value.slice(-4)}` : "****";
+      } else if (typeof value === "string") {
         masked[key] = value;
+      } else {
+        masked[key] = JSON.stringify(value);
       }
     }
     return masked;
@@ -439,6 +448,18 @@ async function initiateConnectionForApp(params: {
   app: IntegrationApp;
   callbackUrl?: string;
 }): Promise<{ ok: true; redirectUrl: string } | { ok: false; status: number; code: string; message: string }> {
+  if (
+    params.provider.type === "canvas" &&
+    (isCanvasBlockedAppId(params.app.id) || isCanvasBlockedAppId(params.app.name))
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      code: "CLI_INTEGRATION",
+      message: canvasBlockedIntegrationMessage(),
+    };
+  }
+
   try {
     const result = await params.provider.initiateConnection(
       params.userEmail,
@@ -567,6 +588,27 @@ function canDisconnectConnection(connection: IntegrationConnection): boolean {
   return connection.canDelete !== false && connection.isOwnedByViewer !== false;
 }
 
+function isCanvasBlockedConnection(connection: IntegrationConnection): boolean {
+  return (
+    isCanvasBlockedAppId(connection.appId) ||
+    isCanvasBlockedAppId(connection.appName) ||
+    isCanvasBlockedConnectionId(connection.id)
+  );
+}
+
+function canvasBlockedConnectionResponse(c: import("hono").Context) {
+  return c.json(
+    {
+      error: {
+        code: "CLI_INTEGRATION",
+        message: canvasBlockedIntegrationMessage(),
+        setupUrl: "/integrations?connect=github",
+      },
+    },
+    409,
+  );
+}
+
 export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
   const routes = new Hono();
 
@@ -578,6 +620,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
   });
 
   routes.post("/", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const body = await c.req.json();
     const parsed = addServerSchema.safeParse(body);
     if (!parsed.success) {
@@ -586,6 +630,9 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     }
 
     const { displayName, url, apiUrl, credentials, type, mode } = parsed.data;
+    if (type === "canvas" && mode === "mcp") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Canvas providers must use skill mode." } }, 400);
+    }
 
     if (type) {
       const credParsed = canvasCredentialsSchema.safeParse(credentials);
@@ -607,7 +654,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
         url,
         apiUrl: apiUrl ?? null,
         credentials: JSON.stringify(credentials),
-        mode: mode ?? "mcp",
+        mode: type === "canvas" ? "skill" : (mode ?? "mcp"),
       });
       return c.json({ server: serializeServer(server) }, 201);
     } catch (err: unknown) {
@@ -619,6 +666,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
   });
 
   routes.patch("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const id = c.req.param("id");
     const existing = await mcpServers.getById(id);
     if (!existing) {
@@ -632,12 +681,17 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    if (existing.type === "canvas" && parsed.data.mode === "mcp") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Canvas providers must use skill mode." } }, 400);
+    }
+
     const updates: Parameters<typeof mcpServers.update>[1] = {};
     if (parsed.data.displayName !== undefined) updates.displayName = parsed.data.displayName;
     if (parsed.data.url !== undefined) updates.url = parsed.data.url;
     if (parsed.data.apiUrl !== undefined) updates.apiUrl = parsed.data.apiUrl;
     if (parsed.data.credentials !== undefined) updates.credentials = JSON.stringify(parsed.data.credentials);
     if (parsed.data.mode !== undefined) updates.mode = parsed.data.mode;
+    if (existing.type === "canvas") updates.mode = "skill";
 
     await mcpServers.update(id, updates);
     const updated = await mcpServers.getById(id);
@@ -648,6 +702,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
   });
 
   routes.delete("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const id = c.req.param("id");
     const existing = await mcpServers.getById(id);
     if (!existing) {
@@ -719,7 +775,11 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const result = await provider.listApps(query, limit, after);
-    return c.json({ apps: result.apps, pageInfo: result.pageInfo });
+    const apps =
+      row.type === "canvas"
+        ? result.apps.filter((app) => !isCanvasBlockedAppId(app.id) && !isCanvasBlockedAppId(app.name))
+        : result.apps;
+    return c.json({ apps, pageInfo: result.pageInfo });
   });
 
   routes.post("/:id/connections", async (c) => {
@@ -739,6 +799,9 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const fallbackApp = fallbackConnectionIntentApp(parsed.data);
+    if (row.type === "canvas" && (isCanvasBlockedAppId(fallbackApp.id) || isCanvasBlockedAppId(fallbackApp.name))) {
+      return canvasBlockedConnectionResponse(c);
+    }
     const result = await resolveConnectionIntent({
       provider,
       userEmail: userResult.email,
@@ -748,6 +811,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       callbackUrl: parsed.data.callbackUrl,
     });
     if (!result.ok) {
+      if (result.code === "CLI_INTEGRATION") return canvasBlockedConnectionResponse(c);
       return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
     }
     return c.json({ redirectUrl: result.redirectUrl });
@@ -770,6 +834,9 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const fallbackApp = fallbackConnectionIntentApp(parsed.data);
+    if (row.type === "canvas" && (isCanvasBlockedAppId(fallbackApp.id) || isCanvasBlockedAppId(fallbackApp.name))) {
+      return canvasBlockedConnectionResponse(c);
+    }
     const result = await resolveConnectionIntent({
       provider,
       userEmail: userResult.email,
@@ -779,6 +846,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       callbackUrl: parsed.data.callbackUrl,
     });
     if (!result.ok) {
+      if (result.code === "CLI_INTEGRATION") return canvasBlockedConnectionResponse(c);
       return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
     }
     return c.json({ app: result.app, redirectUrl: result.redirectUrl });
@@ -794,7 +862,9 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const connections = await provider.listConnections(userResult.email, userResult.name);
-    const enrichedConnections = await enrichConnectionOwnerNames(connections, users);
+    const visibleConnections =
+      row.type === "canvas" ? connections.filter((connection) => !isCanvasBlockedConnection(connection)) : connections;
+    const enrichedConnections = await enrichConnectionOwnerNames(visibleConnections, users);
     return c.json({ connections: enrichedConnections });
   });
 
@@ -807,9 +877,15 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     if (!userResult.ok) return userResult.response;
 
     const connectionId = c.req.param("connectionId");
+    if (row.type === "canvas" && isCanvasBlockedConnectionId(connectionId)) {
+      return canvasBlockedConnectionResponse(c);
+    }
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const connections = await provider.listConnections(userResult.email, userResult.name);
     const connection = connections.find((item) => item.id === connectionId);
+    if (connection && row.type === "canvas" && isCanvasBlockedConnection(connection)) {
+      return canvasBlockedConnectionResponse(c);
+    }
     if (connection && isAccessControlledConnection(connection) && !canDisconnectConnection(connection)) {
       return c.json({ error: { code: "FORBIDDEN", message: "Only the owner can disconnect this app" } }, 403);
     }
@@ -834,7 +910,15 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     if (!userResult.ok) return userResult.response;
 
     const connectionId = c.req.param("connectionId");
+    if (row.type === "canvas" && isCanvasBlockedConnectionId(connectionId)) {
+      return canvasBlockedConnectionResponse(c);
+    }
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+    if (row.type === "canvas") {
+      const connections = (await provider.listConnections(userResult.email, userResult.name)) ?? [];
+      const connection = connections.find((item) => item.id === connectionId);
+      if (connection && isCanvasBlockedConnection(connection)) return canvasBlockedConnectionResponse(c);
+    }
     if (!provider.updateConnectionAccess) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Provider does not support connection access" } }, 400);
     }

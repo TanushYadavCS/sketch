@@ -145,6 +145,8 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
       await collectIntegrationCardsFromProgressEvents({
         events: integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
+        cliIntegrations: params.cliIntegrations,
+        currentUserId: params.currentUserId,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
         userName: params.userName,
@@ -188,6 +190,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     db: params.db,
     getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
+    validateAgentSkills: params.validateAgentSkills,
     taskContext: params.taskContext,
     currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,

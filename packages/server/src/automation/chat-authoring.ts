@@ -84,6 +84,11 @@ export function createChatAutomationAuthoring(deps: {
   scheduler: AuthoringScheduler;
   loadIntegrationProvider: () => Promise<Pick<IntegrationProvider, "isBrokerCapable"> | null>;
   encryptionKey?: string;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   createId?: () => string;
   now?: () => Date;
 }): ChatAutomationAuthoring {
@@ -141,6 +146,24 @@ export function createChatAutomationAuthoring(deps: {
     });
     if (result.kind === "clarification") {
       return { kind: "clarification", message: result.question };
+    }
+
+    if (deps.validateAgentSkills && input.taskContext.createdBy) {
+      const requestedSkills = result.definition.steps.flatMap((step) =>
+        step.type === "agent" ? (step.agentSkills ?? []) : [],
+      );
+      const unavailableSkills = await deps.validateAgentSkills(input.taskContext.createdBy, requestedSkills, {
+        platform: input.taskContext.platform,
+        contextType: input.taskContext.contextType,
+        deliveryTarget: input.taskContext.deliveryTarget,
+        createdBy: input.taskContext.createdBy,
+      });
+      if (unavailableSkills.length > 0) {
+        return {
+          kind: "error",
+          message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+        };
+      }
     }
 
     try {
@@ -213,6 +236,24 @@ export function createChatAutomationAuthoring(deps: {
     });
     if (result.kind === "clarification") {
       return { kind: "clarification", message: result.question };
+    }
+
+    if (deps.validateAgentSkills && input.taskContext.createdBy) {
+      const requestedSkills = result.definition.steps.flatMap((step) =>
+        step.type === "agent" ? (step.agentSkills ?? []) : [],
+      );
+      const unavailableSkills = await deps.validateAgentSkills(input.taskContext.createdBy, requestedSkills, {
+        platform: input.taskContext.platform,
+        contextType: input.taskContext.contextType,
+        deliveryTarget: input.taskContext.deliveryTarget,
+        createdBy: input.taskContext.createdBy,
+      });
+      if (unavailableSkills.length > 0) {
+        return {
+          kind: "error",
+          message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+        };
+      }
     }
 
     let saved: Awaited<ReturnType<typeof replaceAutomationDefinition>>;

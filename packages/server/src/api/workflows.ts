@@ -15,6 +15,7 @@ import { type ScheduledTaskRow, createScheduledTaskRepository } from "../db/repo
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import type { createCliIntegrationService } from "../integrations/cli/service";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
@@ -69,6 +70,7 @@ interface WorkflowRouteDeps {
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  cliIntegrations?: ReturnType<typeof createCliIntegrationService>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => boolean } };
@@ -312,6 +314,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     stepContentRepo,
     loadIntegrationProvider,
     listAgentEnvForRuntime: deps.listAgentEnvForRuntime,
+    cliIntegrations: deps.cliIntegrations,
     userRepo: deps.users,
     runAgent: deps.runAgent,
     buildMcpServers: deps.buildMcpServers,
@@ -353,6 +356,19 @@ function enqueueWorkflowRun<T>(deps: WorkflowRouteDeps, workflowId: string, run:
       reject(new WorkflowApiError("QUEUE_SATURATED", "Workflow queue is full; try again later.", 429));
     }
   });
+}
+
+async function authorizeWorkflowOwner(
+  c: import("hono").Context,
+  task: ScheduledTaskRow,
+  users: ReturnType<typeof createUserRepository>,
+): Promise<void> {
+  if (c.get("role") === "admin") return;
+  const subject = c.get("sub");
+  const user = subject?.includes("@") ? await users.findByEmail(subject) : await users.findById(subject);
+  if (!user || !task.created_by || task.created_by !== user.id) {
+    throw new WorkflowApiError("WORKFLOW_NOT_FOUND", "Workflow not found", 404);
+  }
 }
 
 async function resolveRequesterId(
@@ -407,7 +423,10 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
 
   routes.get("/", async (c) => {
     const rows = await tasks.listActive();
-    const workflows = await listWorkflowMetadata(rows, runsRepo);
+    const subject = c.get("sub");
+    const viewer = subject?.includes("@") ? await deps.users.findByEmail(subject) : await deps.users.findById(subject);
+    const visibleRows = c.get("role") === "admin" ? rows : rows.filter((task) => task.created_by === viewer?.id);
+    const workflows = await listWorkflowMetadata(visibleRows, runsRepo);
     return c.json({ workflows });
   });
 
@@ -423,7 +442,11 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
     let task: ScheduledTaskRow;
     try {
       task = assertActiveWorkflow(await tasks.getById(workflowId));
+      await authorizeWorkflowOwner(c, task, deps.users);
       const requesterUserId = await resolveRequesterId(parsed.data, task, deps.users);
+      if (c.get("role") !== "admin" && parsed.data.requesterUserId && parsed.data.requesterUserId !== requesterUserId) {
+        throw new WorkflowApiError("WORKFLOW_NOT_FOUND", "Workflow not found", 404);
+      }
       const triggerData = buildTriggerData(parsed.data, requesterUserId);
 
       if (parsed.data.responseMode === "json") {
@@ -494,6 +517,12 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
     if (!task) {
       return c.json(errorBody("WORKFLOW_NOT_FOUND", "Workflow not found"), 404);
     }
+    try {
+      await authorizeWorkflowOwner(c, task, deps.users);
+    } catch (error) {
+      if (error instanceof WorkflowApiError) return c.json(errorBody(error.code, error.message), error.status);
+      throw error;
+    }
 
     const run = await runsRepo.getById(runId);
     if (!run || run.task_id !== workflowId) {
@@ -514,6 +543,12 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
     const task = await tasks.getById(workflowId);
     if (!task || task.status !== "active") {
       return c.json(errorBody("WORKFLOW_NOT_FOUND", "Workflow not found"), 404);
+    }
+    try {
+      await authorizeWorkflowOwner(c, task, deps.users);
+    } catch (error) {
+      if (error instanceof WorkflowApiError) return c.json(errorBody(error.code, error.message), error.status);
+      throw error;
     }
     const summaries = await runsRepo.getRunSummaries([task.id]);
     return c.json({ workflow: workflowMetadata(task, summaries.get(task.id)) });

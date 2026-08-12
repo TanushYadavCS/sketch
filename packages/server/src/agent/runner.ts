@@ -28,6 +28,7 @@ import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
 import {
+  type CliIntegrationCardResolver,
   type IntegrationProgressEventLike,
   collectIntegrationCardsFromProgressEvents,
   projectToolResultForProgressLog,
@@ -53,7 +54,7 @@ import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import type { QuestionInteractionCapabilities } from "./interactions/types";
 import { createCanUseTool } from "./permissions";
-import { type ResponseSurface, buildSystemContext } from "./prompt";
+import { type ResponseSurface, buildRuntimeCapabilitiesContext, buildSystemContext } from "./prompt";
 import { createDefaultAgentRuntimeCompactionProvider } from "./runtime/compaction";
 import type {
   AgentRuntimeHarnessExtensions,
@@ -124,6 +125,15 @@ export interface ToolUseProgressEvent {
 
 function isSkillToolName(toolName: string): boolean {
   return toolName === "Skill" || toolName === "mcp__sketch__Skill";
+}
+
+function buildAgentChildEnv(
+  integrationEnv: Record<string, string>,
+  agentEnv: Record<string, string> | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...integrationEnv, ...agentEnv };
+  if (!agentEnv?.GH_TOKEN) env.GH_TOKEN = undefined;
+  return env;
 }
 
 export function isCreateAutomationSkillName(value: unknown): boolean {
@@ -392,6 +402,7 @@ export interface RunAgentParams {
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   agentEnv?: Record<string, string>;
+  cliIntegrations?: CliIntegrationCardResolver;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   visionConfig?: VisionConfig | null;
   blockedReadPaths?: string[] | null;
@@ -403,6 +414,12 @@ export interface RunAgentParams {
   seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
+  agentSkillIds?: string[] | null;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   agentOutputWriter?: AgentOutputWriter;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
@@ -837,10 +854,10 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
     order: ["org", "workspace"],
     logger: params.logger,
   });
-  const systemAppend = prependClaudeMdContext({
+  const systemAppend = `${prependClaudeMdContext({
     claudeMdContext: claudeMdContext.appendedSystemContext,
     systemContext: baseSystemAppend,
-  });
+  })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
 
   const promptContent =
     images.length > 0 && visionConfig
@@ -912,10 +929,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
   try {
     const workspaceTools = createAgentRuntimeWorkspaceTools({
       scope,
-      env: {
-        ...integrationAccess.envVars,
-        ...params.agentEnv,
-      },
+      env: buildAgentChildEnv(integrationAccess.envVars, params.agentEnv),
       toolNames: resolveAgentRuntimeWorkspaceToolNames(params.agentAllowedTools),
       logger,
     });
@@ -1190,7 +1204,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
   const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
 
-  const systemAppend = buildSystemContext({
+  const systemAppend = `${buildSystemContext({
     platform: params.responseSurface ?? params.platform,
     deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
@@ -1201,7 +1215,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     visionAnalysisEnabled: visualAnalysisAllowed,
     automationAuthoringEnabled: params.automationAuthoringEnabled,
     automationBuilderChat: params.automationBuilderChat,
-  });
+  })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
 
   const sdkBuiltInTools = resolveSdkBuiltInTools(params.agentAllowedTools);
 
@@ -1267,6 +1281,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     db: params.db,
     getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
+    validateAgentSkills: params.validateAgentSkills,
     taskContext: params.taskContext,
     currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,
@@ -1318,6 +1333,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
     agentAllowedTools: params.agentAllowedTools,
+    agentEnv: params.agentEnv,
     blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
     blockImageReads: visualAnalysisAllowed,
   });
@@ -1377,8 +1393,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
         env: {
           ...process.env,
           ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
-          ...integrationAccess.envVars,
-          ...params.agentEnv,
+          ...buildAgentChildEnv(integrationAccess.envVars, params.agentEnv),
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,
@@ -1492,6 +1507,8 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       await collectIntegrationCardsFromProgressEvents({
         events: sdkStreamState.integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
+        cliIntegrations: params.cliIntegrations,
+        currentUserId: params.currentUserId,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
         userName: params.userName,

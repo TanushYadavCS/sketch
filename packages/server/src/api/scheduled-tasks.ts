@@ -76,6 +76,16 @@ interface ScheduledTaskRouteOptions {
   encryptionKey?: string;
   getSlack?: () => SlackBot | null;
   whatsappRuntime?: WhatsAppRuntime;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: {
+      platform: "slack" | "whatsapp";
+      contextType: "dm" | "channel" | "group";
+      deliveryTarget: string;
+      createdBy?: string | null;
+    },
+  ) => Promise<string[]>;
 }
 
 interface ScheduledTaskListItem {
@@ -1059,6 +1069,28 @@ export function scheduledTaskRoutes(
       ? await hasBrokerCapableProvider()
       : true;
     const userId = await resolveUserId(c.get("sub"));
+    if (options.validateAgentSkills && result.row.created_by) {
+      const requestedSkills = request.steps.flatMap((step) => (step.type === "agent" ? (step.agentSkills ?? []) : []));
+      const unavailableSkills = await options.validateAgentSkills(result.row.created_by, requestedSkills, {
+        platform: result.row.platform === "whatsapp" ? "whatsapp" : "slack",
+        contextType:
+          result.row.context_type === "group" ? "group" : result.row.context_type === "channel" ? "channel" : "dm",
+        deliveryTarget: result.row.delivery_target,
+        createdBy: result.row.created_by,
+      });
+      if (unavailableSkills.length > 0) {
+        return c.json(
+          {
+            error: {
+              code: "CLI_INTEGRATION_REQUIRED",
+              message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+              skills: unavailableSkills,
+            },
+          },
+          409,
+        );
+      }
+    }
     let saveResult: Awaited<ReturnType<typeof replaceAutomationDefinition>>;
     try {
       saveResult = await replaceAutomationDefinition({

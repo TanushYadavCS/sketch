@@ -21,6 +21,7 @@ export interface AgentEnvironmentVariableRecord {
   isSecret: boolean;
   createdAt: string;
   updatedAt: string;
+  managedBy?: string;
   shares: AgentEnvironmentVariableShareRecord[];
 }
 

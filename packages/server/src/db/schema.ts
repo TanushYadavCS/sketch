@@ -448,6 +448,22 @@ export interface AgentEnvironmentVariableSharesTable {
   created_at: Generated<string>;
 }
 
+export interface CliIntegrationConnectionsTable {
+  id: string;
+  app_id: string;
+  owner_user_id: string;
+  credential_variable_id: string;
+  account_external_id: string | null;
+  account_login: string;
+  account_avatar_url: string | null;
+  account_type: string | null;
+  status: string;
+  verified_at: string;
+  last_verification_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface McpServersTable {
   id: string;
   type: string | null;
@@ -1782,6 +1798,7 @@ export interface DB {
   local_claude_session_events: LocalClaudeSessionEventsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
+  cli_integration_connections: CliIntegrationConnectionsTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   agent_messages: AgentMessagesTable;

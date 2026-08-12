@@ -10,6 +10,7 @@ import {
   automationBuilderSaveRequestSchema,
   automationExecutionModeAllowsStep,
   automationExecutionModeSchema,
+  cliSkillRequiredEnv,
   recommendAutomationExecutionMode,
   stepOutputSchema,
   workflowEdgeSchema,
@@ -607,6 +608,18 @@ export function validateAutomationBuilderSaveRequest(params: {
         "AGENT_PROMPT_REQUIRED",
         `Agent step "${step.label}" requires prompt content`,
         `stepContent.${step.id}`,
+      );
+    }
+    if (
+      step.type === "agent" &&
+      step.agentMode === "light" &&
+      step.agentSkills?.some((skill) => cliSkillRequiredEnv(skill).length > 0)
+    ) {
+      addIssue(
+        issues,
+        "CLI_INTEGRATION_REQUIRES_SKETCH",
+        `Agent step "${step.label}" must use Sketch mode for GitHub integration skills`,
+        `steps.${step.id}.agentMode`,
       );
     }
     if (step.type === "action") {

@@ -22,6 +22,12 @@ interface FeaturedSkillsManifest {
   skills: Record<string, FeaturedSkillManifestEntry>;
 }
 
+function isSafeSkillId(value: string): boolean {
+  return (
+    /^[a-z0-9][a-z0-9-_]{0,63}$/i.test(value) && !value.includes("..") && !value.includes("/") && !value.includes("\\")
+  );
+}
+
 function resolveManagedPath(root: string, subpath: string): string | null {
   const trimmed = subpath.trim();
   if (!trimmed || isAbsolute(trimmed)) return null;
@@ -60,8 +66,16 @@ export async function syncFeaturedSkills(config: Config, logger: Logger): Promis
     let skipped = 0;
     let updated = 0;
     for (const [id, skill] of Object.entries(manifest.skills)) {
-      const src = join(skillsCache, skill.path);
-      const dest = join(skillsTarget, id);
+      if (!isSafeSkillId(id) || typeof skill.path !== "string") {
+        logger.warn({ id }, "Skipping invalid featured skill manifest entry");
+        continue;
+      }
+      const src = resolveManagedPath(skillsCache, skill.path);
+      const dest = resolveManagedPath(skillsTarget, id);
+      if (!src || !dest) {
+        logger.warn({ id }, "Skipping featured skill path outside the managed roots");
+        continue;
+      }
       if (!existsSync(src)) {
         logger.warn({ id, src }, "Featured skill path missing in source repo, skipping");
         continue;
