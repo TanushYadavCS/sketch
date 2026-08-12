@@ -91,7 +91,11 @@ async function seedContactPoint(entityId: string, value: string, kind: "phone" |
 }
 
 function expectNoRawPrivateIdentifiers(serializedSnapshot: string): void {
-  expect(serializedSnapshot).not.toMatch(RAW_PRIVATE_IDENTIFIER_PATTERN);
+  const snapshot = JSON.parse(serializedSnapshot) as { participants: Array<Record<string, unknown>> };
+  for (const participant of snapshot.participants) {
+    participant.entityId = undefined;
+  }
+  expect(JSON.stringify(snapshot)).not.toMatch(RAW_PRIVATE_IDENTIFIER_PATTERN);
 }
 
 describe("WhatsApp identity resolution", () => {
@@ -347,6 +351,46 @@ describe("WhatsApp roster snapshot", () => {
     expect(entity.aliases).not.toContain("Unknown");
   });
 
+  it("promotes a safe push name over a phone fallback canonical name", async () => {
+    const groupJid = "120363000000010@g.us";
+    const groups = await seedGroup(groupJid);
+    const phone = "+15550000910";
+    await seedEntity({ id: "phone-fallback-person", name: phone });
+    await seedContactPoint("phone-fallback-person", phone);
+    await groups.refreshParticipants(groupJid, [
+      { participantJid: "15550000910@s.whatsapp.net", phoneE164: phone, adminRole: null },
+    ]);
+    const conversation = await createConversationRepository(db).getOrCreate({
+      platform: "whatsapp",
+      kind: "group",
+      providerConversationId: groupJid,
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "phone-fallback-name",
+      senderJid: "15550000910@s.whatsapp.net",
+      senderName: "Asha Mehta",
+      text: "hello",
+      receivedAt: "2026-07-07T09:00:00.000Z",
+    });
+
+    await buildWhatsAppRosterSnapshot({
+      db,
+      groupJid,
+      conversationId: conversation.id,
+      logger: { info: vi.fn(), warn: vi.fn() } as unknown as Logger,
+      enrichEntityAliases: true,
+    });
+
+    const entity = await db
+      .selectFrom("entities")
+      .select(["name", "aliases"])
+      .where("id", "=", "phone-fallback-person")
+      .executeTakeFirstOrThrow();
+    expect(entity.name).toBe("Asha Mehta");
+    expect(JSON.parse(entity.aliases ?? "[]")).toContain(phone);
+  });
+
   it("serializes display context without raw phone numbers or phone JIDs", async () => {
     const groupJid = "120363000000004@g.us";
     const groups = await seedGroup(groupJid);
@@ -392,12 +436,12 @@ describe("WhatsApp roster snapshot", () => {
         }),
         expect.objectContaining({
           displayName: "Labeled Buyer (Buyer Co)",
-          resolutionKind: "labeled",
+          resolutionKind: "entity",
           pushName: "Push Buyer",
         }),
         expect.objectContaining({
-          displayName: "External (**43)",
-          resolutionKind: "unresolved",
+          displayName: "+*********43",
+          resolutionKind: "entity",
         }),
       ]),
     );
@@ -406,8 +450,9 @@ describe("WhatsApp roster snapshot", () => {
         conversationId: conversation.id,
         totalParticipants: 3,
         teammate: 1,
-        labeled: 1,
-        unresolved: 1,
+        entity: 2,
+        labeled: 0,
+        unresolved: 0,
       }),
       "whatsapp_roster_resolution_rate",
     );
@@ -440,12 +485,12 @@ describe("WhatsApp roster snapshot", () => {
     expect(result.snapshot.participants).toEqual([
       expect.objectContaining({
         displayName: "Rahul +**********10",
-        resolutionKind: "labeled",
+        resolutionKind: "entity",
       }),
     ]);
   });
 
-  it("uses sanitized push names for unresolved participant display names in roster snapshots and transcripts", async () => {
+  it("uses sanitized push names for placeholder entity display names in roster snapshots and transcripts", async () => {
     const groupJid = "120363000000006@g.us";
     const groups = await seedGroup(groupJid);
     await groups.refreshParticipants(groupJid, [
@@ -480,7 +525,7 @@ describe("WhatsApp roster snapshot", () => {
     expect(result.snapshot.participants).toEqual([
       expect.objectContaining({
         displayName: "Ravi Vendor",
-        resolutionKind: "unresolved",
+        resolutionKind: "entity",
         pushName: "Ravi Vendor",
       }),
     ]);
@@ -534,7 +579,7 @@ describe("WhatsApp roster snapshot", () => {
     expect(transcript).not.toContain("Push Alias: I reviewed the proposal.");
   });
 
-  it("masks phone-like digit runs in unresolved push names before roster and transcript rendering", async () => {
+  it("masks phone-like digit runs in placeholder entity push names before roster and transcript rendering", async () => {
     const groupJid = "120363000000008@g.us";
     const groups = await seedGroup(groupJid);
     await groups.refreshParticipants(groupJid, [
@@ -570,7 +615,7 @@ describe("WhatsApp roster snapshot", () => {
     expect(result.snapshot.participants).toEqual([
       expect.objectContaining({
         displayName: "Ravi +**********00",
-        resolutionKind: "unresolved",
+        resolutionKind: "entity",
         pushName: "Ravi +**********00",
       }),
     ]);

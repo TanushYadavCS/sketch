@@ -9,6 +9,7 @@ import type {
 } from "../schema";
 import { normalizeContactPointValue } from "./entities";
 import { createUserWhatsAppLidRepository } from "./user-whatsapp-lids";
+import { projectWhatsAppRosterPerson } from "./whatsapp-roster-person-projection";
 
 export type WhatsAppGroupRow = Selectable<WhatsAppGroupsTable>;
 export type NewWhatsAppGroup = Insertable<WhatsAppGroupsTable>;
@@ -148,6 +149,23 @@ async function projectCompleteParticipantIdentity(
     .executeTakeFirst();
   if (newerObservation) return;
   await createUserWhatsAppLidRepository(db).attachIfPhoneUnchanged(userId, phoneE164, lid, observedAt);
+}
+
+async function projectParticipantIdentity(
+  db: Transaction<DB>,
+  groupJid: string,
+  participant: ReturnType<typeof normalizedParticipant>,
+  observedAt: string,
+): Promise<void> {
+  if (participant.phoneE164 && participant.lid) {
+    await projectCompleteParticipantIdentity(db, participant.phoneE164, participant.lid, observedAt);
+  }
+  await projectWhatsAppRosterPerson(db, {
+    groupJid,
+    phoneE164: participant.phoneE164,
+    lid: participant.lid,
+    observedAt,
+  });
 }
 
 function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
@@ -511,7 +529,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
               : [];
           if (!participant.phoneE164 || !participant.lid) {
             if (matches.length > 0) {
-              await trx
+              const updated = await trx
                 .updateTable("whatsapp_group_participants")
                 .set({
                   participant_jid: participant.participantJid,
@@ -524,7 +542,10 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                   matches.map((row) => row.id),
                 )
                 .where("last_seen_at", "<=", lastSeenAt)
-                .execute();
+                .executeTakeFirst();
+              if (Number(updated.numUpdatedRows) > 0) {
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
+              }
               continue;
             }
           } else {
@@ -543,7 +564,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                 .where("last_seen_at", "<=", lastSeenAt)
                 .executeTakeFirst();
               if (Number(updated.numUpdatedRows) === 1) {
-                await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
               }
               continue;
             }
@@ -574,7 +595,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                   .where("lid", "=", participant.lid)
                   .where("last_seen_at", "=", lidOnly[0].last_seen_at)
                   .execute();
-                await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
                 continue;
               }
             }
@@ -600,16 +621,14 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
               }),
             )
             .execute();
-          if (participant.phoneE164 && participant.lid) {
-            const stored = await trx
-              .selectFrom("whatsapp_group_participants")
-              .select("last_seen_at")
-              .where("group_jid", "=", groupJid)
-              .where("observation_key", "=", whatsappParticipantObservationKey(participant.phoneE164, participant.lid))
-              .executeTakeFirst();
-            if (stored?.last_seen_at === lastSeenAt) {
-              await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
-            }
+          const stored = await trx
+            .selectFrom("whatsapp_group_participants")
+            .select("last_seen_at")
+            .where("group_jid", "=", groupJid)
+            .where("observation_key", "=", whatsappParticipantObservationKey(participant.phoneE164, participant.lid))
+            .executeTakeFirst();
+          if (stored?.last_seen_at === lastSeenAt) {
+            await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
           }
         }
       });

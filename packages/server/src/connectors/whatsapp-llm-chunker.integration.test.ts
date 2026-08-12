@@ -333,7 +333,7 @@ describe("WhatsApp LLM boundary engine", () => {
     ).resolves.toBe(true);
   });
 
-  it("records unresolved identity candidates once per closed slice", async () => {
+  it("keeps a roster-projected Person stable instead of recording unresolved candidates", async () => {
     const { conversationId, groupJid } = await seedConversation(db, 2, "2026-07-01T09:00:00.000Z");
     await createWhatsAppGroupRepository(db).upsert({
       jid: groupJid,
@@ -360,10 +360,13 @@ describe("WhatsApp LLM boundary engine", () => {
 
     await runLlmChunkingPass(deps, { conversationId, groupJid, knobs: { ...knobs, minMessages: 1 }, mode: "backfill" });
     await expect(evaluateIdleClose(deps, { conversationId, knobs, mode: "live" })).resolves.toBe(true);
-    const firstCount = await db
-      .selectFrom("whatsapp_identity_candidates")
-      .select("kept_slice_count")
+    const firstPerson = await db
+      .selectFrom("entity_contact_points")
+      .select("entity_id")
+      .where("kind", "=", "phone")
+      .where("value", "=", "+15551234567")
       .executeTakeFirstOrThrow();
+    await expect(db.selectFrom("whatsapp_identity_candidates").select("candidate_ref").execute()).resolves.toEqual([]);
     await db
       .updateTable("conversation_slices")
       .set({ status: "open" })
@@ -372,13 +375,15 @@ describe("WhatsApp LLM boundary engine", () => {
       .where("first_message_id", "=", 2)
       .execute();
     await expect(evaluateIdleClose(deps, { conversationId, knobs, mode: "live" })).resolves.toBe(true);
-    const replayCount = await db
-      .selectFrom("whatsapp_identity_candidates")
-      .select("kept_slice_count")
-      .executeTakeFirstOrThrow();
+    const replayPeople = await db
+      .selectFrom("entity_contact_points")
+      .select("entity_id")
+      .where("kind", "=", "phone")
+      .where("value", "=", "+15551234567")
+      .execute();
 
-    expect(firstCount.kept_slice_count).toBe(2);
-    expect(replayCount.kept_slice_count).toBe(2);
+    expect(replayPeople).toEqual([firstPerson]);
+    await expect(db.selectFrom("whatsapp_identity_candidates").select("candidate_ref").execute()).resolves.toEqual([]);
   });
 
   it("enriches resolved person aliases while building LLM chunk rosters", async () => {
