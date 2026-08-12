@@ -37,8 +37,6 @@ const mocks = vi.hoisted(() => ({
   getRun: vi.fn(),
   saveAutomation: vi.fn(),
   selectSetupExecutionMode: vi.fn(),
-  rotateWebhookCredentials: vi.fn(),
-  revokeWebhookCredentials: vi.fn(),
   removeAutomation: vi.fn(),
   testStep: vi.fn(),
   sendMessage: vi.fn(),
@@ -68,8 +66,6 @@ vi.mock("@/lib/api", async (importOriginal) => {
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
         selectSetupExecutionMode: mocks.selectSetupExecutionMode,
-        rotateWebhookCredentials: mocks.rotateWebhookCredentials,
-        revokeWebhookCredentials: mocks.revokeWebhookCredentials,
         remove: mocks.removeAutomation,
         testStep: mocks.testStep,
       },
@@ -444,21 +440,6 @@ describe("AutomationBuilderPage", () => {
     }));
     mocks.selectSetupExecutionMode.mockClear();
     mocks.selectSetupExecutionMode.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
-    mocks.rotateWebhookCredentials.mockClear();
-    mocks.revokeWebhookCredentials.mockClear();
-    mocks.revokeWebhookCredentials.mockResolvedValue({ success: true });
-    mocks.rotateWebhookCredentials.mockResolvedValue({
-      webhook: {
-        webhookUrl: "https://sketch.example/api/webhooks/v1/endpoint-123",
-        webhookEndpointId: "endpoint-123",
-        webhookMethod: "POST",
-        webhookContentType: "application/json",
-        webhookAuthentication: "bearer_or_hmac_sha256",
-        webhookPayloadLimitBytes: 1_000_000,
-        webhookStatus: "active",
-      },
-      secret: { webhookSecret: "whsec_test_123" },
-    });
     mocks.removeAutomation.mockClear();
     mocks.removeAutomation.mockResolvedValue(undefined);
     mocks.testStep.mockResolvedValue({ run: null });
@@ -777,8 +758,7 @@ describe("AutomationBuilderPage", () => {
             webhookEndpointId: "endpoint-123",
             webhookMethod: "POST",
             webhookContentType: "application/json",
-            webhookAuthentication: "bearer_or_hmac_sha256",
-            webhookPayloadLimitBytes: 1_000_000,
+            webhookAuthentication: "none",
             webhookStatus: "active",
           } as WorkflowTriggerConfig,
         },
@@ -793,7 +773,7 @@ describe("AutomationBuilderPage", () => {
     expect(screen.queryByTestId("canvas-trigger-details")).not.toBeInTheDocument();
   });
 
-  it("renders native webhook metadata, authentication guidance, and local secret actions", async () => {
+  it("renders the native webhook with the same simple contract as the Canvas webhook", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -811,8 +791,7 @@ describe("AutomationBuilderPage", () => {
             webhookEndpointId: "endpoint-123",
             webhookMethod: "POST",
             webhookContentType: "application/json",
-            webhookAuthentication: "bearer_or_hmac_sha256",
-            webhookPayloadLimitBytes: 1_000_000,
+            webhookAuthentication: "none",
             webhookStatus: "active",
           } as WorkflowTriggerConfig,
         },
@@ -825,28 +804,23 @@ describe("AutomationBuilderPage", () => {
 
     const panel = await screen.findByTestId("native-webhook-details");
     expect(panel).toHaveTextContent("Active");
-    expect(panel).toHaveTextContent("Authorization: Bearer <webhook secret>");
-    expect(panel).toHaveTextContent("X-Sketch-Webhook-Signature: t=<unix-seconds>,v1=<hmac-sha256 hex>");
-    expect(panel).toHaveTextContent("1,000,000 bytes");
-    expect(panel).toHaveTextContent("Idempotency-Key");
-    expect(panel).toHaveTextContent("Rotating this secret immediately invalidates the previous secret.");
+    expect(panel).toHaveTextContent(
+      "Send POST requests with JSON to the canonical URL above; no authentication is required.",
+    );
+    expect(screen.getByDisplayValue("POST")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("application/json")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("None required")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Any JSON value")).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("HMAC");
+    expect(panel).not.toHaveTextContent("Bearer");
+    expect(screen.queryByRole("button", { name: "Generate secret" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke endpoint" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Copy canonical Sketch webhook URL" }));
     expect(writeText).toHaveBeenCalledWith("https://sketch.example/api/webhooks/v1/endpoint-123");
-
-    await user.click(screen.getByRole("button", { name: "Generate secret" }));
-    await waitFor(() => expect(mocks.rotateWebhookCredentials).toHaveBeenCalledWith("task-123"));
-    const secretInput = await screen.findByLabelText("Webhook secret");
-    expect(secretInput).toHaveAttribute("type", "password");
-    expect(secretInput).toHaveValue("whsec_test_123");
-
-    await user.click(screen.getByRole("button", { name: "Reveal webhook secret" }));
-    expect(screen.getByLabelText("Webhook secret")).toHaveAttribute("type", "text");
-    await user.click(screen.getByRole("button", { name: "Copy webhook secret" }));
-    expect(writeText).toHaveBeenCalledWith("whsec_test_123");
   });
 
-  it("surfaces native webhook credential errors without persisting a secret", async () => {
+  it("shows setup pending when the native webhook endpoint is unavailable", async () => {
     const user = userEvent.setup();
     mocks.getAutomation.mockResolvedValue({
       ...automation,
@@ -856,41 +830,7 @@ describe("AutomationBuilderPage", () => {
         {
           ...automation.steps[0],
           label: "Sketch webhook",
-          triggerConfig: {
-            type: "webhook",
-            webhookUrl: "https://sketch.example/api/webhooks/v1/endpoint-123",
-            webhookStatus: "active",
-          } as WorkflowTriggerConfig,
-        },
-        ...automation.steps.slice(1),
-      ],
-    });
-    mocks.rotateWebhookCredentials.mockRejectedValueOnce(
-      new ApiRequestError("Webhook credentials are unavailable", 503, "SERVICE_UNAVAILABLE"),
-    );
-
-    renderBuilder();
-    await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
-    await user.click(screen.getByRole("button", { name: "Generate secret" }));
-
-    expect(await screen.findByText("Credential error: Webhook credentials are unavailable")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Webhook secret")).not.toBeInTheDocument();
-  });
-
-  it("shows revoked and missing native webhook endpoint state", async () => {
-    const user = userEvent.setup();
-    mocks.getAutomation.mockResolvedValue({
-      ...automation,
-      scheduleType: "external",
-      scheduleValue: "webhook",
-      steps: [
-        {
-          ...automation.steps[0],
-          label: "Sketch webhook",
-          triggerConfig: {
-            type: "webhook",
-            webhookStatus: "revoked",
-          } as WorkflowTriggerConfig,
+          triggerConfig: { type: "webhook", webhookStatus: "unavailable" } as WorkflowTriggerConfig,
         },
         ...automation.steps.slice(1),
       ],
@@ -900,10 +840,9 @@ describe("AutomationBuilderPage", () => {
     await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
 
     const panel = await screen.findByTestId("native-webhook-details");
-    expect(panel).toHaveTextContent("Revoked");
-    expect(panel).toHaveTextContent("This webhook endpoint is revoked");
+    expect(panel).toHaveTextContent("Setup pending");
+    expect(panel).toHaveTextContent("Sketch is still setting up this trigger");
     expect(screen.getByDisplayValue("Webhook endpoint is not available yet")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Generate secret" })).toBeEnabled();
   });
 
   it("opens the selected associated chat and sends the active automation id", async () => {

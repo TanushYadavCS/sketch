@@ -1,19 +1,16 @@
 import type { Kysely } from "kysely";
 import {
   type WebhookEndpointRepositoryOptions,
-  type WebhookEndpointRotationResult,
   type WebhookEndpointRow,
   createWebhookEndpointsRepository,
 } from "../db/repositories/webhook-endpoints";
 import type { DB } from "../db/schema";
-import {
-  type VerifyWebhookAuthInput,
-  WEBHOOK_BODY_LIMIT_BYTES,
-  WEBHOOK_ENDPOINT_PATH,
-  WEBHOOK_IDEMPOTENCY_KEY_HEADER,
-  WEBHOOK_SIGNATURE_HEADER,
-  verifyWebhookAuth,
-} from "./webhook-auth";
+
+export const WEBHOOK_ENDPOINT_PATH = "/api/webhooks/v1";
+export const WEBHOOK_BODY_LIMIT_BYTES = 1_000_000;
+export const WEBHOOK_IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+export const WEBHOOK_EVENT_ID_HEADER = WEBHOOK_IDEMPOTENCY_KEY_HEADER;
+export const WEBHOOK_EVENT_ID_MAX_LENGTH = 200;
 
 export const NATIVE_WEBHOOK_PATH = WEBHOOK_ENDPOINT_PATH;
 export const NATIVE_WEBHOOK_METHOD = "POST" as const;
@@ -25,31 +22,20 @@ export interface WebhookEndpointConfiguration {
   readonly url: string;
   readonly method: typeof NATIVE_WEBHOOK_METHOD;
   readonly contentType: typeof NATIVE_WEBHOOK_CONTENT_TYPE;
-  readonly authentication: readonly ["bearer", "hmac"];
-  readonly authorizationHeader: "Authorization";
-  readonly signatureHeader: typeof WEBHOOK_SIGNATURE_HEADER;
-  readonly idempotencyHeader: typeof WEBHOOK_IDEMPOTENCY_KEY_HEADER;
+  readonly authentication: "none";
   readonly bodyLimitBytes: typeof WEBHOOK_BODY_LIMIT_BYTES;
-  readonly secret: string | null;
-  readonly credential: string | null;
+  readonly idempotencyHeader: typeof WEBHOOK_IDEMPOTENCY_KEY_HEADER;
   readonly status: string;
+  readonly generation: number;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly rotatedAt: string | null;
-  readonly revokedAt: string | null;
 }
 
 export interface WebhookEndpointServiceOptions {
   readonly db: Kysely<DB>;
-  readonly encryptionKey?: string;
   readonly baseUrl?: string | null;
   readonly port?: number;
-  readonly repositoryOptions?: Omit<WebhookEndpointRepositoryOptions, "encryptionKey">;
-}
-
-export interface WebhookAuthenticatedEndpoint {
-  readonly endpoint: WebhookEndpointConfiguration;
-  readonly auth: ReturnType<typeof verifyWebhookAuth>;
+  readonly repositoryOptions?: WebhookEndpointRepositoryOptions;
 }
 
 export function buildNativeWebhookUrl(
@@ -63,7 +49,6 @@ export function buildNativeWebhookUrl(
 function configurationFor(
   row: WebhookEndpointRow,
   options: Pick<WebhookEndpointServiceOptions, "baseUrl" | "port">,
-  secret: string | null,
 ): WebhookEndpointConfiguration {
   return {
     endpointId: row.id,
@@ -71,28 +56,23 @@ function configurationFor(
     url: buildNativeWebhookUrl(row.id, options),
     method: NATIVE_WEBHOOK_METHOD,
     contentType: NATIVE_WEBHOOK_CONTENT_TYPE,
-    authentication: ["bearer", "hmac"],
-    authorizationHeader: "Authorization",
-    signatureHeader: WEBHOOK_SIGNATURE_HEADER,
-    idempotencyHeader: WEBHOOK_IDEMPOTENCY_KEY_HEADER,
+    authentication: "none",
     bodyLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
-    secret,
-    credential: secret,
+    idempotencyHeader: WEBHOOK_IDEMPOTENCY_KEY_HEADER,
     status: row.status,
+    generation: row.generation,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    rotatedAt: row.rotated_at,
-    revokedAt: row.revoked_at,
   };
 }
 
 export function createWebhookEndpointService(
   optionsOrDb: WebhookEndpointServiceOptions | Kysely<DB>,
-  encryptionKey?: string,
+  _legacyEncryptionKey?: string,
   urlOptions?: {
     readonly baseUrl?: string | null;
     readonly port?: number;
-    readonly repositoryOptions?: Omit<WebhookEndpointRepositoryOptions, "encryptionKey">;
+    readonly repositoryOptions?: WebhookEndpointRepositoryOptions;
   },
 ) {
   const resolved: WebhookEndpointServiceOptions =
@@ -100,33 +80,28 @@ export function createWebhookEndpointService(
       ? optionsOrDb
       : {
           db: optionsOrDb,
-          encryptionKey,
           baseUrl: urlOptions?.baseUrl,
           port: urlOptions?.port,
           repositoryOptions: urlOptions?.repositoryOptions,
         };
-  const repository = createWebhookEndpointsRepository(resolved.db, resolved.encryptionKey, resolved.repositoryOptions);
+  const repository = createWebhookEndpointsRepository(resolved.db, resolved.repositoryOptions);
   const endpointUrlOptions = { baseUrl: resolved.baseUrl, port: resolved.port };
 
   const ensureForTask = async (taskId: string): Promise<WebhookEndpointConfiguration> => {
     const result = await repository.ensureForTask(taskId);
-    return configurationFor(result.endpoint, endpointUrlOptions, result.secret);
+    return configurationFor(result.endpoint, endpointUrlOptions);
   };
   const getById = async (endpointId: string): Promise<WebhookEndpointConfiguration | null> => {
     const row = await repository.getById(endpointId);
-    return row ? configurationFor(row, endpointUrlOptions, null) : null;
+    return row ? configurationFor(row, endpointUrlOptions) : null;
   };
   const getByTaskId = async (taskId: string): Promise<WebhookEndpointConfiguration | null> => {
     const row = await repository.getByTaskId(taskId);
-    return row ? configurationFor(row, endpointUrlOptions, null) : null;
+    return row ? configurationFor(row, endpointUrlOptions) : null;
   };
-  const rotateForTask = async (taskId: string): Promise<WebhookEndpointConfiguration | null> => {
-    const result: WebhookEndpointRotationResult | undefined = await repository.rotateForTask(taskId);
-    return result ? configurationFor(result.endpoint, endpointUrlOptions, result.secret) : null;
-  };
-  const revokeForTask = async (taskId: string): Promise<WebhookEndpointConfiguration | null> => {
-    const row = await repository.revokeForTask(taskId);
-    return row ? configurationFor(row, endpointUrlOptions, null) : null;
+  const deactivateForTask = async (taskId: string): Promise<WebhookEndpointConfiguration | null> => {
+    const row = await repository.deactivateForTask(taskId);
+    return row ? configurationFor(row, endpointUrlOptions) : null;
   };
 
   return {
@@ -135,22 +110,10 @@ export function createWebhookEndpointService(
     getById,
     getByTaskId,
     get: getById,
-    rotateForTask,
-    rotate: rotateForTask,
-    revokeForTask,
-    revoke: revokeForTask,
+    deactivateForTask,
+    deactivate: deactivateForTask,
     async deleteByTaskId(taskId: string): Promise<void> {
       await repository.deleteByTaskId(taskId);
-    },
-
-    async authenticate(endpointId: string, input: Omit<VerifyWebhookAuthInput, "secret">) {
-      const stored = await repository.getSecretById(endpointId);
-      if (!stored) return null;
-      if (stored.endpoint.status !== "active") return null;
-      return {
-        endpoint: configurationFor(stored.endpoint, endpointUrlOptions, null),
-        auth: verifyWebhookAuth({ ...input, secret: stored.secret }),
-      } satisfies WebhookAuthenticatedEndpoint;
     },
   };
 }

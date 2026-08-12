@@ -10,11 +10,7 @@ import type { TaskScheduler } from "../scheduler/service";
 import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler/types";
 import { AUTOMATION_AUTHORING_TRIGGER_TYPES, type AutomationAuthoringService } from "./authoring/service";
 import { AutomationValidationError, buildAutomationDefinition } from "./definition";
-import {
-  WebhookCredentialUnavailableError,
-  createAutomationDefinition,
-  replaceAutomationDefinition,
-} from "./persistence";
+import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
 import { webChatTaskConversationAssociation } from "./task-conversations";
 
 type AuthoringScheduler = Pick<TaskScheduler, "getTaskById" | "refreshTaskSchedule">;
@@ -171,12 +167,6 @@ export function createChatAutomationAuthoring(deps: {
       if (error instanceof AutomationValidationError) {
         return { kind: "error", message: persistenceValidationMessage(error) };
       }
-      if (error instanceof WebhookCredentialUnavailableError) {
-        return {
-          kind: "error",
-          message: "Native webhook credentials are unavailable until ENCRYPTION_KEY is configured.",
-        };
-      }
       throw error;
     }
     return refreshOrError(taskId, artifactFromDefinition(result.definition));
@@ -233,12 +223,6 @@ export function createChatAutomationAuthoring(deps: {
     } catch (error) {
       if (error instanceof AutomationValidationError) {
         return { kind: "error", message: persistenceValidationMessage(error) };
-      }
-      if (error instanceof WebhookCredentialUnavailableError) {
-        return {
-          kind: "error",
-          message: "Native webhook credentials are unavailable until ENCRYPTION_KEY is configured.",
-        };
       }
       throw error;
     }

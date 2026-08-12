@@ -5,7 +5,6 @@ import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import {
   AutomationValidationError,
-  WEBHOOK_AUTH_GUIDANCE,
   addWebhookEndpointMetadata,
   buildAutomationDefinition,
   isAutomationPlaceholderDraft,
@@ -13,25 +12,19 @@ import {
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
 import {
-  WebhookCredentialUnavailableError,
   deleteAutomation,
   replaceAutomationDefinition,
   selectAutomationSetupExecutionMode,
 } from "../automation/persistence";
 import { parseAutomationTriggerConfig } from "../automation/webhook";
-import {
-  WEBHOOK_BODY_LIMIT_BYTES,
-  WEBHOOK_IDEMPOTENCY_KEY_HEADER,
-  WEBHOOK_SIGNATURE_HEADER,
-} from "../automation/webhook-auth";
-import { buildNativeWebhookUrl } from "../automation/webhook-endpoints";
+
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
 import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
-import { type WebhookEndpointRow, createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
+import { createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
@@ -42,24 +35,6 @@ import type { WorkflowStep } from "../workflows/types";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
-
-const webhookCredentialLocks = new Map<string, Promise<void>>();
-
-async function withWebhookCredentialLock<T>(taskId: string, work: () => Promise<T>): Promise<T> {
-  const previous = webhookCredentialLocks.get(taskId) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  webhookCredentialLocks.set(taskId, current);
-  await previous;
-  try {
-    return await work();
-  } finally {
-    release();
-    if (webhookCredentialLocks.get(taskId) === current) webhookCredentialLocks.delete(taskId);
-  }
-}
 
 interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
@@ -193,27 +168,6 @@ function parseTriggerConfig(
 
 function isLocalScheduleType(value: string): value is "cron" | "interval" | "once" {
   return value === "cron" || value === "interval" || value === "once";
-}
-
-function webhookEndpointResponse(
-  endpoint: WebhookEndpointRow,
-  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port">,
-  secret?: string,
-): Record<string, unknown> {
-  return {
-    endpointId: endpoint.id,
-    taskId: endpoint.task_id,
-    webhookUrl: buildNativeWebhookUrl(endpoint.id, options),
-    webhookMethod: "POST",
-    webhookContentType: "application/json",
-    webhookAuthentication: "bearer_or_hmac_sha256",
-    webhookPayloadLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
-    webhookStatus: endpoint.status === "revoked" ? "revoked" : "active",
-    webhookSignatureHeader: WEBHOOK_SIGNATURE_HEADER,
-    webhookIdempotencyHeader: WEBHOOK_IDEMPOTENCY_KEY_HEADER,
-    webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE,
-    ...(secret === undefined ? {} : { secret }),
-  };
 }
 
 function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targetKindLabel"] {
@@ -621,84 +575,6 @@ export function scheduledTaskRoutes(
     return c.json({ automation: await loadFullDefinition(result.row) });
   });
 
-  routes.post("/:id/webhook/credentials", async (c) => {
-    const id = c.req.param("id");
-    const result = await loadAccessibleTask(c, id);
-    if ("response" in result) return result.response;
-    const trigger = parseTriggerConfig(result.row.steps, {
-      scheduleType: result.row.schedule_type,
-      scheduleValue: result.row.schedule_value,
-    });
-    if (trigger?.type !== "webhook") {
-      return c.json(
-        { error: { code: "INVALID_STATE", message: "Webhook credentials require a native webhook trigger" } },
-        409,
-      );
-    }
-
-    if (!options.encryptionKey) {
-      return c.json(
-        { error: { code: "WEBHOOK_CREDENTIAL_UNAVAILABLE", message: "Webhook encryption is not configured" } },
-        503,
-      );
-    }
-
-    return withWebhookCredentialLock(id, async () => {
-      const endpointRepository = createWebhookEndpointRepository(db, options.encryptionKey);
-      const existing = await endpointRepository.getByTaskId(id);
-      let lifecycle = existing
-        ? await endpointRepository.rotateForTask(id)
-        : await endpointRepository.ensureForTask(id);
-      if (!lifecycle || lifecycle.secret === null) {
-        lifecycle = await endpointRepository.rotateForTask(id);
-      }
-      if (!lifecycle || lifecycle.secret === null) {
-        return c.json(
-          {
-            error: {
-              code: "WEBHOOK_CREDENTIAL_UNAVAILABLE",
-              message: "Webhook credentials could not be provisioned",
-            },
-          },
-          503,
-        );
-      }
-      return c.json(
-        { webhook: webhookEndpointResponse(lifecycle.endpoint, options), secret: lifecycle.secret },
-        existing ? 200 : 201,
-      );
-    });
-  });
-
-  routes.delete("/:id/webhook/credentials", async (c) => {
-    const id = c.req.param("id");
-    const result = await loadAccessibleTask(c, id);
-    if ("response" in result) return result.response;
-    const trigger = parseTriggerConfig(result.row.steps, {
-      scheduleType: result.row.schedule_type,
-      scheduleValue: result.row.schedule_value,
-    });
-    if (trigger?.type !== "webhook") {
-      return c.json(
-        { error: { code: "INVALID_STATE", message: "Webhook credentials require a native webhook trigger" } },
-        409,
-      );
-    }
-
-    return withWebhookCredentialLock(id, async () => {
-      const endpointRepository = createWebhookEndpointRepository(db, options.encryptionKey);
-      const existing = await endpointRepository.getByTaskId(id);
-      if (!existing) {
-        return c.json({ error: { code: "NOT_FOUND", message: "Webhook credentials not found" } }, 404);
-      }
-      const revoked = await endpointRepository.revokeForTask(id);
-      if (!revoked) {
-        return c.json({ error: { code: "NOT_FOUND", message: "Webhook credentials not found" } }, 404);
-      }
-      return c.json({ success: true, webhook: webhookEndpointResponse(revoked, options) });
-    });
-  });
-
   routes.patch("/:id/execution-mode", async (c) => {
     const id = c.req.param("id");
     const accessible = await loadAccessibleTask(c, id);
@@ -774,12 +650,6 @@ export function scheduledTaskRoutes(
         return c.json(
           { error: { code: "VALIDATION_ERROR", message: "Automation definition is invalid", issues: err.issues } },
           400,
-        );
-      }
-      if (err instanceof WebhookCredentialUnavailableError) {
-        return c.json(
-          { error: { code: "WEBHOOK_CREDENTIAL_UNAVAILABLE", message: "Webhook encryption is not configured" } },
-          503,
         );
       }
       throw err;

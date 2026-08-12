@@ -11,6 +11,8 @@ import { createTestDb } from "../../test-utils";
 import { handleManageScheduledTasks, requiresAutomationBuilder } from "./scheduled-tasks";
 import { AutomationArtifactCollector } from "./types";
 
+const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
     title: "Daily account brief",
@@ -460,6 +462,110 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         apps: JSON.stringify(["clickup", "slack"]),
       }),
     ]);
+  });
+
+  it("creates native webhook definitions with external webhook schedule fields", async () => {
+    const scheduler = schedulerFor("native-webhook-task");
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Deployment webhook",
+        prompt: "Format deployment events.",
+        steps: [
+          {
+            ...definition().steps[0],
+            label: "Incoming deployment webhook",
+            icon: "webhook",
+            triggerConfig: { type: "webhook" },
+          },
+          {
+            ...definition().steps[1],
+            agentPrompt: "Format the deployment event.",
+            apps: [],
+          },
+        ],
+        edges: [{ id: "trigger-agent", from: "trigger", to: "agent" }],
+      },
+      {
+        db,
+        scheduler,
+        config: { PORT: 3000 },
+        encryptionKey: ENCRYPTION_KEY,
+        taskContext: taskContextFor("native-webhook-task"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation created:");
+    const row = await createScheduledTaskRepository(db).listAll();
+    expect(row).toHaveLength(1);
+    expect(row[0]).toMatchObject({ schedule_type: "external", schedule_value: "webhook" });
+    expect(JSON.parse(row[0].steps ?? "[]")[0]).toMatchObject({
+      triggerConfig: { type: "webhook" },
+    });
+    await expect(
+      db
+        .selectFrom("webhook_endpoints")
+        .select(["status", "task_id"])
+        .where("task_id", "=", row[0].id)
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ status: "active", task_id: row[0].id });
+  });
+
+  it("expands prompt shorthand into a native webhook definition", async () => {
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Deployment webhook shorthand",
+        prompt: "Format deployment events.",
+        schedule_type: "external",
+        schedule_value: "webhook",
+        timezone: "UTC",
+      },
+      {
+        db,
+        scheduler: schedulerFor("native-webhook-prompt-task"),
+        config: { PORT: 3000 },
+        encryptionKey: ENCRYPTION_KEY,
+        taskContext: taskContextFor("native-webhook-prompt-task"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation created:");
+    const row = await createScheduledTaskRepository(db).listAll();
+    expect(row).toHaveLength(1);
+    expect(row[0]).toMatchObject({ schedule_type: "external", schedule_value: "webhook" });
+    expect(JSON.parse(row[0].steps ?? "[]")[0]).toMatchObject({
+      label: "Webhook",
+      icon: "webhook",
+      triggerConfig: { type: "webhook" },
+    });
+  });
+
+  it("rejects Canvas-managed webhook definitions before persistence", async () => {
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Unsupported Canvas webhook",
+        steps: [
+          {
+            ...definition().steps[0],
+            label: "Incoming webhook",
+            icon: "webhook",
+            triggerConfig: { type: "canvas", componentKey: "webhook-trigger" },
+          },
+          {
+            ...definition().steps[1],
+            agentPrompt: "Process the event.",
+            apps: [],
+          },
+        ],
+        edges: [{ id: "trigger-agent", from: "trigger", to: "agent" }],
+      },
+      { db, scheduler: schedulerFor("blocked-canvas-webhook"), taskContext: taskContextFor("blocked-canvas-webhook") },
+    );
+
+    expect(result.content[0].text).toContain("Canvas-managed webhook triggers are not supported");
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
   });
 
   it("reports a thrown scheduler refresh after add instead of reading the saved row", async () => {
@@ -1103,10 +1209,10 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
           {
             id: "trigger",
             type: "trigger",
-            label: "Webhook",
-            icon: "webhook",
+            label: "Cron",
+            icon: "clock",
             position: { x: 0, y: 0 },
-            triggerConfig: { type: "webhook" },
+            triggerConfig: { type: "schedule", scheduleType: "cron", scheduleValue: "0 9 * * *", timezone: "UTC" },
           },
           definition().steps[1],
         ],
@@ -1115,7 +1221,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       { db, scheduler, taskContext: taskContextFor("trigger-validation-task") },
     );
 
-    expect(result.content[0].text).toContain("TRIGGER_CONFIG_MISMATCH");
+    expect(result.content[0].text).toContain("SCHEDULE_TRIGGER_MISMATCH");
     await expect(createScheduledTaskRepository(db).getById("trigger-validation-task")).resolves.toMatchObject({
       revision: 0,
       schedule_value: "120",

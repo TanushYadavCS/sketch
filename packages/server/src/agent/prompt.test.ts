@@ -234,10 +234,14 @@ describe("buildSystemContext", () => {
       expect(result).toContain("never invent a channel ID");
     });
 
-    it("preserves legacy structured authoring guidance when authoring is not configured", () => {
+    it("guides legacy structured authoring to Sketch-native webhooks", () => {
       const result = buildSystemContext({ platform: "slack" });
 
-      expect(result).toContain("prefer a Canvas-managed trigger only when a Canvas skill/MCP is available");
+      expect(result).toContain("use Sketch's native webhook trigger");
+      expect(result).toContain("schedule_type='external'");
+      expect(result).toContain("schedule_value='webhook'");
+      expect(result).toContain("Never use the Canvas componentKey='webhook-trigger'");
+      expect(result).not.toContain("prefer a Canvas-managed trigger only when a Canvas skill/MCP is available");
       expect(result).not.toContain("use only the admitted schedule, webhook, or Slack channel-message trigger types");
       expect(result).not.toContain("Do not construct or pass automation definition fields");
       expect(result).not.toContain("Never use updateStepContent");

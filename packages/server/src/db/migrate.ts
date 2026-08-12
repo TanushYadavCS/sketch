@@ -173,6 +173,7 @@ import * as m170 from "./migrations/170-question-interactions";
 import * as m171 from "./migrations/171-question-interaction-active-keys";
 import * as m172 from "./migrations/172-native-webhook-endpoints";
 import * as m173 from "./migrations/173-webhook-delivery-generation-fencing";
+import * as m174 from "./migrations/174-native-webhook-no-credentials";
 import type { DB } from "./schema";
 
 /**
@@ -355,6 +356,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "171-question-interaction-active-keys": m171,
           "172-native-webhook-endpoints": m172,
           "173-webhook-delivery-generation-fencing": m173,
+          "174-native-webhook-no-credentials": m174,
         };
       },
     },

@@ -113,12 +113,6 @@ class AutomationDeletionRaceError extends Error {
   }
 }
 
-export class WebhookCredentialUnavailableError extends Error {
-  constructor() {
-    super("ENCRYPTION_KEY is required for native webhook credentials");
-  }
-}
-
 function validatedRequest(
   request: AutomationBuilderSaveRequest,
   brokerCapable: boolean,
@@ -129,23 +123,25 @@ function validatedRequest(
   return parsed;
 }
 
+function hasWebhookTriggerInSteps(steps: readonly WorkflowStep[]): boolean {
+  return steps.some((step) => step.type === "trigger" && step.triggerConfig?.type === "webhook");
+}
+
 function hasWebhookTrigger(request: AutomationBuilderSaveRequest): boolean {
-  return request.steps.some((step) => step.type === "trigger" && step.triggerConfig?.type === "webhook");
+  return hasWebhookTriggerInSteps(request.steps);
 }
 
 async function ensureWebhookEndpoint(
   db: Kysely<DB>,
   taskId: string,
   request: AutomationBuilderSaveRequest,
-  encryptionKey?: string,
 ): Promise<void> {
-  const repository = createWebhookEndpointRepository(db, encryptionKey);
+  const repository = createWebhookEndpointRepository(db);
   if (hasWebhookTrigger(request)) {
-    if (!encryptionKey?.trim()) throw new WebhookCredentialUnavailableError();
     await repository.ensureForTask(taskId);
     return;
   }
-  await repository.revokeForTask(taskId);
+  await repository.deactivateForTask(taskId);
 }
 
 function contentEntries(request: AutomationBuilderSaveRequest) {
@@ -310,6 +306,9 @@ function applyDefinitionPatch(
   } else if (trigger?.type === "canvas") {
     scheduleType = "external";
     scheduleValue = "canvas";
+  } else if (trigger?.type === "webhook") {
+    scheduleType = "external";
+    scheduleValue = "webhook";
   } else if (
     (patch.scheduleType !== undefined || patch.scheduleValue !== undefined || patch.timezone !== undefined) &&
     scheduleType !== "external" &&
@@ -494,7 +493,7 @@ export async function updateAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
-    await ensureWebhookEndpoint(trx, params.taskId, request, params.encryptionKey);
+    await ensureWebhookEndpoint(trx, params.taskId, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: params.taskId,
@@ -555,7 +554,7 @@ export async function createAutomationDefinition(params: {
     };
     const created = await createScheduledTaskRepository(trx).add(task);
     await replaceStepContent(trx, id, request);
-    await ensureWebhookEndpoint(trx, id, request, params.encryptionKey);
+    await ensureWebhookEndpoint(trx, id, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: id,
@@ -752,7 +751,7 @@ export async function replaceAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
-    await ensureWebhookEndpoint(trx, params.taskId, request, params.encryptionKey);
+    await ensureWebhookEndpoint(trx, params.taskId, request);
     if (params.taskConversationAssociation) {
       await upsertAutomationTaskConversationAssociation(trx, {
         taskId: params.taskId,

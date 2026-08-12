@@ -21,8 +21,6 @@ vi.mock("../workflows/runtime", async () => {
   };
 });
 
-const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
 function webhookSteps() {
   return JSON.stringify([
     {
@@ -126,7 +124,7 @@ describe("TaskScheduler native webhook delivery", () => {
       steps: webhookSteps(),
       output_mode: "silent",
     });
-    const endpoint = await createWebhookEndpointsRepository(db, ENCRYPTION_KEY, {
+    const endpoint = await createWebhookEndpointsRepository(db, {
       idGenerator: () => "webhook-endpoint",
     }).ensureForTask(task.id);
     const delivery = await createWebhookDeliveriesRepository(db).insertOrGet({
@@ -215,7 +213,7 @@ describe("TaskScheduler native webhook delivery", () => {
 
   it("cancels a queued delivery when its endpoint is revoked", async () => {
     const delivery = await createDelivery();
-    await createWebhookEndpointsRepository(db, ENCRYPTION_KEY).revokeForTask("webhook-task");
+    await createWebhookEndpointsRepository(db).deactivateForTask("webhook-task");
     const { scheduler } = buildScheduler(db);
 
     await expect(scheduler.enqueueWebhookDelivery(delivery.id)).resolves.toBe(false);
@@ -231,21 +229,6 @@ describe("TaskScheduler native webhook delivery", () => {
 
     await expect(scheduler.enqueueWebhookDelivery(delivery.id)).resolves.toBe(true);
     await createScheduledTaskRepository(db).update("webhook-task", { prompt: "Changed" }, { incrementRevision: true });
-    await callbacks[0]?.();
-
-    await expect(createWebhookDeliveriesRepository(db).getById(delivery.id)).resolves.toMatchObject({
-      status: "cancelled",
-      error_message: "Automation or webhook endpoint changed before delivery execution",
-    });
-    expect(workflowRuntime.executeAutomation).not.toHaveBeenCalled();
-  });
-
-  it("fences a queued delivery when endpoint credentials rotate", async () => {
-    const delivery = await createDelivery();
-    const { scheduler, callbacks } = buildScheduler(db);
-
-    await expect(scheduler.enqueueWebhookDelivery(delivery.id)).resolves.toBe(true);
-    await createWebhookEndpointsRepository(db, ENCRYPTION_KEY).rotateForTask("webhook-task");
     await callbacks[0]?.();
 
     await expect(createWebhookDeliveriesRepository(db).getById(delivery.id)).resolves.toMatchObject({

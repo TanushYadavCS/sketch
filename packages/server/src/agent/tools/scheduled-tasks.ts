@@ -13,12 +13,11 @@ import { AutomationAuthoringValidationError } from "../../automation/authoring/s
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
   AutomationValidationError,
-  WEBHOOK_AUTH_GUIDANCE,
   addWebhookEndpointMetadata,
+  isCanvasWebhookTrigger,
 } from "../../automation/definition";
 import {
   type AutomationDefinitionPatch,
-  WebhookCredentialUnavailableError,
   createAutomationDefinition,
   deleteAutomation,
   getAutomationDefinition,
@@ -95,7 +94,7 @@ const workflowStepSchema = z.object({
       errorMessage: z.string().optional(),
     })
     .describe(
-      "Use type 'canvas' for Canvas-managed external triggers. Use it only when a Canvas skill/MCP has selected a trigger component via search_components; otherwise create a normal schedule trigger fallback.",
+      "Use type 'webhook' for generic inbound webhooks; this is the Sketch-native trigger and requires schedule_type='external' with schedule_value='webhook'. Canvas-managed webhook triggers are unsupported. Use type 'canvas' only for explicitly requested provider events after Canvas search_components selects a non-webhook trigger component.",
     )
     .optional(),
 });
@@ -137,16 +136,19 @@ const manageScheduledTasksSchema = {
       "How the automation runs: 'Follow exact steps' (deterministic) allows action steps but no agent steps; 'Exact steps with smart help' (hybrid) allows both; 'Let Sketch handle the details' (agent-led) allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
-    .enum(["cron", "interval", "once"])
+    .enum(["cron", "interval", "once", "external"])
     .optional()
-    .describe("'cron' for cron expressions, 'interval' for fixed second intervals, 'once' for a one-time run."),
+    .describe(
+      "'external' for event-driven automations: use schedule_value='webhook' for a Sketch-native webhook or 'slack_channel_message' for a native Slack channel trigger. Otherwise use 'cron', 'interval', or 'once'.",
+    ),
   schedule_value: z
     .string()
     .optional()
     .describe(
       `For cron: standard 5-field expression (minute hour day-of-month month day-of-week). Always use 5-field, never 6-field. Examples: '*/2 * * * *' (every 2 min), '0 9 * * 1-5' (weekdays 9am), '0 */6 * * *' (every 6 hours).
 For interval: number of seconds as a plain string, minimum 60. Examples: '120' (every 2 min), '3600' (every hour). Do not use duration strings like '2m' or '1h'.
-For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:00') is interpreted in the resolved timezone (the user's tz unless 'timezone' is set explicitly). To pin an absolute instant regardless of timezone, include a Z suffix or numeric offset (e.g. '2026-03-14T15:00:00Z' or '2026-03-14T15:00:00+05:30'). The task runs once at this time then auto-completes.`,
+For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:00') is interpreted in the resolved timezone (the user's tz unless 'timezone' is set explicitly). To pin an absolute instant regardless of timezone, include a Z suffix or numeric offset (e.g. '2026-03-14T15:00:00Z' or '2026-03-14T15:00:00+05:30'). The task runs once at this time then auto-completes.
+For external: use 'webhook' or 'slack_channel_message' as described above.`,
     ),
   timezone: z
     .string()
@@ -300,7 +302,8 @@ export interface ManageScheduledTasksDeps {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
-  config?: { BASE_URL?: string; PORT: number; ENCRYPTION_KEY?: string };
+  config?: { BASE_URL?: string; PORT: number };
+  encryptionKey?: string;
   automationArtifactCollector?: AutomationArtifactCollector;
   chatAuthoring?: ChatAutomationAuthoring;
   currentAutomation?: CurrentAutomation;
@@ -428,6 +431,10 @@ function definitionPatchFromParams(params: ManageScheduledTasksParams, ctx: Task
       patch.scheduleType = "external";
       patch.scheduleValue = "canvas";
     }
+    if (triggerStep?.triggerConfig?.type === "webhook") {
+      patch.scheduleType = "external";
+      patch.scheduleValue = "webhook";
+    }
     if (triggerStep?.triggerConfig?.type === "slack_channel_message") {
       patch.scheduleType = "external";
       patch.scheduleValue = "slack_channel_message";
@@ -515,9 +522,6 @@ function automationPersistenceError(error: unknown): string | null {
   if (error instanceof AutomationValidationError) {
     return `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`;
   }
-  if (error instanceof WebhookCredentialUnavailableError) {
-    return "Error: native webhook credentials are unavailable until ENCRYPTION_KEY is configured.";
-  }
   return null;
 }
 
@@ -579,17 +583,14 @@ async function webhookResponseMetadata(
 ): Promise<Record<string, unknown> | null> {
   if (triggerConfig?.type !== "webhook") return null;
   const endpoint = deps.db
-    ? await createWebhookEndpointRepository(deps.db, deps.config?.ENCRYPTION_KEY).getByTaskId(taskId)
+    ? await createWebhookEndpointRepository(deps.db, deps.encryptionKey).getByTaskId(taskId)
     : undefined;
   const metadata = addWebhookEndpointMetadata(triggerConfig, taskId, {
     endpoint,
     baseUrl: deps.config?.BASE_URL,
     port: deps.config?.PORT,
   });
-  return {
-    ...metadata,
-    webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE,
-  };
+  return metadata;
 }
 
 /**
@@ -949,16 +950,27 @@ export async function handleManageScheduledTasks(
         }
         const triggerStep = params.steps.find((step) => step.type === "trigger");
         const isCanvasManagedTrigger = triggerStep?.triggerConfig?.type === "canvas";
+        const isNativeWebhookTrigger = triggerStep?.triggerConfig?.type === "webhook";
         const isSlackChannelMessageTrigger = triggerStep?.triggerConfig?.type === "slack_channel_message";
+        if (isCanvasWebhookTrigger(triggerStep?.triggerConfig)) {
+          return text(
+            "Error: Canvas-managed webhook triggers are not supported; use the Sketch-native webhook trigger instead.",
+          );
+        }
         if (isSlackChannelMessageTrigger && !triggerStep.triggerConfig?.channelId?.trim()) {
           return text("Error: Slack channel message trigger requires channelId.");
         }
         if (
           !isCanvasManagedTrigger &&
+          !isNativeWebhookTrigger &&
           !isSlackChannelMessageTrigger &&
           (!params.schedule_type || !params.schedule_value)
         ) {
           return text("Error: schedule_type and schedule_value are required for add action.");
+        }
+        if (isNativeWebhookTrigger) {
+          params.schedule_type = "external";
+          params.schedule_value = "webhook";
         }
         if (triggerStep?.triggerConfig?.type === "canvas") {
           params.schedule_type = "external";
@@ -981,13 +993,14 @@ export async function handleManageScheduledTasks(
           return text("Error: prompt, schedule_type, and schedule_value are required for add action.");
         }
         params.title = params.title ?? params.prompt;
+        const isNativeWebhook = params.schedule_type === "external" && params.schedule_value === "webhook";
         params.steps = [
           {
             id: "trigger",
             type: "trigger",
-            label: "Schedule",
-            icon: "clock",
-            triggerConfig: { type: "schedule" },
+            label: isNativeWebhook ? "Webhook" : "Schedule",
+            icon: isNativeWebhook ? "webhook" : "clock",
+            triggerConfig: isNativeWebhook ? { type: "webhook" } : { type: "schedule" },
             position: { x: 0, y: 0 },
           },
           {
@@ -1136,7 +1149,7 @@ export async function handleManageScheduledTasks(
             originMessageId: ctx.origin?.currentMessageId ?? null,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
-          encryptionKey: deps.config?.ENCRYPTION_KEY,
+          encryptionKey: deps.encryptionKey,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
@@ -1180,6 +1193,11 @@ export async function handleManageScheduledTasks(
 
       const brokerError = await ensureBrokerForActionSteps(params.steps);
       if (brokerError) return brokerError;
+      if (params.steps?.some((step) => isCanvasWebhookTrigger(step.triggerConfig))) {
+        return text(
+          "Error: Canvas-managed webhook triggers are not supported; use the Sketch-native webhook trigger instead.",
+        );
+      }
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
@@ -1211,7 +1229,7 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
-          encryptionKey: deps.config?.ENCRYPTION_KEY,
+          encryptionKey: deps.encryptionKey,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
@@ -1265,15 +1283,10 @@ export async function handleManageScheduledTasks(
         taskId: task_id,
         webhookBaseUrl: deps.config?.BASE_URL,
         webhookPort: deps.config?.PORT,
-        encryptionKey: deps.config?.ENCRYPTION_KEY,
+        encryptionKey: deps.encryptionKey,
       });
       if (!definition) return text(`Error: task ${task_id} not found.`);
-      const triggerConfig = definition.steps.find((step) => step.type === "trigger")?.triggerConfig;
-      const response =
-        triggerConfig?.type === "webhook" && triggerConfig.webhookEndpointId
-          ? { ...definition, webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE }
-          : definition;
-      return text(JSON.stringify(response, null, 2));
+      return text(JSON.stringify(definition, null, 2));
     }
 
     case "remove": {
@@ -1291,7 +1304,7 @@ export async function handleManageScheduledTasks(
           canManageAnyTask: ctx.canManageAnyTask ?? false,
         },
         scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
-        encryptionKey: deps.config?.ENCRYPTION_KEY,
+        encryptionKey: deps.encryptionKey,
       });
       if (deletion.kind === "not_found") return text(`Error: task ${task_id} not found.`);
       if (deletion.kind === "access_denied")
@@ -1381,7 +1394,7 @@ export async function handleManageScheduledTasks(
       const currentDefinition = await getAutomationDefinition({
         db: deps.db,
         taskId: task_id,
-        encryptionKey: deps.config?.ENCRYPTION_KEY,
+        encryptionKey: deps.encryptionKey,
       });
       const step = currentDefinition?.steps.find((candidate) => candidate.id === params.step_id);
       const existing = currentDefinition?.stepContent[params.step_id];
@@ -1413,7 +1426,7 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
-          encryptionKey: deps.config?.ENCRYPTION_KEY,
+          encryptionKey: deps.encryptionKey,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
@@ -1455,6 +1468,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         queueManager: deps.queueManager,
         activeQueueKey: deps.activeQueueKey,
         config: deps.config,
+        encryptionKey: deps.encryptionKey,
         automationArtifactCollector: deps.automationArtifactCollector,
         chatAuthoring: deps.chatAuthoring,
         currentAutomation: deps.currentAutomation ?? deps.taskContext?.currentAutomation,

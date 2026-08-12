@@ -713,32 +713,28 @@ export async function createServer(config: Config, options?: CreateServerOptions
     return status.kind === "ok" ? status.provider : null;
   };
 
-  if (config.ENCRYPTION_KEY) {
-    const webhookEndpoints = createWebhookEndpointRepository(db, config.ENCRYPTION_KEY);
-    const batchSize = 500;
-    let lastTaskId: string | undefined;
-    for (;;) {
-      let query = db
-        .selectFrom("scheduled_tasks")
-        .select(["id", "steps", "schedule_type", "schedule_value"])
-        .where("schedule_type", "=", "external")
-        .orderBy("id", "asc")
-        .limit(batchSize);
-      if (lastTaskId) query = query.where("id", ">", lastTaskId);
-      const nativeWebhookTasks = await query.execute();
-      if (nativeWebhookTasks.length === 0) break;
-      for (const task of nativeWebhookTasks) {
-        const trigger = parseAutomationTriggerConfig(task.steps, {
-          scheduleType: task.schedule_type,
-          scheduleValue: task.schedule_value,
-        });
-        if (isAutomationWebhookTrigger(trigger)) await webhookEndpoints.ensureForTask(task.id);
-      }
-      lastTaskId = nativeWebhookTasks[nativeWebhookTasks.length - 1]?.id;
-      if (nativeWebhookTasks.length < batchSize) break;
+  const webhookEndpoints = createWebhookEndpointRepository(db);
+  const batchSize = 500;
+  let lastTaskId: string | undefined;
+  for (;;) {
+    let query = db
+      .selectFrom("scheduled_tasks")
+      .select(["id", "steps", "schedule_type", "schedule_value"])
+      .where("schedule_type", "=", "external")
+      .orderBy("id", "asc")
+      .limit(batchSize);
+    if (lastTaskId) query = query.where("id", ">", lastTaskId);
+    const nativeWebhookTasks = await query.execute();
+    if (nativeWebhookTasks.length === 0) break;
+    for (const task of nativeWebhookTasks) {
+      const trigger = parseAutomationTriggerConfig(task.steps, {
+        scheduleType: task.schedule_type,
+        scheduleValue: task.schedule_value,
+      });
+      if (isAutomationWebhookTrigger(trigger)) await webhookEndpoints.ensureForTask(task.id);
     }
-  } else {
-    logger.warn("Native webhook credentials require ENCRYPTION_KEY; webhook provisioning is unavailable");
+    lastTaskId = nativeWebhookTasks[nativeWebhookTasks.length - 1]?.id;
+    if (nativeWebhookTasks.length < batchSize) break;
   }
 
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly

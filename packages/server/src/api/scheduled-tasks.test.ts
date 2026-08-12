@@ -19,8 +19,6 @@ import { createTestConfig, createTestDb } from "../test-utils";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
 
 const config = createTestConfig();
-const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
   const users = createUserRepository(db);
@@ -1430,97 +1428,6 @@ describe("Scheduled Tasks API", () => {
     expect(await adminResponse.json()).toEqual({ success: true });
     expect(scheduler.removedTaskIds).toEqual(["task-delete-foreign"]);
     await expect(tasks.getById("task-delete-foreign")).resolves.toBeUndefined();
-  });
-
-  it("provisions, rotates, exposes, and revokes native webhook credentials", async () => {
-    const admin = await seedAdmin(db);
-    const tasks = createScheduledTaskRepository(db);
-    await tasks.add({
-      id: "task-webhook-credentials",
-      platform: "slack",
-      context_type: "dm",
-      delivery_target: "D123",
-      thread_ts: null,
-      prompt: "Process webhook data",
-      schedule_type: "external",
-      schedule_value: "webhook",
-      timezone: "UTC",
-      session_mode: "fresh",
-      created_by: admin.id,
-      status: "active",
-      next_run_at: null,
-      steps: JSON.stringify([
-        {
-          id: "trigger",
-          type: "trigger",
-          label: "Webhook",
-          icon: "webhook",
-          position: { x: 0, y: 0 },
-          triggerConfig: { type: "webhook" },
-        },
-        {
-          id: "agent",
-          type: "agent",
-          label: "Process",
-          icon: "sketch-ai",
-          position: { x: 260, y: 0 },
-          agentMode: "sketch",
-        },
-      ]),
-    });
-
-    const scheduler = {
-      pauseTask: vi.fn(),
-      resumeTask: vi.fn(),
-      removeTask: vi.fn(),
-      removeTaskRuntime: vi.fn().mockResolvedValue(true),
-      executeTaskById: vi.fn(),
-      enqueueWebhookDelivery: vi.fn().mockResolvedValue(true),
-    };
-    const app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), { scheduler });
-    const cookie = await loginAdmin(app);
-
-    const first = await app.request("/api/scheduled-tasks/task-webhook-credentials/webhook/credentials", {
-      method: "POST",
-      headers: { Cookie: cookie },
-    });
-    expect(first.status).toBe(201);
-    const firstBody = await first.json();
-    expect(firstBody).toMatchObject({
-      webhook: {
-        endpointId: expect.any(String),
-        webhookUrl: expect.stringMatching(/\/api\/webhooks\/v1\//),
-        webhookSignatureHeader: "X-Sketch-Webhook-Signature",
-        webhookIdempotencyHeader: "Idempotency-Key",
-      },
-      secret: expect.any(String),
-    });
-
-    const definitionResponse = await app.request("/api/scheduled-tasks/task-webhook-credentials", {
-      headers: { Cookie: cookie },
-    });
-    expect(definitionResponse.status).toBe(200);
-    const definitionBody = await definitionResponse.json();
-    expect(definitionBody.automation.steps[0].triggerConfig).toMatchObject({
-      webhookEndpointId: firstBody.webhook.endpointId,
-      webhookUrl: firstBody.webhook.webhookUrl,
-      webhookStatus: "active",
-    });
-
-    const second = await app.request("/api/scheduled-tasks/task-webhook-credentials/webhook/credentials", {
-      method: "POST",
-      headers: { Cookie: cookie },
-    });
-    expect(second.status).toBe(200);
-    const secondBody = await second.json();
-    expect(secondBody.secret).not.toBe(firstBody.secret);
-
-    const revoked = await app.request("/api/scheduled-tasks/task-webhook-credentials/webhook/credentials", {
-      method: "DELETE",
-      headers: { Cookie: cookie },
-    });
-    expect(revoked.status).toBe(200);
-    await expect(revoked.json()).resolves.toMatchObject({ success: true, webhook: { webhookStatus: "revoked" } });
   });
 
   it("surfaces runtime cleanup failure after committing API deletion", async () => {

@@ -1563,13 +1563,10 @@ export interface QuestionInteractionDeliveriesTable {
 export interface WebhookEndpointsTable {
   id: string;
   task_id: string;
-  secret: string;
   status: string;
   generation: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
-  rotated_at: string | null;
-  revoked_at: string | null;
 }
 
 export interface WebhookDeliveriesTable {

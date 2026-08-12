@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Kysely } from "kysely";
@@ -8,9 +8,7 @@ import {
   WEBHOOK_BODY_LIMIT_BYTES,
   WEBHOOK_EVENT_ID_HEADER,
   WEBHOOK_EVENT_ID_MAX_LENGTH,
-  WEBHOOK_SIGNATURE_HEADER,
-  verifyWebhookAuth,
-} from "../automation/webhook-auth";
+} from "../automation/webhook-endpoints";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createWebhookDeliveryRepository } from "../db/repositories/webhook-deliveries";
 import { createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
@@ -64,7 +62,8 @@ function errorResponse(c: Context, code: string, message: string, status: 400 | 
 }
 
 function requestEventId(value: string | undefined): string | undefined {
-  if (value === undefined || value.trim().length === 0 || value.length > WEBHOOK_EVENT_ID_MAX_LENGTH) return undefined;
+  if (value === undefined) return randomUUID();
+  if (value.trim().length === 0 || value.length > WEBHOOK_EVENT_ID_MAX_LENGTH) return undefined;
   return value;
 }
 
@@ -76,20 +75,19 @@ export function automationWebhookRoutes(deps: AutomationWebhookRouteDeps) {
 
   const handleWebhook = async (c: Context, kind: WebhookRouteKind) => {
     const identifier = c.req.param(kind === "endpoint" ? "endpointId" : "taskId");
-    let stored: Awaited<ReturnType<typeof endpoints.getSecretById>>;
+    let endpoint: Awaited<ReturnType<typeof endpoints.getById>>;
     try {
-      stored =
-        kind === "endpoint" ? await endpoints.getSecretById(identifier) : await endpoints.getSecretByTaskId(identifier);
+      endpoint = kind === "endpoint" ? await endpoints.getById(identifier) : await endpoints.getByTaskId(identifier);
     } catch (error) {
-      deps.logger?.error({ err: error, endpointId: identifier }, "Webhook credential lookup failed");
-      return errorResponse(c, "WEBHOOK_UNAVAILABLE", "Webhook credentials are temporarily unavailable", 503);
+      deps.logger?.error({ err: error, endpointId: identifier }, "Webhook endpoint lookup failed");
+      return errorResponse(c, "WEBHOOK_UNAVAILABLE", "Webhook endpoint is temporarily unavailable", 503);
     }
 
-    if (!stored || stored.endpoint.status !== "active") {
+    if (!endpoint || endpoint.status !== "active") {
       return errorResponse(c, "NOT_FOUND", "Webhook endpoint not found", 404);
     }
 
-    const task = await tasks.getById(stored.endpoint.task_id);
+    const task = await tasks.getById(endpoint.task_id);
     const trigger = task
       ? parseAutomationTriggerConfig(task.steps, {
           scheduleType: task.schedule_type,
@@ -123,15 +121,6 @@ export function automationWebhookRoutes(deps: AutomationWebhookRouteDeps) {
     }
 
     const rawBodyText = rawBody.toString("utf8");
-    const auth = verifyWebhookAuth({
-      secret: stored.secret,
-      rawBody,
-      authorization: c.req.header("authorization"),
-      signature: c.req.header(WEBHOOK_SIGNATURE_HEADER),
-    });
-    if (!auth.ok) {
-      return errorResponse(c, "UNAUTHORIZED", "Webhook credentials are invalid", 401);
-    }
 
     if (task.status !== "active") {
       return errorResponse(c, "AUTOMATION_INACTIVE", "Automation is not active", 409);
@@ -160,17 +149,17 @@ export function automationWebhookRoutes(deps: AutomationWebhookRouteDeps) {
     try {
       admission = await deps.db.transaction().execute((trx) =>
         createWebhookDeliveryRepository(trx).insertOrGet({
-          endpointId: stored.endpoint.id,
-          taskId: stored.endpoint.task_id,
+          endpointId: endpoint.id,
+          taskId: endpoint.task_id,
           eventId,
           payloadHash,
           triggerData,
           taskRevision: task.revision,
-          endpointGeneration: stored.endpoint.generation,
+          endpointGeneration: endpoint.generation,
         }),
       );
     } catch (error) {
-      deps.logger?.error({ err: error, endpointId: stored.endpoint.id }, "Webhook durable admission failed");
+      deps.logger?.error({ err: error, endpointId: endpoint.id }, "Webhook durable admission failed");
       return errorResponse(c, "ADMISSION_UNAVAILABLE", "Webhook admission is temporarily unavailable", 503);
     }
 

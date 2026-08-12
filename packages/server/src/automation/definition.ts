@@ -27,7 +27,6 @@ import { parseOnceSchedule } from "../scheduler/parse-once";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import { resolveWorkflowDelivery } from "../workflows/delivery";
 import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "./action-script";
-import { WEBHOOK_BODY_LIMIT_BYTES } from "./webhook-auth";
 import { buildNativeWebhookUrl } from "./webhook-endpoints";
 
 export type BuilderValidationIssue = { code: string; message: string; path?: string };
@@ -61,6 +60,12 @@ const DEFAULT_SUPPORTED_TRIGGER_TYPES: readonly WorkflowTriggerConfig["type"][] 
   "canvas",
   "slack_channel_message",
 ];
+
+export function isCanvasWebhookTrigger(config: WorkflowTriggerConfig | undefined): boolean {
+  return (
+    config?.type === "canvas" && (config.componentKey === "webhook-trigger" || config.canvasEndpoint !== undefined)
+  );
+}
 
 function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
@@ -290,10 +295,7 @@ export function addWebhookEndpointMetadata(
       webhookEndpointId: options.endpoint.id,
       webhookMethod: "POST",
       webhookContentType: "application/json",
-      webhookAuthentication: "bearer_or_hmac_sha256",
-      webhookSignatureHeader: "X-Sketch-Webhook-Signature",
-      webhookIdempotencyHeader: "Idempotency-Key",
-      webhookPayloadLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
+      webhookAuthentication: "none",
       webhookStatus: options.endpoint.status === "revoked" ? "revoked" : "active",
     };
   }
@@ -307,16 +309,10 @@ export function addWebhookEndpointMetadata(
     ...withoutLegacyEndpoint,
     webhookMethod: "POST",
     webhookContentType: "application/json",
-    webhookAuthentication: "bearer_or_hmac_sha256",
-    webhookSignatureHeader: "X-Sketch-Webhook-Signature",
-    webhookIdempotencyHeader: "Idempotency-Key",
-    webhookPayloadLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
+    webhookAuthentication: "none",
     webhookStatus: "unavailable",
   };
 }
-
-export const WEBHOOK_AUTH_GUIDANCE =
-  "For retry-safe deduplication, include a unique Idempotency-Key. Authenticate with Authorization: Bearer <secret> or X-Sketch-Webhook-Signature: t=<unix-seconds>,v1=<hmac-sha256 hex>, signing <unix-seconds>.<exact request body>; HMAC timestamps expire after 5 minutes. Send application/json payloads up to 1000000 bytes.";
 
 export function buildAutomationDefinition(params: {
   row: ScheduledTaskRow;
@@ -856,6 +852,15 @@ function validateTriggerSchedule(
   const config = trigger?.triggerConfig;
   if (!config) {
     addIssue(issues, "TRIGGER_CONFIG_REQUIRED", "Trigger step requires trigger config", "steps");
+    return;
+  }
+  if (isCanvasWebhookTrigger(config)) {
+    addIssue(
+      issues,
+      "CANVAS_WEBHOOK_UNSUPPORTED",
+      "Canvas-managed webhook triggers are not supported; use the native Sketch webhook trigger",
+      "steps",
+    );
     return;
   }
   if (request.scheduleType === "external") {
