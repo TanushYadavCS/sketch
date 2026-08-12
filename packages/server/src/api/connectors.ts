@@ -31,6 +31,7 @@ import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/
 import type { EmailAddr } from "../connectors/email/normalized-email";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import {
+  buildEnrichmentProviderConfig,
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
   resolveOpenRouterEnrichmentConfig,
@@ -2516,15 +2517,7 @@ export function connectorRoutes(
     if (denied) return denied;
 
     const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
-    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
-    const providerConfig = {
-      geminiApiKey: settings?.gemini_api_key,
-      embeddingProvider: settings?.embedding_provider,
-      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
-      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
-      logger,
-      ...openRouterConfig,
-    };
+    const providerConfig = buildEnrichmentProviderConfig(settings, appConfig, logger);
     const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
     const generator = createEnrichmentGenerator(providerConfig);
 

@@ -20,6 +20,7 @@ import { apiTokenRoutes } from "./api/api-tokens";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
+import { devEnrichmentRoutes } from "./api/dev-enrichment";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
 import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
@@ -476,6 +477,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
+  if (config.DEV_TOOLS_ENABLED) {
+    app.route("/api/dev", devEnrichmentRoutes(db, logger, config));
+  }
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",

@@ -1040,6 +1040,54 @@ export interface FileContent {
   emailThread?: { connectorId: string; threadKey: string };
 }
 
+/**
+ * One group of context handed to the extraction model, as the server assembled it.
+ *
+ * Modelled as an ordered list rather than named fields so the same renderer serves both
+ * shapes of run: today every block is stuffed into the prompt up front, and a later
+ * tool-calling extractor emits the same blocks as the model fetches them. `via`
+ * distinguishes the two.
+ */
+export interface MintContextBlock {
+  key: string;
+  label: string;
+  /** The rule that chose these items, stated for a reader — e.g. "open tasks on the 3 projects above". */
+  selection: string;
+  /** How many items the rule matched, before any cap. Differs from items.length when truncated. */
+  total: number;
+  items: string[];
+  truncated?: boolean;
+  via?: "prompt" | "tool";
+}
+
+
+
+/**
+ * One captured pino call from a traced enrichment run. Prompt and response
+ * bodies are never included — those stay in the server-side dump directory.
+ */
+export interface DevTraceStep {
+  seq: number;
+  at: string;
+  level: string;
+  msg: string;
+  fields: Record<string, unknown>;
+}
+
+export interface DevTraceRunHeader {
+  id: string;
+  fileId: string;
+  fileName: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "done" | "failed";
+  error: string | null;
+  dumpDir: string;
+  stepCount: number;
+  /** Set once the run exceeded the capture cap and later steps were dropped. */
+  truncated: boolean;
+}
+
 export interface EmailAddr {
   name?: string | null;
   email: string;
@@ -3025,6 +3073,26 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ status }),
       });
+    },
+  },
+  /**
+   * Internal pipeline-debugging endpoints. Present only when the server was
+   * started with DEV_TOOLS_ENABLED; every call 404s otherwise.
+   */
+  dev: {
+    startEnrichmentRun(fileId: string) {
+      return request<{ runId: string; fileId: string; fileName: string }>("/api/dev/enrichment-runs", {
+        method: "POST",
+        body: JSON.stringify({ fileId }),
+      });
+    },
+    enrichmentRuns() {
+      return request<{ runs: DevTraceRunHeader[] }>("/api/dev/enrichment-runs");
+    },
+    /** `since` fetches only steps after that sequence number, for incremental polling. */
+    enrichmentRun(runId: string, since = 0) {
+      const qs = since > 0 ? `?since=${since}` : "";
+      return request<{ run: DevTraceRunHeader; steps: DevTraceStep[] }>(`/api/dev/enrichment-runs/${runId}${qs}`);
     },
   },
   workspace: {

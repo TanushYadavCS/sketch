@@ -5,6 +5,7 @@ import { channelsRoute } from "./routes/channels";
 import { chatIndexRoute, chatRoute } from "./routes/chat";
 import { connectionsCallbackRoute, connectionsRoute } from "./routes/connections";
 import { dashboardRoute } from "./routes/dashboard";
+import { devToolsRoute } from "./routes/dev-tools";
 import { filesRoute } from "./routes/files";
 import { homeRoute } from "./routes/home";
 import { indexRoute } from "./routes/index";
@@ -41,6 +42,7 @@ const routeTree = rootRoute.addChildren([
     connectionsRoute.addChildren([connectionsCallbackRoute]),
     usageRoute,
     settingsRoute,
+    devToolsRoute,
   ]),
 ]);
 

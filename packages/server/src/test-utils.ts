@@ -182,6 +182,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,
     BIRTH_GATE_DRY_RUN: true,
+    DEV_TOOLS_ENABLED: false,
     LLM_PROMOTION_THRESHOLD: 2,
     LLM_TASK_CORROBORATION_THRESHOLD: 2,
     FEATURE_AUTO_MINT_THRESHOLD: 1,
