@@ -1,5 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Kysely } from "kysely";
 import { normalizeName } from "../connectors/name-normalize";
+import { forEachChunk } from "../connectors/sync-utils";
 import type { DB } from "../db/schema";
 import { readPersonEmailFromMetadata } from "./materialize-json";
 import type { PassReason, ReasonHit } from "./queue-projection";
@@ -105,27 +107,56 @@ async function loadMentionFiles(db: Kysely<DB>, entityIds: string[]): Promise<Ma
 
 type AttendeeFact = { id: string; indexed_file_id: string; email: string | null; normalized: string | null };
 
+/**
+ * Test-only override for the batch size, scoped to one call.
+ *
+ * `IN_CLAUSE_CHUNK_SIZE` is 500, which is far more evidence files than an
+ * integration test can seed, and the tests have to drive the passes through
+ * `POST /api/graph-passes/queue-runs` — so the size cannot be threaded in as a
+ * parameter. A module-level setter of the `configureMaterializeDefaults` shape
+ * would work, but it is sticky: under `isolate: false` it stays set for every
+ * later test in the worker unless something resets it. This unsets itself when
+ * the call returns.
+ */
+const attendeeFactChunkSize = new AsyncLocalStorage<number>();
+
+export async function withAttendeeFactChunkSizeForTest<T>(size: number, work: () => Promise<T>): Promise<T> {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`attendee fact chunk size must be a positive integer, got ${size}`);
+  }
+  return attendeeFactChunkSize.run(size, work);
+}
+
 async function loadAttendeeFacts(db: Kysely<DB>, fileIds: string[]): Promise<Map<string, AttendeeFact[]>> {
   if (fileIds.length === 0) return new Map();
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["id", "indexed_file_id", "subject_email", "normalized_subject_name"])
-    .where("indexed_file_id", "in", fileIds)
-    .where("fact_type", "=", "attendee")
-    .where("deleted_at", "is", null)
-    .execute();
   const byFile = new Map<string, AttendeeFact[]>();
-  for (const row of rows) {
-    if (!row.indexed_file_id) continue;
-    const held = byFile.get(row.indexed_file_id) ?? [];
-    held.push({
-      id: row.id,
-      indexed_file_id: row.indexed_file_id,
-      email: cleanEmail(row.subject_email),
-      normalized: row.normalized_subject_name,
-    });
-    byFile.set(row.indexed_file_id, held);
-  }
+
+  await forEachChunk(
+    fileIds,
+    async (batch) => {
+      const rows = await db
+        .selectFrom("indexed_file_facts")
+        .select(["id", "indexed_file_id", "subject_email", "normalized_subject_name"])
+        .where("indexed_file_id", "in", batch)
+        .where("fact_type", "=", "attendee")
+        .where("deleted_at", "is", null)
+        .execute();
+
+      for (const row of rows) {
+        if (!row.indexed_file_id) continue;
+        const held = byFile.get(row.indexed_file_id) ?? [];
+        held.push({
+          id: row.id,
+          indexed_file_id: row.indexed_file_id,
+          email: cleanEmail(row.subject_email),
+          normalized: row.normalized_subject_name,
+        });
+        byFile.set(row.indexed_file_id, held);
+      }
+    },
+    attendeeFactChunkSize.getStore(),
+  );
+
   return byFile;
 }
 
@@ -160,6 +191,7 @@ function shouldFoldProposalEntityEmails(
  *
  * Built from `indexed_file_facts` on both sides because `entity_mentions` has no
  * column linking a mention back to the fact that produced it.
+ * The nested scan is bounded only by one indexed file's attendee fact count.
  */
 function coListed(facts: AttendeeFact[], proposal: Side, candidate: Side): boolean {
   const namesDistinguish = proposal.normalized !== candidate.normalized;

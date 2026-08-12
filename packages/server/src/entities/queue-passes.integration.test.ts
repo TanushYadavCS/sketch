@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -9,7 +9,7 @@ import { createApp } from "../http";
 import { createTestConfig, createTestLogger, createTestPgDb } from "../test-utils";
 import { applyProjection } from "./queue-projection";
 import { liveEntitiesForNames, loadQueueRows } from "./queue-reconcile";
-import { structuralPass } from "./queue-structural";
+import { structuralPass, withAttendeeFactChunkSizeForTest } from "./queue-structural";
 
 const ADMIN_EMAIL = "admin@test.com";
 const PASSWORD = "testpassword123";
@@ -132,6 +132,100 @@ async function readRow(db: Kysely<DB>, id: string) {
   return db.selectFrom("entity_review_queue").selectAll().where("id", "=", id).executeTakeFirst();
 }
 
+async function seedConnector(db: Kysely<DB>, ownerId: string): Promise<string> {
+  const id = randomUUID();
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id,
+      connector_type: "gmail",
+      auth_type: "system",
+      credentials: JSON.stringify({ type: "system" }),
+      created_by: ownerId,
+      scope_config: "{}",
+      sync_status: "active",
+    })
+    .execute();
+  return id;
+}
+
+async function seedIndexedFiles(db: Kysely<DB>, ownerId: string, prefix: string, count: number): Promise<string[]> {
+  const connectorId = await seedConnector(db, ownerId);
+  const now = new Date().toISOString();
+  const fileIds = Array.from({ length: count }, (_, index) => `${prefix}-${String(index + 1).padStart(2, "0")}`);
+  await db
+    .insertInto("indexed_files")
+    .values(
+      fileIds.map((id, index) => ({
+        id,
+        connector_config_id: connectorId,
+        provider_file_id: `${prefix}-${index + 1}-${id}`,
+        file_name: `${prefix}-${index + 1}.eml`,
+        content_category: "document",
+        source: "gmail",
+        synced_at: now,
+      })),
+    )
+    .execute();
+  return fileIds;
+}
+
+async function seedReviewEvidence(db: Kysely<DB>, reviewId: string, fileIds: string[]): Promise<void> {
+  await db
+    .insertInto("entity_review_evidence")
+    .values(
+      fileIds.map((fileId) => ({ id: randomUUID(), review_id: reviewId, indexed_file_id: fileId, source: "gmail" })),
+    )
+    .execute();
+}
+
+async function seedAttendeeFact(
+  db: Kysely<DB>,
+  fileId: string,
+  params: { email: string; normalizedName: string },
+): Promise<void> {
+  const id = randomUUID();
+  await db
+    .insertInto("indexed_file_facts")
+    .values({
+      id,
+      indexed_file_id: fileId,
+      source: "gmail",
+      fact_type: "attendee",
+      relation: "attendee",
+      subject_email: params.email,
+      normalized_subject_name: params.normalizedName,
+      fact_key: `${fileId}:attendee:${id}`,
+    })
+    .execute();
+}
+
+async function seedMention(db: Kysely<DB>, entityId: string, fileId: string): Promise<void> {
+  await db
+    .insertInto("entity_mentions")
+    .values({
+      id: randomUUID(),
+      entity_id: entityId,
+      indexed_file_id: fileId,
+      chunk_index: null,
+      context_snippet: null,
+      confidence: "EXTRACTED",
+      source: "llm_extraction",
+      relation: "mentioned",
+      mentioned_at: new Date().toISOString(),
+    })
+    .execute();
+}
+
+async function queueState(db: Kysely<DB>, ids: string[]) {
+  return db
+    .selectFrom("entity_review_queue")
+    .select(["id", "status", "pass_reason", "candidate_entity_id"])
+    .where("id", "in", ids)
+    .orderBy("id")
+    .execute();
+}
+
 /**
  * Aliases are not a table — they live in `entities.aliases`, so `selectAll` on
  * entities already carries them.
@@ -148,6 +242,10 @@ describe("queue graph passes", () => {
 
   beforeEach(async () => {
     h = await createHarness();
+  });
+
+  afterEach(async () => {
+    await h.db.destroy();
   });
 
   it("T1 defers on the register only when the type matches, and writes nothing to the graph", async () => {
@@ -268,6 +366,9 @@ describe("queue graph passes", () => {
     expect(cleared?.candidate_generated_at).not.toBe("2020-01-01T00:00:00.000Z");
   });
 
+  /**
+   * Deferred rows stay live queue records, so later evidence accrual is preserved.
+   */
   it("T4 keeps a deferred row accruing evidence and hands it back when the cause disappears", async () => {
     const rowId = await seedQueueRow(h.db, h.ownerId, { name: "Deferrable Person" });
     const entityId = await seedEntity(h.db, { name: "Deferrable Person" });
@@ -573,6 +674,142 @@ describe("queue graph passes", () => {
 
     const row = await readRow(h.db, rowId);
     expect(row?.pass_reason).not.toBe("co_listed_participants");
+  });
+
+  it("C1 still sees co-listed attendee proof when it lands in the last evidence chunk", async () => {
+    const candidate = await seedEntity(h.db, {
+      name: "A. Boundary",
+      metadata: { email: "candidate.boundary@acme.test" },
+    });
+    const rowId = await seedQueueRow(h.db, h.ownerId, {
+      name: "Ada Boundary",
+      candidateEntityId: candidate,
+      proposedEmail: "ada.boundary@other.test",
+    });
+    const fileIds = await seedIndexedFiles(h.db, h.ownerId, "c1-boundary", 3);
+    await seedReviewEvidence(h.db, rowId, fileIds);
+    await seedMention(h.db, candidate, fileIds[2]);
+    await seedAttendeeFact(h.db, fileIds[2], {
+      email: "ada.boundary@other.test",
+      normalizedName: "ada boundary",
+    });
+    await seedAttendeeFact(h.db, fileIds[2], {
+      email: "candidate.boundary@acme.test",
+      normalizedName: "a boundary",
+    });
+
+    await withAttendeeFactChunkSizeForTest(2, () => runPasses(h));
+
+    const row = await readRow(h.db, rowId);
+    expect(row?.status).toBe("deferred");
+    expect(row?.pass_reason).toBe("co_listed_participants");
+  });
+
+  it("C2 does not pool attendees from different evidence chunks into one co-listed proof", async () => {
+    const candidate = await seedEntity(h.db, {
+      name: "B. Boundary",
+      metadata: { email: "candidate.pool@acme.test" },
+    });
+    const rowId = await seedQueueRow(h.db, h.ownerId, {
+      name: "Bea Boundary",
+      candidateEntityId: candidate,
+      proposedEmail: "bea.pool@other.test",
+    });
+    const fileIds = await seedIndexedFiles(h.db, h.ownerId, "c2-boundary", 3);
+    await seedReviewEvidence(h.db, rowId, fileIds);
+    await seedMention(h.db, candidate, fileIds[2]);
+    await seedAttendeeFact(h.db, fileIds[0], {
+      email: "bea.pool@other.test",
+      normalizedName: "bea boundary",
+    });
+    await seedAttendeeFact(h.db, fileIds[2], {
+      email: "candidate.pool@acme.test",
+      normalizedName: "b boundary",
+    });
+
+    await withAttendeeFactChunkSizeForTest(2, () => runPasses(h));
+
+    const row = await readRow(h.db, rowId);
+    expect(row?.status).toBe("deferred");
+    expect(row?.pass_reason).not.toBe("co_listed_participants");
+    expect(row?.pass_reason).toBe("different_emails");
+  });
+
+  it("C3 converges over a multi-chunk corpus with candidate re-points without touching graph tables", async () => {
+    const coListedCandidate = await seedEntity(h.db, {
+      name: "C. Boundary",
+      metadata: { email: "candidate.converge@acme.test" },
+    });
+    const coListedRow = await seedQueueRow(h.db, h.ownerId, {
+      name: "Cara Boundary",
+      candidateEntityId: coListedCandidate,
+      proposedEmail: "cara.converge@other.test",
+    });
+    const fileIds = await seedIndexedFiles(h.db, h.ownerId, "c3-boundary", 5);
+    await seedReviewEvidence(h.db, coListedRow, fileIds);
+    await seedMention(h.db, coListedCandidate, fileIds[4]);
+    await seedAttendeeFact(h.db, fileIds[4], {
+      email: "cara.converge@other.test",
+      normalizedName: "cara boundary",
+    });
+    await seedAttendeeFact(h.db, fileIds[4], {
+      email: "candidate.converge@acme.test",
+      normalizedName: "c boundary",
+    });
+
+    const supersededCandidate = await seedEntity(h.db, { name: "Old Superseded" });
+    const supersedingEntity = await seedEntity(h.db, { name: "Fresh Superseded" });
+    const supersededRow = await seedQueueRow(h.db, h.ownerId, {
+      name: "Fresh Superseded",
+      candidateEntityId: supersededCandidate,
+      candidateEntityIds: [supersededCandidate],
+      candidateScore: 0.8,
+    });
+
+    const mergeSurvivor = await seedEntity(h.db, { name: "Merge Survivor" });
+    const mergedCandidate = await seedEntity(h.db, {
+      name: "Merged Candidate",
+      mergedInto: mergeSurvivor,
+    });
+    const mergedRow = await seedQueueRow(h.db, h.ownerId, {
+      name: "Merged Proposal",
+      candidateEntityId: mergedCandidate,
+      candidateEntityIds: [mergedCandidate],
+      candidateScore: 0.7,
+    });
+
+    const deletedCandidate = await seedEntity(h.db, { name: "Deleted Candidate", deletedAt: new Date().toISOString() });
+    const clearedRow = await seedQueueRow(h.db, h.ownerId, {
+      name: "Deleted Proposal",
+      candidateEntityId: deletedCandidate,
+      candidateEntityIds: [deletedCandidate],
+      candidateScore: 0.6,
+    });
+
+    const rowIds = [coListedRow, supersededRow, mergedRow, clearedRow];
+    const beforeGraph = await graphFingerprint(h.db);
+    let previous = await queueState(h.db, rowIds);
+    let convergedAt: number | null = null;
+
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      await withAttendeeFactChunkSizeForTest(2, () => runPasses(h));
+      const current = await queueState(h.db, rowIds);
+      if (JSON.stringify(current) === JSON.stringify(previous)) {
+        convergedAt = attempt;
+        break;
+      }
+      previous = current;
+    }
+
+    expect(convergedAt).not.toBeNull();
+    expect(convergedAt).toBeGreaterThan(1);
+    expect(await graphFingerprint(h.db)).toBe(beforeGraph);
+
+    const convergedRows = new Map((await queueState(h.db, rowIds)).map((row) => [row.id, row]));
+    expect(convergedRows.get(coListedRow)?.pass_reason).toBe("co_listed_participants");
+    expect(convergedRows.get(supersededRow)?.candidate_entity_id).toBe(supersedingEntity);
+    expect(convergedRows.get(mergedRow)?.candidate_entity_id).toBe(mergeSurvivor);
+    expect(convergedRows.get(clearedRow)?.candidate_entity_id).toBeNull();
   });
 
   it("T8 leaves a row alone while a person has it open, and defers it once the freeze lapses", async () => {
