@@ -42,6 +42,7 @@ import { createAutomationRunsRepository } from "./db/repositories/automation-run
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConversationRepository } from "./db/repositories/conversations";
+import { createGraphPassRunRepository } from "./db/repositories/graph-pass-runs";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createLocalClaudeSessionRepository } from "./db/repositories/local-claude-sessions";
 import { createLocalDeviceRepository } from "./db/repositories/local-devices";
@@ -216,6 +217,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
     });
   } catch (err) {
     logger.error({ err }, "Failed to restore unfinished post-sync graph passes");
+  }
+
+  try {
+    const abandoned = await createGraphPassRunRepository(db).failUnfinishedQueueRuns();
+    if (abandoned > 0) logger.warn({ abandoned }, "Marked interrupted queue graph passes as failed");
+  } catch (err) {
+    logger.error({ err }, "Failed to close out interrupted queue graph passes");
   }
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.

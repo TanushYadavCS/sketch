@@ -42,7 +42,7 @@ export function createPostSyncCoordinator(
     while (dirty && pending.hasInputs()) {
       const snapshot = pending.take();
       const restoredRunId = restoredRunIds.shift();
-      const runId = runs ? await runs.start(snapshot, restoredRunId) : null;
+      const runId = runs ? await runs.start({ kind: "post_sync", ...snapshot }, restoredRunId) : null;
       dirty = false;
       try {
         await runPipeline({
@@ -85,8 +85,9 @@ export function createPostSyncCoordinator(
     },
     async restoreUnfinished(context) {
       if (!runs) return;
-      const unfinished = await runs.listUnfinished();
+      const unfinished = (await runs.listUnfinished()).filter((run) => run.inputSnapshot.kind === "post_sync");
       for (const run of unfinished) {
+        if (run.inputSnapshot.kind !== "post_sync") continue;
         pending.restore(run.inputSnapshot);
         restoredRunIds.push(run.id);
         dirty = true;

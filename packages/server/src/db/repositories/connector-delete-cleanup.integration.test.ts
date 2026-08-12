@@ -131,11 +131,11 @@ describe("connector delete relationship and review cleanup postgres", () => {
     const domainsRepo = createEntityDomainsRepository(db);
     const reviewRepo = createEntityReviewRepo(db);
     const relationshipIds = await domainsRepo.relationshipIdsWithEvidenceInFiles(["pg-cleanup-file"]);
-    const reviewIds = await reviewRepo.pendingReviewIdsWithEvidenceInFiles(["pg-cleanup-file"]);
+    const reviewIds = await reviewRepo.nonTerminalReviewIdsWithEvidenceInFiles(["pg-cleanup-file"]);
 
     await db.deleteFrom("indexed_files").where("id", "=", "pg-cleanup-file").execute();
     await expect(domainsRepo.deleteEmptyRelationshipsByIds(relationshipIds)).resolves.toBe(1);
-    await expect(reviewRepo.deleteEmptyPendingReviewsByIds(reviewIds)).resolves.toBe(1);
+    await expect(reviewRepo.deleteEmptyNonTerminalReviewsByIds(reviewIds)).resolves.toBe(1);
 
     await expect(db.selectFrom("entity_relationships").selectAll().execute()).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);

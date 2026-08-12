@@ -1314,6 +1314,7 @@ export interface EntityReviewQueueTable {
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
+  pass_reason: string | null;
   first_seen_at: Generated<string>;
   last_seen_at: Generated<string>;
   occurrence_count: Generated<number>;
