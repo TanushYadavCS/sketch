@@ -552,6 +552,7 @@ export class WhatsAppBackfillWorker {
           SELECT 1
           FROM conversation_slices AS slice
           WHERE slice.conversation_id = message.conversation_id
+            AND slice.status IN ('closed', 'open')
             AND message.id BETWEEN slice.first_message_id AND slice.last_message_id
             AND message.effective_at BETWEEN slice.started_at AND slice.ended_at
         )`,

@@ -12,7 +12,6 @@ import { createTestDb, createTestLogger, createTestPgDb } from "../test-utils";
 import { runEnrichment } from "./enrichment";
 import type { GeminiGenerator } from "./gemini-generate";
 import { runConnectorSync } from "./sync";
-import { createWhatsAppConnector } from "./whatsapp";
 import { emitWhatsAppSyncedItems, reconcileWhatsAppGroupAcls } from "./whatsapp-salience";
 
 const RAW_IDENTIFIER_PATTERN = /(?:\+?[1-9]\d{9,14}\b|@s\.whatsapp\.net|@lid)/iu;
@@ -28,28 +27,8 @@ interface SeededSlice {
   teammateUserId: string | null;
 }
 
-interface FakeGenerator extends GeminiGenerator {
-  calls: string[];
-}
-
 function fakeLogger(): Logger {
   return { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } as unknown as Logger;
-}
-
-function fakeGenerator(responses: Array<unknown | Error>): FakeGenerator {
-  const calls: string[] = [];
-  return {
-    calls,
-    async generate() {
-      return "";
-    },
-    async generateJSON<T>(prompt: string) {
-      const response = responses[calls.length];
-      calls.push(prompt);
-      if (response instanceof Error) throw response;
-      return response as T;
-    },
-  };
 }
 
 async function seedConnectorConfig(db: Kysely<DB>) {
@@ -78,6 +57,9 @@ async function seedSlice(
   options: {
     teammate?: boolean;
     verdict?: "kept" | "dropped" | null;
+    status?: "open" | "closed";
+    chunkMinMessages?: number | null;
+    chunkProvisionalRefreshMessages?: number | null;
     salienceSignals?: string | null;
     text?: string;
     teammatePhone?: string;
@@ -92,7 +74,10 @@ async function seedSlice(
     description: null,
     updated_at: "2026-07-07T09:00:00.000Z",
   });
-  await groups.setIndexEnabled(groupJid, true);
+  await groups.setIndexEnabled(groupJid, true, {
+    chunkMinMessages: options.chunkMinMessages,
+    chunkProvisionalRefreshMessages: options.chunkProvisionalRefreshMessages,
+  });
 
   const teammateUserId = options.teammate === false ? null : (options.teammateUserId ?? `teammate-${randomUUID()}`);
   const teammatePhone = options.teammatePhone ?? nextTeammatePhone();
@@ -159,6 +144,7 @@ async function seedSlice(
     rosterSnapshot: "[]",
     salienceVerdict: options.verdict ?? null,
     salienceSignals: options.salienceSignals ?? null,
+    status: options.status,
   });
 
   return {
@@ -169,21 +155,6 @@ async function seedSlice(
     teammateEmail,
     teammateUserId,
   };
-}
-
-async function collectWhatsAppItems(db: Kysely<DB>, generator?: GeminiGenerator | null) {
-  const items = [];
-  for await (const item of createWhatsAppConnector().sync({
-    db,
-    credentials: { type: "system" },
-    scopeConfig: {},
-    cursor: null,
-    logger: fakeLogger(),
-    salienceGenerator: generator,
-  })) {
-    items.push(item);
-  }
-  return items;
 }
 
 async function collectEmittedWhatsAppItems(db: Kysely<DB>, options: { emissionRefreshDays?: number; now?: Date } = {}) {
@@ -259,62 +230,158 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       await db.destroy();
     });
 
-    it("persists a kept verdict, emits a scoped SyncedItem, records candidates, and never re-judges", async () => {
-      const seeded = await seedSlice(db);
-      const generator = fakeGenerator([
-        {
-          salient: true,
-          signals: ["decision", "named_entity"],
-          entities: [
-            { name: "Project Atlas", type: "project" },
-            { name: "External Buyer", type: "person" },
-          ],
-        },
-      ]);
+    it("emits a closed LLM-kept slice once with group scope and never re-judges", async () => {
+      const seeded = await seedSlice(db, {
+        verdict: "kept",
+        status: "closed",
+        salienceSignals: JSON.stringify({ boundary: "llm" }),
+      });
+      const config = await seedConnectorConfig(db);
 
-      const firstItems = await collectWhatsAppItems(db, generator);
-      const secondItems = await collectWhatsAppItems(db, generator);
+      const firstSync = await runConnectorSync(db, config.id, createTestLogger());
+      const secondSync = await runConnectorSync(db, config.id, createTestLogger());
       const slice = await db
         .selectFrom("conversation_slices")
         .selectAll()
         .where("id", "=", seeded.sliceId)
         .executeTakeFirstOrThrow();
-      const candidates = await db.selectFrom("whatsapp_identity_candidates").selectAll().execute();
+      const file = await db
+        .selectFrom("indexed_files")
+        .selectAll()
+        .where("provider_file_id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      const scopeMembers = await db
+        .selectFrom("access_scope_members")
+        .innerJoin("access_scopes", "access_scopes.id", "access_scope_members.access_scope_id")
+        .select(["access_scope_members.principal_value", "access_scopes.provider_scope_id"])
+        .where("access_scopes.provider_scope_id", "=", seeded.groupJid)
+        .execute();
 
-      expect(generator.calls).toHaveLength(1);
-      expect(firstItems).toHaveLength(1);
-      expect(secondItems).toHaveLength(1);
+      expect(firstSync.itemsCreated).toBe(1);
+      expect(secondSync.itemsCreated).toBe(0);
       expect(slice.salience_verdict).toBe("kept");
-      expect(slice.salience_signals).toContain("named_entity");
-      expect(firstItems[0]).toMatchObject({
-        providerFileId: seeded.sliceId,
-        fileType: "whatsapp_conversation_slice",
-        contentCategory: "document",
-        threadId: String(seeded.conversationId),
-        accessScope: {
-          scopeType: "whatsapp_group",
-          providerScopeId: seeded.groupJid,
-          members: expect.arrayContaining([
-            { type: "phone", value: seeded.teammatePhone },
-            { type: "phone", value: "+15550000002" },
-            { type: "email", value: seeded.teammateEmail },
+      expect(file.provider_file_id).toBe(seeded.sliceId);
+      expect(file.content).toContain("Group: ");
+      expect(file.content).not.toContain("WhatsApp roster:");
+      expect(file.content).toContain("Tara Teammate:");
+      expect(file.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
+      expect(scopeMembers.map((row) => row.principal_value)).toEqual(
+        expect.arrayContaining([seeded.teammatePhone, "+15550000002", seeded.teammateEmail]),
+      );
+    });
+
+    it("materializes and refreshes one open slice by growth threshold, then emits a boundary shrink", async () => {
+      const seeded = await seedSlice(db, {
+        status: "open",
+        verdict: "kept",
+        chunkMinMessages: 1,
+        chunkProvisionalRefreshMessages: 2,
+      });
+      const config = await seedConnectorConfig(db);
+      const liveNow = new Date().toISOString();
+      await db
+        .updateTable("conversation_messages")
+        .set({ received_at: liveNow })
+        .where("conversation_id", "=", seeded.conversationId)
+        .execute();
+      await setSliceWindow(db, seeded.sliceId, liveNow, liveNow);
+      const firstSync = await runConnectorSync(db, config.id, createTestLogger());
+      const before = await db
+        .selectFrom("indexed_files")
+        .selectAll()
+        .where("provider_file_id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      const messages = createConversationRepository(db);
+      const third = await messages.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:3`,
+        senderJid: "15550000002@s.whatsapp.net",
+        senderName: "External Buyer",
+        text: "one more update",
+        receivedAt: "2026-07-07T09:02:00.000Z",
+      });
+      await db
+        .updateTable("conversation_slices")
+        .set({
+          last_message_id: third.row.id,
+          ended_at: "2026-07-07T09:02:00.000Z",
+          message_count: 3,
+          denoised_message_ids: JSON.stringify([slice.first_message_id, slice.last_message_id, third.row.id]),
+        })
+        .where("id", "=", seeded.sliceId)
+        .execute();
+      await expect(collectEmittedWhatsAppItems(db)).resolves.toEqual([]);
+
+      const fourth = await messages.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:4`,
+        senderJid: "15550000002@s.whatsapp.net",
+        senderName: "External Buyer",
+        text: "second update",
+        receivedAt: "2026-07-07T09:03:00.000Z",
+      });
+      await db
+        .updateTable("conversation_slices")
+        .set({
+          last_message_id: fourth.row.id,
+          ended_at: "2026-07-07T09:03:00.000Z",
+          message_count: 4,
+          denoised_message_ids: JSON.stringify([
+            slice.first_message_id,
+            slice.last_message_id,
+            third.row.id,
+            fourth.row.id,
           ]),
-        },
+        })
+        .where("id", "=", seeded.sliceId)
+        .execute();
+      const grown = await collectEmittedWhatsAppItems(db);
+
+      expect(firstSync.itemsCreated).toBe(1);
+      expect(before.access_scope_id).not.toBeNull();
+      const scopeMembers = await db
+        .selectFrom("access_scope_members")
+        .selectAll()
+        .where("access_scope_id", "=", before.access_scope_id)
+        .execute();
+      expect(scopeMembers.length).toBeGreaterThanOrEqual(2);
+      expect(grown).toHaveLength(1);
+      expect(grown[0]?.providerFileId).toBe(seeded.sliceId);
+      expect(grown[0]?.contentHash).not.toBe(before.content_hash);
+      await createWhatsAppGroupRepository(db).setIndexEnabled(seeded.groupJid, true, {
+        chunkIdleCloseHours: 100_000,
       });
-      expect(firstItems[0]?.content).toContain("Group: ");
-      expect(firstItems[0]?.content).not.toContain("WhatsApp roster:");
-      expect(firstItems[0]?.content).toContain("Tara Teammate:");
-      expect(firstItems[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
-      expect(firstItems[0]?.entitySeeds).toBeUndefined();
-      expect(firstItems[0]?.personSeeds).toBeUndefined();
-      expect(firstItems[0]?.attendees).toBeUndefined();
-      expect(candidates).toHaveLength(1);
-      expect(candidates[0]).toMatchObject({
-        group_jid: seeded.groupJid,
-        kept_slice_count: 1,
-        last_slice_id: seeded.sliceId,
-      });
-      expect(candidates[0]?.candidate_ref).not.toMatch(RAW_IDENTIFIER_PATTERN);
+      const materializedGrowth = await runConnectorSync(db, config.id, createTestLogger());
+      const grownFile = await db
+        .selectFrom("indexed_files")
+        .select("content_hash")
+        .where("id", "=", before.id)
+        .executeTakeFirstOrThrow();
+      expect(materializedGrowth.itemsUpdated).toBe(1);
+      expect(grownFile.content_hash).toBe(grown[0]?.contentHash);
+
+      await db
+        .updateTable("conversation_slices")
+        .set({
+          last_message_id: slice.last_message_id,
+          ended_at: slice.ended_at,
+          message_count: 2,
+          denoised_message_ids: JSON.stringify([slice.first_message_id, slice.last_message_id]),
+        })
+        .where("id", "=", seeded.sliceId)
+        .execute();
+      const shrunk = await collectEmittedWhatsAppItems(db);
+
+      expect(shrunk).toHaveLength(1);
+      expect(shrunk[0]?.providerFileId).toBe(seeded.sliceId);
+      await expect(
+        db.selectFrom("indexed_files").select("provider_file_id").where("id", "=", before.id).executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ provider_file_id: seeded.sliceId });
     });
 
     it("emits zero structural_seed facts for a kept slice with salience structural entities", async () => {
@@ -415,39 +482,20 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(new Set(llmFacts.map((fact) => fact.subject_name)).size).toBe(llmFacts.length);
     });
 
-    it("keeps gate, scoping, privacy, roster, and zero-task behavior unchanged", async () => {
-      const kept = await seedSlice(db, { text: "We decided Project Atlas starts Monday with 0 tasks assigned." });
-      const dropped = await seedSlice(db, { text: "haha okay" });
+    it("emits kept closed slices without a WhatsApp salience gate and preserves privacy", async () => {
+      const kept = await seedSlice(db, {
+        verdict: "kept",
+        salienceSignals: JSON.stringify({ boundary: "llm" }),
+        text: "We decided Project Atlas starts Monday with 0 tasks assigned.",
+      });
+      const dropped = await seedSlice(db, { verdict: "dropped", text: "haha okay" });
       const unscoped = await seedSlice(db, {
         teammate: false,
         verdict: "kept",
-        salienceSignals: JSON.stringify({
-          signals: ["decision", "named_entity"],
-          entities: [{ name: "Project Atlas", type: "project" }],
-        }),
+        salienceSignals: JSON.stringify({ boundary: "llm" }),
       });
-      const calls: string[] = [];
-      const generator: FakeGenerator = {
-        calls,
-        async generate() {
-          return "";
-        },
-        async generateJSON<T>(prompt: string) {
-          calls.push(prompt);
-          const salient = prompt.includes("Project Atlas");
-          return (
-            salient
-              ? {
-                  salient: true,
-                  signals: ["decision", "named_entity"],
-                  entities: [{ name: "Project Atlas", type: "project" }],
-                }
-              : { salient: false, signals: [], entities: [] }
-          ) as T;
-        },
-      };
-
-      const items = await collectWhatsAppItems(db, generator);
+      const config = await seedConnectorConfig(db);
+      const result = await runConnectorSync(db, config.id, createTestLogger());
       const keptSlice = await db
         .selectFrom("conversation_slices")
         .selectAll()
@@ -458,71 +506,61 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .selectAll()
         .where("id", "=", dropped.sliceId)
         .executeTakeFirstOrThrow();
-      const unscopedItems = await collectEmittedWhatsAppItems(db);
+      const unscopedSlice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", unscoped.sliceId)
+        .executeTakeFirstOrThrow();
 
-      expect(generator.calls).toHaveLength(2);
+      expect(result.itemsCreated).toBe(2);
       expect(keptSlice.salience_verdict).toBe("kept");
-      expect(keptSlice.salience_signals).toContain("Project Atlas");
       expect(droppedSlice.salience_verdict).toBe("dropped");
-      expect(items.map((item) => item.providerFileId).sort()).toEqual([kept.sliceId, unscoped.sliceId].sort());
-      expect(unscopedItems.map((item) => item.providerFileId)).toContain(unscoped.sliceId);
-      const keptItem = items.find((item) => item.providerFileId === kept.sliceId);
-      expect(keptItem?.accessScope?.members).toEqual(
-        expect.arrayContaining([
-          { type: "phone", value: kept.teammatePhone },
-          { type: "phone", value: "+15550000002" },
-          { type: "email", value: kept.teammateEmail },
-        ]),
-      );
-      expect(keptItem?.content).toContain("Group: ");
-      expect(keptItem?.content).not.toContain("WhatsApp roster:");
-      expect(keptItem?.content).toContain("Tara Teammate:");
-      expect(keptItem?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
+      expect(unscopedSlice.salience_verdict).toBe("kept");
+      expect(keptSlice.indexed_file_id).not.toBeNull();
+      expect(droppedSlice.indexed_file_id).toBeNull();
+      expect(unscopedSlice.indexed_file_id).not.toBeNull();
+      const keptFile = await db
+        .selectFrom("indexed_files")
+        .select("content")
+        .where("id", "=", keptSlice.indexed_file_id)
+        .executeTakeFirstOrThrow();
+      expect(keptFile.content).toContain("Group: ");
+      expect(keptFile.content).not.toContain("WhatsApp roster:");
+      expect(keptFile.content).toContain("Tara Teammate:");
+      expect(keptFile.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
     });
 
-    it("persists a dropped verdict and emits no item", async () => {
-      const seeded = await seedSlice(db, { text: "haha okay" });
-      const generator = fakeGenerator([{ salient: false, signals: [], entities: [] }]);
+    it("does not emit a non-kept slice when the LLM path has no kept boundary", async () => {
+      const seeded = await seedSlice(db, { verdict: "dropped", text: "haha okay" });
+      const config = await seedConnectorConfig(db);
 
-      const items = await collectWhatsAppItems(db, generator);
+      const result = await runConnectorSync(db, config.id, createTestLogger());
       const slice = await db
         .selectFrom("conversation_slices")
         .selectAll()
         .where("id", "=", seeded.sliceId)
         .executeTakeFirstOrThrow();
 
-      expect(items).toEqual([]);
+      expect(result.itemsCreated).toBe(0);
       expect(slice.salience_verdict).toBe("dropped");
       await expect(db.selectFrom("indexed_files").selectAll().execute()).resolves.toEqual([]);
     });
 
-    it("leaves a failed LLM verdict pending and retries it on the next run", async () => {
-      const seeded = await seedSlice(db);
-      const generator = fakeGenerator([
-        new Error("fixture outage"),
-        { salient: true, signals: ["decision"], entities: [] },
-      ]);
+    it("leaves a pending slice untouched when the WhatsApp chunker generator is unavailable", async () => {
+      const seeded = await seedSlice(db, { verdict: null });
+      const config = await seedConnectorConfig(db);
 
-      await expect(collectWhatsAppItems(db, generator)).resolves.toEqual([]);
-      await expect(
-        db
-          .selectFrom("conversation_slices")
-          .select(["salience_verdict", "salience_claim_token", "salience_claimed_at"])
-          .where("id", "=", seeded.sliceId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toMatchObject({ salience_verdict: null, salience_claim_token: null, salience_claimed_at: null });
-
-      const retriedItems = await collectWhatsAppItems(db, generator);
+      const result = await runConnectorSync(db, config.id, createTestLogger());
       const slice = await db
         .selectFrom("conversation_slices")
         .select("salience_verdict")
         .where("id", "=", seeded.sliceId)
         .executeTakeFirstOrThrow();
 
-      expect(generator.calls).toHaveLength(2);
-      expect(retriedItems).toHaveLength(1);
-      expect(slice.salience_verdict).toBe("kept");
+      expect(result.itemsCreated).toBe(0);
+      expect(slice.salience_verdict).toBeNull();
+      await expect(db.selectFrom("indexed_files").selectAll().execute()).resolves.toEqual([]);
     });
 
     it("keeps a phone-only group when no teammate email resolves", async () => {

@@ -1,15 +1,15 @@
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import { purgeConversationalFactsForFile } from "./smart-enrichment";
 import type { BrowseResult, Connector, ConnectorCredentials, SyncedItem } from "./types";
 import {
   type WhatsAppBackfillGraphKnobs,
   type WhatsAppChunkerKnobs,
+  type WhatsAppLlmChunkerKnobs,
   chunkWhatsAppIndexingGroups,
 } from "./whatsapp-chunker";
 import {
-  DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT,
   WHATSAPP_EMISSION_REFRESH_DAYS,
   emitWhatsAppSyncedItems,
-  processWhatsAppSalience,
   reconcileWhatsAppGroupAcls,
 } from "./whatsapp-salience";
 
@@ -32,12 +32,32 @@ function chunkerDefaultsFromScopeConfig(scopeConfig: Record<string, unknown>): P
   };
 }
 
-function salienceBatchLimitFromScopeConfig(scopeConfig: Record<string, unknown>): number {
-  return positiveInteger(scopeConfig.salienceBatchLimit) ?? DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT;
-}
-
 function emissionRefreshDaysFromScopeConfig(scopeConfig: Record<string, unknown>): number {
   return positiveInteger(scopeConfig.emissionRefreshDays) ?? WHATSAPP_EMISSION_REFRESH_DAYS;
+}
+
+function llmChunkerDefaultsFromScopeConfig(scopeConfig: Record<string, unknown>): Partial<WhatsAppLlmChunkerKnobs> {
+  const reasoningEffort = scopeConfig.chunkReasoningEffort;
+  const model = typeof scopeConfig.chunkModel === "string" ? scopeConfig.chunkModel.trim() : undefined;
+  return {
+    windowMessages: positiveInteger(scopeConfig.chunkWindowMessages),
+    windowTokens: positiveInteger(scopeConfig.chunkWindowTokens),
+    minMessages: positiveInteger(scopeConfig.chunkMinMessages),
+    targetMessages: positiveInteger(scopeConfig.chunkTargetMessages),
+    maxMessages: positiveInteger(scopeConfig.chunkMaxMessages),
+    maxTokens: positiveInteger(scopeConfig.chunkMaxTokens),
+    tickMinutes: positiveInteger(scopeConfig.chunkTickMinutes),
+    idleCloseHours: positiveInteger(scopeConfig.chunkIdleCloseHours),
+    provisionalRefreshMessages: positiveInteger(scopeConfig.chunkProvisionalRefreshMessages),
+    model: model || null,
+    reasoningEffort:
+      reasoningEffort === "low" || reasoningEffort === "medium" || reasoningEffort === "high"
+        ? reasoningEffort
+        : undefined,
+    burstThresholdMessages: positiveInteger(scopeConfig.chunkBurstThresholdMessages) ?? null,
+    topicRegistryCap: positiveInteger(scopeConfig.chunkTopicRegistryCap),
+    groupWorkerPool: positiveInteger(scopeConfig.chunkGroupWorkerPool),
+  };
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
@@ -90,7 +110,7 @@ export function createWhatsAppConnector(): Connector {
       credentials,
       logger,
       scopeConfig,
-      salienceGenerator,
+      whatsappChunkerGenerate,
     }): AsyncGenerator<SyncedItem> {
       assertSystemCredentials(credentials);
       if (!db) {
@@ -103,16 +123,12 @@ export function createWhatsAppConnector(): Connector {
         groups,
         logger,
         defaultKnobs: chunkerDefaultsFromScopeConfig(scopeConfig),
+        defaultLlmKnobs: llmChunkerDefaultsFromScopeConfig(scopeConfig),
+        llmGenerate: whatsappChunkerGenerate,
+        onOpenChunkShrunk: (indexedFileId) => purgeConversationalFactsForFile(db, indexedFileId),
         backfillGraphKnobs: backfillGraphKnobsFromScopeConfig(scopeConfig),
       });
-      const salienceSummary = await processWhatsAppSalience({
-        db,
-        groups,
-        logger,
-        generator: salienceGenerator,
-        batchLimit: salienceBatchLimitFromScopeConfig(scopeConfig),
-      });
-      let skippedNoScope = salienceSummary.skippedNoScope;
+      let skippedNoScope = 0;
       let emitted = 0;
       for await (const item of emitWhatsAppSyncedItems({
         db,

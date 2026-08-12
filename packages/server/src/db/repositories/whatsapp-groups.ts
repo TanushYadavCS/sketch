@@ -24,12 +24,41 @@ export interface WhatsAppGroupIndexingConfig {
   sliceGapMinutes: number | null;
   sliceMaxAgeMinutes: number | null;
   sliceMaxMessages: number | null;
+  chunkWindowMessages?: number | null;
+  chunkWindowTokens?: number | null;
+  chunkMinMessages?: number | null;
+  chunkTargetMessages?: number | null;
+  chunkMaxMessages?: number | null;
+  chunkMaxTokens?: number | null;
+  chunkTickMinutes?: number | null;
+  chunkIdleCloseHours?: number | null;
+  chunkProvisionalRefreshMessages?: number | null;
+  chunkModel?: string | null;
+  chunkReasoningEffort?: string | null;
+  chunkBurstThresholdMessages?: number | null;
+  chunkTopicRegistryCap?: number | null;
+  chunkGroupWorkerPool?: number | null;
+  chunkLastLlmAttemptAt?: string | null;
 }
 
 export interface WhatsAppGroupIndexingOverrides {
   sliceGapMinutes?: number | null;
   sliceMaxAgeMinutes?: number | null;
   sliceMaxMessages?: number | null;
+  chunkWindowMessages?: number | null;
+  chunkWindowTokens?: number | null;
+  chunkMinMessages?: number | null;
+  chunkTargetMessages?: number | null;
+  chunkMaxMessages?: number | null;
+  chunkMaxTokens?: number | null;
+  chunkTickMinutes?: number | null;
+  chunkIdleCloseHours?: number | null;
+  chunkProvisionalRefreshMessages?: number | null;
+  chunkModel?: string | null;
+  chunkReasoningEffort?: string | null;
+  chunkBurstThresholdMessages?: number | null;
+  chunkTopicRegistryCap?: number | null;
+  chunkGroupWorkerPool?: number | null;
 }
 
 export interface WhatsAppGroupMemberLabelInput {
@@ -130,6 +159,21 @@ function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
     sliceGapMinutes: row.slice_gap_minutes,
     sliceMaxAgeMinutes: row.slice_max_age_minutes,
     sliceMaxMessages: row.slice_max_messages,
+    chunkWindowMessages: row.chunk_window_messages,
+    chunkWindowTokens: row.chunk_window_tokens,
+    chunkMinMessages: row.chunk_min_messages,
+    chunkTargetMessages: row.chunk_target_messages,
+    chunkMaxMessages: row.chunk_max_messages,
+    chunkMaxTokens: row.chunk_max_tokens,
+    chunkTickMinutes: row.chunk_tick_minutes,
+    chunkIdleCloseHours: row.chunk_idle_close_hours,
+    chunkProvisionalRefreshMessages: row.chunk_provisional_refresh_messages,
+    chunkModel: row.chunk_model,
+    chunkReasoningEffort: row.chunk_reasoning_effort,
+    chunkBurstThresholdMessages: row.chunk_burst_threshold_messages,
+    chunkTopicRegistryCap: row.chunk_topic_registry_cap,
+    chunkGroupWorkerPool: row.chunk_group_worker_pool,
+    chunkLastLlmAttemptAt: row.chunk_last_llm_attempt_at,
   };
 }
 
@@ -278,6 +322,25 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       if (overrides.sliceGapMinutes !== undefined) values.slice_gap_minutes = overrides.sliceGapMinutes;
       if (overrides.sliceMaxAgeMinutes !== undefined) values.slice_max_age_minutes = overrides.sliceMaxAgeMinutes;
       if (overrides.sliceMaxMessages !== undefined) values.slice_max_messages = overrides.sliceMaxMessages;
+      if (overrides.chunkWindowMessages !== undefined) values.chunk_window_messages = overrides.chunkWindowMessages;
+      if (overrides.chunkWindowTokens !== undefined) values.chunk_window_tokens = overrides.chunkWindowTokens;
+      if (overrides.chunkMinMessages !== undefined) values.chunk_min_messages = overrides.chunkMinMessages;
+      if (overrides.chunkTargetMessages !== undefined) values.chunk_target_messages = overrides.chunkTargetMessages;
+      if (overrides.chunkMaxMessages !== undefined) values.chunk_max_messages = overrides.chunkMaxMessages;
+      if (overrides.chunkMaxTokens !== undefined) values.chunk_max_tokens = overrides.chunkMaxTokens;
+      if (overrides.chunkTickMinutes !== undefined) values.chunk_tick_minutes = overrides.chunkTickMinutes;
+      if (overrides.chunkIdleCloseHours !== undefined) values.chunk_idle_close_hours = overrides.chunkIdleCloseHours;
+      if (overrides.chunkProvisionalRefreshMessages !== undefined) {
+        values.chunk_provisional_refresh_messages = overrides.chunkProvisionalRefreshMessages;
+      }
+      if (overrides.chunkModel !== undefined) values.chunk_model = overrides.chunkModel;
+      if (overrides.chunkReasoningEffort !== undefined) values.chunk_reasoning_effort = overrides.chunkReasoningEffort;
+      if (overrides.chunkBurstThresholdMessages !== undefined) {
+        values.chunk_burst_threshold_messages = overrides.chunkBurstThresholdMessages;
+      }
+      if (overrides.chunkTopicRegistryCap !== undefined)
+        values.chunk_topic_registry_cap = overrides.chunkTopicRegistryCap;
+      if (overrides.chunkGroupWorkerPool !== undefined) values.chunk_group_worker_pool = overrides.chunkGroupWorkerPool;
       /**
        * Deliberately not wrapped in an explicit transaction: repository
        * methods run inside shared-PGlite test transactions where an inner

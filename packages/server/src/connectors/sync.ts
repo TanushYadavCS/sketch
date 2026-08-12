@@ -143,6 +143,20 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_GAP_MINUTES"
       | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
       | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "WHATSAPP_CHUNK_WINDOW_MESSAGES"
+      | "WHATSAPP_CHUNK_WINDOW_TOKENS"
+      | "WHATSAPP_CHUNK_MIN_MESSAGES"
+      | "WHATSAPP_CHUNK_TARGET_MESSAGES"
+      | "WHATSAPP_CHUNK_MAX_MESSAGES"
+      | "WHATSAPP_CHUNK_MAX_TOKENS"
+      | "WHATSAPP_CHUNK_TICK_MINUTES"
+      | "WHATSAPP_CHUNK_IDLE_CLOSE_HOURS"
+      | "WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES"
+      | "WHATSAPP_CHUNK_MODEL"
+      | "WHATSAPP_CHUNK_REASONING_EFFORT"
+      | "WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES"
+      | "WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP"
+      | "WHATSAPP_CHUNK_GROUP_WORKER_POOL"
       | "SLACK_ENTITY_SYNC"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
@@ -204,6 +218,26 @@ export async function runConnectorSync(
               sliceGapMinutes: storedScopeConfig.sliceGapMinutes ?? appConfig?.WHATSAPP_SLICE_GAP_MINUTES,
               sliceMaxAgeMinutes: storedScopeConfig.sliceMaxAgeMinutes ?? appConfig?.WHATSAPP_SLICE_MAX_AGE_MINUTES,
               sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
+              chunkWindowMessages: storedScopeConfig.chunkWindowMessages ?? appConfig?.WHATSAPP_CHUNK_WINDOW_MESSAGES,
+              chunkWindowTokens: storedScopeConfig.chunkWindowTokens ?? appConfig?.WHATSAPP_CHUNK_WINDOW_TOKENS,
+              chunkMinMessages: storedScopeConfig.chunkMinMessages ?? appConfig?.WHATSAPP_CHUNK_MIN_MESSAGES,
+              chunkTargetMessages: storedScopeConfig.chunkTargetMessages ?? appConfig?.WHATSAPP_CHUNK_TARGET_MESSAGES,
+              chunkMaxMessages: storedScopeConfig.chunkMaxMessages ?? appConfig?.WHATSAPP_CHUNK_MAX_MESSAGES,
+              chunkMaxTokens: storedScopeConfig.chunkMaxTokens ?? appConfig?.WHATSAPP_CHUNK_MAX_TOKENS,
+              chunkTickMinutes: storedScopeConfig.chunkTickMinutes ?? appConfig?.WHATSAPP_CHUNK_TICK_MINUTES,
+              chunkIdleCloseHours: storedScopeConfig.chunkIdleCloseHours ?? appConfig?.WHATSAPP_CHUNK_IDLE_CLOSE_HOURS,
+              chunkProvisionalRefreshMessages:
+                storedScopeConfig.chunkProvisionalRefreshMessages ??
+                appConfig?.WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES,
+              chunkModel: storedScopeConfig.chunkModel ?? appConfig?.WHATSAPP_CHUNK_MODEL,
+              chunkReasoningEffort:
+                storedScopeConfig.chunkReasoningEffort ?? appConfig?.WHATSAPP_CHUNK_REASONING_EFFORT,
+              chunkBurstThresholdMessages:
+                storedScopeConfig.chunkBurstThresholdMessages ?? appConfig?.WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES,
+              chunkTopicRegistryCap:
+                storedScopeConfig.chunkTopicRegistryCap ?? appConfig?.WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP,
+              chunkGroupWorkerPool:
+                storedScopeConfig.chunkGroupWorkerPool ?? appConfig?.WHATSAPP_CHUNK_GROUP_WORKER_POOL,
               salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
               emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
               backfillGraphPageMessages:
@@ -310,6 +344,10 @@ export async function runConnectorSync(
             logger: syncLogger,
           })
         : null;
+    const whatsappChunkerGenerate = salienceGenerator
+      ? (prompt: string, opts: Parameters<NonNullable<typeof salienceGenerator>["generate"]>[1]) =>
+          salienceGenerator.generate(prompt, opts)
+      : undefined;
 
     for await (const item of connector.sync({
       db,
@@ -322,6 +360,7 @@ export async function runConnectorSync(
       ownerEmail,
       resolveNameToEmail,
       salienceGenerator,
+      whatsappChunkerGenerate,
       slackIndexing: options.slackIndexingFacade ?? null,
       appConfig: {
         SLACK_ENTITY_SYNC: appConfig?.SLACK_ENTITY_SYNC,
@@ -626,6 +665,20 @@ export interface SyncSchedulerDeps {
       | "TEAMS_MAX_INFLIGHT"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
+      | "WHATSAPP_CHUNK_WINDOW_MESSAGES"
+      | "WHATSAPP_CHUNK_WINDOW_TOKENS"
+      | "WHATSAPP_CHUNK_MIN_MESSAGES"
+      | "WHATSAPP_CHUNK_TARGET_MESSAGES"
+      | "WHATSAPP_CHUNK_MAX_MESSAGES"
+      | "WHATSAPP_CHUNK_MAX_TOKENS"
+      | "WHATSAPP_CHUNK_TICK_MINUTES"
+      | "WHATSAPP_CHUNK_IDLE_CLOSE_HOURS"
+      | "WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES"
+      | "WHATSAPP_CHUNK_MODEL"
+      | "WHATSAPP_CHUNK_REASONING_EFFORT"
+      | "WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES"
+      | "WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP"
+      | "WHATSAPP_CHUNK_GROUP_WORKER_POOL"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"

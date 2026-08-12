@@ -49,7 +49,6 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("inprocess");
         expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(3901);
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
-        expect(result.data.WHATSAPP_LLM_CHUNKING_ENABLED).toBe(false);
         expect(result.data.WHATSAPP_CHUNK_WINDOW_MESSAGES).toBe(250);
         expect(result.data.WHATSAPP_CHUNK_WINDOW_TOKENS).toBe(7500);
         expect(result.data.WHATSAPP_CHUNK_MIN_MESSAGES).toBe(10);
@@ -192,7 +191,6 @@ describe("configSchema", () => {
 
     it("parses WhatsApp LLM chunking configuration", () => {
       const result = configSchema.safeParse({
-        WHATSAPP_LLM_CHUNKING_ENABLED: "true",
         WHATSAPP_CHUNK_WINDOW_MESSAGES: "200",
         WHATSAPP_CHUNK_WINDOW_TOKENS: "6000",
         WHATSAPP_CHUNK_MIN_MESSAGES: "12",
@@ -211,7 +209,6 @@ describe("configSchema", () => {
 
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.WHATSAPP_LLM_CHUNKING_ENABLED).toBe(true);
         expect(result.data.WHATSAPP_CHUNK_WINDOW_MESSAGES).toBe(200);
         expect(result.data.WHATSAPP_CHUNK_WINDOW_TOKENS).toBe(6000);
         expect(result.data.WHATSAPP_CHUNK_MIN_MESSAGES).toBe(12);

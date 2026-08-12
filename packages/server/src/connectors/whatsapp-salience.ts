@@ -24,6 +24,10 @@ import {
   WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
   toEmailPrincipals,
 } from "./types";
+import {
+  DEFAULT_WHATSAPP_LLM_CHUNK_MIN_MESSAGES,
+  DEFAULT_WHATSAPP_LLM_CHUNK_PROVISIONAL_REFRESH_MESSAGES,
+} from "./whatsapp-chunker";
 
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
 export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
@@ -80,6 +84,8 @@ interface SliceContext {
   conversationId: number;
   groupJid: string;
   groupName: string;
+  chunkMinMessages?: number | null;
+  chunkProvisionalRefreshMessages?: number | null;
 }
 
 interface RenderedSlice {
@@ -341,6 +347,8 @@ async function listKeptSliceContexts(
       "conversations.provider_conversation_id as group_jid",
       "conversations.display_name as conversation_display_name",
       "whatsapp_groups.name as group_name",
+      "whatsapp_groups.chunk_min_messages as chunk_min_messages",
+      "whatsapp_groups.chunk_provisional_refresh_messages as chunk_provisional_refresh_messages",
     ])
     .where("conversations.platform", "=", "whatsapp")
     .where("conversations.kind", "=", "group")
@@ -349,6 +357,7 @@ async function listKeptSliceContexts(
     .where((eb) =>
       eb.or([
         eb("conversation_slices.indexed_file_id", "is", null),
+        eb("conversation_slices.status", "=", "open"),
         eb("conversation_slices.ended_at", ">=", refreshCutoff),
       ]),
     )
@@ -361,6 +370,8 @@ async function listKeptSliceContexts(
     conversationId: row.conversation_id,
     groupJid: row.group_jid,
     groupName: row.group_name ?? row.conversation_display_name ?? "WhatsApp group",
+    chunkMinMessages: row.chunk_min_messages,
+    chunkProvisionalRefreshMessages: row.chunk_provisional_refresh_messages,
   }));
 }
 
@@ -535,6 +546,11 @@ function sourcePathForSlice(context: SliceContext): string {
   return `whatsapp://slice/${context.slice.id}?${params.toString()}`;
 }
 
+function renderedMessageCount(content: string | null): number {
+  const transcript = content?.split("\n\nTranscript:\n")[1] ?? "";
+  return transcript ? transcript.split("\n").length : 0;
+}
+
 async function syncedItemForKeptSlice(
   db: Kysely<DB>,
   context: SliceContext,
@@ -558,6 +574,29 @@ async function syncedItemForKeptSlice(
   }
   const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
   const content = rendered.content;
+  const contentHash = stableContentHash(content);
+  if (context.slice.status === "open") {
+    const minMessages = context.chunkMinMessages ?? DEFAULT_WHATSAPP_LLM_CHUNK_MIN_MESSAGES;
+    if (context.slice.message_count < minMessages) return { item: null, skippedNoScope: false };
+    const indexedFileId = context.slice.indexed_file_id ?? (await findSliceFileId(db, context.slice.id));
+    if (indexedFileId) {
+      const existing = await db
+        .selectFrom("indexed_files")
+        .select(["content_hash", "content"])
+        .where("id", "=", indexedFileId)
+        .executeTakeFirst();
+      if (existing?.content_hash === contentHash) return { item: null, skippedNoScope: false };
+      const previousMessageCount = renderedMessageCount(existing?.content ?? null);
+      const refreshMessages =
+        context.chunkProvisionalRefreshMessages ?? DEFAULT_WHATSAPP_LLM_CHUNK_PROVISIONAL_REFRESH_MESSAGES;
+      if (
+        context.slice.message_count >= previousMessageCount &&
+        context.slice.message_count - previousMessageCount < refreshMessages
+      ) {
+        return { item: null, skippedNoScope: false };
+      }
+    }
+  }
   return {
     skippedNoScope: false,
     item: {
@@ -568,7 +607,7 @@ async function syncedItemForKeptSlice(
       contentCategory: "document",
       content,
       sourcePath: sourcePathForSlice(context),
-      contentHash: stableContentHash(content),
+      contentHash,
       sourceCreatedAt: context.slice.started_at,
       sourceUpdatedAt: context.slice.ended_at,
       threadId: String(context.conversationId),

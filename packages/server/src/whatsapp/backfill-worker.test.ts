@@ -842,6 +842,76 @@ describe("WhatsAppBackfillWorker", () => {
     ).resolves.toEqual({ parent_range_id: "range-graph-completed", graph_completed_at: null });
   });
 
+  it("treats a completed range row inside an open LLM tail as covered", async () => {
+    const conversation = await seedGroup(db);
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "in_progress",
+        live_start_effective_at: "2026-07-17T11:00:00.000Z",
+        live_start_message_id: 1,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-open-tail",
+        group_jid: "group@g.us",
+        range_key: `gap:${KEY_3}`,
+        kind: "gap",
+        connection_key: KEY_3,
+        status: "complete",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-17T09:00:00.000Z",
+        upper_bound_at: "2026-07-17T11:00:00.000Z",
+        graph_cursor_effective_at: "2026-07-17T10:00:00.000Z",
+        graph_cursor_message_id: 1,
+        graph_completed_at: "2026-07-17T10:01:00.000Z",
+      })
+      .execute();
+    const tail = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "open-tail-history",
+      eventKey: "event-open-tail-history",
+      senderName: "History",
+      text: "covered by the open tail",
+      providerTimestamp: "2026-07-17T09:30:00.000Z",
+      source: "history",
+      connectionKey: KEY_3,
+      backfillRangeId: "range-open-tail",
+    });
+    await db
+      .insertInto("conversation_slices")
+      .values({
+        id: "open-tail-slice",
+        conversation_id: conversation.id,
+        first_message_id: tail.row.id,
+        last_message_id: tail.row.id,
+        started_at: "2026-07-17T09:30:00.000Z",
+        ended_at: "2026-07-17T09:30:00.000Z",
+        message_count: 1,
+        denoised_message_ids: JSON.stringify([tail.row.id]),
+        flush_reason: "llm_boundary",
+        roster_snapshot: "[]",
+        salience_verdict: "kept",
+        status: "open",
+      })
+      .execute();
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("id", "=", tail.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ backfill_range_id: "range-open-tail" });
+  });
+
   it("corrects a legacy manual outgoing anchor from a device-suffixed account JID", async () => {
     const conversation = await seedGroup(db);
     const message = await createConversationRepository(db).insertMessage({

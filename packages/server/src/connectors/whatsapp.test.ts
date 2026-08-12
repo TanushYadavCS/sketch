@@ -62,7 +62,7 @@ describe("createWhatsAppConnector", () => {
     });
   });
 
-  it("loads only index-enabled groups, chunks them, and yields no items without a salience generator", async () => {
+  it("loads only index-enabled groups, LLM-chunks them, and yields no items without a roster scope", async () => {
     const groups = createWhatsAppGroupRepository(db);
     await groups.upsert({
       jid: "disabled@g.us",
@@ -107,13 +107,20 @@ describe("createWhatsAppConnector", () => {
       scopeConfig: {},
       cursor: null,
       logger,
+      whatsappChunkerGenerate: async () => JSON.stringify({ segments: [{ start: 1, end: 1, threads: ["topic"] }] }),
     })) {
       seen.push(item);
     }
 
     expect(seen).toEqual([]);
     expect(debug).toHaveBeenCalledWith({ groupCount: 1 }, "Loaded enabled WhatsApp groups for indexing");
-    await expect(db.selectFrom("conversation_slices").selectAll().execute()).resolves.toHaveLength(1);
+    await expect(db.selectFrom("conversation_slices").selectAll().execute()).resolves.toMatchObject([
+      expect.objectContaining({
+        status: "open",
+        flush_reason: "llm_boundary",
+        salience_verdict: "kept",
+      }),
+    ]);
   });
 
   it("disabled groups yield nothing by construction", async () => {
@@ -198,18 +205,21 @@ describe("createWhatsAppConnector", () => {
       scopeConfig: {},
       cursor: null,
       logger: syncLogger,
+      whatsappChunkerGenerate: async () => JSON.stringify({ segments: [{ start: 1, end: 1, threads: ["history"] }] }),
     })) {
     }
 
     await expect(
       db
         .selectFrom("conversation_slices")
-        .select(["denoised_message_ids", "salience_verdict"])
+        .select(["denoised_message_ids", "salience_verdict", "status", "flush_reason"])
         .where("conversation_id", "=", conversation.id)
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({
       denoised_message_ids: JSON.stringify([history.row.id]),
-      salience_verdict: null,
+      salience_verdict: "kept",
+      status: "open",
+      flush_reason: "llm_boundary",
     });
     expect(syncLogger.info).toHaveBeenCalledWith(
       expect.objectContaining({ chatsServed: 1, messagesRead: 1, rangesCompleted: 1 }),
