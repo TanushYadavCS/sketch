@@ -97,7 +97,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v15";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v14";
 const DEDUP_PROMPT_VERSION = "dedup-adjudication-v1";
 const GENERIC_DEDUP_TOKENS = new Set([
   "a",
