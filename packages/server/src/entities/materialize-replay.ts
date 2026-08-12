@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import type { StageOutcome } from "../connectors/enrichment-stage-report";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
@@ -413,6 +414,13 @@ async function materializeUnmaterializedFactsInner(
     summary.factsRead++;
     try {
       const result = await materializeFromFact(deps, fact);
+      opts.stageReport?.({
+        stage: "materialize",
+        label: "Materialise",
+        kind: "code",
+        status: "done",
+        outcomes: [materializeOutcome(fact, result, deps.llmPromotionThreshold)],
+      });
       accumulate(summary, result);
       if (result.kind === "deferred_below_threshold") {
         summary.deferredBelowThreshold++;
@@ -453,6 +461,21 @@ async function materializeUnmaterializedFactsInner(
         .execute();
       summary.skipped++;
       summary.deferred++;
+      opts.stageReport?.({
+        stage: "materialize",
+        label: "Materialise",
+        kind: "code",
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        outcomes: [
+          {
+            subject: fact.subject_name ?? fact.fact_key,
+            kind: fact.mention_type ?? fact.fact_type,
+            result: "deferred",
+            reason: err instanceof Error ? err.message : String(err),
+          },
+        ],
+      });
     }
     completed++;
     opts.onProgress?.({ phase: "materialize", completed, total });
@@ -495,6 +518,33 @@ async function materializeUnmaterializedFactsInner(
   await cleanupEmptyRelationships(db);
   logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
   return summary;
+}
+
+function materializeOutcome(
+  fact: IndexedFileFactRow,
+  result: MaterializeResult,
+  llmPromotionThreshold: number,
+): StageOutcome {
+  const subject = fact.subject_name ?? fact.fact_key;
+  const kind = fact.mention_type ?? fact.fact_type;
+  if (result.kind === "entity_created") return { subject, kind, result: "created" };
+  if (result.kind === "entity_linked") return { subject, kind, result: "linked" };
+  if (result.kind === "queued") return { subject, kind, result: "queued" };
+  if (result.kind === "queued_held") return { subject, kind, result: "queued", reason: result.reason };
+  if (result.kind === "deferred_below_threshold") {
+    return {
+      subject,
+      kind,
+      result: "deferred",
+      reason: `${result.reason}; seen count below threshold, needs ${llmPromotionThreshold}`,
+    };
+  }
+  if (result.kind === "skipped" || result.kind === "skipped_missing_owner") {
+    return { subject, kind, result: "suppressed", reason: result.reason };
+  }
+  if (result.kind === "relationship_materialized") return { subject, kind, result: "linked" };
+  if (result.kind === "structural") return { subject, kind, result: "linked" };
+  return { subject, kind, result: "created" };
 }
 
 export function shouldMarkMaterialized(result: MaterializeResult): boolean {

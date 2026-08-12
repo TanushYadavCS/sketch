@@ -1,6 +1,7 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import type { EmbeddingProvider } from "../connectors/embeddings/types";
+import type { StageReporter } from "../connectors/enrichment-stage-report";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -181,4 +182,5 @@ export interface MaterializeUnmaterializedOptions {
    */
   onProgress?: (progress: MaterializeProgress) => void;
   shouldCancel?: () => boolean;
+  stageReport?: StageReporter;
 }

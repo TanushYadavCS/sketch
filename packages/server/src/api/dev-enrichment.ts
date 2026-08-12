@@ -19,9 +19,18 @@ import {
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
 } from "../connectors/enrichment-providers";
+import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
-import { createTracedLogger, finishTraceRun, getTraceRun, listTraceRuns, startTraceRun } from "../dev/enrichment-trace";
+import {
+  appendTraceStageReport,
+  createTracedLogger,
+  finishTraceRun,
+  getTraceRun,
+  listTraceRuns,
+  startTraceRun,
+} from "../dev/enrichment-trace";
+import { listLlmDumpHeaders, readLlmDumpBody } from "../dev/llm-dump-reader";
 
 const startRunSchema = z.object({ fileId: z.string().min(1) });
 
@@ -40,7 +49,9 @@ export function devEnrichmentRoutes(
     GEMINI_MAX_RPM?: number;
     GEMINI_MAX_RETRIES?: number;
     OPENROUTER_API_KEY?: string;
+    DATA_DIR?: string;
   },
+  deps: { enrichmentGenerator?: GeminiGenerator } = {},
 ) {
   const routes = new Hono();
 
@@ -65,7 +76,7 @@ export function devEnrichmentRoutes(
 
     const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
     const providerConfig = buildEnrichmentProviderConfig(settings, appConfig, logger);
-    const generator = createEnrichmentGenerator(providerConfig);
+    const generator = deps.enrichmentGenerator ?? createEnrichmentGenerator(providerConfig);
     if (!generator) {
       return c.json(
         { error: { code: "LLM_NOT_CONFIGURED", message: "Configure an enrichment model before tracing a run" } },
@@ -75,29 +86,38 @@ export function devEnrichmentRoutes(
     const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
 
     const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const dumpDir = `data/llm-dumps/${file.id}__${dumpStamp}`;
+    const dumpDir = `${appConfig?.DATA_DIR ?? "data"}/llm-dumps/${file.id}__${dumpStamp}`;
     const run = startTraceRun({ fileId: file.id, fileName: file.file_name, dumpDir });
 
-    runEnrichment({
-      db,
-      logger: createTracedLogger(logger.child({ component: "enrichment", fileId: file.id }), run),
-      embeddingProvider,
-      generator,
-      geminiApiKey: settings?.gemini_api_key,
-      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
-      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
-      fileIds: [file.id],
-      debugDumpDir: dumpDir,
-    })
-      .then((result) => {
+    void (async () => {
+      try {
+        const result = await runEnrichment({
+          db,
+          logger: createTracedLogger(logger.child({ component: "enrichment", fileId: file.id }), run),
+          embeddingProvider,
+          generator,
+          geminiApiKey: settings?.gemini_api_key,
+          geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+          geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+          fileIds: [file.id],
+          debugDumpDir: dumpDir,
+          forceSmartEnrichment: true,
+          stageReport: (report) => appendTraceStageReport(run, report),
+        });
         const failure = result.errors[0];
-        if (failure) finishTraceRun(run, "failed", failure.error);
-        else finishTraceRun(run, "done");
-      })
-      .catch((err) => {
-        finishTraceRun(run, "failed", err);
+        const failedStage = run.stageReports.find((report) => report.status === "failed");
+        if (run.status === "running") {
+          if (failure) finishTraceRun(run, "failed", failure.error);
+          else if (failedStage) finishTraceRun(run, "failed", failedStage.error ?? `${failedStage.label} failed`);
+          else finishTraceRun(run, "done");
+        }
+      } catch (err) {
+        if (run.status === "running") finishTraceRun(run, "failed", err);
         logger.error({ err, fileId: file.id }, "Traced enrichment run failed");
-      });
+      } finally {
+        if (run.status === "running") finishTraceRun(run, "failed", "Trace promise settled without a terminal result");
+      }
+    })();
 
     return c.json({ runId: run.id, fileId: file.id, fileName: file.file_name }, 201);
   });
@@ -119,11 +139,44 @@ export function devEnrichmentRoutes(
     }
 
     const since = Number(c.req.query("since") ?? 0) || 0;
-    const { steps, ...header } = run;
+    const { steps, stageReports, ...header } = run;
     return c.json({
       run: { ...header, stepCount: steps.length },
       steps: since > 0 ? steps.filter((step) => step.seq > since) : steps,
+      stageReports,
     });
+  });
+
+  routes.get("/enrichment-runs/:id/calls", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const run = getTraceRun(c.req.param("id"));
+    if (!run) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Run not found or evicted" } }, 404);
+    }
+
+    return c.json({ calls: await listLlmDumpHeaders(run.dumpDir) });
+  });
+
+  routes.get("/enrichment-runs/:id/calls/:seq", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const run = getTraceRun(c.req.param("id"));
+    if (!run) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Run not found or evicted" } }, 404);
+    }
+
+    const seq = Number(c.req.param("seq"));
+    if (!Number.isInteger(seq) || seq < 1) {
+      return c.json({ error: { code: "INVALID_SEQ", message: "Call sequence must be a positive integer" } }, 400);
+    }
+    const call = await readLlmDumpBody(run.dumpDir, seq);
+    if (!call) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Call not found" } }, 404);
+    }
+    return c.json({ call });
   });
 
   return routes;

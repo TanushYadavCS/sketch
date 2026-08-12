@@ -478,7 +478,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
   if (config.DEV_TOOLS_ENABLED) {
-    app.route("/api/dev", devEnrichmentRoutes(db, logger, config));
+    app.route("/api/dev", devEnrichmentRoutes(db, logger, config, { enrichmentGenerator: deps?.enrichmentGenerator }));
   }
   app.route("/api/skills", skillsRoutes(config));
   app.route(

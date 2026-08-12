@@ -16,6 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
+import type { StageReport } from "../connectors/enrichment-stage-report";
 
 /** Level methods intercepted on the wrapped logger. */
 const LEVEL_METHODS = new Set(["trace", "debug", "info", "warn", "error", "fatal"]);
@@ -25,6 +26,16 @@ const MAX_STEPS_PER_RUN = 4000;
 const MAX_STRING_CHARS = 600;
 const MAX_ARRAY_ITEMS = 25;
 const MAX_FIELD_DEPTH = 3;
+const STAGE_ORDER = new Map([
+  ["extractEntities", 1],
+  ["dedupAdjudicate", 2],
+  ["reconcileFacts", 3],
+  ["matchEntities", 4],
+  ["generateSummary", 5],
+  ["extractEntityFacts", 6],
+  ["engagementFloor", 7],
+  ["materialize", 8],
+]);
 
 export type DevTraceRunStatus = "running" | "done" | "failed";
 
@@ -48,6 +59,7 @@ export interface DevTraceRun {
   error: string | null;
   /** Server-side directory holding the raw prompts and responses for this run. */
   dumpDir: string;
+  stageReports: StageReport[];
   steps: DevTraceStep[];
   /** Set once the run exceeded `MAX_STEPS_PER_RUN` and later steps were dropped. */
   truncated: boolean;
@@ -65,6 +77,7 @@ export function startTraceRun(input: { fileId: string; fileName: string; dumpDir
     status: "running",
     error: null,
     dumpDir: input.dumpDir,
+    stageReports: [],
     steps: [],
     truncated: false,
   };
@@ -77,6 +90,28 @@ export function finishTraceRun(run: DevTraceRun, status: Exclude<DevTraceRunStat
   run.status = status;
   run.finishedAt = new Date().toISOString();
   run.error = error ? errorMessage(error) : null;
+}
+
+export function appendTraceStageReport(run: DevTraceRun, report: StageReport): void {
+  const existingIndex = run.stageReports.findIndex((item) => item.stage === report.stage);
+  if (existingIndex >= 0) {
+    const existing = run.stageReports[existingIndex];
+    run.stageReports[existingIndex] = {
+      ...existing,
+      ...report,
+      context: report.context ?? existing.context,
+      outcomes: [...(existing.outcomes ?? []), ...(report.outcomes ?? [])],
+      summary: { ...(existing.summary ?? {}), ...(report.summary ?? {}) },
+    };
+    sortStageReports(run);
+    return;
+  }
+  run.stageReports.push(report);
+  sortStageReports(run);
+}
+
+function sortStageReports(run: DevTraceRun): void {
+  run.stageReports.sort((a, b) => (STAGE_ORDER.get(a.stage) ?? 999) - (STAGE_ORDER.get(b.stage) ?? 999));
 }
 
 export function getTraceRun(id: string): DevTraceRun | undefined {

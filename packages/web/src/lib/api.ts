@@ -1074,6 +1074,61 @@ export interface DevTraceStep {
   fields: Record<string, unknown>;
 }
 
+/** The eight stages a single-file enrichment runs, in the order the server reports them. */
+export type DevStageKey =
+  | "extractEntities"
+  | "dedupAdjudicate"
+  | "reconcileFacts"
+  | "matchEntities"
+  | "generateSummary"
+  | "extractEntityFacts"
+  | "engagementFloor"
+  | "materialize";
+
+/** What one stage decided about one thing, and the rule that decided it. */
+export interface DevStageOutcome {
+  subject: string;
+  kind: string;
+  result: "kept" | "dropped" | "created" | "linked" | "queued" | "suppressed" | "deferred";
+  reason?: string;
+}
+
+export interface DevStageReport {
+  stage: DevStageKey;
+  label: string;
+  kind: "model" | "code";
+  status: "done" | "failed" | "skipped";
+  context?: MintContextBlock[];
+  outcomes?: DevStageOutcome[];
+  error?: string;
+  parallelGroup?: string;
+  summary?: Record<string, unknown>;
+}
+
+/** One LLM call's header. Never carries the prompt — those are ~19,000 chars each. */
+export interface DevLlmCallHeader {
+  seq: number;
+  label: string;
+  stage: DevStageKey | "unknown";
+  at: string | null;
+  model: string;
+  promptChars: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  costUsd: number | null;
+  finishReason: string | null;
+  /** Set when the dump is missing or malformed — normal for a call that threw. */
+  unreadable?: { reason: string };
+}
+
+export interface DevLlmCallBody extends DevLlmCallHeader {
+  prompt: string | null;
+  systemPrompt: string | null;
+  text: string | null;
+  /** The response re-parsed as JSON, so a silent empty parse is visible. */
+  parsed?: unknown;
+}
+
 export interface DevTraceRunHeader {
   id: string;
   fileId: string;
@@ -3092,7 +3147,16 @@ export const api = {
     /** `since` fetches only steps after that sequence number, for incremental polling. */
     enrichmentRun(runId: string, since = 0) {
       const qs = since > 0 ? `?since=${since}` : "";
-      return request<{ run: DevTraceRunHeader; steps: DevTraceStep[] }>(`/api/dev/enrichment-runs/${runId}${qs}`);
+      return request<{ run: DevTraceRunHeader; steps: DevTraceStep[]; stageReports: DevStageReport[] }>(
+        `/api/dev/enrichment-runs/${runId}${qs}`,
+      );
+    },
+    enrichmentCalls(runId: string) {
+      return request<{ calls: DevLlmCallHeader[] }>(`/api/dev/enrichment-runs/${runId}/calls`);
+    },
+    /** Fetched per call on expand — the prompt bodies are far too large for the list. */
+    enrichmentCall(runId: string, seq: number) {
+      return request<{ call: DevLlmCallBody }>(`/api/dev/enrichment-runs/${runId}/calls/${seq}`);
     },
   },
   workspace: {
