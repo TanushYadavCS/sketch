@@ -1,3 +1,4 @@
+import dotenv from "dotenv";
 import { Kysely, PostgresDialect } from "kysely";
 import type { KyselyPlugin, PluginTransformQueryArgs, PluginTransformResultArgs } from "kysely";
 import type { QueryResult, RootOperationNode, UnknownRow } from "kysely";
@@ -8,6 +9,13 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger } from "../test-utils";
+
+/**
+ * The worktree this runs in has no `.env` of its own — only the main checkout
+ * does — so the path is overridable. `ENCRYPTION_KEY` is the one value that
+ * matters: without it the settings row cannot be decrypted and login 500s.
+ */
+dotenv.config({ path: process.env.MEASURE_ENV ?? "../../.env" });
 
 const DB_NAME = process.env.MEASURE_DB ?? "sketch_queue_reconcile";
 const EMAIL = "queue-measure@local.test";
@@ -53,7 +61,9 @@ async function main(): Promise<void> {
   }
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 
-  const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), { logger: createTestLogger() });
+  const app = createApp(db, createTestConfig({ DB_TYPE: "postgres", ENCRYPTION_KEY: process.env.ENCRYPTION_KEY }), {
+    logger: createTestLogger(),
+  });
   const login = await app.request("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
