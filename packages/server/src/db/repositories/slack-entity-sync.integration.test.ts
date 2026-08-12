@@ -4,6 +4,7 @@ import { normalizeName } from "../../connectors/name-normalize";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createEntityRepository } from "./entities";
+import { mergeEntityAliases } from "./entity-aliases";
 import { isInternalSlackUser, upsertSlackPersonEntity } from "./slack-entity-sync";
 
 type SlackProfile = Parameters<typeof upsertSlackPersonEntity>[1];
@@ -633,7 +634,7 @@ describe("upsertSlackPersonEntity", () => {
         name: "Existing Canonical Name",
         source_type: "person",
         subtype: "internal",
-        aliases: null,
+        aliases: JSON.stringify(["Existing Alias", "slack display name"]),
         metadata: JSON.stringify({ email: "linked@example.com", owner: "human" }),
         source_ref_id: null,
         status: "confirmed",
@@ -680,6 +681,9 @@ describe("upsertSlackPersonEntity", () => {
       .where("id", "=", "linked-person")
       .executeTakeFirstOrThrow();
     expect(entity.name).toBe("Existing Canonical Name");
+    expect(JSON.parse(entity.aliases ?? "[]")).toEqual(["Existing Alias", "slack display name", "Slack Real Name"]);
+    expect(entity.aliases).not.toContain("deprecated.handle");
+    expect(entity.aliases).not.toContain("linked@example.com");
     expect(JSON.parse(entity.metadata ?? "{}")).toEqual({ email: "linked@example.com", owner: "human" });
     const contactPoints = await db
       .selectFrom("entity_contact_points")
@@ -695,6 +699,39 @@ describe("upsertSlackPersonEntity", () => {
         .where("slack_user_id", "=", "U-LINKED")
         .executeTakeFirstOrThrow(),
     ).resolves.toMatchObject({ entity_created_by_sync: 0 });
+  });
+
+  it("preserves aliases added by concurrent identity writers", async () => {
+    await db
+      .insertInto("entities")
+      .values({
+        id: "concurrent-alias-person",
+        name: "Concurrent Person",
+        source_type: "person",
+        subtype: "external",
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "human_confirmed",
+        hotness: 0,
+        created_at: "2026-08-12T00:00:00.000Z",
+        updated_at: "2026-08-12T00:00:00.000Z",
+      })
+      .execute();
+
+    await Promise.all([
+      mergeEntityAliases(db, "concurrent-alias-person", ["Slack Name"]),
+      mergeEntityAliases(db, "concurrent-alias-person", ["WhatsApp Name"]),
+      mergeEntityAliases(db, "concurrent-alias-person", ["Manual Name"]),
+    ]);
+
+    const entity = await db
+      .selectFrom("entities")
+      .select("aliases")
+      .where("id", "=", "concurrent-alias-person")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(entity.aliases ?? "[]").sort()).toEqual(["Manual Name", "Slack Name", "WhatsApp Name"]);
   });
 
   it("demotes internal classification when a positive guest signal arrives", async () => {

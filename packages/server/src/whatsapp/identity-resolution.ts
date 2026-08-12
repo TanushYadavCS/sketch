@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
+import { mergeEntityAliases } from "../db/repositories/entity-aliases";
 import { createUserWhatsAppLidRepository } from "../db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
-import { safeWhatsAppErrorFields, sanitizeWhatsAppDisplayText } from "./privacy";
+import { safeWhatsAppErrorFields, sanitizeWhatsAppDisplayText, stripPersonalNumberTokens } from "./privacy";
 import { phoneE164ToWhatsAppJid } from "./provider";
 
 export { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
@@ -63,6 +64,7 @@ interface BuildRosterSnapshotOptions {
   groupJid: string;
   conversationId: number;
   logger: Logger;
+  enrichEntityAliases?: boolean;
 }
 
 const REF_ALPHABET = "abcdefghijklmnop";
@@ -129,7 +131,55 @@ function unresolvedDisplayName(phoneE164: string | null): string {
 function safePushName(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const sanitized = sanitizeWhatsAppDisplayText(value);
-  return sanitized.length > 0 ? sanitized : undefined;
+  return isHumanReadableAlias(value, sanitized) ? sanitized : undefined;
+}
+
+function safeEntityAlias(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const withoutControls = value
+    .replace(/[\p{Cc}\p{Cf}]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const sanitized = stripPersonalNumberTokens(withoutControls).slice(0, 160).trim();
+  return isHumanReadableAlias(withoutControls, sanitized) ? sanitized : undefined;
+}
+
+function isHumanReadableAlias(raw: string, sanitized: string): boolean {
+  if (!sanitized || sanitized.includes("[whatsapp-id]")) return false;
+  const trimmed = raw.trim();
+  if (/^(?:unknown|unknown group|unresolved whatsapp participant)$/iu.test(trimmed)) return false;
+  if (/^\+?\d+$/u.test(trimmed)) return false;
+  return normalizeWhatsAppIdentityPhone(trimmed) === null && !/@(?:lid|s\.whatsapp\.net)$/iu.test(trimmed);
+}
+
+async function enrichResolvedEntityAliases(
+  db: Kysely<DB>,
+  groupJid: string,
+  participants: Array<{ phone_e164: string | null; resolution: WhatsAppIdentityResolution; aliasName?: string }>,
+): Promise<void> {
+  const candidates = participants.filter(
+    (
+      participant,
+    ): participant is typeof participant & { resolution: Extract<WhatsAppIdentityResolution, { kind: "entity" }> } =>
+      participant.resolution.kind === "entity",
+  );
+  if (candidates.length === 0) return;
+
+  const labels = await createWhatsAppGroupRepository(db).listMemberLabels(groupJid);
+  const labelByPhone = new Map(
+    labels.map((label) => [normalizeWhatsAppIdentityPhone(label.phone_e164), safeEntityAlias(label.display_name)]),
+  );
+  const additionsByEntityId = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    const phone = normalizeWhatsAppIdentityPhone(candidate.phone_e164);
+    const additions = additionsByEntityId.get(candidate.resolution.entityId) ?? [];
+    additions.push(candidate.aliasName ?? "", phone ? (labelByPhone.get(phone) ?? "") : "");
+    additionsByEntityId.set(candidate.resolution.entityId, additions);
+  }
+
+  for (const [entityId, additions] of additionsByEntityId) {
+    await mergeEntityAliases(db, entityId, additions);
+  }
 }
 
 function displayNameForResolution(
@@ -409,16 +459,16 @@ async function loadPushNamesBySenderJid(db: Kysely<DB>, conversationId: number):
   return out;
 }
 
-function pushNameForParticipant(
+function rawPushNameForParticipant(
   pushNamesBySenderJid: Map<string, string>,
   participantJid: string,
   phoneE164: string | null,
 ): string | undefined {
   const direct = pushNamesBySenderJid.get(participantJid);
-  if (direct) return safePushName(direct);
+  if (direct) return direct;
   const normalizedPhone = normalizeWhatsAppIdentityPhone(phoneE164);
   if (!normalizedPhone) return undefined;
-  return safePushName(pushNamesBySenderJid.get(phoneE164ToWhatsAppJid(normalizedPhone)));
+  return pushNamesBySenderJid.get(phoneE164ToWhatsAppJid(normalizedPhone));
 }
 
 export async function buildWhatsAppRosterSnapshot({
@@ -426,6 +476,7 @@ export async function buildWhatsAppRosterSnapshot({
   groupJid,
   conversationId,
   logger,
+  enrichEntityAliases = false,
 }: BuildRosterSnapshotOptions): Promise<WhatsAppRosterBuildResult> {
   const participantRepo = createWhatsAppGroupRepository(db);
   const participants = await participantRepo.listParticipants(groupJid);
@@ -441,14 +492,37 @@ export async function buildWhatsAppRosterSnapshot({
   const pushNamesBySenderJid = await loadPushNamesBySenderJid(db, conversationId);
   const counts = emptyCounts(participants.length);
 
-  const snapshotParticipants = participants.map((participant) => {
+  const snapshotInputs = participants.map((participant) => {
     const resolution = resolutions.get(participant.participant_jid) ?? { kind: "unresolved" };
-    incrementCount(counts, resolution.kind);
-    return snapshotParticipant(
-      participant,
-      resolution,
-      pushNameForParticipant(pushNamesBySenderJid, participant.participant_jid, participant.phone_e164),
+    const rawPushName = rawPushNameForParticipant(
+      pushNamesBySenderJid,
+      participant.participant_jid,
+      participant.phone_e164,
     );
+    return { participant, resolution, pushName: safePushName(rawPushName), aliasName: safeEntityAlias(rawPushName) };
+  });
+  if (enrichEntityAliases) {
+    try {
+      await enrichResolvedEntityAliases(
+        db,
+        groupJid,
+        snapshotInputs.map(({ participant, resolution, aliasName }) => ({
+          phone_e164: participant.phone_e164,
+          resolution,
+          aliasName,
+        })),
+      );
+    } catch (err) {
+      logger.warn(
+        { ...safeWhatsAppErrorFields(err), groupJid },
+        "WhatsApp entity alias enrichment failed without blocking roster resolution",
+      );
+    }
+  }
+
+  const snapshotParticipants = snapshotInputs.map(({ participant, resolution, pushName }) => {
+    incrementCount(counts, resolution.kind);
+    return snapshotParticipant(participant, resolution, pushName);
   });
 
   logger.info(
