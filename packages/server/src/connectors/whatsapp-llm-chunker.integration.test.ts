@@ -381,6 +381,81 @@ describe("WhatsApp LLM boundary engine", () => {
     expect(replayCount.kept_slice_count).toBe(2);
   });
 
+  it("enriches resolved person aliases while building LLM chunk rosters", async () => {
+    const groupJid = "llm-aliases@g.us";
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: groupJid,
+      name: "Alias Group",
+      description: null,
+      updated_at: "2026-07-07T09:00:00.000Z",
+    });
+    await db
+      .insertInto("entities")
+      .values({
+        id: "llm-alias-person",
+        name: "CRM Contact",
+        source_type: "person",
+        subtype: "external",
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: "2026-07-07T09:00:00.000Z",
+        updated_at: "2026-07-07T09:00:00.000Z",
+        ai_brief: null,
+      })
+      .execute();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "llm-alias-phone",
+        entity_id: "llm-alias-person",
+        kind: "phone",
+        value: "+15550000123",
+        source: "test",
+      })
+      .execute();
+    await groups.refreshParticipants(groupJid, [
+      { participantJid: "15550000123@s.whatsapp.net", phoneE164: "+15550000123" },
+    ]);
+    const conversation = await createConversationRepository(db).getOrCreate({
+      platform: "whatsapp",
+      kind: "group",
+      providerConversationId: groupJid,
+    });
+    const messages = createConversationRepository(db);
+    await messages.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "alias-1",
+      senderJid: "15550000123@s.whatsapp.net",
+      senderName: "Asha Buyer",
+      text: "first topic",
+      receivedAt: "2026-07-07T09:00:00.000Z",
+    });
+    await messages.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "alias-2",
+      senderJid: "15550000123@s.whatsapp.net",
+      senderName: "Asha Buyer",
+      text: "second topic",
+      receivedAt: "2026-07-07T09:01:00.000Z",
+    });
+
+    await runLlmChunkingPass(
+      createDeps(db, async () => JSON.stringify({ segments: [{ start: 1, end: 2, threads: ["topic"] }] })),
+      { conversationId: conversation.id, groupJid, knobs, mode: "backfill" },
+    );
+
+    const entity = await db
+      .selectFrom("entities")
+      .select("aliases")
+      .where("id", "=", "llm-alias-person")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(entity.aliases ?? "[]")).toEqual(["Asha Buyer"]);
+  });
+
   it("applies the same slice and topic transaction on Postgres", async () => {
     const pgDb = await createTestPgDb();
     try {

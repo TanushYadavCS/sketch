@@ -592,8 +592,15 @@ async function buildRosterSnapshot(
   fallback: string,
 ): Promise<string> {
   try {
-    return (await buildWhatsAppRosterSnapshot({ db: deps.db, groupJid, conversationId, logger: deps.logger }))
-      .serializedSnapshot;
+    return (
+      await buildWhatsAppRosterSnapshot({
+        db: deps.db,
+        groupJid,
+        conversationId,
+        logger: deps.logger,
+        enrichEntityAliases: true,
+      })
+    ).serializedSnapshot;
   } catch {
     return fallback;
   }
