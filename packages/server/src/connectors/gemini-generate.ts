@@ -45,6 +45,10 @@ const DEFAULT_MAX_TOKENS = 8192;
 export interface GenerateOptions {
   /** System instruction for the model. */
   systemPrompt?: string;
+  /** Per-call model override for providers that support model routing. */
+  model?: string | null;
+  /** Per-call reasoning effort for reasoning-capable providers. */
+  reasoningEffort?: "low" | "medium" | "high";
   /** Max output tokens (default 2048). */
   maxTokens?: number;
   /** Response MIME type — set to "application/json" for structured output. */

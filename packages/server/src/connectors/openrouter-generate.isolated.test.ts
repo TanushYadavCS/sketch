@@ -43,4 +43,27 @@ describe("createOpenRouterGenerator", () => {
     expect(body.response_format).toBeUndefined();
     expect(body.provider).toBeUndefined();
   });
+
+  it("uses per-call model, reasoning effort, and max tokens", async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+      Response.json({
+        choices: [{ finish_reason: "stop", message: { content: '{"ok":true}' } }],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const generator = createOpenRouterGenerator("sk-or-test", { model: "configured-model" });
+
+    await generator.generateJSON("Return JSON", {
+      model: "gpt-5.6-luna",
+      reasoningEffort: "high",
+      maxTokens: 1500,
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body.model).toBe("gpt-5.6-luna");
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.max_tokens).toBe(1500);
+  });
 });

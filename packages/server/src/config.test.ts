@@ -49,6 +49,21 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("inprocess");
         expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(3901);
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
+        expect(result.data.WHATSAPP_LLM_CHUNKING_ENABLED).toBe(false);
+        expect(result.data.WHATSAPP_CHUNK_WINDOW_MESSAGES).toBe(250);
+        expect(result.data.WHATSAPP_CHUNK_WINDOW_TOKENS).toBe(7500);
+        expect(result.data.WHATSAPP_CHUNK_MIN_MESSAGES).toBe(10);
+        expect(result.data.WHATSAPP_CHUNK_TARGET_MESSAGES).toBe(40);
+        expect(result.data.WHATSAPP_CHUNK_MAX_MESSAGES).toBe(80);
+        expect(result.data.WHATSAPP_CHUNK_MAX_TOKENS).toBe(1500);
+        expect(result.data.WHATSAPP_CHUNK_TICK_MINUTES).toBe(30);
+        expect(result.data.WHATSAPP_CHUNK_IDLE_CLOSE_HOURS).toBe(96);
+        expect(result.data.WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES).toBe(15);
+        expect(result.data.WHATSAPP_CHUNK_MODEL).toBeNull();
+        expect(result.data.WHATSAPP_CHUNK_REASONING_EFFORT).toBe("high");
+        expect(result.data.WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES).toBeNull();
+        expect(result.data.WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP).toBe(30);
+        expect(result.data.WHATSAPP_CHUNK_GROUP_WORKER_POOL).toBe(4);
         expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(25);
         expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(120);
         expect(result.data.WHATSAPP_SLICE_MAX_MESSAGES).toBe(50);
@@ -172,6 +187,45 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX).toBe(30);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX).toBe(40);
         expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(true);
+      }
+    });
+
+    it("parses WhatsApp LLM chunking configuration", () => {
+      const result = configSchema.safeParse({
+        WHATSAPP_LLM_CHUNKING_ENABLED: "true",
+        WHATSAPP_CHUNK_WINDOW_MESSAGES: "200",
+        WHATSAPP_CHUNK_WINDOW_TOKENS: "6000",
+        WHATSAPP_CHUNK_MIN_MESSAGES: "12",
+        WHATSAPP_CHUNK_TARGET_MESSAGES: "35",
+        WHATSAPP_CHUNK_MAX_MESSAGES: "75",
+        WHATSAPP_CHUNK_MAX_TOKENS: "1400",
+        WHATSAPP_CHUNK_TICK_MINUTES: "45",
+        WHATSAPP_CHUNK_IDLE_CLOSE_HOURS: "72",
+        WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES: "20",
+        WHATSAPP_CHUNK_MODEL: "gpt-5.6-luna",
+        WHATSAPP_CHUNK_REASONING_EFFORT: "medium",
+        WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES: "50",
+        WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP: "25",
+        WHATSAPP_CHUNK_GROUP_WORKER_POOL: "3",
+      });
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_LLM_CHUNKING_ENABLED).toBe(true);
+        expect(result.data.WHATSAPP_CHUNK_WINDOW_MESSAGES).toBe(200);
+        expect(result.data.WHATSAPP_CHUNK_WINDOW_TOKENS).toBe(6000);
+        expect(result.data.WHATSAPP_CHUNK_MIN_MESSAGES).toBe(12);
+        expect(result.data.WHATSAPP_CHUNK_TARGET_MESSAGES).toBe(35);
+        expect(result.data.WHATSAPP_CHUNK_MAX_MESSAGES).toBe(75);
+        expect(result.data.WHATSAPP_CHUNK_MAX_TOKENS).toBe(1400);
+        expect(result.data.WHATSAPP_CHUNK_TICK_MINUTES).toBe(45);
+        expect(result.data.WHATSAPP_CHUNK_IDLE_CLOSE_HOURS).toBe(72);
+        expect(result.data.WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES).toBe(20);
+        expect(result.data.WHATSAPP_CHUNK_MODEL).toBe("gpt-5.6-luna");
+        expect(result.data.WHATSAPP_CHUNK_REASONING_EFFORT).toBe("medium");
+        expect(result.data.WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES).toBe(50);
+        expect(result.data.WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP).toBe(25);
+        expect(result.data.WHATSAPP_CHUNK_GROUP_WORKER_POOL).toBe(3);
       }
     });
 
