@@ -20,6 +20,12 @@ export type StageOutcome = {
   reason?: string;
 };
 
+export interface MaterializeStageSummary {
+  eligibleFacts: number;
+  indexBuilds: number;
+  scopeKeyReads: number;
+}
+
 export interface StageReport {
   stage: EnrichmentStageKey;
   label: string;
@@ -30,6 +36,7 @@ export interface StageReport {
   error?: string;
   parallelGroup?: string;
   summary?: Record<string, unknown>;
+  materializeSummary?: MaterializeStageSummary;
 }
 
 export type StageReporter = (report: StageReport) => void;

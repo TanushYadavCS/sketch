@@ -34,11 +34,14 @@ export function isTrustedPersonScopeKey(scopeKey: string): boolean {
 export async function personScopeKey(
   email: string | null | undefined,
   domainsRepo: EntityDomainsRepository,
+  companyIdsByDomain?: ReadonlyMap<string, readonly string[]>,
 ): Promise<PersonScopeKey | null> {
   const domain = domainsRepo.normalizeEmailDomain(email);
   if (!domain) return null;
   if (await domainsRepo.isPersonalOrShared(domain)) return null;
-  const companyIds = await domainsRepo.getCompanyIdsByDomain(domain);
+  const companyIds = companyIdsByDomain
+    ? (companyIdsByDomain.get(domain) ?? [])
+    : await domainsRepo.getCompanyIdsByDomain(domain);
   if (companyIds.length > 0) return { kind: "company", value: [...companyIds].sort()[0] };
   return { kind: "domain", value: domain };
 }

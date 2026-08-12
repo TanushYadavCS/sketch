@@ -23,6 +23,9 @@ export interface ReplayFactsSummary {
 }
 
 export interface MaterializeFactsSummary extends ReplayFactsSummary {
+  eligibleFacts: number;
+  indexBuilds: number;
+  scopeKeyReads: number;
   materialized: number;
   deferred: number;
   deferredBelowThreshold: number;
@@ -76,6 +79,7 @@ export interface LookupIndex {
   bySourceRef: Map<string, IndexEntityRow>;
   companyIdsByDomain: Map<string, string[]>;
   personScopeKeysByEntityId: Map<string, string[]>;
+  personScopeKeyReads: number;
 }
 
 export interface MaterializeDeps {

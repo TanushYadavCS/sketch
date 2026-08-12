@@ -201,7 +201,12 @@ async function waitForRun(app: ReturnType<typeof createApp>, cookie: string, run
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
         run: { status: string };
-        stageReports: Array<{ stage: string; status: string; error?: string }>;
+        stageReports: Array<{
+          stage: string;
+          status: string;
+          error?: string;
+          materializeSummary?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number };
+        }>;
       };
       expect(body.run.status).not.toBe("running");
     },
@@ -211,7 +216,12 @@ async function waitForRun(app: ReturnType<typeof createApp>, cookie: string, run
   expect(res.status).toBe(200);
   return (await res.json()) as {
     run: { status: string };
-    stageReports: Array<{ stage: string; status: string; error?: string }>;
+    stageReports: Array<{
+      stage: string;
+      status: string;
+      error?: string;
+      materializeSummary?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number };
+    }>;
   };
 }
 
@@ -285,6 +295,11 @@ describe("Dev enrichment trace routes", () => {
     const knownBlock = extractReport?.context?.find((block) => block.key === "knownEntities");
     expect(knownBlock?.total).toBeGreaterThan(knownBlock?.items.length ?? 0);
     expect(knownBlock?.truncated).toBe(true);
+    expect(runBody.stageReports.find((report) => report.stage === "materialize")?.materializeSummary).toMatchObject({
+      eligibleFacts: expect.any(Number),
+      indexBuilds: expect.any(Number),
+      scopeKeyReads: expect.any(Number),
+    });
   });
 
   it("does not expose call payloads through either dev-tools gate", async () => {

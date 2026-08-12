@@ -379,6 +379,9 @@ async function materializeUnmaterializedFactsInner(
     mentionsWritten: 0,
     relationshipsWritten: 0,
     skipped: 0,
+    eligibleFacts: 0,
+    indexBuilds: 0,
+    scopeKeyReads: 0,
     materialized: 0,
     deferred: 0,
     deferredBelowThreshold: 0,
@@ -403,11 +406,13 @@ async function materializeUnmaterializedFactsInner(
         : countQuery.where("indexed_file_id", "in", indexedFileIdsFilter);
   }
   const total = Number((await countQuery.executeTakeFirst())?.count ?? 0);
+  summary.eligibleFacts = total;
   let completed = 0;
   opts.onProgress?.({ phase: "materialize", completed: 0, total });
 
   if (total === 0) {
     await cleanupEmptyRelationships(db);
+    reportMaterializeSummary(opts, summary);
     logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
     return summary;
   }
@@ -422,6 +427,7 @@ async function materializeUnmaterializedFactsInner(
     birthGateDryRun: opts.birthGateDryRun,
     embeddingProvider: opts.embeddingProvider,
   });
+  summary.indexBuilds++;
 
   const processFact = async (fact: IndexedFileFactRow): Promise<void> => {
     if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
@@ -534,8 +540,24 @@ async function materializeUnmaterializedFactsInner(
   }
 
   await cleanupEmptyRelationships(db);
+  summary.scopeKeyReads = deps.index.personScopeKeyReads;
+  reportMaterializeSummary(opts, summary);
   logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
   return summary;
+}
+
+function reportMaterializeSummary(opts: MaterializeUnmaterializedOptions, summary: MaterializeFactsSummary): void {
+  opts.stageReport?.({
+    stage: "materialize",
+    label: "Materialise",
+    kind: "code",
+    status: "done",
+    materializeSummary: {
+      eligibleFacts: summary.eligibleFacts,
+      indexBuilds: summary.indexBuilds,
+      scopeKeyReads: summary.scopeKeyReads,
+    },
+  });
 }
 
 function materializeOutcome(

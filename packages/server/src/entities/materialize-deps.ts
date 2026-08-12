@@ -100,6 +100,9 @@ export async function buildLookupIndex(
   const includeSourceRefs = !scopedTypes || scopedTypes.some((entityType) => SOURCE_REF_INDEX_TYPES.has(entityType));
   const includeCompanyDomains = !scopedTypes || scopedTypes.includes("company");
   const includePersonScopeKeys = !scopedTypes || scopedTypes.includes("person");
+  if (includePersonScopeKeys && !includeCompanyDomains) {
+    throw new Error("Lookup index person scope requires company scope");
+  }
   /**
    * One shared row instance per live entity, keyed by id. The type, name,
    * alias, and source-ref indexes all point at these instances, so an in-pass
@@ -181,6 +184,7 @@ export async function buildLookupIndex(
     ? await buildPersonScopeKeys(
         db,
         entityRows.filter((entity) => entity.source_type === "person"),
+        companyIdsByDomain,
       )
     : new Map<string, string[]>();
   return {
@@ -193,6 +197,7 @@ export async function buildLookupIndex(
     bySourceRef,
     companyIdsByDomain,
     personScopeKeysByEntityId,
+    personScopeKeyReads: 0,
   };
 }
 
@@ -216,13 +221,30 @@ function getOrBuildCandidatePool(index: LookupIndex, entityType: ProposeEntityTy
   return pool;
 }
 
-async function buildPersonScopeKeys(db: Kysely<DB>, persons: IndexEntityRow[]): Promise<Map<string, string[]>> {
+async function buildPersonScopeKeys(
+  db: Kysely<DB>,
+  persons: IndexEntityRow[],
+  companyIdsByDomain: ReadonlyMap<string, readonly string[]>,
+): Promise<Map<string, string[]>> {
   const scopeKeys = new Map<string, Set<string>>();
   for (const person of persons) scopeKeys.set(person.id, new Set());
   const domainsRepo = createEntityDomainsRepository(db);
+  const personDomains = new Map<string, string>();
+  const domains = new Set<string>();
   for (const person of persons) {
     const email = readPersonEmailFromMetadata(person.metadata);
-    const scope = await personScopeKey(email, domainsRepo);
+    const domain = domainsRepo.normalizeEmailDomain(email);
+    if (!domain) continue;
+    personDomains.set(person.id, domain);
+    domains.add(domain);
+  }
+  const scopesByDomain = new Map<string, Awaited<ReturnType<typeof personScopeKey>>>();
+  for (const domain of domains) {
+    scopesByDomain.set(domain, await personScopeKey(`person@${domain}`, domainsRepo, companyIdsByDomain));
+  }
+  for (const person of persons) {
+    const domain = personDomains.get(person.id);
+    const scope = domain ? scopesByDomain.get(domain) : null;
     if (scope) scopeKeys.get(person.id)?.add(personScopeKeyId(scope));
   }
 
@@ -517,7 +539,7 @@ export async function refreshResolvedEntityIndex(
   }
   registerEntity(index, row);
   if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) return;
-  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
+  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : [], index.companyIdsByDomain);
   const personScopeKeys = scopeKeys.get(row.id);
   if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
   for (const ref of sourceRefs) {
@@ -588,6 +610,7 @@ export function createEntityLookupFromIndex(opts: {
     },
     getPersonScopeKeys: (entityId) => {
       assertLookupIndexIncludesType(index, "person");
+      index.personScopeKeyReads++;
       return index.personScopeKeysByEntityId.get(entityId) ?? [];
     },
   };

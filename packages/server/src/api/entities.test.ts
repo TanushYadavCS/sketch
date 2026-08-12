@@ -230,6 +230,27 @@ async function waitForJobDone(app: ReturnType<typeof createApp>, cookie: string,
   );
 }
 
+/**
+ * Reads the materialize counters back off a finished reset+rebuild job. This is
+ * the only HTTP surface that carries them: the per-file enrichment trace only
+ * ever replays `llm_relation` facts, whose endpoints never carry an email, so
+ * it can never observe a person scope-key read.
+ */
+async function replayCounters(
+  app: ReturnType<typeof createApp>,
+  cookie: string,
+  jobId: string,
+): Promise<{ eligibleFacts: number; indexBuilds: number; scopeKeyReads: number }> {
+  const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    recreate?: { replay?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number } };
+  };
+  const replay = body.recreate?.replay;
+  if (!replay) throw new Error("rebuild job carried no replay summary");
+  return replay;
+}
+
 async function runResetAndWait(
   app: ReturnType<typeof createApp>,
   cookie: string,
@@ -643,6 +664,88 @@ describe("POST /api/entities/resets", () => {
 
     const entities = await db.selectFrom("entities").select("name").execute();
     expect(entities.some((e) => e.name === "Alice")).toBe(true);
+  });
+
+  it("reports materialize counters on the rebuild job with no scope-key read when no person matches by name", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Priya Nandan",
+      subjectEmail: "priya@northwind-logistics.test",
+      subjectSource: "fireflies",
+      subjectSourceId: "f1:priya@northwind-logistics.test",
+      raw: { providerFileId: "f1", attendee: { name: "Priya Nandan" } },
+    });
+
+    const result = await runResetAndWait(app, adminCookie, {
+      categories: ["connectors", "ai"],
+      runAfter: true,
+      confirm: "RESET_AND_RECREATE",
+    });
+    expect(result.phase).toBe("done");
+
+    const replay = await replayCounters(app, adminCookie, result.jobId as string);
+    expect(replay.eligibleFacts).toBe(1);
+    expect(replay.indexBuilds).toBeGreaterThan(0);
+    expect(replay.scopeKeyReads).toBe(0);
+
+    const names = (await db.selectFrom("entities").select("name").execute()).map((row) => row.name);
+    expect(names).toContain("Priya Nandan");
+  });
+
+  /**
+   * The cross-source identity join, which is the only thing that reads the
+   * scope-key map. Every clause of the fixture is load-bearing: the seeded
+   * person carries no email and a different source ref, so the source-ref rung
+   * and the email fast path both miss and the exact-name rung is what resolves
+   * the second fact.
+   */
+  it("counts a scope-key read when an emailed person fact joins a name-only person from another source", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "slack",
+      factType: "person_seed",
+      relation: "seeded",
+      subjectName: "Avery Stone",
+      subjectSource: "slack",
+      subjectSourceId: "slack:U-AVERY",
+      raw: { subtype: "external" },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: "file-2",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Avery Stone",
+      subjectEmail: "avery@scoped-corp.test",
+      subjectSource: "fireflies",
+      subjectSourceId: "f2:avery@scoped-corp.test",
+      raw: { providerFileId: "f2", attendee: { name: "Avery Stone", email: "avery@scoped-corp.test" } },
+    });
+
+    const result = await runResetAndWait(app, adminCookie, {
+      categories: ["connectors", "ai"],
+      runAfter: true,
+      confirm: "RESET_AND_RECREATE",
+    });
+    expect(result.phase).toBe("done");
+
+    const replay = await replayCounters(app, adminCookie, result.jobId as string);
+    expect(replay.eligibleFacts).toBe(2);
+    expect(replay.indexBuilds).toBeGreaterThan(0);
+    expect(replay.scopeKeyReads).toBeGreaterThan(0);
   });
 
   it("rejects runAfter without confirm token", async () => {

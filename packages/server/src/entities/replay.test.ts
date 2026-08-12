@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { StageReport } from "../connectors/enrichment-stage-report";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -255,6 +256,118 @@ describe("replaySourceFacts", () => {
     await expect(db.selectFrom("entities").selectAll().where("source_type", "=", "feature").execute()).resolves.toEqual(
       [],
     );
+  });
+
+  it("reports materialize counters and counts person scope-key reads", async () => {
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "feature",
+      relation: "mentioned",
+      subjectName: "CRM Analytics",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v13:CRM Analytics:counters",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v13",
+        model: "gemini",
+        featureId: "llm-feature:file-1:crm-analytics-counters",
+        featureName: "CRM Analytics",
+        parentProductName: "Canvas CRM",
+        corroborationKey: "crm-analytics-canvas-crm-counters",
+        status: "proposed",
+        evidence: { fileIds: [ATTENDED_FILE_ID], entityIds: [] },
+        confidence: 0.91,
+      } as never,
+    });
+    const featureReports: StageReport[] = [];
+
+    const featureSummary = await materializeUnmaterializedFacts(db, createTestLogger(), {
+      factTypes: ["feature"],
+      indexedFileIds: [ATTENDED_FILE_ID],
+      stageReport: (report) => featureReports.push(report),
+    });
+
+    expect(featureSummary).toMatchObject({ eligibleFacts: 1, indexBuilds: 1, scopeKeyReads: 0 });
+    expect(featureReports.at(-1)?.materializeSummary).toEqual({
+      eligibleFacts: 1,
+      indexBuilds: 1,
+      scopeKeyReads: 0,
+    });
+    const featureFact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["materialized_at"])
+      .where("subject_source_id", "=", "file-1:hash-1:llm-extraction-v13:CRM Analytics:counters")
+      .executeTakeFirstOrThrow();
+    expect(featureFact.materialized_at).not.toBeNull();
+
+    const now = new Date().toISOString();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "scope-read-file",
+        connector_config_id: CONNECTOR_ID,
+        provider_file_id: "scope-read-file",
+        file_name: "Scope read fixture",
+        file_type: "calendar",
+        content_category: "document",
+        content: "Avery Stone attended with a corporate email.",
+        source: "calendar",
+        content_hash: "hash-scope-read",
+        is_archived: 0,
+        synced_at: now,
+      })
+      .execute();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-avery-stone",
+        name: "Avery Stone",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify([]),
+        metadata: JSON.stringify({}),
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "declared",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+    await factRepo.upsertFact({
+      indexedFileId: "scope-read-file",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: "hash-scope-read",
+      source: "calendar",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Avery Stone",
+      subjectEmail: "avery@scoped-corp.test",
+      subjectSource: "calendar",
+      subjectSourceId: "scope-read-file:attendee:avery-external",
+      raw: {
+        providerFileId: "scope-read-file",
+        attendee: { name: "Avery Stone", email: "avery@scoped-corp.test" },
+      },
+    });
+    const attendeeReports: StageReport[] = [];
+
+    const attendeeSummary = await materializeUnmaterializedFacts(db, createTestLogger(), {
+      factTypes: ["attendee"],
+      indexedFileIds: ["scope-read-file"],
+      stageReport: (report) => attendeeReports.push(report),
+    });
+
+    expect(attendeeSummary.eligibleFacts).toBe(1);
+    expect(attendeeSummary.indexBuilds).toBe(1);
+    expect(attendeeSummary.scopeKeyReads).toBeGreaterThan(0);
+    expect(attendeeReports.at(-1)?.materializeSummary?.scopeKeyReads).toBeGreaterThan(0);
   });
 
   it("upgrades existing INFERRED mentions when a durable fact replays", async () => {

@@ -16,7 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { StageReport } from "../connectors/enrichment-stage-report";
+import type { MaterializeStageSummary, StageReport } from "../connectors/enrichment-stage-report";
 
 /** Level methods intercepted on the wrapped logger. */
 const LEVEL_METHODS = new Set(["trace", "debug", "info", "warn", "error", "fatal"]);
@@ -102,12 +102,26 @@ export function appendTraceStageReport(run: DevTraceRun, report: StageReport): v
       context: report.context ?? existing.context,
       outcomes: [...(existing.outcomes ?? []), ...(report.outcomes ?? [])],
       summary: { ...(existing.summary ?? {}), ...(report.summary ?? {}) },
+      materializeSummary: mergeMaterializeSummary(existing.materializeSummary, report.materializeSummary),
     };
     sortStageReports(run);
     return;
   }
   run.stageReports.push(report);
   sortStageReports(run);
+}
+
+function mergeMaterializeSummary(
+  existing: MaterializeStageSummary | undefined,
+  incoming: MaterializeStageSummary | undefined,
+): MaterializeStageSummary | undefined {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  return {
+    eligibleFacts: existing.eligibleFacts + incoming.eligibleFacts,
+    indexBuilds: existing.indexBuilds + incoming.indexBuilds,
+    scopeKeyReads: existing.scopeKeyReads + incoming.scopeKeyReads,
+  };
 }
 
 function sortStageReports(run: DevTraceRun): void {
