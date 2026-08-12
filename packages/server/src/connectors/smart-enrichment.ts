@@ -1269,17 +1269,26 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       if (newFacts.length === 0) continue;
 
       await deps.ensureFresh?.();
-      const updated = await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+      const appendedCount = await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
         const txEntityRepo = createEntityRepository(trx);
         const currentEntity = await txEntityRepo.getEntity(entityId);
-        if (!currentEntity) return false;
+        if (!currentEntity) return 0;
         const currentMetadata = parseEntityMetadata(currentEntity.metadata);
-        currentMetadata.learned_facts = [...(currentMetadata.learned_facts ?? []), ...newFacts];
+        const existingFacts = currentMetadata.learned_facts ?? [];
+        const existingKeys = new Set(existingFacts.map(learnedFactKey).filter((key): key is string => key !== null));
+        const factsToAppend = newFacts.filter((fact) => {
+          const key = learnedFactKey(fact);
+          if (!key || existingKeys.has(key)) return false;
+          existingKeys.add(key);
+          return true;
+        });
+        if (factsToAppend.length === 0) return 0;
+        currentMetadata.learned_facts = [...existingFacts, ...factsToAppend];
         await txEntityRepo.updateEntity(entityId, { metadata: JSON.stringify(currentMetadata) });
-        return true;
+        return factsToAppend.length;
       });
 
-      if (updated) logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
+      if (appendedCount > 0) logger.debug({ entityId, newFactCount: appendedCount }, "Updated entity definition");
       await yieldToEventLoop();
     }
   } catch (err) {
@@ -1711,6 +1720,19 @@ interface EntityMetadata {
   definition?: string;
   learned_facts?: Array<{ fact: string; source_file_id?: string; learned_at?: string }>;
   [key: string]: unknown;
+}
+
+function normalizeLearnedFactContent(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase();
+}
+
+function learnedFactKey(entry: { fact?: unknown; source_file_id?: unknown }): string | null {
+  if (typeof entry.fact !== "string" || typeof entry.source_file_id !== "string" || entry.source_file_id.length === 0) {
+    return null;
+  }
+  const normalizedFact = normalizeLearnedFactContent(entry.fact);
+  const factHash = createHash("sha256").update(normalizedFact).digest("hex");
+  return `${entry.source_file_id}:${factHash}`;
 }
 
 function parseEntityMetadata(raw: string | null): EntityMetadata {
