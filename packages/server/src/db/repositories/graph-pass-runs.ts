@@ -21,7 +21,22 @@ export type QueueRunSnapshot = {
   candidatesCleared: number;
 };
 
-export type GraphPassRunSnapshot = PostSyncRunSnapshot | QueueRunSnapshot;
+export type DuplicateDrainRunSnapshot = {
+  kind: "duplicate_drain";
+  passId: "duplicate-drain";
+  version: 1;
+  status: "running" | "complete";
+  cursorCreatedAt: string | null;
+  cursorId: string | null;
+  scannedEntities: number;
+  merged: number;
+  groupIds: string[];
+  m5SkippedPassReason: number;
+  m3EmailVetoes: number;
+  aliasOnlyQueued: number;
+};
+
+export type GraphPassRunSnapshot = PostSyncRunSnapshot | QueueRunSnapshot | DuplicateDrainRunSnapshot;
 
 export interface GraphPassRun {
   id: string;
@@ -64,6 +79,24 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
       candidatesCleared: readNumber(parsed.candidatesCleared),
     };
   }
+  if (parsed?.kind === "duplicate_drain") {
+    return {
+      kind: "duplicate_drain",
+      passId: "duplicate-drain",
+      version: 1,
+      status: parsed.status === "complete" ? "complete" : "running",
+      cursorCreatedAt: typeof parsed.cursorCreatedAt === "string" ? parsed.cursorCreatedAt : null,
+      cursorId: typeof parsed.cursorId === "string" ? parsed.cursorId : null,
+      scannedEntities: readNumber(parsed.scannedEntities),
+      merged: readNumber(parsed.merged),
+      groupIds: Array.isArray(parsed.groupIds)
+        ? (parsed.groupIds as string[]).filter((id) => typeof id === "string")
+        : [],
+      m5SkippedPassReason: readNumber(parsed.m5SkippedPassReason),
+      m3EmailVetoes: readNumber(parsed.m3EmailVetoes),
+      aliasOnlyQueued: readNumber(parsed.aliasOnlyQueued),
+    };
+  }
   return {
     kind: "post_sync",
     affectedIndexedFileIds: Array.isArray(parsed?.affectedIndexedFileIds)
@@ -85,6 +118,10 @@ function mapRun(row: GraphPassRunRow): GraphPassRun {
     errorMessage: row.error_message,
     inputSnapshot: parseSnapshot(row.input_snapshot_json),
   };
+}
+
+function isPostSyncRun(row: GraphPassRunRow): boolean {
+  return parseSnapshot(row.input_snapshot_json).kind === "post_sync";
 }
 
 export function createGraphPassRunRepository(db: Kysely<DB>) {
@@ -150,13 +187,14 @@ export function createGraphPassRunRepository(db: Kysely<DB>) {
     },
 
     async getRunning(): Promise<GraphPassRun | null> {
-      const row = await db
+      const rows = await db
         .selectFrom("graph_pass_runs")
         .selectAll()
         .where("status", "=", "running")
         .orderBy("started_at", "desc")
         .orderBy("id", "desc")
-        .executeTakeFirst();
+        .execute();
+      const row = rows.find(isPostSyncRun);
       return row ? mapRun(row) : null;
     },
 
@@ -166,9 +204,9 @@ export function createGraphPassRunRepository(db: Kysely<DB>) {
         .selectAll()
         .orderBy("started_at", "desc")
         .orderBy("id", "desc")
-        .limit(limit)
+        .limit(Math.max(limit * 2, limit))
         .execute();
-      return rows.map(mapRun);
+      return rows.filter(isPostSyncRun).slice(0, limit).map(mapRun);
     },
 
     async listUnfinished(): Promise<GraphPassRun[]> {
@@ -179,7 +217,7 @@ export function createGraphPassRunRepository(db: Kysely<DB>) {
         .orderBy("started_at", "asc")
         .orderBy("id", "asc")
         .execute();
-      return rows.map(mapRun);
+      return rows.filter(isPostSyncRun).map(mapRun);
     },
 
     /**

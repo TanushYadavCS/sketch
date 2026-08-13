@@ -60,6 +60,7 @@ import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsap
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
+import { startDuplicateDrain } from "./entities/duplicate-drain";
 import { configureMaterializeDefaults } from "./entities/materialize";
 import { startNormalizationBackfill } from "./entities/normalization-backfill";
 import { isPersonalOrSharedDomain } from "./entities/personal-domains";
@@ -878,6 +879,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // for pre-migration rows in the background; readers stay on the legacy path
   // until it completes, so this must not block startup readiness.
   const normalizationBackfill = backgroundWork ? startNormalizationBackfill(db, logger) : null;
+  const duplicateDrain = backgroundWork ? startDuplicateDrain(db, logger) : null;
   const whatsappWindowKeepAliveJob =
     backgroundWork && config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
       ? startWhatsAppWindowKeepAliveJob({
@@ -1262,6 +1264,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     }
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
+    duplicateDrain?.stop();
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();

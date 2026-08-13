@@ -130,8 +130,11 @@ function collectEdges(members: CompanyDedupMember[]): CompanyDedupEdge[] {
  * including singletons, so callers can use it as a complete partition of the
  * input. Members and groups are ordered deterministically.
  */
-export function buildCompanyDedupGroups(members: CompanyDedupMember[]): CompanyDedupGroup[] {
-  const edges = collectEdges(members);
+export function buildCompanyDedupGroups(
+  members: CompanyDedupMember[],
+  allowedEdgeKinds?: ReadonlySet<CompanyDedupEdgeKind>,
+): CompanyDedupGroup[] {
+  const edges = collectEdges(members).filter((edge) => !allowedEdgeKinds || allowedEdgeKinds.has(edge.kind));
   const uf = createUnionFind(members.map((member) => member.entityId));
   for (const edge of edges) {
     for (let i = 1; i < edge.entityIds.length; i += 1) uf.union(edge.entityIds[0], edge.entityIds[i]);

@@ -4,6 +4,7 @@ import { createTaskRepository } from "../db/repositories/tasks";
 import { reconcileWorkCycles } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
+import { runDuplicateDrain } from "../entities/duplicate-drain";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { reconcileStructuralAssigneeContributesTo } from "../entities/structural-assignee";
 import { floorRetryForDomains } from "./engagement-floor";
@@ -134,6 +135,10 @@ export async function runPostSyncGraphPipeline({
       domainSweep.promotedDomains,
       { maxFilesPerDomain: floorRetryMaxFilesPerDomain },
     );
+  }
+  const duplicateDrain = await runDuplicateDrain(db, { logger: syncLogger.child({ component: "duplicate-drain" }) });
+  if (duplicateDrain.merged > 0 || duplicateDrain.aliasOnlyQueued > 0) {
+    syncLogger.info({ duplicateDrain }, "Post-sync duplicate drain complete");
   }
 
   await sweepCoMentionContributesTo(db, syncLogger.child({ component: "co-mention-sweep" }), {

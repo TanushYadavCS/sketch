@@ -344,17 +344,21 @@ export async function replaySourceFacts(
 
 let materializeQueue: Promise<void> = Promise.resolve();
 
-export async function materializeUnmaterializedFacts(
-  db: Kysely<DB>,
-  logger: Logger,
-  opts: MaterializeUnmaterializedOptions = {},
-): Promise<MaterializeFactsSummary> {
-  const run = materializeQueue.then(() => materializeUnmaterializedFactsInner(db, logger, opts));
+export async function withMaterializeReplayQueue<T>(work: () => Promise<T>): Promise<T> {
+  const run = materializeQueue.then(work);
   materializeQueue = run.then(
     () => undefined,
     () => undefined,
   );
   return run;
+}
+
+export async function materializeUnmaterializedFacts(
+  db: Kysely<DB>,
+  logger: Logger,
+  opts: MaterializeUnmaterializedOptions = {},
+): Promise<MaterializeFactsSummary> {
+  return withMaterializeReplayQueue(() => materializeUnmaterializedFactsInner(db, logger, opts));
 }
 
 export async function cleanupRelationshipEvidenceForFacts(db: Kysely<DB>, sourceFactIds: string[]): Promise<number> {
