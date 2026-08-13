@@ -461,9 +461,8 @@ export function scheduledTaskRoutes(
       };
     }
     const userId = await resolveUserId(c.get("sub"));
-    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, {
+    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, new Set<string>(), {
       userId,
-      role: c.get("role"),
     });
     if (!accessibleRow) {
       logger?.warn(
@@ -634,7 +633,7 @@ export function scheduledTaskRoutes(
       db,
       taskId: id,
       executionMode: executionMode.data,
-      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      actor: { userId },
     });
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
@@ -679,7 +678,7 @@ export function scheduledTaskRoutes(
         db,
         taskId: id,
         request,
-        actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+        actor: { userId },
         brokerCapable,
         encryptionKey: options.encryptionKey,
       });
@@ -832,7 +831,7 @@ export function scheduledTaskRoutes(
     const deletion = await deleteAutomation({
       db,
       taskId: id,
-      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      actor: { userId },
       scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
       encryptionKey: options.encryptionKey,
     });

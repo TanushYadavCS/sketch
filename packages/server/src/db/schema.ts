@@ -883,6 +883,15 @@ export interface AutomationRunsTable {
   error_message: string | null;
   started_at: Generated<string>;
   completed_at: string | null;
+  triggered_by_user_id: string | null;
+}
+
+export interface AutomationTaskSharesTable {
+  id: string;
+  task_id: string;
+  user_id: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface AutomationStepContentTable {
@@ -1779,6 +1788,7 @@ export interface DB {
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
+  automation_task_shares: AutomationTaskSharesTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;

@@ -2,6 +2,7 @@ import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -92,6 +93,10 @@ describe("automation persistence", () => {
     db = await createTestDb();
   });
 
+  async function addUser(id: string): Promise<void> {
+    await db.insertInto("users").values({ id, name: id }).execute();
+  }
+
   afterEach(async () => {
     await db.destroy();
   });
@@ -169,7 +174,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-mode",
       patch: { expectedRevision: 0, executionMode: "hybrid" },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
     });
 
@@ -238,7 +243,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-webhook-update",
       patch: { expectedRevision: 0, steps: nextDefinition.steps },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
       encryptionKey: ENCRYPTION_KEY,
     });
@@ -264,7 +269,7 @@ describe("automation persistence", () => {
         scheduleValue: "120",
         steps: makeDefinition().steps,
       },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
       encryptionKey: ENCRYPTION_KEY,
     });
@@ -281,7 +286,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-webhook-update",
       patch: { expectedRevision: 2, steps: nextDefinition.steps },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
       encryptionKey: ENCRYPTION_KEY,
     });
@@ -347,7 +352,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-edit",
       request: makeDefinition({ expectedRevision: 0, title: "Replacement" }),
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
     });
 
@@ -369,7 +374,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-owned",
       request: makeDefinition({ expectedRevision: 0, title: "Unauthorized" }),
-      actor: { userId: "user-2", canManageAnyTask: false },
+      actor: { userId: "user-2" },
       brokerCapable: true,
     });
 
@@ -380,7 +385,7 @@ describe("automation persistence", () => {
     });
   });
 
-  it("allows an admin actor to replace another owner's definition", async () => {
+  it("denies an admin without a grant and allows a granted member to replace", async () => {
     await createAutomationDefinition({
       db,
       request: makeDefinition(),
@@ -388,17 +393,74 @@ describe("automation persistence", () => {
       brokerCapable: true,
     });
 
-    const result = await replaceAutomationDefinition({
+    const denied = await replaceAutomationDefinition({
       db,
       taskId: "automation-admin",
       request: makeDefinition({ expectedRevision: 0, title: "Admin replacement" }),
-      actor: { userId: "admin-1", canManageAnyTask: true },
+      actor: { userId: "admin-1" },
       brokerCapable: true,
     });
 
-    expect(result).toMatchObject({
+    expect(denied).toEqual({ kind: "not_found" });
+    await expect(createScheduledTaskRepository(db).getById("automation-admin")).resolves.toMatchObject({
+      title: "Daily account brief",
+      revision: 0,
+    });
+
+    await addUser("grantee-1");
+    await createAutomationSharesRepository(db).grant({
+      taskId: "automation-admin",
+      userId: "grantee-1",
+      grantedByUserId: "user-1",
+    });
+    const allowed = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-admin",
+      request: makeDefinition({ expectedRevision: 0, title: "Granted replacement" }),
+      actor: { userId: "grantee-1" },
+      brokerCapable: true,
+    });
+
+    expect(allowed).toMatchObject({
       kind: "saved",
-      row: { title: "Admin replacement", revision: 1, last_edited_by: "admin-1" },
+      row: { title: "Granted replacement", revision: 1, last_edited_by: "grantee-1" },
+    });
+  });
+
+  it("re-checks the grant inside the mutation transaction after a revoke", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-grant-recheck"),
+      brokerCapable: true,
+    });
+    await addUser("grantee-1");
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-grant-recheck", userId: "grantee-1", grantedByUserId: "user-1" });
+
+    await expect(
+      updateAutomationDefinition({
+        db,
+        taskId: "automation-grant-recheck",
+        patch: { expectedRevision: 0, title: "Granted edit" },
+        actor: { userId: "grantee-1" },
+        brokerCapable: true,
+      }),
+    ).resolves.toMatchObject({ kind: "saved" });
+
+    await shares.revoke({ taskId: "automation-grant-recheck", userId: "grantee-1" });
+    await expect(
+      updateAutomationDefinition({
+        db,
+        taskId: "automation-grant-recheck",
+        patch: { expectedRevision: 1, title: "Revoked edit" },
+        actor: { userId: "grantee-1" },
+        brokerCapable: true,
+      }),
+    ).resolves.toEqual({ kind: "access_denied" });
+    await expect(createScheduledTaskRepository(db).getById("automation-grant-recheck")).resolves.toMatchObject({
+      title: "Granted edit",
+      revision: 1,
     });
   });
 
@@ -414,7 +476,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-no-admin-identity",
       request: makeDefinition({ expectedRevision: 0, title: "Unauthorized admin replacement" }),
-      actor: { userId: null, canManageAnyTask: true },
+      actor: { userId: null },
       brokerCapable: true,
     });
 
@@ -438,7 +500,7 @@ describe("automation persistence", () => {
       db,
       taskId: "automation-conflict",
       request: makeDefinition({ expectedRevision: 0, title: "Stale" }),
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
     });
 
@@ -481,7 +543,7 @@ describe("automation persistence", () => {
             },
           },
         }),
-        actor: { userId: "user-1", canManageAnyTask: false },
+        actor: { userId: "user-1" },
         brokerCapable: true,
       }),
     ).rejects.toThrow("replacement rejected");
@@ -516,7 +578,7 @@ describe("automation persistence", () => {
           },
         },
       },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
     });
 
@@ -535,7 +597,7 @@ describe("automation persistence", () => {
           agent: { contentType: "prompt", content: "Stale content", apps: null },
         },
       },
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       brokerCapable: true,
     });
 
@@ -576,7 +638,7 @@ describe("automation persistence", () => {
               agent: { contentType: "prompt", content: "Rejected content", apps: null },
             },
           },
-          actor: { userId: "user-1", canManageAnyTask: false },
+          actor: { userId: "user-1" },
           brokerCapable: true,
         }),
       ).rejects.toThrow("direct update rejected");
@@ -618,7 +680,7 @@ describe("automation persistence", () => {
     const result = await deleteAutomation({
       db,
       taskId: "automation-delete",
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       scheduler: { removeTaskRuntime },
     });
 
@@ -661,7 +723,7 @@ describe("automation persistence", () => {
         deleteAutomation({
           db,
           taskId: "automation-delete-rollback",
-          actor: { userId: "user-1", canManageAnyTask: false },
+          actor: { userId: "user-1" },
           scheduler: { removeTaskRuntime },
         }),
       ).rejects.toThrow("run deletion rejected");
@@ -693,7 +755,7 @@ describe("automation persistence", () => {
     const falseResult = await deleteAutomation({
       db,
       taskId: "automation-delete-false",
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       scheduler: { removeTaskRuntime: falseCleanup },
     });
     expect(falseResult.kind).toBe("scheduler_failure");
@@ -709,26 +771,45 @@ describe("automation persistence", () => {
     const thrownResult = await deleteAutomation({
       db,
       taskId: "automation-delete-throw",
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       scheduler: { removeTaskRuntime: thrownCleanup },
     });
     expect(thrownResult).toMatchObject({ kind: "scheduler_failure", error: new Error("runtime unavailable") });
     await expect(createScheduledTaskRepository(db).getById("automation-delete-throw")).resolves.toBeUndefined();
   });
 
-  it("preserves owner/admin access semantics and returns not-found for repeat deletes", async () => {
+  it("deletes only for the owner and returns not-found for repeat deletes", async () => {
     await createAutomationDefinition({
       db,
       request: makeDefinition(),
       context: createContext("automation-delete-access"),
       brokerCapable: true,
     });
+    await addUser("grantee-1");
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-delete-access", userId: "grantee-1", grantedByUserId: "user-1" });
     const removeTaskRuntime = vi.fn().mockResolvedValue(true);
     await expect(
       deleteAutomation({
         db,
         taskId: "automation-delete-access",
-        actor: { userId: "user-2", canManageAnyTask: false },
+        actor: { userId: "user-2" },
+        scheduler: { removeTaskRuntime },
+      }),
+    ).resolves.toEqual({ kind: "access_denied" });
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-access",
+        actor: { userId: "grantee-1" },
+        scheduler: { removeTaskRuntime },
+      }),
+    ).resolves.toEqual({ kind: "access_denied" });
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-access",
+        actor: { userId: "admin-1" },
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "access_denied" });
@@ -738,7 +819,7 @@ describe("automation persistence", () => {
       deleteAutomation({
         db,
         taskId: "automation-delete-access",
-        actor: { userId: "admin-1", canManageAnyTask: true },
+        actor: { userId: "user-1" },
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "deleted" });
@@ -746,11 +827,37 @@ describe("automation persistence", () => {
       deleteAutomation({
         db,
         taskId: "automation-delete-access",
-        actor: { userId: "admin-1", canManageAnyTask: true },
+        actor: { userId: "user-1" },
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "not_found" });
     expect(removeTaskRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("removes share rows for the task inside the delete transaction", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-shares"),
+      brokerCapable: true,
+    });
+    await addUser("grantee-1");
+    await addUser("grantee-2");
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-delete-shares", userId: "grantee-1", grantedByUserId: "user-1" });
+    await shares.grant({ taskId: "automation-delete-shares", userId: "grantee-2", grantedByUserId: "user-1" });
+
+    const result = await deleteAutomation({
+      db,
+      taskId: "automation-delete-shares",
+      actor: { userId: "user-1" },
+      scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    await expect(
+      db.selectFrom("automation_task_shares").selectAll().where("task_id", "=", "automation-delete-shares").execute(),
+    ).resolves.toEqual([]);
   });
 
   it("returns not-found for a concurrent delete that arrives during runtime cleanup", async () => {
@@ -776,7 +883,7 @@ describe("automation persistence", () => {
     const firstDelete = deleteAutomation({
       db,
       taskId: "automation-delete-race",
-      actor: { userId: "user-1", canManageAnyTask: false },
+      actor: { userId: "user-1" },
       scheduler: { removeTaskRuntime: firstCleanup },
     });
     await cleanupStarted;
@@ -786,7 +893,7 @@ describe("automation persistence", () => {
       deleteAutomation({
         db,
         taskId: "automation-delete-race",
-        actor: { userId: "user-1", canManageAnyTask: false },
+        actor: { userId: "user-1" },
         scheduler: { removeTaskRuntime: secondCleanup },
       }),
     ).resolves.toEqual({ kind: "not_found" });

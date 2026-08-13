@@ -684,16 +684,30 @@ export class TaskScheduler {
 
   async executeTaskById(
     id: string,
-    options: { preserveTaskState?: boolean; runMode?: AutomationRunMode; runId?: string } = {},
+    options: {
+      preserveTaskState?: boolean;
+      runMode?: AutomationRunMode;
+      runId?: string;
+      triggeredByUserId?: string | null;
+    } = {},
   ): Promise<AutomationExecutionResult | null> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
+    const runId =
+      options.runId ??
+      (options.triggeredByUserId
+        ? await this.deps.automationRunsRepo.create({
+            taskId: id,
+            triggerData: { type: "manual" },
+            triggeredByUserId: options.triggeredByUserId,
+          })
+        : undefined);
     if (row.status === "completed" && row.schedule_type === "once") {
-      if (options.runId) await this.failReservedManualRun(row, options.runId, `Task ${id} is no longer runnable`);
+      if (runId) await this.failReservedManualRun(row, runId, `Task ${id} is no longer runnable`);
       return null;
     }
     if (row.status !== "active") {
-      if (options.runId) await this.failReservedManualRun(row, options.runId, `Task ${id} is not active`);
+      if (runId) await this.failReservedManualRun(row, runId, `Task ${id} is not active`);
       throw new Error(`Task ${id} is not active`);
     }
     return this.enqueueTaskRun(
@@ -704,7 +718,7 @@ export class TaskScheduler {
       getSlackParentAbortSignal(),
       options.preserveTaskState === true || options.runMode === "manual" || options.runMode === "test",
       options.runMode,
-      options.runId,
+      runId,
     );
   }
 
@@ -1193,6 +1207,12 @@ export class TaskScheduler {
     } else {
       rows = await this.repo.listActive();
     }
+    return rows.map((r) => this.toScheduledTask(r));
+  }
+
+  /** Grant-aware list: tasks the user created plus tasks shared with them. */
+  async listTasksForUser(userId: string): Promise<ScheduledTask[]> {
+    const rows = await this.repo.listAccessibleByUser(userId);
     return rows.map((r) => this.toScheduledTask(r));
   }
 

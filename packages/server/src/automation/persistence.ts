@@ -11,6 +11,7 @@ import type {
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import {
@@ -48,9 +49,13 @@ export interface AutomationCreateContext {
   originMessageId: number | null;
 }
 
+/**
+ * Actor for automation mutations. Rights are owner-or-explicit-grant, re-checked
+ * inside each mutation's transaction against the shares table — there is no
+ * admin bypass.
+ */
 export interface AutomationEditActor {
   userId: string | null;
-  canManageAnyTask: boolean;
 }
 
 export type AutomationCreateResult = {
@@ -250,6 +255,20 @@ function contentTypeForStep(step: WorkflowStep | undefined): "prompt" | "script"
   return step?.type === "action" ? "script" : "prompt";
 }
 
+/**
+ * Owner-or-grantee check evaluated inside the caller's transaction so a
+ * revoke between the access read and the mutation write cannot slip through.
+ */
+async function isTaskEditor(
+  trx: Kysely<DB>,
+  taskId: string,
+  createdBy: string | null,
+  userId: string,
+): Promise<boolean> {
+  if (createdBy === userId) return true;
+  return createAutomationSharesRepository(trx).hasGrant(taskId, userId);
+}
+
 function mergeStepContent(
   definition: AutomationDefinition,
   steps: WorkflowStep[],
@@ -399,7 +418,7 @@ export async function deleteAutomation(params: {
         .executeTakeFirst();
 
       if (!current) return { kind: "not_found" as const };
-      if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
+      if (!params.actor.userId || current.created_by !== params.actor.userId) {
         return { kind: "access_denied" as const };
       }
 
@@ -408,6 +427,7 @@ export async function deleteAutomation(params: {
       await createAutomationRunsRepository(trx).deleteByTaskId(params.taskId);
       await createWebhookDeliveryRepository(trx).deleteByTaskId(params.taskId);
       await trx.deleteFrom("webhook_endpoints").where("task_id", "=", params.taskId).execute();
+      await createAutomationSharesRepository(trx).deleteByTaskId(params.taskId);
 
       const deleted = await trx.deleteFrom("scheduled_tasks").where("id", "=", params.taskId).executeTakeFirst();
       if (Number(deleted.numDeletedRows ?? 0) === 0) throw new AutomationDeletionRaceError();
@@ -450,7 +470,7 @@ export async function updateAutomationDefinition(params: {
       .executeTakeFirst();
     if (!current) return { kind: "not_found" as const };
     if (!params.actor.userId) return { kind: "access_denied" as const };
-    if (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId) {
+    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
       return { kind: "access_denied" as const };
     }
 
@@ -672,9 +692,8 @@ export async function selectAutomationSetupExecutionMode(params: {
 }): Promise<AutomationSetupModeSelectionResult> {
   return params.db.transaction().execute(async (trx) => {
     const row = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", params.taskId).executeTakeFirst();
-    if (!row || !params.actor.userId || (!params.actor.canManageAnyTask && row.created_by !== params.actor.userId)) {
-      return { kind: "not_found" as const };
-    }
+    if (!row || !params.actor.userId) return { kind: "not_found" as const };
+    if (!(await isTaskEditor(trx, row.id, row.created_by, params.actor.userId))) return { kind: "not_found" as const };
     const [stepContentRows, runRows] = await Promise.all([
       createAutomationStepContentRepository(trx).getByTask(params.taskId),
       createAutomationRunsRepository(trx).list(params.taskId),
@@ -721,7 +740,8 @@ export async function replaceAutomationDefinition(params: {
       .where("id", "=", params.taskId)
       .executeTakeFirst();
     if (!current) return { kind: "not_found" as const };
-    if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
+    if (!params.actor.userId) return { kind: "not_found" as const };
+    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
       return { kind: "not_found" as const };
     }
     const expectedRevision = request.expectedRevision ?? current.revision;

@@ -1927,7 +1927,7 @@ describe("web chat API", () => {
     });
 
     expect(res.status).toBe(404);
-    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
+    expect(await res.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
     expect(runAgent).not.toHaveBeenCalled();
     await expect(readFile(webChatTranscriptPath(dataDir, admin.id, "owner-builder"), "utf-8")).rejects.toMatchObject({
       code: "ENOENT",

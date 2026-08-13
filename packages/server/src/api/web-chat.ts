@@ -654,9 +654,8 @@ async function resolveAutomationBuilderContext(params: {
     params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
     return null;
   });
-  const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, {
+  const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, new Set<string>(), {
     userId: params.currentUserId,
-    role: params.role,
   });
   if (!accessibleTask) {
     return null;
@@ -2055,9 +2054,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         deps.logger.warn({ err, taskId: automationTaskId }, "Failed to resolve builder interruption task");
         return null;
       });
-      const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, {
+      const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, new Set<string>(), {
         userId: currentUser.id,
-        role: c.get("role"),
       });
       if (!accessibleTask) {
         return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);

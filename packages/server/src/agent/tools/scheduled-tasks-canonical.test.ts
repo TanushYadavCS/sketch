@@ -1353,31 +1353,29 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     ]);
   });
 
-  it("keeps ownership on the owner while allowing an admin editor and denying a member", async () => {
+  it("keeps ownership on the owner while denying an admin editor without a grant and a member", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
       context: context("ownership-task"),
       brokerCapable: true,
     });
-    const adminScheduler = schedulerFor("ownership-task", "owner-1");
     const adminResult = await handleManageScheduledTasks(
       { action: "update", task_id: "ownership-task", prompt: "Admin edit", expected_revision: 0 },
       {
         db,
-        scheduler: adminScheduler,
+        scheduler: schedulerFor("ownership-task", "owner-1"),
         taskContext: { ...taskContextFor("ownership-task", "admin-1"), canManageAnyTask: true },
       },
     );
-    expect(adminResult.content[0].text).toContain("Automation updated:");
+    expect(adminResult.content[0].text).toContain("Error: you do not have permission to update task ownership-task.");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
       created_by: "owner-1",
-      last_edited_by: "admin-1",
-      revision: 1,
+      revision: 0,
     });
 
     const memberResult = await handleManageScheduledTasks(
-      { action: "update", task_id: "ownership-task", prompt: "Member edit", expected_revision: 1 },
+      { action: "update", task_id: "ownership-task", prompt: "Member edit", expected_revision: 0 },
       {
         db,
         scheduler: schedulerFor("ownership-task", "owner-1"),
@@ -1386,9 +1384,9 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     );
     expect(memberResult.content[0].text).toContain("created by");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
-      prompt: "Admin edit",
-      revision: 1,
-      last_edited_by: "admin-1",
+      created_by: "owner-1",
+      revision: 0,
+      last_edited_by: "owner-1",
     });
   });
 

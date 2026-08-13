@@ -371,7 +371,7 @@ describe("chat automation authoring orchestration", () => {
     expect(edit).not.toHaveBeenCalled();
   });
 
-  it("lets an admin edit a foreign-owned task without changing its owner", async () => {
+  it("denies an admin without a grant on a foreign-owned task", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
@@ -413,14 +413,11 @@ describe("chat automation authoring orchestration", () => {
         taskContext: { ...taskContext(), createdBy: "admin-id", canManageAnyTask: true },
         currentAutomation: current,
       }),
-    ).resolves.toMatchObject({ kind: "saved", task: { id: "foreign-admin-edit" } });
-
-    expect(edit).toHaveBeenCalledWith(expect.objectContaining({ currentAutomation: current, expectedRevision: 0 }));
+    ).resolves.toEqual({ kind: "error", message: "Automation not found." });
+    expect(edit).not.toHaveBeenCalled();
     await expect(createScheduledTaskRepository(db).getById("foreign-admin-edit")).resolves.toMatchObject({
       created_by: "owner-id",
-      last_edited_by: "admin-id",
-      title: "Admin-edited brief",
-      revision: 1,
+      revision: 0,
     });
   });
 

@@ -201,21 +201,23 @@ describe("scheduled task conversation API", () => {
     const adminList = await app.request("/api/scheduled-tasks/foreign-task/conversations", {
       headers: { Cookie: adminCookie },
     });
-    expect(adminList.status).toBe(200);
-    await expect(adminList.json()).resolves.toMatchObject({ conversations: [], transcriptAccess: "viewer" });
+    expect(adminList.status).toBe(404);
 
     const adminDetail = await app.request("/api/scheduled-tasks/foreign-task/conversations/owner-private-chat", {
       headers: { Cookie: adminCookie },
     });
     expect(adminDetail.status).toBe(404);
-    await expect(adminDetail.json()).resolves.toMatchObject({
-      error: { code: "CONVERSATION_NOT_FOUND" },
-    });
 
     const memberResponse = await app.request("/api/scheduled-tasks/foreign-task/conversations", {
       headers: { Cookie: await memberCookie(db, member.id) },
     });
     expect(memberResponse.status).toBe(404);
+
+    const ownerList = await app.request("/api/scheduled-tasks/foreign-task/conversations", {
+      headers: { Cookie: await memberCookie(db, owner.id) },
+    });
+    expect(ownerList.status).toBe(200);
+    await expect(ownerList.json()).resolves.toMatchObject({ transcriptAccess: "viewer" });
     expect(admin.id).not.toBe(owner.id);
   });
 
@@ -246,9 +248,15 @@ describe("scheduled task conversation API", () => {
       headers: { Cookie: adminCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ createNew: true }),
     });
+    expect(adminStart.status).toBe(404);
 
-    expect(adminStart.status).toBe(409);
-    await expect(adminStart.json()).resolves.toMatchObject({
+    const ownerSecond = await app.request("/api/scheduled-tasks/locked-task/conversations", {
+      method: "POST",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true }),
+    });
+    expect(ownerSecond.status).toBe(409);
+    await expect(ownerSecond.json()).resolves.toMatchObject({
       error: { code: "BUILDER_CHAT_LOCKED" },
     });
     await expect(

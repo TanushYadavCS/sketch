@@ -81,9 +81,8 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     }
 
     const userId = await resolveUserId(db, c.get("sub"));
-    const accessibleTask = resolveScheduledTaskAccess(row, row.created_by, {
+    const accessibleTask = resolveScheduledTaskAccess(row, row.created_by, new Set<string>(), {
       userId,
-      role: c.get("role"),
     });
     if (!accessibleTask) {
       options.logger?.warn({ taskId, userId, ownerUserId: row.created_by }, "task-conversations: task access denied");

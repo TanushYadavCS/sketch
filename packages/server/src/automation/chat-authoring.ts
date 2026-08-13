@@ -177,9 +177,8 @@ export function createChatAutomationAuthoring(deps: {
     const currentAutomation = input.currentAutomation ?? input.taskContext.currentAutomation;
     const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const row = await tasks.getById(input.taskId);
-    const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, {
+    const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, new Set<string>(), {
       userId: input.taskContext.createdBy,
-      role: input.taskContext.canManageAnyTask ? "admin" : undefined,
     });
     if (!accessibleRow) {
       return { kind: "error", message: "Automation not found." };
@@ -213,7 +212,6 @@ export function createChatAutomationAuthoring(deps: {
         request: result.definition,
         actor: {
           userId: input.taskContext.createdBy,
-          canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,

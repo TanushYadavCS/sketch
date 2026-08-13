@@ -131,7 +131,7 @@ describe("automation persistence on Postgres", () => {
         db,
         taskId: "pg-automation",
         request: definition({ expectedRevision: 0, title: "Unauthorized replacement" }),
-        actor: { userId: "another-owner", canManageAnyTask: false },
+        actor: { userId: "another-owner" },
         brokerCapable: true,
       }),
     ).resolves.toEqual({ kind: "not_found" });
@@ -140,7 +140,7 @@ describe("automation persistence on Postgres", () => {
       db,
       taskId: "pg-automation",
       request: definition({ expectedRevision: 0, title: "Portable replacement" }),
-      actor: { userId: "pg-owner", canManageAnyTask: false },
+      actor: { userId: "pg-owner" },
       brokerCapable: true,
     });
 
@@ -153,7 +153,7 @@ describe("automation persistence on Postgres", () => {
         db,
         taskId: "pg-automation",
         request: definition({ expectedRevision: 0, title: "Stale replacement" }),
-        actor: { userId: "pg-owner", canManageAnyTask: false },
+        actor: { userId: "pg-owner" },
         brokerCapable: true,
       }),
     ).resolves.toEqual({ kind: "revision_conflict", currentRevision: 1 });
@@ -185,7 +185,7 @@ describe("automation persistence on Postgres", () => {
           db,
           taskId: "pg-replace-rollback",
           request: definition({ expectedRevision: 0, title: "Must roll back" }),
-          actor: { userId: "pg-owner", canManageAnyTask: false },
+          actor: { userId: "pg-owner" },
           brokerCapable: true,
         }),
       ).rejects.toThrow("replacement content rejected");
@@ -217,7 +217,7 @@ describe("automation persistence on Postgres", () => {
           agent: { contentType: "prompt", content: "Updated portable content", apps: ["linear"] },
         },
       },
-      actor: { userId: "pg-owner", canManageAnyTask: false },
+      actor: { userId: "pg-owner" },
       brokerCapable: true,
     });
 
@@ -230,7 +230,7 @@ describe("automation persistence on Postgres", () => {
         db,
         taskId: "pg-direct-update",
         patch: { expectedRevision: 0, prompt: "Stale Postgres update" },
-        actor: { userId: "pg-owner", canManageAnyTask: false },
+        actor: { userId: "pg-owner" },
         brokerCapable: true,
       }),
     ).resolves.toEqual({ kind: "revision_conflict", currentRevision: 1 });
@@ -284,7 +284,7 @@ describe("automation persistence on Postgres", () => {
     const result = await deleteAutomation({
       db,
       taskId: "pg-delete",
-      actor: { userId: "pg-owner", canManageAnyTask: false },
+      actor: { userId: "pg-owner" },
       scheduler: {
         removeTaskRuntime: async (taskId) => {
           taskVisibleAtRuntimeCleanup = Boolean(await createScheduledTaskRepository(db).getById(taskId));

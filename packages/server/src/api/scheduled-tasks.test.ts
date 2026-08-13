@@ -336,6 +336,7 @@ describe("Scheduled Tasks API", () => {
     };
     const app = createApp(db, config, { scheduler });
     const cookie = await loginAdmin(app);
+    const memberCookie = await getMemberCookie(db, member.id);
 
     const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
@@ -361,7 +362,7 @@ describe("Scheduled Tasks API", () => {
     expect(whatsappTask.canResume).toBe(true);
     expect(whatsappTask.originChat).toBeNull();
 
-    const detail = await app.request("/api/scheduled-tasks/task-channel", { headers: { Cookie: cookie } });
+    const detail = await app.request("/api/scheduled-tasks/task-channel", { headers: { Cookie: memberCookie } });
     expect(detail.status).toBe(200);
     await expect(detail.json()).resolves.toMatchObject({
       automation: {
@@ -446,7 +447,7 @@ describe("Scheduled Tasks API", () => {
         executeTaskById: vi.fn(),
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, member.id);
 
     const res = await app.request("/api/scheduled-tasks/task-origin/origin-chat/messages", {
       headers: { Cookie: cookie },
@@ -746,7 +747,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const pauseRes = await app.request("/api/scheduled-tasks/task-1/pause", {
       method: "POST",
@@ -818,7 +819,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
-  it("admins can access any task via any route", async () => {
+  it("denies an admin without a grant on a foreign task via every route", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -854,16 +855,22 @@ describe("Scheduled Tasks API", () => {
     const cookie = await loginAdmin(app);
 
     const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: cookie } });
-    expect(runsRes.status).toBe(200);
+    expect(runsRes.status).toBe(404);
 
     const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", { headers: { Cookie: cookie } });
-    expect(stepRes.status).toBe(200);
+    expect(stepRes.status).toBe(404);
 
     const pauseRes = await app.request("/api/scheduled-tasks/task-bob/pause", {
       method: "POST",
       headers: { Cookie: cookie },
     });
-    expect(pauseRes.status).toBe(200);
+    expect(pauseRes.status).toBe(404);
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+
+    const ownerRes = await app.request("/api/scheduled-tasks/task-bob/runs", {
+      headers: { Cookie: await getMemberCookie(db, bob.id) },
+    });
+    expect(ownerRes.status).toBe(200);
   });
 
   it("fails closed when an admin context has no user in this tenant", async () => {
@@ -1103,7 +1110,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1117,8 +1124,8 @@ describe("Scheduled Tasks API", () => {
       id: "task-builder",
       createdBy: alice.id,
       createdByName: "Alice",
-      lastEditedBy: admin.id,
-      lastEditedByName: "admin",
+      lastEditedBy: alice.id,
+      lastEditedByName: "Alice",
       title: "Daily account brief",
       revision: 1,
       scheduleType: "interval",
@@ -1136,7 +1143,7 @@ describe("Scheduled Tasks API", () => {
       prompt: "Summarize account activity.",
       schedule_type: "interval",
       schedule_value: "120",
-      last_edited_by: admin.id,
+      last_edited_by: alice.id,
       revision: 1,
     });
     expect(row?.steps).not.toContain("Check account activity");
@@ -1185,7 +1192,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1260,7 +1267,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1334,7 +1341,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1393,7 +1400,7 @@ describe("Scheduled Tasks API", () => {
         executeStepById,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder/steps/agent-1/runs", {
       method: "POST",
@@ -1446,7 +1453,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-delete", {
       method: "DELETE",
@@ -1462,7 +1469,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-delete");
   });
 
-  it("allows an admin to delete a foreign-owned task without detaching scheduler cleanup", async () => {
+  it("denies an admin delete of a foreign-owned task and lets the owner delete", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1505,15 +1512,21 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: await getMemberCookie(db, member.id) },
     });
     expect(memberResponse.status).toBe(404);
-    expect(scheduler.removedTaskIds).toEqual([]);
-    await expect(tasks.getById("task-delete-foreign")).resolves.toBeDefined();
 
     const adminResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
       method: "DELETE",
       headers: { Cookie: await loginAdmin(app) },
     });
-    expect(adminResponse.status).toBe(200);
-    expect(await adminResponse.json()).toEqual({ success: true });
+    expect(adminResponse.status).toBe(404);
+    expect(scheduler.removedTaskIds).toEqual([]);
+    await expect(tasks.getById("task-delete-foreign")).resolves.toBeDefined();
+
+    const ownerResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
+      method: "DELETE",
+      headers: { Cookie: await getMemberCookie(db, owner.id) },
+    });
+    expect(ownerResponse.status).toBe(200);
+    expect(await ownerResponse.json()).toEqual({ success: true });
     expect(scheduler.removedTaskIds).toEqual(["task-delete-foreign"]);
     await expect(tasks.getById("task-delete-foreign")).resolves.toBeUndefined();
   });
@@ -1549,7 +1562,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const falseResponse = await app.request("/api/scheduled-tasks/task-delete-false", {
       method: "DELETE",

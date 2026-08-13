@@ -1274,7 +1274,6 @@ export async function handleManageScheduledTasks(
           patch,
           actor: {
             userId: ctx.createdBy,
-            canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
@@ -1369,7 +1368,6 @@ export async function handleManageScheduledTasks(
         taskId: task_id,
         actor: {
           userId: ctx.createdBy,
-          canManageAnyTask: ctx.canManageAnyTask ?? false,
         },
         scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
         encryptionKey: deps.encryptionKey,
@@ -1491,7 +1489,6 @@ export async function handleManageScheduledTasks(
           },
           actor: {
             userId: ctx.createdBy,
-            canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
