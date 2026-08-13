@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createManageAutomationSharesTool } from "./tools/automation-shares";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
@@ -14,7 +15,6 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createAskUserQuestionTool, createAskUserQuestionsTool } from "./tools/questions";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
-import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
@@ -72,8 +72,8 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       automationArtifactCollector: deps.automationArtifactCollector,
       notifyStealRequest:
         deps.getSlack && deps.logger && deps.db
-          ? ((stealSlack, stealLogger, stealDb) =>
-              (taskId: string) =>
+          ? (
+              (stealSlack, stealLogger, stealDb) => (taskId: string) =>
                 notifyStealRequested({
                   db: stealDb,
                   logger: stealLogger,
@@ -92,7 +92,8 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
                       },
                     },
                   },
-                }))(deps.getSlack, deps.logger, deps.db)
+                })
+            )(deps.getSlack, deps.logger, deps.db)
           : undefined,
     }),
     createManageAutomationSharesTool({
