@@ -1,10 +1,10 @@
 import { z } from "zod";
 import type { AgentEnvironmentShareTargetInput } from "./agent-environment";
 
-export const cliIntegrationAppIdSchema = z.enum(["github"]);
+export const cliIntegrationAppIdSchema = z.enum(["github", "linear"]);
 export type CliIntegrationAppId = z.infer<typeof cliIntegrationAppIdSchema>;
 
-export const cliIntegrationExecutionModeSchema = z.literal("cli");
+export const cliIntegrationExecutionModeSchema = z.enum(["cli", "api"]);
 export type CliIntegrationExecutionMode = z.infer<typeof cliIntegrationExecutionModeSchema>;
 
 export const cliIntegrationConnectionStatusSchema = z.enum(["active", "invalid"]);
@@ -24,6 +24,7 @@ export interface CliIntegrationAppDefinition {
   description: string;
   icon: string;
   skillId: string;
+  executionMode: CliIntegrationExecutionMode;
   executable: string;
   credentialFields: Array<z.infer<typeof cliIntegrationCredentialFieldSchema>>;
 }
@@ -102,6 +103,7 @@ export const githubCliIntegrationApp: CliIntegrationAppDefinition = {
   description: "Use GitHub through the managed GitHub CLI in Sketch.",
   icon: "https://github.githubassets.com/favicons/favicon.svg",
   skillId: "github",
+  executionMode: "cli",
   executable: "gh",
   credentialFields: [
     {
@@ -114,8 +116,28 @@ export const githubCliIntegrationApp: CliIntegrationAppDefinition = {
   ],
 };
 
+export const linearManagedIntegrationApp: CliIntegrationAppDefinition = {
+  id: "linear",
+  name: "Linear",
+  description: "Use Linear through the managed GraphQL API in Sketch.",
+  icon: "https://linear.app/favicon.svg",
+  skillId: "linear",
+  executionMode: "api",
+  executable: "",
+  credentialFields: [
+    {
+      id: "api-key",
+      label: "Personal API key",
+      envName: "LINEAR_API_KEY",
+      secret: true,
+      inputType: "password",
+    },
+  ],
+};
+
 export const cliIntegrationAppDefinitions: Readonly<Record<CliIntegrationAppId, CliIntegrationAppDefinition>> = {
   github: githubCliIntegrationApp,
+  linear: linearManagedIntegrationApp,
 };
 
 export function cliIntegrationAppDefinition(appId: string): CliIntegrationAppDefinition | null {
