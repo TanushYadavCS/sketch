@@ -60,12 +60,17 @@ export function createEntityMergeRoutes(db: Kysely<DB>) {
     const denied = denyIfNotMergeAdmin(c);
     if (denied) return denied;
     const entityId = c.req.query("entityId");
-    if (!entityId) return c.json({ error: { code: "BAD_REQUEST", message: "entityId is required" } }, 400);
+    const groupId = c.req.query("groupId");
+    if (!entityId && !groupId) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "entityId or groupId is required" } }, 400);
+    }
 
-    const merges = await db
+    let query = db
       .selectFrom("entity_merges")
       .select([
         "id",
+        "group_id",
+        "merged_by",
         "survivor_entity_id",
         "merged_entity_id",
         "entity_type",
@@ -73,10 +78,15 @@ export function createEntityMergeRoutes(db: Kysely<DB>) {
         "unmerged_at",
         "unmerged_by_user_id",
       ])
-      .where((eb) => eb.or([eb("survivor_entity_id", "=", entityId), eb("merged_entity_id", "=", entityId)]))
       .orderBy("merged_at", "desc")
-      .orderBy("id", "desc")
-      .execute();
+      .orderBy("id", "desc");
+    if (entityId) {
+      query = query.where((eb) =>
+        eb.or([eb("survivor_entity_id", "=", entityId), eb("merged_entity_id", "=", entityId)]),
+      );
+    }
+    if (groupId) query = query.where("group_id", "=", groupId);
+    const merges = await query.execute();
 
     return c.json({ merges });
   });
@@ -84,7 +94,11 @@ export function createEntityMergeRoutes(db: Kysely<DB>) {
   routes.post("/merges", async (c) => {
     const denied = denyIfNotMergeAdmin(c);
     if (denied) return denied;
-    const body = (await c.req.json().catch(() => ({}))) as { survivorId?: string; loserId?: string };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      survivorId?: string;
+      loserId?: string;
+      groupId?: string;
+    };
     if (!body.survivorId || !body.loserId) {
       return c.json({ error: { code: "BAD_REQUEST", message: "survivorId and loserId are required" } }, 400);
     }
@@ -94,8 +108,36 @@ export function createEntityMergeRoutes(db: Kysely<DB>) {
         survivorId: body.survivorId,
         loserId: body.loserId,
         userId: c.get("sub"),
+        groupId: body.groupId,
       });
       return c.json({ mergeId: result.mergeId, moves: result.moves.map(redactMove) });
+    } catch (err) {
+      return handleMergeError(c, err);
+    }
+  });
+
+  routes.delete("/merges/groups/:groupId", async (c) => {
+    const denied = denyIfNotMergeAdmin(c);
+    if (denied) return denied;
+
+    const groupId = c.req.param("groupId");
+    const merges = await db
+      .selectFrom("entity_merges")
+      .select(["id"])
+      .where("group_id", "=", groupId)
+      .where("unmerged_at", "is", null)
+      .orderBy("merged_at", "desc")
+      .orderBy("id", "desc")
+      .execute();
+    if (merges.length === 0) {
+      return c.json({ error: { code: "MERGE_NOT_FOUND", message: "active merge group not found" } }, 404);
+    }
+
+    try {
+      for (const merge of merges) {
+        await unmergeEntities(db, { mergeId: merge.id, userId: c.get("sub") });
+      }
+      return c.json({ ok: true, reversed: merges.length });
     } catch (err) {
       return handleMergeError(c, err);
     }

@@ -4,6 +4,7 @@ import type { Logger } from "pino";
 import { getPostSyncCoordinator } from "../connectors/post-sync-coordinator";
 import { type GraphPassRun, createGraphPassRunRepository } from "../db/repositories/graph-pass-runs";
 import type { DB } from "../db/schema";
+import { runDuplicateDrain } from "../entities/duplicate-drain";
 import { runQueuePasses } from "../entities/queue-run";
 
 function requireAdmin(c: Context) {
@@ -85,6 +86,22 @@ export function graphPassRoutes(db: Kysely<DB>, logger: Logger) {
 
     const run = await runs.get(runId);
     return c.json({ run: run ? serializeRun(run) : null }, 201);
+  });
+
+  routes.post("/duplicate-drain-runs", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    try {
+      const snapshot = await runDuplicateDrain(db, { logger });
+      const run = await runs.get("duplicate-drain:v1");
+      logger.info(snapshot, "Duplicate drain graph pass complete");
+      return c.json({ run: run ? serializeRun(run) : null }, 201);
+    } catch (err) {
+      logger.error({ err }, "Duplicate drain graph pass failed");
+      const run = await runs.get("duplicate-drain:v1");
+      return c.json({ run: run ? serializeRun(run) : null }, 500);
+    }
   });
 
   routes.get("/runs", async (c) => {

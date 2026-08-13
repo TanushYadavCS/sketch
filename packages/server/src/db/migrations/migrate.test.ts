@@ -27,8 +27,9 @@ import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durabi
 import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-sync";
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
+import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 
-const EXPECTED_MIGRATION_COUNT = 181;
+const EXPECTED_MIGRATION_COUNT = 182;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -1191,7 +1192,9 @@ describe("runMigrations — full sequence", () => {
         expect.objectContaining({ name: "merged_entity_id", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "entity_type", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "moves", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "merged_by_user_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "merged_by_user_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "group_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "merged_by", type: "TEXT", notnull: 0 }),
         expect.objectContaining({ name: "merged_at", type: "TEXT", notnull: 1, dflt_value: "CURRENT_TIMESTAMP" }),
         expect.objectContaining({ name: "unmerged_at", type: "TEXT", notnull: 0 }),
         expect.objectContaining({ name: "unmerged_by_user_id", type: "TEXT", notnull: 0 }),
@@ -1215,8 +1218,26 @@ describe("runMigrations — full sequence", () => {
 
     const indexes = await sql<{ name: string }>`PRAGMA index_list(entity_merges)`.execute(db);
     expect(indexes.rows.map((row) => row.name)).toEqual(
-      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx"]),
+      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx", "entity_merges_group_idx"]),
     );
+  });
+
+  it("migration 171 down restores the NOT NULL ledger without indexing a dropped column", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await entityMergeGroupsMigration.down(db as unknown as Kysely<unknown>);
+
+    const columns = await sql<{ name: string; notnull: number }>`PRAGMA table_info(entity_merges)`.execute(db);
+    expect(columns.rows.map((row) => row.name)).not.toContain("group_id");
+    expect(columns.rows.map((row) => row.name)).not.toContain("merged_by");
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "merged_by_user_id", notnull: 1 })]),
+    );
+
+    const indexes = await sql<{ name: string }>`PRAGMA index_list(entity_merges)`.execute(db);
+    const names = indexes.rows.map((row) => row.name);
+    expect(names).toEqual(expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx"]));
+    expect(names).not.toContain("entity_merges_group_idx");
   });
 
   it("creates the users table", async () => {

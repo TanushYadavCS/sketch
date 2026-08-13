@@ -47,7 +47,10 @@ export type EntityMergeMove =
   | {
       table: "entities";
       rowId: string;
-      colChanges: { subtype: { before: string | null; after: string } };
+      colChanges: Partial<{
+        subtype: { before: string | null; after: string | null };
+        name: { before: string | null; after: string | null };
+      }>;
     }
   | { kind: "alias_added"; value: string; normalizedKey: string };
 
@@ -74,12 +77,15 @@ export class EntityMergeError extends Error {
 export interface MergeEntitiesInput {
   survivorId: string;
   loserId: string;
-  userId: string;
+  userId?: string;
+  groupId?: string;
+  mergedBy?: string;
+  survivorName?: string;
 }
 
 export interface UnmergeEntitiesInput {
   mergeId: string;
-  userId: string;
+  userId?: string;
 }
 
 export interface MergeEntitiesResult {
@@ -756,6 +762,55 @@ async function carryLoserAliasesToSurvivor(
     .execute();
 }
 
+async function addAliasIfAbsent(
+  db: Kysely<DB>,
+  entityId: string,
+  aliasesRaw: string | null,
+  value: string,
+  moves: EntityMergeMove[],
+): Promise<string | null> {
+  const trimmed = value.trim();
+  const normalizedKey = normalizeStrict(trimmed);
+  if (!trimmed || !normalizedKey) return aliasesRaw;
+  const aliases = parseAliasesString(aliasesRaw);
+  if (aliases.some((alias) => normalizeStrict(alias) === normalizedKey)) return aliasesRaw;
+  aliases.push(trimmed);
+  moves.push({ kind: "alias_added", value: trimmed, normalizedKey });
+  const next = JSON.stringify(aliases);
+  await db
+    .updateTable("entities")
+    .set({ aliases: next, updated_at: new Date().toISOString() })
+    .where("id", "=", entityId)
+    .where("deleted_at", "is", null)
+    .where("merged_into_entity_id", "is", null)
+    .execute();
+  return next;
+}
+
+async function renameSurvivorIfRequested(
+  db: Kysely<DB>,
+  survivor: Entity,
+  input: MergeEntitiesInput,
+  moves: EntityMergeMove[],
+): Promise<Entity> {
+  const name = input.survivorName?.trim();
+  if (!name || name === survivor.name) return survivor;
+  const aliases = await addAliasIfAbsent(db, survivor.id, survivor.aliases, survivor.name, moves);
+  moves.push({
+    table: "entities",
+    rowId: survivor.id,
+    colChanges: { name: { before: survivor.name, after: name } },
+  });
+  await db
+    .updateTable("entities")
+    .set({ name, aliases, updated_at: new Date().toISOString() })
+    .where("id", "=", survivor.id)
+    .where("deleted_at", "is", null)
+    .where("merged_into_entity_id", "is", null)
+    .execute();
+  return { ...survivor, name, aliases };
+}
+
 function emptyMergePreview(
   input: { survivorId: string; loserId: string },
   blocked?: EntityMergeErrorCode,
@@ -902,9 +957,11 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
     return;
   }
   if (move.table === "entities" && "colChanges" in move) {
+    const updates: Record<string, string | null> = {};
+    for (const [column, change] of Object.entries(move.colChanges)) updates[column] = change.before;
     await db
       .updateTable("entities")
-      .set({ subtype: move.colChanges.subtype.before })
+      .set({ ...updates, updated_at: new Date().toISOString() })
       .where("id", "=", move.rowId)
       .execute();
     return;
@@ -1052,11 +1109,12 @@ export async function mergeEntitiesInTransaction(
   db: Kysely<DB>,
   input: MergeEntitiesInput,
 ): Promise<MergeEntitiesResult> {
-  const survivor = await fetchRawEntity(db, input.survivorId);
+  let survivor = await fetchRawEntity(db, input.survivorId);
   const loser = await fetchRawEntity(db, input.loserId);
   assertMergeable(survivor, loser, input);
 
   const moves: EntityMergeMove[] = [];
+  if (survivor) survivor = await renameSurvivorIfRequested(db, survivor, input, moves);
   if (survivor?.source_type === "person" && loser?.source_type === "person") {
     const internalSubtype = survivor.subtype === "internal" || loser.subtype === "internal";
     if (internalSubtype && survivor.subtype !== "internal") {
@@ -1103,7 +1161,9 @@ export async function mergeEntitiesInTransaction(
       merged_entity_id: input.loserId,
       entity_type: survivor?.source_type ?? "",
       moves: JSON.stringify(moves),
-      merged_by_user_id: input.userId,
+      merged_by_user_id: input.userId ?? null,
+      group_id: input.groupId ?? null,
+      merged_by: input.mergedBy ?? null,
     })
     .execute();
 

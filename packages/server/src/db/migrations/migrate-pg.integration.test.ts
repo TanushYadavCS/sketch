@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 181;
+const EXPECTED_MIGRATION_COUNT = 182;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -981,7 +981,9 @@ describe("runMigrations on Postgres — full sequence", () => {
         expect.objectContaining({ column_name: "merged_entity_id", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "entity_type", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "moves", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "merged_by_user_id", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "merged_by_user_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "group_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "merged_by", data_type: "text", is_nullable: "YES" }),
         expect.objectContaining({ column_name: "merged_at", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "unmerged_at", data_type: "text", is_nullable: "YES" }),
         expect.objectContaining({ column_name: "unmerged_by_user_id", data_type: "text", is_nullable: "YES" }),
@@ -1047,7 +1049,7 @@ describe("runMigrations on Postgres — full sequence", () => {
         AND tablename = 'entity_merges'
     `.execute(db);
     expect(indexes.rows.map((row) => row.indexname)).toEqual(
-      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx"]),
+      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx", "entity_merges_group_idx"]),
     );
   });
 
