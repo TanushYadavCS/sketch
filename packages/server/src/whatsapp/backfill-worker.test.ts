@@ -248,6 +248,138 @@ describe("WhatsAppBackfillWorker", () => {
     ]);
   });
 
+  it("bootstraps an initial range for an enabled group whose history never saw a live message", async () => {
+    const conversation = await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    for (const [id, connectionKey, providerTimestamp] of [
+      ["history-older-higher-key", KEY_3, "2026-07-17T09:00:00.000Z"],
+      ["history-newest-lower-key", KEY_1, "2026-07-17T10:00:00.000Z"],
+    ] as const) {
+      await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: id,
+        eventKey: `event-${id}`,
+        senderName: "History Sender",
+        providerTimestamp,
+        source: "history",
+        connectionKey,
+      });
+    }
+
+    await worker(db).reconcile(true);
+
+    const initial = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .select(["id", "connection_key", "upper_bound_at"])
+      .where("group_jid", "=", "group@g.us")
+      .where("kind", "=", "initial")
+      .executeTakeFirstOrThrow();
+    expect(initial.connection_key).toBe(KEY_3);
+    /**
+     * Strictly past the newest stranded row so materialization keeps the siblings
+     * that share its second, which `timestamp >= upper_bound_at` would drop.
+     */
+    expect(initial.upper_bound_at).toBe("2026-07-17T10:00:00.001Z");
+    const rows = await db
+      .selectFrom("conversation_messages")
+      .select(["provider_message_id", "backfill_range_id"])
+      .where("source", "=", "history")
+      .orderBy("provider_message_id")
+      .execute();
+    expect(rows).toEqual([
+      { provider_message_id: "history-newest-lower-key", backfill_range_id: initial.id },
+      { provider_message_id: "history-older-higher-key", backfill_range_id: initial.id },
+    ]);
+    const checkpoint = await db
+      .selectFrom("whatsapp_backfill_checkpoints")
+      .select(["live_start_effective_at", "live_start_message_id"])
+      .where("group_jid", "=", "group@g.us")
+      .executeTakeFirstOrThrow();
+    expect(checkpoint).toEqual({ live_start_effective_at: null, live_start_message_id: null });
+  });
+
+  it("skips bootstrapping when every stranded row lacks a connection key", async () => {
+    const conversation = await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "history-null-key",
+      eventKey: "event-history-null-key",
+      senderName: "History Sender",
+      providerTimestamp: "2026-07-17T10:00:00.000Z",
+      source: "history",
+      connectionKey: null,
+    });
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("id")
+        .where("group_jid", "=", "group@g.us")
+        .where("kind", "=", "initial")
+        .executeTakeFirst(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("leaves history stranded when the group is not enabled for indexing", async () => {
+    const conversation = await seedGroup(db);
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "history-disabled",
+      eventKey: "event-history-disabled",
+      senderName: "History Sender",
+      providerTimestamp: "2026-07-17T10:00:00.000Z",
+      source: "history",
+      connectionKey: KEY_1,
+    });
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("id")
+        .where("group_jid", "=", "group@g.us")
+        .where("kind", "=", "initial")
+        .executeTakeFirst(),
+    ).resolves.toBeUndefined();
+  });
+
   it("creates a gap on an accepted connected transition and sweep-recovers an orphaned key", async () => {
     const conversation = await seedGroup(db);
     await seedLease(db);

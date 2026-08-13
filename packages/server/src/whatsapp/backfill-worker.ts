@@ -442,6 +442,92 @@ export class WhatsAppBackfillWorker {
         );
       }
     }
+    await this.bootstrapStrandedHistoryRanges(nowMs, now, account);
+  }
+
+  /**
+   * A group backfilled before any live message never establishes `live_start`,
+   * so the live-message path that adopts captured history into an initial range
+   * never fires. Its history stays orphaned (`backfill_range_id IS NULL`) and is
+   * never sliced, chunked, or minted. Bootstrap the initial range for enabled
+   * groups in that state by synthesizing the boundary from the newest captured
+   * history row: adoption is not gated on the upper bound, so every stranded row
+   * is pulled in, and the graph slicer keys on the range rather than
+   * `live_start`, so the history indexes as soon as the range materializes.
+   * Deliberately does not write `live_start` to the checkpoint — a real live
+   * message stays the only writer of the true live boundary.
+   */
+  private async bootstrapStrandedHistoryRanges(
+    nowMs: number,
+    now: string,
+    account: WhatsAppAccountIdentity,
+  ): Promise<void> {
+    const stranded = await this.options.db
+      .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
+      .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
+      .select("checkpoint.group_jid")
+      .where("group.index_enabled", "=", 1)
+      .where("checkpoint.live_start_message_id", "is", null)
+      .execute();
+    for (const { group_jid: groupJid } of stranded) {
+      const orphaned = this.options.db
+        .selectFrom("conversation_messages as message")
+        .innerJoin("conversations as conversation", "conversation.id", "message.conversation_id")
+        .where("conversation.platform", "=", "whatsapp")
+        .where("conversation.kind", "=", "group")
+        .where("conversation.provider_conversation_id", "=", groupJid)
+        .where("message.source", "=", "history")
+        .where("message.backfill_range_id", "is", null);
+      const newest = await orphaned
+        .select(["message.id", "message.effective_at"])
+        .where("message.effective_at", "is not", null)
+        .orderBy("message.effective_at", "desc")
+        .orderBy("message.id", "desc")
+        .executeTakeFirst();
+      if (!newest?.effective_at) continue;
+      /**
+       * Initial-range adoption matches `connection_key <= range.connection_key`,
+       * so the range has to carry the highest key among the stranded rows or the
+       * newer ones stay orphaned. That key need not belong to the newest row by
+       * time, so it is read separately.
+       */
+      const highestUnownedKey = await orphaned
+        .select("message.connection_key")
+        .where("message.connection_key", "is not", null)
+        .orderBy("message.connection_key", "desc")
+        .executeTakeFirst();
+      /**
+       * Adoption compares `connection_key <= range.connection_key`, which no NULL
+       * key can satisfy. Without a real key the range could never adopt anything,
+       * so skip rather than leave an empty range behind that only blocks ordering.
+       */
+      if (!highestUnownedKey?.connection_key) continue;
+      /**
+       * Provider timestamps are second-granularity, so the newest stranded row
+       * routinely shares its `effective_at` with siblings. Materialization drops
+       * fetched messages at `timestamp >= upper_bound_at`, so an exclusive bound
+       * placed exactly on that row would discard every sibling in the same second.
+       * Push the synthetic bound one millisecond past it; the row itself is
+       * already captured and re-materialization dedups.
+       */
+      const syntheticBoundary = new Date(Date.parse(newest.effective_at) + 1).toISOString();
+      const result = await this.ranges.ensureInitialRange({
+        groupJid,
+        connectionKey: highestUnownedKey.connection_key,
+        liveStartEffectiveAt: syntheticBoundary,
+        liveStartMessageId: newest.id,
+        lowerBoundAt: new Date(nowMs - this.options.config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS).toISOString(),
+        now,
+        accountJid: account.jid,
+        accountLid: account.lid,
+      });
+      if (result.created || result.adopted > 0) {
+        this.options.logger.info(
+          { rangeId: result.row.id, rowsAdopted: result.adopted, groupJid },
+          "WhatsApp initial backfill range bootstrapped from stranded history",
+        );
+      }
+    }
   }
 
   private async reconcileState(nowMs: number, now: string): Promise<void> {
