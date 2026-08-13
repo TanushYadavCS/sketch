@@ -94,12 +94,12 @@ export function graphPassRoutes(db: Kysely<DB>, logger: Logger) {
 
     try {
       const snapshot = await runDuplicateDrain(db, { logger });
-      const run = await runs.get("duplicate-drain:v1");
+      const run = await runs.get("duplicate-drain:v2");
       logger.info(snapshot, "Duplicate drain graph pass complete");
       return c.json({ run: run ? serializeRun(run) : null }, 201);
     } catch (err) {
       logger.error({ err }, "Duplicate drain graph pass failed");
-      const run = await runs.get("duplicate-drain:v1");
+      const run = await runs.get("duplicate-drain:v2");
       return c.json({ run: run ? serializeRun(run) : null }, 500);
     }
   });

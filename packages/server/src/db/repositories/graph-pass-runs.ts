@@ -24,7 +24,7 @@ export type QueueRunSnapshot = {
 export type DuplicateDrainRunSnapshot = {
   kind: "duplicate_drain";
   passId: "duplicate-drain";
-  version: 1;
+  version: 2;
   status: "running" | "complete";
   cursorCreatedAt: string | null;
   cursorId: string | null;
@@ -34,6 +34,7 @@ export type DuplicateDrainRunSnapshot = {
   m5SkippedPassReason: number;
   m3EmailVetoes: number;
   aliasOnlyQueued: number;
+  aliasOnlyDropped: number;
 };
 
 export type GraphPassRunSnapshot = PostSyncRunSnapshot | QueueRunSnapshot | DuplicateDrainRunSnapshot;
@@ -83,7 +84,7 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
     return {
       kind: "duplicate_drain",
       passId: "duplicate-drain",
-      version: 1,
+      version: 2,
       status: parsed.status === "complete" ? "complete" : "running",
       cursorCreatedAt: typeof parsed.cursorCreatedAt === "string" ? parsed.cursorCreatedAt : null,
       cursorId: typeof parsed.cursorId === "string" ? parsed.cursorId : null,
@@ -95,6 +96,7 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
       m5SkippedPassReason: readNumber(parsed.m5SkippedPassReason),
       m3EmailVetoes: readNumber(parsed.m3EmailVetoes),
       aliasOnlyQueued: readNumber(parsed.aliasOnlyQueued),
+      aliasOnlyDropped: readNumber(parsed.aliasOnlyDropped),
     };
   }
   return {
