@@ -1090,7 +1090,9 @@ export interface EntityMergesTable {
   merged_entity_id: string;
   entity_type: string;
   moves: string;
-  merged_by_user_id: string;
+  merged_by_user_id: string | null;
+  group_id: string | null;
+  merged_by: string | null;
   merged_at: Generated<string>;
   unmerged_at: string | null;
   unmerged_by_user_id: string | null;
