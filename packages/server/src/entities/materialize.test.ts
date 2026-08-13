@@ -653,6 +653,50 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(await db.selectFrom("entity_mentions").selectAll().execute()).toHaveLength(0);
   });
 
+  it("preserves progress, cleanup, and zero summary when indexedFileIds is empty", async () => {
+    await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    const source = await entityRepo.upsertEntity({ name: "Source Co", sourceType: "company" });
+    const target = await entityRepo.upsertEntity({ name: "Target Co", sourceType: "company" });
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: "empty-relationship",
+        source_entity_id: source.id,
+        target_entity_id: target.id,
+        relationship_type: "partner_of",
+        confidence: "INFERRED",
+        confidence_score: 0.9,
+        source: "test",
+        valid_to: null,
+      })
+      .execute();
+    const progress: Array<{ phase: string; completed: number; total: number }> = [];
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {
+      indexedFileIds: [],
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(progress).toEqual([{ phase: "materialize", completed: 0, total: 0 }]);
+    expect(summary).toEqual({
+      factsRead: 0,
+      entitiesCreated: 0,
+      entitiesLinked: 0,
+      queued: 0,
+      mentionsWritten: 0,
+      relationshipsWritten: 0,
+      skipped: 0,
+      eligibleFacts: 0,
+      indexBuilds: 0,
+      scopeKeyReads: 0,
+      materialized: 0,
+      deferred: 0,
+      deferredBelowThreshold: 0,
+    });
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
+  });
+
   it("respects configurable threshold (=1 promotes immediately, =3 keeps deferred)", async () => {
     await seedFiles(db, 2);
     await upsertLlmFact(db, "file-1", "Acme", "company");

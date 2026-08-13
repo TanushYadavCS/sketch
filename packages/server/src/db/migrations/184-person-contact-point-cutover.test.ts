@@ -2,9 +2,9 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import * as migration from "./181-person-contact-point-cutover";
+import * as migration from "./184-person-contact-point-cutover";
 
-describe("181 person contact point cutover", () => {
+describe("184 person contact point cutover", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {

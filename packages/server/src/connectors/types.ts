@@ -291,21 +291,6 @@ export interface CommitmentSeed {
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
-export interface FeatureFactRaw {
-  featureId: string;
-  featureName: string;
-  corroborationKey?: string;
-  parentProductRef?: { source: string; sourceId: string };
-  parentProductName?: string;
-  parentEntityId?: string;
-  status: "proposed" | "building" | "shipped" | "deprecated";
-  dueAt?: string;
-  evidence: { fileIds: string[]; entityIds: string[] };
-  promptVersion?: string;
-  model?: string;
-  confidence?: number;
-}
-
 export interface MilestoneFactRaw {
   milestoneId: string;
   milestoneName: string;
@@ -370,7 +355,6 @@ export type IndexedFileFactRaw =
       task: NonNullable<SyncedItem["task"]>;
     }
   | CommitmentSeed
-  | FeatureFactRaw
   | MilestoneFactRaw
   | DecisionSeed
   | LlmTaskFactRaw

@@ -8,10 +8,7 @@ import {
   WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
 } from "../../connectors/types";
 import { readJsonObject } from "../../entities/materialize-json";
-import {
-  projectFeatureCorroborationKey,
-  projectLlmExtractedNormalization,
-} from "../../entities/normalization-projection";
+import { projectLlmExtractedNormalization } from "../../entities/normalization-projection";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 import { createEntityDomainsRepository } from "./entity-domains";
@@ -408,6 +405,12 @@ function projectNormalizationColumns(
     };
   }
   return EMPTY_NORMALIZATION_COLUMNS;
+}
+
+function projectFeatureCorroborationKey(source: string, raw: Record<string, unknown>): string | null {
+  if (source !== "llm_extraction" && source !== "llm") return null;
+  const key = raw.corroborationKey;
+  return typeof key === "string" && key.length > 0 ? key : null;
 }
 
 /**

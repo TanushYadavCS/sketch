@@ -530,7 +530,8 @@ describe("smartEnrichFile — LLM extraction facts", () => {
       .execute();
     expect(secondFacts).toHaveLength(firstFacts.length);
     expect(secondFacts.filter((fact) => fact.deleted_at !== null)).toHaveLength(0);
-    expect(secondRefs).toHaveLength(firstRefs.length);
+    expect(new Set(secondRefs.map((ref) => `${ref.source}:${ref.source_id}`)).size).toBe(secondRefs.length);
+    expect(secondRefs.filter((ref) => ref.source_id.startsWith(`${fileId}:`))).toHaveLength(1);
 
     mentions = ["Jane Doe"];
     await entityRepo.upsertEntityFromTool({
@@ -854,7 +855,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(await readLearnedFacts(entity.id)).toEqual(firstFacts);
   });
 
-  it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
+  it("persists LLM facts on first sighting and materializes only the current file once threshold is reached", async () => {
     const firstFileId = randomUUID();
     const secondFileId = randomUUID();
     await seedFile(db, firstFileId, { content: "Jane Doe discussed the launch plan.", contentHash: "hash-1" });
@@ -909,16 +910,19 @@ describe("smartEnrichFile — LLM extraction facts", () => {
 
     const factsAfter = await db
       .selectFrom("indexed_file_facts")
-      .selectAll()
+      .select(["indexed_file_id", "materialized_at"])
       .where("fact_type", "=", "llm_extracted")
       .execute();
-    expect(factsAfter.every((f) => f.materialized_at !== null)).toBe(true);
+    const materializedAtByFile = new Map(factsAfter.map((fact) => [fact.indexed_file_id, fact.materialized_at]));
+    expect(materializedAtByFile.get(firstFileId)).toBeNull();
+    expect(materializedAtByFile.get(secondFileId)).toEqual(expect.any(String));
 
     const mentions = await db
       .selectFrom("entity_mentions")
       .select(["source", "confidence", "relation", "indexed_file_id"])
       .execute();
-    expect(mentions.length).toBeGreaterThanOrEqual(2);
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0].indexed_file_id).toBe(secondFileId);
     expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
   });
 
@@ -1004,7 +1008,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     });
   });
 
-  it("drops feature mentions whose parent product is domain-shaped while writing valid feature facts", async () => {
+  it("drops feature mentions without writing feature facts", async () => {
     const fileId = randomUUID();
     const content = "beaconvendor.com exposes Vendor Analytics. Canvas CRM includes CRM Analytics.";
     await seedFile(db, fileId, { content, contentHash: "hash-feature-domain-parent" });
@@ -1060,7 +1064,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
       .where("fact_type", "=", "feature")
       .where("deleted_at", "is", null)
       .execute();
-    expect(featureFacts).toEqual([{ fact_type: "feature", subject_name: "CRM Analytics" }]);
+    expect(featureFacts).toEqual([]);
   });
 
   it("preserves prior LLM facts when extractEntities throws", async () => {
@@ -1674,9 +1678,9 @@ describe("extractEntities prompt — v6 entity type removal", () => {
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
-    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "tool", "feature"');
-    expect(capturedPrompt).toContain("Features");
-    expect(capturedPrompt).toContain('"feature"');
+    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "tool"');
+    expect(capturedPrompt).not.toContain('"feature"');
+    expect(capturedPrompt).not.toContain("parentProduct");
   });
 
   it("ignores feature mentions and feature endpoint relations emitted by the model", async () => {
@@ -2101,10 +2105,10 @@ describe("dedup adjudication", () => {
     ]);
   });
 
-  it("canonicalizes a dedup hit across mentions, relation endpoints, and feature parents", async () => {
+  it("canonicalizes a dedup hit across mentions and relation endpoints", async () => {
     const fileId = randomUUID();
     const canonical = "[OW x Canvasx] Tourism Recovery Dashboard";
-    const content = "Sarah Chen leads Tourism dashboard. Recovery Analytics belongs to Tourism dashboard.";
+    const content = "Sarah Chen leads Tourism dashboard.";
     await seedFile(db, fileId, { content, contentHash: "hash-dedup-hit" });
     const generator = {
       generate: async () => "Sarah Chen leads the tourism dashboard work.",
@@ -2114,13 +2118,6 @@ describe("dedup adjudication", () => {
             mentions: [
               { mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.96 },
               { mention: "Tourism dashboard", type: "project", variations: [], confidence: 0.95 },
-              {
-                mention: "Recovery Analytics",
-                type: "feature",
-                parentProduct: "Tourism dashboard",
-                variations: [],
-                confidence: 0.94,
-              },
             ],
             relations: [
               {
@@ -2169,15 +2166,6 @@ describe("dedup adjudication", () => {
       .executeTakeFirstOrThrow();
     const relation = JSON.parse(relationRaw.raw ?? "{}") as { target?: { name?: string } };
     expect(relation.target?.name).toBe(canonical);
-
-    const featureRaw = await db
-      .selectFrom("indexed_file_facts")
-      .select("raw")
-      .where("indexed_file_id", "=", fileId)
-      .where("fact_type", "=", "feature")
-      .executeTakeFirstOrThrow();
-    const feature = JSON.parse(featureRaw.raw ?? "{}") as { parentProductName?: string };
-    expect(feature.parentProductName).toBe(canonical);
   });
 
   it("drops a generic-only over-merge and requires distinctive overlap", async () => {

@@ -6,6 +6,8 @@ import { getSharedPgDb } from "../test-utils";
 import { buildOpenFactCandidateQuery } from "./materialize-replay";
 
 const OWNER_ID = "pg-lean-owner";
+const CONNECTOR_ID = "pg-lean-connector";
+const FILE_ID = "pg-lean-file";
 
 /**
  * Postgres arm of the Fix 4 partial-index coverage check. The narrow candidate
@@ -34,10 +36,39 @@ describe("lean candidate scan partial index (Postgres)", () => {
         auth_role: "admin",
       })
       .execute();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: CONNECTOR_ID,
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: "{}",
+        created_by: OWNER_ID,
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: FILE_ID,
+        connector_config_id: CONNECTOR_ID,
+        provider_file_id: FILE_ID,
+        file_name: "PG Lean",
+        file_type: "transcript",
+        content_category: "document",
+        content: "Discussion.",
+        source: "fireflies",
+        content_hash: "pg-lean-hash",
+        is_archived: 0,
+        synced_at: "2026-07-14T00:00:00.000Z",
+      })
+      .execute();
     const repo = createIndexedFileFactRepository(db);
     for (let i = 0; i < 60; i++) {
       await repo.upsertFact({
+        indexedFileId: FILE_ID,
+        connectorConfigId: CONNECTOR_ID,
         createdByUserId: OWNER_ID,
+        contentHash: `pg-person-${i}`,
         source: "manual",
         factType: "person_seed",
         relation: "seeded",
@@ -66,5 +97,20 @@ describe("lean candidate scan partial index (Postgres)", () => {
     const planText = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
 
     expect(planText).toContain("idx_indexed_file_facts_open_materializable");
+  });
+
+  it("plans a file-scoped candidate scan without a full fact-table scan", async () => {
+    await sql`SET LOCAL enable_seqscan = off`.execute(db);
+
+    const compiled = buildOpenFactCandidateQuery(db, { createdAt: "", id: "" }, 250, {
+      factType: "person_seed",
+      indexedFileIds: [FILE_ID],
+    }).compile();
+    const plan = await db.executeQuery<{ "QUERY PLAN": string }>(
+      CompiledQuery.raw(`EXPLAIN ${compiled.sql}`, [...compiled.parameters]),
+    );
+    const planText = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
+
+    expect(planText).not.toMatch(/Seq Scan on indexed_file_facts\b/i);
   });
 });

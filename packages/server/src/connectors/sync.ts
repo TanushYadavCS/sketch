@@ -18,7 +18,6 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
-import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { heapStats, heapUsedMb } from "../lib/heap";
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
@@ -38,11 +37,7 @@ import {
 } from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
 import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
-import {
-  type PostSyncGraphInputCollector,
-  createPostSyncGraphInputCollector,
-  runPostSyncGraphPipeline,
-} from "./post-sync";
+import { type PostSyncGraphInputCollector, createPostSyncGraphInputCollector } from "./post-sync";
 import { getPostSyncCoordinator } from "./post-sync-coordinator";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
@@ -127,9 +122,6 @@ export async function runConnectorSync(
       | "SYNC_MAX_RECONCILE_RATIO"
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "FLOOR_RETRY_MAX_FILES_PER_DOMAIN"
-      | "FEATURE_ARCHIVE_MIN_MENTIONS"
-      | "FEATURE_ARCHIVE_AGE_DAYS"
-      | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
@@ -501,15 +493,19 @@ export async function runConnectorSync(
     }
 
     if (options.postSyncMode !== "deferred") {
-      await runPostSyncGraphPipeline({
-        db,
-        syncLogger,
-        affectedIndexedFileIds: [...affectedIndexedFileIds],
-        sources: [connectorType],
-        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
-        coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-        floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
-      });
+      await getPostSyncCoordinator(db).enqueue(
+        {
+          affectedIndexedFileIds: [...affectedIndexedFileIds],
+          sources: [connectorType],
+          workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+        },
+        {
+          db,
+          logger: syncLogger,
+          coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+        },
+      );
     }
 
     if (connectorType === "zoho_crm") {
@@ -651,9 +647,6 @@ export interface SyncSchedulerDeps {
       | "SYNC_MAX_RECONCILE_RATIO"
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "FLOOR_RETRY_MAX_FILES_PER_DOMAIN"
-      | "FEATURE_ARCHIVE_MIN_MENTIONS"
-      | "FEATURE_ARCHIVE_AGE_DAYS"
-      | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
@@ -691,9 +684,7 @@ export interface SyncSchedulerDeps {
 const SYNC_CONCURRENCY = 4;
 const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
-const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const CO_MENTION_FULL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
-let lastFeatureArchiveSweepAt = 0;
 let lastCoMentionFullSweepAt = 0;
 
 async function resolveConnectorCredentialsForSync(params: {
@@ -801,19 +792,6 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
   }
 
   const now = Date.now();
-  if (now - lastFeatureArchiveSweepAt >= FEATURE_ARCHIVE_SWEEP_INTERVAL_MS) {
-    lastFeatureArchiveSweepAt = now;
-    try {
-      await runFeatureArchiveSweep(db, logger.child({ component: "feature-archive-sweep" }), {
-        minMentions: deps?.appConfig?.FEATURE_ARCHIVE_MIN_MENTIONS,
-        ageDays: deps?.appConfig?.FEATURE_ARCHIVE_AGE_DAYS,
-        maxPerRun: deps?.appConfig?.FEATURE_ARCHIVE_MAX_PER_RUN,
-      });
-    } catch (err) {
-      logger.error({ err }, "Feature archive sweep failed");
-    }
-  }
-
   if (now - lastCoMentionFullSweepAt >= CO_MENTION_FULL_SWEEP_INTERVAL_MS) {
     lastCoMentionFullSweepAt = now;
     try {

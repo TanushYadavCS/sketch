@@ -1007,6 +1007,12 @@ export interface ConnectorConfig {
   canUpdateCredentials?: boolean;
   canBrowseScope?: boolean;
   canEnrich?: boolean;
+  /**
+   * Minting reads content that is already indexed, so unlike canEnrich it does not
+   * require the connector to still be syncing — a disabled connector's files are exactly
+   * the ones worth minting from.
+   */
+  canMint?: boolean;
 }
 
 export interface ConnectorListResponse {
@@ -1052,6 +1058,114 @@ export interface FileContent {
   enrichmentStatus: string;
   /** Present for email_message files — lets the detail sheet load the full thread. */
   emailThread?: { connectorId: string; threadKey: string };
+}
+
+/**
+ * One group of context handed to the extraction model, as the server assembled it.
+ *
+ * Modelled as an ordered list rather than named fields so the same renderer serves both
+ * shapes of run: today every block is stuffed into the prompt up front, and a later
+ * tool-calling extractor emits the same blocks as the model fetches them. `via`
+ * distinguishes the two.
+ */
+export interface MintContextBlock {
+  key: string;
+  label: string;
+  /** The rule that chose these items, stated for a reader — e.g. "open tasks on the 3 projects above". */
+  selection: string;
+  /** How many items the rule matched, before any cap. Differs from items.length when truncated. */
+  total: number;
+  items: string[];
+  truncated?: boolean;
+  via?: "prompt" | "tool";
+}
+
+/**
+ * One captured pino call from a traced enrichment run. Prompt and response
+ * bodies are never included — those stay in the server-side dump directory.
+ */
+export interface DevTraceStep {
+  seq: number;
+  at: string;
+  level: string;
+  msg: string;
+  fields: Record<string, unknown>;
+}
+
+/** The eight stages a single-file enrichment runs, in the order the server reports them. */
+/** Which pipeline a run traced. Picks the stage list the rail renders against. */
+export type DevTraceRunKind = "enrichment" | "mint";
+
+export type DevMintStageKey = "neighbourhood" | "gatherContext" | "extractCandidates" | "writeCandidates";
+
+export type DevStageKey =
+  | DevMintStageKey
+  | "extractEntities"
+  | "dedupAdjudicate"
+  | "reconcileFacts"
+  | "matchEntities"
+  | "generateSummary"
+  | "extractEntityFacts"
+  | "engagementFloor"
+  | "materialize";
+
+/** What one stage decided about one thing, and the rule that decided it. */
+export interface DevStageOutcome {
+  subject: string;
+  kind: string;
+  result: "kept" | "dropped" | "created" | "linked" | "queued" | "suppressed" | "deferred";
+  reason?: string;
+}
+
+export interface DevStageReport {
+  stage: DevStageKey;
+  label: string;
+  kind: "model" | "code";
+  status: "done" | "failed" | "skipped";
+  context?: MintContextBlock[];
+  outcomes?: DevStageOutcome[];
+  error?: string;
+  parallelGroup?: string;
+  summary?: Record<string, unknown>;
+}
+
+/** One LLM call's header. Never carries the prompt — those are ~19,000 chars each. */
+export interface DevLlmCallHeader {
+  seq: number;
+  label: string;
+  stage: DevStageKey | "unknown";
+  at: string | null;
+  model: string;
+  promptChars: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  costUsd: number | null;
+  finishReason: string | null;
+  /** Set when the dump is missing or malformed — normal for a call that threw. */
+  unreadable?: { reason: string };
+}
+
+export interface DevLlmCallBody extends DevLlmCallHeader {
+  prompt: string | null;
+  systemPrompt: string | null;
+  text: string | null;
+  /** The response re-parsed as JSON, so a silent empty parse is visible. */
+  parsed?: unknown;
+}
+
+export interface DevTraceRunHeader {
+  id: string;
+  kind: DevTraceRunKind;
+  fileId: string;
+  fileName: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "done" | "failed";
+  error: string | null;
+  dumpDir: string;
+  stepCount: number;
+  /** Set once the run exceeded the capture cap and later steps were dropped. */
+  truncated: boolean;
 }
 
 export interface EmailAddr {
@@ -2164,6 +2278,15 @@ export const api = {
         },
       );
     },
+    /**
+     * Starts task extraction against one file. Returns as soon as the run is
+     * queued — the report it produces is internal, and lives in /dev-tools.
+     */
+    mintTasks(fileId: string) {
+      return request<{ success: boolean; fileId: string; fileName: string }>(`/api/connectors/files/${fileId}/tasks`, {
+        method: "POST",
+      });
+    },
     browseGoogleDrive(credentials: { client_id: string; client_secret: string; refresh_token: string }) {
       return request<{
         sharedDrives: Array<{ id: string; name: string }>;
@@ -3061,6 +3184,35 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ status }),
       });
+    },
+  },
+  /**
+   * Internal pipeline-debugging endpoints. Present only when the server was
+   * started with DEV_TOOLS_ENABLED; every call 404s otherwise.
+   */
+  dev: {
+    startEnrichmentRun(fileId: string, kind: DevTraceRunKind = "enrichment") {
+      return request<{ runId: string; fileId: string; fileName: string }>("/api/dev/runs", {
+        method: "POST",
+        body: JSON.stringify({ fileId, kind }),
+      });
+    },
+    enrichmentRuns() {
+      return request<{ runs: DevTraceRunHeader[] }>("/api/dev/runs");
+    },
+    /** `since` fetches only steps after that sequence number, for incremental polling. */
+    enrichmentRun(runId: string, since = 0) {
+      const qs = since > 0 ? `?since=${since}` : "";
+      return request<{ run: DevTraceRunHeader; steps: DevTraceStep[]; stageReports: DevStageReport[] }>(
+        `/api/dev/runs/${runId}${qs}`,
+      );
+    },
+    enrichmentCalls(runId: string) {
+      return request<{ calls: DevLlmCallHeader[] }>(`/api/dev/runs/${runId}/calls`);
+    },
+    /** Fetched per call on expand — the prompt bodies are far too large for the list. */
+    enrichmentCall(runId: string, seq: number) {
+      return request<{ call: DevLlmCallBody }>(`/api/dev/runs/${runId}/calls/${seq}`);
     },
   },
   workspace: {

@@ -230,6 +230,27 @@ async function waitForJobDone(app: ReturnType<typeof createApp>, cookie: string,
   );
 }
 
+/**
+ * Reads the materialize counters back off a finished reset+rebuild job. This is
+ * the only HTTP surface that carries them: the per-file enrichment trace only
+ * ever replays `llm_relation` facts, whose endpoints never carry an email, so
+ * it can never observe a person scope-key read.
+ */
+async function replayCounters(
+  app: ReturnType<typeof createApp>,
+  cookie: string,
+  jobId: string,
+): Promise<{ eligibleFacts: number; indexBuilds: number; scopeKeyReads: number }> {
+  const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    recreate?: { replay?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number } };
+  };
+  const replay = body.recreate?.replay;
+  if (!replay) throw new Error("rebuild job carried no replay summary");
+  return replay;
+}
+
 async function runResetAndWait(
   app: ReturnType<typeof createApp>,
   cookie: string,
@@ -643,6 +664,88 @@ describe("POST /api/entities/resets", () => {
 
     const entities = await db.selectFrom("entities").select("name").execute();
     expect(entities.some((e) => e.name === "Alice")).toBe(true);
+  });
+
+  it("reports materialize counters on the rebuild job with no scope-key read when no person matches by name", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Priya Nandan",
+      subjectEmail: "priya@northwind-logistics.test",
+      subjectSource: "fireflies",
+      subjectSourceId: "f1:priya@northwind-logistics.test",
+      raw: { providerFileId: "f1", attendee: { name: "Priya Nandan" } },
+    });
+
+    const result = await runResetAndWait(app, adminCookie, {
+      categories: ["connectors", "ai"],
+      runAfter: true,
+      confirm: "RESET_AND_RECREATE",
+    });
+    expect(result.phase).toBe("done");
+
+    const replay = await replayCounters(app, adminCookie, result.jobId as string);
+    expect(replay.eligibleFacts).toBe(1);
+    expect(replay.indexBuilds).toBeGreaterThan(0);
+    expect(replay.scopeKeyReads).toBe(0);
+
+    const names = (await db.selectFrom("entities").select("name").execute()).map((row) => row.name);
+    expect(names).toContain("Priya Nandan");
+  });
+
+  /**
+   * The cross-source identity join, which is the only thing that reads the
+   * scope-key map. Every clause of the fixture is load-bearing: the seeded
+   * person carries no email and a different source ref, so the source-ref rung
+   * and the email fast path both miss and the exact-name rung is what resolves
+   * the second fact.
+   */
+  it("counts a scope-key read when an emailed person fact joins a name-only person from another source", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "slack",
+      factType: "person_seed",
+      relation: "seeded",
+      subjectName: "Avery Stone",
+      subjectSource: "slack",
+      subjectSourceId: "slack:U-AVERY",
+      raw: { subtype: "external" },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: "file-2",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Avery Stone",
+      subjectEmail: "avery@scoped-corp.test",
+      subjectSource: "fireflies",
+      subjectSourceId: "f2:avery@scoped-corp.test",
+      raw: { providerFileId: "f2", attendee: { name: "Avery Stone", email: "avery@scoped-corp.test" } },
+    });
+
+    const result = await runResetAndWait(app, adminCookie, {
+      categories: ["connectors", "ai"],
+      runAfter: true,
+      confirm: "RESET_AND_RECREATE",
+    });
+    expect(result.phase).toBe("done");
+
+    const replay = await replayCounters(app, adminCookie, result.jobId as string);
+    expect(replay.eligibleFacts).toBe(2);
+    expect(replay.indexBuilds).toBeGreaterThan(0);
+    expect(replay.scopeKeyReads).toBeGreaterThan(0);
   });
 
   it("rejects runAfter without confirm token", async () => {
@@ -2460,31 +2563,31 @@ describe("Entity drawer routes", () => {
     expect(includeBody.total).toBe(3);
   });
 
-  it("GET /api/entities hides archived features by default, including explicit type filters and relation lists", async () => {
+  it("GET /api/entities hides archived rows by default, including explicit type filters and relation lists", async () => {
     await seedEntity("person-arch", "Alice", "person");
-    await seedEntity("feature-live", "Access Control Integration", "feature");
-    await seedEntity("feature-arch", "Backend Work", "feature");
-    await db.updateTable("entities").set({ status: "archived" }).where("id", "=", "feature-arch").execute();
-    await seedRelation("rel-live", "person-arch", "feature-live", "contributes_to", "EXTRACTED", 0.95);
-    await seedRelation("rel-arch", "person-arch", "feature-arch", "contributes_to", "EXTRACTED", 0.95);
+    await seedEntity("project-live", "Access Control Integration", "project");
+    await seedEntity("project-arch", "Backend Work", "project");
+    await db.updateTable("entities").set({ status: "archived" }).where("id", "=", "project-arch").execute();
+    await seedRelation("rel-live", "person-arch", "project-live", "contributes_to", "EXTRACTED", 0.95);
+    await seedRelation("rel-arch", "person-arch", "project-arch", "contributes_to", "EXTRACTED", 0.95);
 
     const defaultRes = await app.request("/api/entities", { headers: { Cookie: adminCookie } });
     const defaultBody = (await defaultRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(defaultBody.entities.map((entity) => entity.id).sort()).toEqual(["feature-live", "person-arch"]);
+    expect(defaultBody.entities.map((entity) => entity.id).sort()).toEqual(["person-arch", "project-live"]);
 
-    const explicitRes = await app.request("/api/entities?type=feature", { headers: { Cookie: adminCookie } });
+    const explicitRes = await app.request("/api/entities?type=project", { headers: { Cookie: adminCookie } });
     const explicitBody = (await explicitRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(explicitBody.entities.map((entity) => entity.id)).toEqual(["feature-live"]);
+    expect(explicitBody.entities.map((entity) => entity.id)).toEqual(["project-live"]);
 
-    const includeRes = await app.request("/api/entities?type=feature&includeArchived=true", {
+    const includeRes = await app.request("/api/entities?type=project&includeArchived=true", {
       headers: { Cookie: adminCookie },
     });
     const includeBody = (await includeRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(includeBody.entities.map((entity) => entity.id).sort()).toEqual(["feature-arch", "feature-live"]);
+    expect(includeBody.entities.map((entity) => entity.id).sort()).toEqual(["project-arch", "project-live"]);
 
     const relationsRes = await app.request("/api/entities/person-arch/relations", { headers: { Cookie: adminCookie } });
     const relationsBody = (await relationsRes.json()) as { outgoing: Array<{ other: { id: string } }> };
-    expect(relationsBody.outgoing.map((relation) => relation.other.id)).toEqual(["feature-live"]);
+    expect(relationsBody.outgoing.map((relation) => relation.other.id)).toEqual(["project-live"]);
   });
 
   it("GET /api/entities/:id/timeline applies file RBAC, collapses per-file mentions, groups by month", async () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 
-interface MigrationDb {
+interface PersonContactPointCutoverDb {
   entities: {
     id: string;
     source_type: string;
@@ -38,7 +38,7 @@ function legacyEmail(metadata: string | null): string | null {
   }
 }
 
-export async function up(db: Kysely<MigrationDb>): Promise<void> {
+export async function up(db: Kysely<PersonContactPointCutoverDb>): Promise<void> {
   let cursor = "";
   while (true) {
     const entities = await db
@@ -114,6 +114,6 @@ export async function up(db: Kysely<MigrationDb>): Promise<void> {
     .execute();
 }
 
-export async function down(db: Kysely<MigrationDb>): Promise<void> {
+export async function down(db: Kysely<PersonContactPointCutoverDb>): Promise<void> {
   await db.schema.dropIndex("idx_entity_contact_points_one_primary").execute();
 }

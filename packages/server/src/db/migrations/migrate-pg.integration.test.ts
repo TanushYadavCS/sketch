@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 177;
+const EXPECTED_MIGRATION_COUNT = 180;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -209,6 +209,15 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[168]).toBe("173-native-webhook-endpoints");
     expect(names[169]).toBe("174-webhook-delivery-generation-fencing");
     expect(names[170]).toBe("175-native-webhook-no-credentials");
+    expect(names[171]).toBe("176-whatsapp-llm-flush-reason");
+    expect(names[172]).toBe("177-whatsapp-topic-tables");
+    expect(names[173]).toBe("178-whatsapp-chunk-knobs");
+    expect(names[174]).toBe("179-whatsapp-open-slices");
+    expect(names[175]).toBe("180-whatsapp-chunk-conversion-state");
+    expect(names[176]).toBe("181-project-minting-verdicts");
+    expect(names[177]).toBe("182-project-minting-states");
+    expect(names[178]).toBe("183-graph-pass-runs");
+    expect(names[179]).toBe("184-person-contact-point-cutover");
   });
 
   it("upgrades existing email access rows on Postgres", async () => {

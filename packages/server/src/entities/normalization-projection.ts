@@ -44,16 +44,3 @@ export function projectLlmExtractedNormalization(
     mention_type: coerced,
   };
 }
-
-const LLM_FEATURE_SOURCES = new Set(["llm_extraction", "llm"]);
-
-/**
- * The corroboration key an LLM-sourced feature fact groups under. Structural
- * feature facts never corroborate, so their key stays null; this matches
- * `loadCorroboratingFeatureFacts`, which considers only LLM feature sources.
- */
-export function projectFeatureCorroborationKey(source: string, raw: Record<string, unknown>): string | null {
-  if (!LLM_FEATURE_SOURCES.has(source)) return null;
-  const key = raw.corroborationKey;
-  return typeof key === "string" && key.length > 0 ? key : null;
-}

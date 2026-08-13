@@ -317,7 +317,6 @@ export interface RecreateDeps {
    * Production callers should pass `config.LLM_PROMOTION_THRESHOLD`.
    */
   llmPromotionThreshold?: number;
-  featureAutoMintThreshold?: number;
   coMentionContributesToThreshold?: number;
   /**
    * Restrict the materialize replay to a subset of fact types. Used by
@@ -353,7 +352,6 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const replay = await materializeUnmaterializedFacts(db, logger, {
       llmPromotionThreshold: deps.llmPromotionThreshold,
-      featureAutoMintThreshold: deps.featureAutoMintThreshold,
       factTypes: deps.materializeFactTypes,
       onProgress: deps.onProgress,
       shouldCancel: deps.shouldCancel,

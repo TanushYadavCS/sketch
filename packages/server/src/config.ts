@@ -56,6 +56,15 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("false")
     .transform((v) => v === "true" || v === "1"),
+  /**
+   * Mounts the internal pipeline-debugging routes under /api/dev and the
+   * /dev-tools page. Off everywhere except our own deployments — a tenant
+   * should have no route to find.
+   */
+  DEV_TOOLS_ENABLED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
   VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_PRICE_TTL_HOURS: z.coerce.number().min(1).default(12),
@@ -67,16 +76,28 @@ export const configSchema = z.object({
       .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
       .optional(),
   ),
+  TASK_MINTING_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .string()
+      .trim()
+      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
+      .optional(),
+  ),
+  PROJECT_MINTING_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .string()
+      .trim()
+      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
+      .optional(),
+  ),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
   LLM_TASK_CORROBORATION_THRESHOLD: z.coerce.number().int().min(1).default(2),
-  FEATURE_AUTO_MINT_THRESHOLD: z.coerce.number().int().min(1).default(1),
   CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
   FLOOR_RETRY_MAX_FILES_PER_DOMAIN: z.coerce.number().int().min(1).default(5000),
-  FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
-  FEATURE_ARCHIVE_AGE_DAYS: z.coerce.number().int().min(1).default(30),
-  FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
   GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
   GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
   AGENT_RUNTIME: z.enum(["sdk", "aisdk"]).default("aisdk"),

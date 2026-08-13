@@ -13,6 +13,7 @@ import {
   ArrowSquareOutIcon,
   GlobeIcon,
   LinkIcon,
+  ListChecksIcon,
   LockSimpleIcon,
   ShareNetworkIcon,
   SparkleIcon,
@@ -448,6 +449,8 @@ function FileDetailFooter({
   const canEnrich = connector?.canEnrich === true;
   const [shareOpen, setShareOpen] = useState(false);
 
+  const canMint = connector?.canMint === true;
+
   const enrichMutation = useMutation({
     mutationFn: () => api.integrations.enrichFile(fileId),
     onSuccess: () => {
@@ -457,7 +460,14 @@ function FileDetailFooter({
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (!canManageShares && !canEnrich) return null;
+  /** Fire and forget, like enrichment. The stage-by-stage story lives in /dev-tools. */
+  const mintMutation = useMutation({
+    mutationFn: () => api.integrations.mintTasks(fileId),
+    onSuccess: () => toast.success("Minting started — tasks appear when it finishes"),
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  if (!canManageShares && !canEnrich && !canMint) return null;
 
   return (
     <div className="border-t border-border px-4 py-3 flex gap-2">
@@ -484,6 +494,27 @@ function FileDetailFooter({
             <>
               <SparkleIcon size={12} />
               Enrich
+            </>
+          )}
+        </Button>
+      )}
+      {canMint && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="flex-1 gap-1.5 text-xs"
+          onClick={() => mintMutation.mutate()}
+          disabled={mintMutation.isPending}
+        >
+          {mintMutation.isPending ? (
+            <>
+              <SpinnerGapIcon size={12} className="animate-spin" />
+              Minting...
+            </>
+          ) : (
+            <>
+              <ListChecksIcon size={12} />
+              Mint tasks
             </>
           )}
         </Button>

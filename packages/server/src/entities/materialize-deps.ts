@@ -19,7 +19,13 @@ import { type MentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import { ENTITY_INDEX_COLUMNS } from "./materialize-types";
-import type { EntityRow, IndexEntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
+import {
+  type IndexEntityRow,
+  type IndexedFileFactRow,
+  type LookupIndex,
+  type MaterializeDeps,
+  lookupIndexScopeBrand,
+} from "./materialize-types";
 import {
   type CandidatePoolEntry,
   addToCandidatePool,
@@ -36,10 +42,8 @@ export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
-const DEFAULT_FEATURE_AUTO_MINT_THRESHOLD = 1;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
-let configuredFeatureAutoMintThreshold = DEFAULT_FEATURE_AUTO_MINT_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
@@ -54,7 +58,6 @@ let configuredBirthGateDryRun = true;
 export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -66,42 +69,67 @@ export function configureMaterializeDefaults(opts: {
   if (typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1) {
     configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
   }
-  if (typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1) {
-    configuredFeatureAutoMintThreshold = Math.floor(opts.featureAutoMintThreshold);
-  }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (opts.structuralAutoBirthTypes) configuredStructuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
 }
 
-async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
-  const supportedTypeSet = new Set<string>(supportedTypes);
+const SUPPORTED_LOOKUP_TYPES: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
+const SOURCE_REF_INDEX_TYPES = new Set<ProposeEntityType>(["person", "product", "project", "team", "deal", "tool"]);
+
+function lookupIndexIncludesType(index: LookupIndex, entityType: ProposeEntityType): boolean {
+  const scope = index[lookupIndexScopeBrand];
+  return scope.kind === "full" || scope.types.has(entityType);
+}
+
+function assertLookupIndexIncludesType(index: LookupIndex, entityType: ProposeEntityType): void {
+  if (!lookupIndexIncludesType(index, entityType)) {
+    throw new Error(`Lookup index was built without ${entityType} scope`);
+  }
+}
+
+export async function buildLookupIndex(
+  db: Kysely<DB>,
+  opts: { types?: ProposeEntityType[] } = {},
+): Promise<LookupIndex> {
+  const scopedTypes = opts.types ? [...new Set(opts.types)] : null;
+  const indexedTypes = scopedTypes ?? SUPPORTED_LOOKUP_TYPES;
+  const indexedTypeSet = new Set<string>(indexedTypes);
+  const supportedTypeSet = new Set<string>(SUPPORTED_LOOKUP_TYPES);
+  const includeSourceRefs = !scopedTypes || scopedTypes.some((entityType) => SOURCE_REF_INDEX_TYPES.has(entityType));
+  const includeCompanyDomains = !scopedTypes || scopedTypes.includes("company");
+  const includePersonScopeKeys = !scopedTypes || scopedTypes.includes("person");
+  if (includePersonScopeKeys && !includeCompanyDomains) {
+    throw new Error("Lookup index person scope requires company scope");
+  }
   /**
    * One shared row instance per live entity, keyed by id. The type, name,
    * alias, and source-ref indexes all point at these instances, so an in-pass
    * `registerEntity` update reflows through every bucket and no full row is
-   * duplicated per source ref. All live entities are loaded (not just the
-   * supported types) because `bySourceRef` also resolves system entities such
-   * as `clickup_workspace`/`clickup_space`, which are never bucketed by name.
+   * duplicated per source ref. The full materializer load includes every live
+   * entity because `bySourceRef` also resolves system entities such as
+   * `clickup_workspace`/`clickup_space`; scoped lookup loads filter by type in
+   * SQL and only build indexes needed by that scope.
    */
-  const entityRows = await db
+  let entityRowsQuery = db
     .selectFrom("entities")
     .select([...ENTITY_INDEX_COLUMNS])
-    .where(whereLiveEntity())
-    .execute();
+    .where(whereLiveEntity());
+  if (scopedTypes) entityRowsQuery = entityRowsQuery.where("source_type", "in", scopedTypes);
+  const entityRows = scopedTypes?.length === 0 ? [] : await entityRowsQuery.execute();
   const byId = new Map<string, IndexEntityRow>();
   for (const e of entityRows) byId.set(e.id, e);
 
   const entitiesByType = new Map<ProposeEntityType, IndexEntityRow[]>();
-  for (const t of supportedTypes) entitiesByType.set(t, []);
+  for (const t of indexedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, IndexEntityRow[]>();
   const byNormalizedAlias = new Map<string, IndexEntityRow[]>();
   const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
-  for (const t of supportedTypes) dedupEntriesByType.set(t, []);
+  for (const t of indexedTypes) dedupEntriesByType.set(t, []);
   for (const e of entityRows) {
     if (!supportedTypeSet.has(e.source_type)) continue;
+    if (!indexedTypeSet.has(e.source_type)) continue;
     if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
@@ -122,52 +150,101 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     }
   }
 
-  const sourceRefs = await db.selectFrom("entity_source_refs").select(["entity_id", "source", "source_id"]).execute();
   const bySourceRef = new Map<string, IndexEntityRow>();
-  for (const ref of sourceRefs) {
-    const row = byId.get(ref.entity_id);
-    if (!row) continue;
-    if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
-    bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
+  if (includeSourceRefs) {
+    const sourceRefs = await db.selectFrom("entity_source_refs").select(["entity_id", "source", "source_id"]).execute();
+    for (const ref of sourceRefs) {
+      const row = byId.get(ref.entity_id);
+      if (!row) continue;
+      if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
+      bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
+    }
   }
-  const domainRows = await db
-    .selectFrom("entity_domains")
-    .select(["domain", "entity_id"])
-    .where("kind", "=", "corporate")
-    .where("entity_id", "is not", null)
-    .execute();
   const companyIdsByDomain = new Map<string, string[]>();
-  for (const row of domainRows) {
-    if (!row.entity_id) continue;
-    const domain = row.domain.toLowerCase();
-    const bucket = companyIdsByDomain.get(domain);
-    if (bucket) bucket.push(row.entity_id);
-    else companyIdsByDomain.set(domain, [row.entity_id]);
+  if (includeCompanyDomains) {
+    const domainRows = await db
+      .selectFrom("entity_domains")
+      .innerJoin("entities", "entities.id", "entity_domains.entity_id")
+      .select(["entity_domains.domain", "entity_domains.entity_id"])
+      .where("entity_domains.kind", "=", "corporate")
+      .where("entity_domains.entity_id", "is not", null)
+      .where(whereLiveEntity())
+      .where("entities.source_type", "=", "company")
+      .execute();
+    for (const row of domainRows) {
+      if (!row.entity_id) continue;
+      const domain = row.domain.toLowerCase();
+      const bucket = companyIdsByDomain.get(domain);
+      if (bucket) bucket.push(row.entity_id);
+      else companyIdsByDomain.set(domain, [row.entity_id]);
+    }
   }
   const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
-  for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
-  const personScopeKeysByEntityId = await buildPersonScopeKeys(
-    db,
-    entityRows.filter((entity) => entity.source_type === "person"),
-  );
+  const personScopeKeysByEntityId = includePersonScopeKeys
+    ? await buildPersonScopeKeys(
+        db,
+        entityRows.filter((entity) => entity.source_type === "person"),
+        companyIdsByDomain,
+      )
+    : new Map<string, string[]>();
   return {
+    [lookupIndexScopeBrand]: scopedTypes ? { kind: "scoped", types: new Set(scopedTypes) } : { kind: "full" },
     entitiesByType,
     byNormalizedName,
     byNormalizedAlias,
+    dedupEntriesByType,
     dedupPoolsByType,
     bySourceRef,
     companyIdsByDomain,
     personScopeKeysByEntityId,
+    personScopeKeyReads: 0,
   };
 }
 
-async function buildPersonScopeKeys(db: Kysely<DB>, persons: IndexEntityRow[]): Promise<Map<string, string[]>> {
+function candidatePoolEntriesForEntity(entity: IndexEntityRow): CandidatePoolEntry[] {
+  return [
+    { entityId: entity.id, valueKind: "name", value: entity.name },
+    ...parseAliasesString(entity.aliases).map((value) => ({
+      entityId: entity.id,
+      valueKind: "alias" as const,
+      value,
+    })),
+  ];
+}
+
+function getOrBuildCandidatePool(index: LookupIndex, entityType: ProposeEntityType) {
+  assertLookupIndexIncludesType(index, entityType);
+  const existing = index.dedupPoolsByType.get(entityType);
+  if (existing) return existing;
+  const pool = buildCandidatePool(index.dedupEntriesByType.get(entityType) ?? []);
+  index.dedupPoolsByType.set(entityType, pool);
+  return pool;
+}
+
+async function buildPersonScopeKeys(
+  db: Kysely<DB>,
+  persons: IndexEntityRow[],
+  companyIdsByDomain: ReadonlyMap<string, readonly string[]>,
+): Promise<Map<string, string[]>> {
   const scopeKeys = new Map<string, Set<string>>();
   for (const person of persons) scopeKeys.set(person.id, new Set());
   const domainsRepo = createEntityDomainsRepository(db);
+  const personDomains = new Map<string, string>();
+  const domains = new Set<string>();
   for (const person of persons) {
     const email = readPersonEmailFromMetadata(person.metadata);
-    const scope = await personScopeKey(email, domainsRepo);
+    const domain = domainsRepo.normalizeEmailDomain(email);
+    if (!domain) continue;
+    personDomains.set(person.id, domain);
+    domains.add(domain);
+  }
+  const scopesByDomain = new Map<string, Awaited<ReturnType<typeof personScopeKey>>>();
+  for (const domain of domains) {
+    scopesByDomain.set(domain, await personScopeKey(`person@${domain}`, domainsRepo, companyIdsByDomain));
+  }
+  for (const person of persons) {
+    const domain = personDomains.get(person.id);
+    const scope = domain ? scopesByDomain.get(domain) : null;
     if (scope) scopeKeys.get(person.id)?.add(personScopeKeyId(scope));
   }
 
@@ -305,9 +382,10 @@ function isNameDedupEntityType(entityType: ProposeEntityType): entityType is Nam
 }
 
 export function registerEntity(index: LookupIndex, entity: IndexEntityRow): void {
+  const entityType = entity.source_type as ProposeEntityType;
+  if (!lookupIndexIncludesType(index, entityType)) return;
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
-  const entityType = entity.source_type as ProposeEntityType;
   if (!canUseEntityAsMatchTarget(entityType, entity.provenance_tier)) return;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
@@ -330,17 +408,10 @@ export function registerEntity(index: LookupIndex, entity: IndexEntityRow): void
       index.byNormalizedAlias.set(aliasKey, [entity]);
     }
   }
+  const dedupEntries = candidatePoolEntriesForEntity(entity);
+  index.dedupEntriesByType.get(entityType)?.push(...dedupEntries);
   const pool = index.dedupPoolsByType.get(entityType);
-  if (pool) {
-    addToCandidatePool(pool, [
-      { entityId: entity.id, valueKind: "name", value: entity.name },
-      ...parseAliasesString(entity.aliases).map((value) => ({
-        entityId: entity.id,
-        valueKind: "alias" as const,
-        value,
-      })),
-    ]);
-  }
+  if (pool) addToCandidatePool(pool, dedupEntries);
   if (entityType === "person" && existingPersonScopeKeys) {
     index.personScopeKeysByEntityId.set(entity.id, existingPersonScopeKeys);
   }
@@ -361,6 +432,10 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   }
   removeEntityFromMapBuckets(index.byNormalizedName, entityId);
   removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+  for (const [type, entries] of index.dedupEntriesByType) {
+    const filtered = entries.filter((entry) => entry.entityId !== entityId);
+    if (filtered.length !== entries.length) index.dedupEntriesByType.set(type, filtered);
+  }
   for (const pool of index.dedupPoolsByType.values()) {
     removeFromCandidatePool(pool, entityId);
   }
@@ -464,7 +539,7 @@ export async function refreshResolvedEntityIndex(
   }
   registerEntity(index, row);
   if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) return;
-  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
+  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : [], index.companyIdsByDomain);
   const personScopeKeys = scopeKeys.get(row.id);
   if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
   for (const ref of sourceRefs) {
@@ -475,7 +550,6 @@ export async function refreshResolvedEntityIndex(
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
@@ -484,42 +558,24 @@ export interface BuildMaterializeDepsOptions {
   embeddingProvider?: EmbeddingProvider | null;
 }
 
-export async function buildMaterializeDeps(
-  db: Kysely<DB>,
-  opts: BuildMaterializeDepsOptions = {},
-): Promise<MaterializeDeps> {
-  const entityRepo = createEntityRepository(db);
-  const reviewRepo = createEntityReviewRepo(db);
-  const suppressionRepo = createEntitySuppressionRepository(db);
-  const domainsRepo = createEntityDomainsRepository(db);
-  const index = await buildLookupIndex(db);
-  const normalizationBackfillComplete = await isNormalizationBackfillComplete(db);
-  const llmPromotionThreshold =
-    typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
-      ? Math.floor(opts.llmPromotionThreshold)
-      : configuredLlmPromotionThreshold;
-  let activeLlmEvidenceProfiles: Promise<Map<string, ActiveLlmEvidenceProfile>> | null = null;
-  const llmTaskCorroborationThreshold =
-    typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
-      ? Math.floor(opts.llmTaskCorroborationThreshold)
-      : configuredLlmTaskCorroborationThreshold;
-  const featureAutoMintThreshold =
-    typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1
-      ? Math.floor(opts.featureAutoMintThreshold)
-      : configuredFeatureAutoMintThreshold;
-  const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
-  const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
-  const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
-  const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
-  const embeddingProvider = opts.embeddingProvider ?? null;
-
+export function createEntityLookupFromIndex(opts: {
+  db: Kysely<DB>;
+  index: LookupIndex;
+  normalizationBackfillComplete: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
+  logger?: Logger;
+}): EntityLookup {
+  const { db, index } = opts;
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
-    listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
+    listByType: (t: ProposeEntityType) => {
+      assertLookupIndexIncludesType(index, t);
+      return index.entitiesByType.get(t) ?? [];
+    },
     findNameDedupCandidates: (entityType, name) => {
-      const pool = index.dedupPoolsByType.get(entityType);
-      if (!pool) return [];
+      assertLookupIndexIncludesType(index, entityType);
+      const pool = getOrBuildCandidatePool(index, entityType);
       const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
       const strict = findStrictMatches(name, pool);
       const strictEntityIds = new Set(strict.map((match) => match.entityId));
@@ -548,20 +604,33 @@ export async function buildMaterializeDeps(
       }
       return [...byEntity.values()].sort((a, b) => b.score - a.score || a.entity.id.localeCompare(b.entity.id));
     },
-    getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
-    getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
-    findLlmExtractedThirdPartyMention: (name) =>
-      normalizationBackfillComplete
-        ? findLlmExtractedThirdPartyMentionIndexed(db, name)
-        : findLlmExtractedThirdPartyMention(db, name),
+    getCompanyIdsByDomain: (domain) => {
+      assertLookupIndexIncludesType(index, "company");
+      return index.companyIdsByDomain.get(domain.toLowerCase()) ?? [];
+    },
+    getPersonScopeKeys: (entityId) => {
+      assertLookupIndexIncludesType(index, "person");
+      index.personScopeKeyReads++;
+      return index.personScopeKeysByEntityId.get(entityId) ?? [];
+    },
   };
-  if (embeddingProvider) {
+  if (lookupIndexIncludesType(index, "product")) {
+    lookup.findLlmExtractedThirdPartyMention = (name) =>
+      opts.normalizationBackfillComplete
+        ? findLlmExtractedThirdPartyMentionIndexed(db, name)
+        : findLlmExtractedThirdPartyMention(db, name);
+  }
+  if (opts.embeddingProvider) {
     lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
+      assertLookupIndexIncludesType(index, entityType);
       if (!isNameDedupEntityType(entityType)) return [];
       try {
         const pool = index.entitiesByType.get(entityType) ?? [];
         const entitiesById = new Map(pool.map((entity) => [entity.id, entity]));
-        const rows = await retrieveEntityNameCandidates(db, embeddingProvider, { name, type: entityType });
+        const rows = await retrieveEntityNameCandidates(db, opts.embeddingProvider as EmbeddingProvider, {
+          name,
+          type: entityType,
+        });
         const candidates: RankedCandidate[] = [];
         for (const row of rows) {
           const entity = entitiesById.get(row.entityId);
@@ -574,6 +643,40 @@ export async function buildMaterializeDeps(
       }
     };
   }
+  return lookup;
+}
+
+export async function buildMaterializeDeps(
+  db: Kysely<DB>,
+  opts: BuildMaterializeDepsOptions = {},
+): Promise<MaterializeDeps> {
+  const entityRepo = createEntityRepository(db);
+  const reviewRepo = createEntityReviewRepo(db);
+  const suppressionRepo = createEntitySuppressionRepository(db);
+  const domainsRepo = createEntityDomainsRepository(db);
+  const index = await buildLookupIndex(db);
+  const normalizationBackfillComplete = await isNormalizationBackfillComplete(db);
+  const llmPromotionThreshold =
+    typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
+      ? Math.floor(opts.llmPromotionThreshold)
+      : configuredLlmPromotionThreshold;
+  let activeLlmEvidenceProfiles: Promise<Map<string, ActiveLlmEvidenceProfile>> | null = null;
+  const llmTaskCorroborationThreshold =
+    typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
+      ? Math.floor(opts.llmTaskCorroborationThreshold)
+      : configuredLlmTaskCorroborationThreshold;
+  const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
+  const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
+  const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
+  const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
+  const embeddingProvider = opts.embeddingProvider ?? null;
+  const lookup = createEntityLookupFromIndex({
+    db,
+    index,
+    normalizationBackfillComplete,
+    embeddingProvider,
+    logger: opts.logger,
+  });
 
   const chatSliceFileCache = new Map<string, boolean>();
   const fileToConnector = new Map<string, string>();
@@ -596,7 +699,6 @@ export async function buildMaterializeDeps(
     index,
     llmPromotionThreshold,
     llmTaskCorroborationThreshold,
-    featureAutoMintThreshold,
     birthGateTypes,
     birthGateLiveTypes,
     structuralAutoBirthTypes,

@@ -1007,6 +1007,7 @@ describe("Connectors API — authorization", () => {
         canUpdateCredentials: true,
         canBrowseScope: true,
         canEnrich: true,
+        canMint: true,
         credentialHint: "admin@google.test",
         createdByName: "admin",
         createdByEmail: ADMIN_EMAIL,
@@ -1022,6 +1023,7 @@ describe("Connectors API — authorization", () => {
         canUpdateCredentials: false,
         canBrowseScope: false,
         canEnrich: false,
+        canMint: false,
         credentialHint: "member@microsoft.test",
         createdByName: "member",
         createdByEmail: MEMBER_EMAIL,
@@ -1047,6 +1049,7 @@ describe("Connectors API — authorization", () => {
         canUpdateCredentials: true,
         canBrowseScope: true,
         canEnrich: true,
+        canMint: true,
         credentialHint: "member@fireflies.test",
         createdByName: "member",
         createdByEmail: MEMBER_EMAIL,
@@ -1065,6 +1068,7 @@ describe("Connectors API — authorization", () => {
         canUpdateCredentials: true,
         canBrowseScope: true,
         canEnrich: true,
+        canMint: true,
         credentialHint: "member@fireflies.test",
         createdByName: "member",
         createdByEmail: MEMBER_EMAIL,
@@ -1086,6 +1090,7 @@ describe("Connectors API — authorization", () => {
         canChangeScope: false,
         canUpdateCredentials: false,
         canEnrich: false,
+        canMint: true,
       });
 
       const disconnect = await app.request(`/api/connectors/${disabledCfg.id}`, {
