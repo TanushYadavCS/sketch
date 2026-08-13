@@ -286,6 +286,14 @@ describe("WhatsApp roster snapshot", () => {
     });
     await createConversationRepository(db).insertMessage({
       conversationId: conversation.id,
+      providerMessageId: "entity-alias-real-push-name",
+      senderJid: "15550000901@s.whatsapp.net",
+      senderName: "First Push Name",
+      text: "hello first",
+      receivedAt: "2026-07-07T08:59:00.000Z",
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
       providerMessageId: "entity-alias-push-name",
       senderJid: "15550000901@s.whatsapp.net",
       senderName: "Unknown",
@@ -341,6 +349,7 @@ describe("WhatsApp roster snapshot", () => {
     expect(JSON.parse(entity.aliases ?? "[]")).toEqual([
       "Existing Alias",
       "PUSH NAME",
+      "First Push Name",
       "Group Label",
       "Second Push Name",
     ]);
@@ -349,13 +358,26 @@ describe("WhatsApp roster snapshot", () => {
     expect(entity.aliases).not.toContain("@lid");
     expect(entity.aliases).not.toContain("12345");
     expect(entity.aliases).not.toContain("Unknown");
+    await expect(
+      db
+        .selectFrom("entity_name_proposals")
+        .select("value")
+        .where("entity_id", "=", "entity-aliases")
+        .orderBy("value")
+        .execute(),
+    ).resolves.toEqual([{ value: "First Push Name" }, { value: "Second Push Name" }]);
   });
 
-  it("promotes a safe push name over a phone fallback canonical name", async () => {
+  it("proposes a safe push name without changing a phone fallback canonical name", async () => {
     const groupJid = "120363000000010@g.us";
     const groups = await seedGroup(groupJid);
     const phone = "+15550000910";
     await seedEntity({ id: "phone-fallback-person", name: phone });
+    await db
+      .updateTable("entities")
+      .set({ name_status: "placeholder" })
+      .where("id", "=", "phone-fallback-person")
+      .execute();
     await seedContactPoint("phone-fallback-person", phone);
     await groups.refreshParticipants(groupJid, [
       { participantJid: "15550000910@s.whatsapp.net", phoneE164: phone, adminRole: null },
@@ -384,11 +406,18 @@ describe("WhatsApp roster snapshot", () => {
 
     const entity = await db
       .selectFrom("entities")
-      .select(["name", "aliases"])
+      .select(["name", "name_status", "aliases"])
       .where("id", "=", "phone-fallback-person")
       .executeTakeFirstOrThrow();
-    expect(entity.name).toBe("Asha Mehta");
-    expect(JSON.parse(entity.aliases ?? "[]")).toContain(phone);
+    expect(entity).toMatchObject({ name: phone, name_status: "placeholder" });
+    expect(JSON.parse(entity.aliases ?? "[]")).toEqual(["Asha Mehta"]);
+    await expect(
+      db
+        .selectFrom("entity_name_proposals")
+        .select(["source", "value", "observed_count", "status"])
+        .where("entity_id", "=", "phone-fallback-person")
+        .execute(),
+    ).resolves.toEqual([{ source: "whatsapp_pushname", value: "Asha Mehta", observed_count: 1, status: "pending" }]);
   });
 
   it("serializes display context without raw phone numbers or phone JIDs", async () => {

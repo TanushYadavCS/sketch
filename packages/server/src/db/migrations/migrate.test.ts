@@ -29,7 +29,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 
-const EXPECTED_MIGRATION_COUNT = 182;
+const EXPECTED_MIGRATION_COUNT = 183;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -50,6 +50,54 @@ describe("runMigrations — full sequence", () => {
 
   it("runs all migrations on a fresh database without error", async () => {
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
+  });
+
+  it("backfills placeholder status only for WhatsApp identity names", async () => {
+    const migrator = createMigrator(db);
+    await migrator.migrateTo("180-whatsapp-chunk-conversion-state");
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "whatsapp-phone",
+          name: "+919969577769",
+          source_type: "person",
+          status: "confirmed",
+          hotness: 0,
+          created_at: "2026-08-13T00:00:00.000Z",
+          updated_at: "2026-08-13T00:00:00.000Z",
+        },
+        {
+          id: "email-phone",
+          name: "+919891688787",
+          source_type: "person",
+          status: "confirmed",
+          hotness: 0,
+          created_at: "2026-08-13T00:00:00.000Z",
+          updated_at: "2026-08-13T00:00:00.000Z",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "whatsapp-phone-point",
+        entity_id: "whatsapp-phone",
+        kind: "phone",
+        value: "+919969577769",
+        source: "whatsapp_identity",
+      })
+      .execute();
+
+    await migrator.migrateToLatest();
+
+    const rows = await sql<{ id: string; name_status: string }>`
+      SELECT id, name_status FROM entities ORDER BY id
+    `.execute(db);
+    expect(rows.rows).toEqual([
+      { id: "email-phone", name_status: "confirmed" },
+      { id: "whatsapp-phone", name_status: "placeholder" },
+    ]);
   });
 
   it("logs each applied migration by default and stays silent when quiet is set", async () => {

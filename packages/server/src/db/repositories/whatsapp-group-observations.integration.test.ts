@@ -6,6 +6,7 @@ import type { DB } from "../schema";
 import { createEntityRepository } from "./entities";
 import { createUserRepository } from "./users";
 import { createWhatsAppGroupRepository } from "./whatsapp-groups";
+import { projectWhatsAppRosterPerson } from "./whatsapp-roster-person-projection";
 
 type DbFactory = () => Promise<Kysely<DB>>;
 
@@ -260,6 +261,86 @@ function observationSuite(label: string, createDb: DbFactory) {
         .where("entity_contact_points.value", "=", lid)
         .executeTakeFirstOrThrow();
       expect(person).toEqual({ name: lid, subtype: "external", kind: "whatsapp_lid", value: lid });
+    }, 30_000);
+
+    it("keeps a WhatsApp placeholder name while accumulating one proposal", async () => {
+      const groupJid = `proposal-${randomUUID()}@g.us`;
+      const phone = "+919891688787";
+      const lid = "3878523285582@lid";
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: groupJid,
+        name: "sketch-whatsapp-test",
+        description: null,
+        updated_at: "2026-08-13T00:00:00.000Z",
+      });
+
+      await projectWhatsAppRosterPerson(db, {
+        groupJid,
+        phoneE164: phone,
+        lid,
+        displayName: "Tanush Yadav",
+        observedAt: "2026-08-13T06:02:47.000Z",
+      });
+      await projectWhatsAppRosterPerson(db, {
+        groupJid,
+        phoneE164: phone,
+        lid,
+        displayName: "Tanush Yadav",
+        observedAt: "2026-08-13T06:03:47.000Z",
+      });
+
+      const entity = await db
+        .selectFrom("entities")
+        .select(["id", "name", "name_status", "aliases"])
+        .where("name", "=", phone)
+        .executeTakeFirstOrThrow();
+      expect(entity).toMatchObject({ name: phone, name_status: "placeholder" });
+      expect(JSON.parse(entity.aliases ?? "[]")).toEqual(["Tanush Yadav"]);
+      await expect(
+        db
+          .selectFrom("entity_name_proposals")
+          .select(["entity_id", "source", "value", "normalized_value", "observed_count", "status"])
+          .where("entity_id", "=", entity.id)
+          .execute(),
+      ).resolves.toEqual([
+        {
+          entity_id: entity.id,
+          source: "whatsapp_pushname",
+          value: "Tanush Yadav",
+          normalized_value: "tanush yadav",
+          observed_count: 2,
+          status: "pending",
+        },
+      ]);
+    }, 30_000);
+
+    it("keeps an existing numeric-name Person confirmed", async () => {
+      const groupJid = `confirmed-${randomUUID()}@g.us`;
+      const phone = "+919891688788";
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: groupJid,
+        name: "Confirmed",
+        description: null,
+        updated_at: "2026-08-13T00:00:00.000Z",
+      });
+      const existing = await createEntityRepository(db).upsertPersonEntity({
+        name: phone,
+        email: "confirmed@example.com",
+        subtype: "external",
+        source: "email",
+        sourceId: "confirmed@example.com",
+      });
+
+      await projectWhatsAppRosterPerson(db, {
+        groupJid,
+        phoneE164: phone,
+        lid: null,
+        observedAt: "2026-08-13T06:02:47.000Z",
+      });
+
+      await expect(
+        db.selectFrom("entities").select("name_status").where("id", "=", existing.id).executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ name_status: "confirmed" });
     }, 30_000);
 
     it("projects a retained participant after its group becomes enabled", async () => {

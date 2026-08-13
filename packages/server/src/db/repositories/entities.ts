@@ -178,6 +178,7 @@ export interface UpsertPersonEntityData {
   source: string;
   sourceId: string;
   provenanceTier?: ProvenanceTier;
+  nameStatus?: "confirmed" | "placeholder";
 }
 
 export function isHumanSubtypeOverride(provenanceTier: string | null | undefined): boolean {
@@ -1779,6 +1780,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: JSON.stringify(metadata),
           source_ref_id: null,
           status: "confirmed",
+          name_status: data.nameStatus ?? "confirmed",
           provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,

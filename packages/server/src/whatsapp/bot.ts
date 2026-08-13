@@ -31,6 +31,7 @@ import type {
   WhatsAppGroupParticipantInput,
   WhatsAppGroupParticipantRefreshLogger,
 } from "../db/repositories/whatsapp-groups";
+import { projectWhatsAppRosterPerson } from "../db/repositories/whatsapp-roster-person-projection";
 import type { DB } from "../db/schema";
 import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
 import type { Logger } from "../logger";
@@ -62,6 +63,7 @@ const RECONNECT_FACTOR = 1.8;
 const RECONNECT_JITTER = 0.25;
 const GROUP_META_TTL_MS = 5 * 60_000;
 const GROUP_SYNC_THROTTLE_MS = 5 * 60_000;
+const IDENTITY_PROJECTION_CACHE_SIZE = 1_000;
 
 /** Cached WA version — fetched once from GitHub, reused for all subsequent connections. */
 let cachedVersion: WAVersion | null = null;
@@ -232,6 +234,7 @@ export class WhatsAppBot {
     { interval: ReturnType<typeof setInterval>; ttl: ReturnType<typeof setTimeout> }
   >();
   private groupMetaCache = new Map<string, { meta: GroupMetadata; expires: number }>();
+  private projectedIdentities = new Map<string, true>();
 
   constructor(config: WhatsAppBotConfig) {
     this.db = config.db;
@@ -887,6 +890,14 @@ export class WhatsAppBot {
 
         if (msg.key.id && this.recentlySent.has(msg.key.id)) continue;
 
+        if (isGroup) {
+          try {
+            await this.observeGroupMessageIdentity(msg, jid);
+          } catch (err) {
+            this.logger.warn({ err, groupJid: jid }, "Failed to project WhatsApp message identity");
+          }
+        }
+
         const messageType = getContentType(msg.message);
         const text = extractText(msg);
         const hasMedia = hasMediaContent(messageType);
@@ -900,6 +911,43 @@ export class WhatsAppBot {
         }
       }
     });
+  }
+
+  private async observeGroupMessageIdentity(msg: proto.IWebMessageInfo, groupJid: string): Promise<void> {
+    const senderJid = msg.key?.participant ?? msg.participant;
+    if (!senderJid) return;
+    if (
+      (this.sock?.user?.id && areJidsSameUser(senderJid, this.sock.user.id)) ||
+      (this.sock?.user?.lid && areJidsSameUser(senderJid, this.sock.user.lid))
+    ) {
+      return;
+    }
+    const lid = normalizeWhatsAppIdentityLid(senderJid);
+    const participantAlt = (msg.key as proto.IMessageKey & { participantAlt?: string }).participantAlt;
+    const phoneE164 = participantAlt?.endsWith("@s.whatsapp.net")
+      ? jidToPhoneNumber(participantAlt)
+      : senderJid.endsWith("@s.whatsapp.net")
+        ? jidToPhoneNumber(senderJid)
+        : await this.resolveLidToPhone(senderJid);
+    const displayName = msg.pushName?.trim() || null;
+    const key = [groupJid, lid ?? "", phoneE164 ?? "", displayName ?? ""].join("|");
+    if (this.projectedIdentities.delete(key)) {
+      this.projectedIdentities.set(key, true);
+      return;
+    }
+    const timestamp = Number(msg.messageTimestamp);
+    const result = await projectWhatsAppRosterPerson(this.db, {
+      groupJid,
+      phoneE164,
+      lid,
+      displayName,
+      observedAt: Number.isFinite(timestamp) ? new Date(timestamp * 1_000).toISOString() : new Date().toISOString(),
+    });
+    if (result !== "created" && result !== "linked") return;
+    this.projectedIdentities.set(key, true);
+    if (this.projectedIdentities.size > IDENTITY_PROJECTION_CACHE_SIZE) {
+      this.projectedIdentities.delete(this.projectedIdentities.keys().next().value as string);
+    }
   }
 
   private async handleDmMessage(

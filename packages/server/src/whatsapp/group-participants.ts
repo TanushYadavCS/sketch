@@ -31,10 +31,26 @@ function participantLid(row: Record<string, unknown>, jid: string): string | nul
   return asString(row.lid) ?? (jid.endsWith("@lid") ? jid : null);
 }
 
+/**
+ * In lid-addressed groups — now WhatsApp's default — the participant phone
+ * arrives as a PN JID (`919969577769@s.whatsapp.net`), not bare E.164. Prefixing
+ * that with `+` produces a value `normalizeContactPointValue` rejects, so the
+ * number WhatsApp handed us was discarded and resolution fell through to the
+ * cache-dependent LID lookup. Strip the server and device suffix first.
+ *
+ * A `@lid` value is an opaque identifier that happens to be numeric: stripping
+ * its suffix yields something that passes an E.164 shape check while being a
+ * phone number nobody owns. Reject it outright rather than mint a fake.
+ */
 function explicitPhoneNumber(value: unknown): string | null {
   const phoneNumber = asString(value);
-  if (!phoneNumber) return null;
-  const candidate = phoneNumber.startsWith("+") || phoneNumber.startsWith("00") ? phoneNumber : `+${phoneNumber}`;
+  if (!phoneNumber || /@lid$/i.test(phoneNumber)) return null;
+  const bare = phoneNumber
+    .replace(/@s\.whatsapp\.net$/i, "")
+    .split(":")[0]
+    .trim();
+  if (!bare) return null;
+  const candidate = bare.startsWith("+") || bare.startsWith("00") ? bare : `+${bare}`;
   try {
     const normalized = normalizeContactPointValue("whatsapp", candidate);
     return isWhatsAppDmPhoneE164(normalized) ? normalized : null;

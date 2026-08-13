@@ -1068,6 +1068,7 @@ export interface InboxMessagesTable {
 export interface EntitiesTable {
   id: string;
   name: string;
+  name_status: Generated<string>;
   source_type: string;
   subtype: string | null;
   aliases: string | null;
@@ -1082,6 +1083,20 @@ export interface EntitiesTable {
   share_with_everyone: Generated<number>;
   deleted_at: string | null;
   merged_into_entity_id: string | null;
+}
+
+export interface EntityNameProposalsTable {
+  id: string;
+  entity_id: string;
+  source: string;
+  value: string;
+  normalized_value: string;
+  observed_count: Generated<number>;
+  first_seen_at: string;
+  last_seen_at: string;
+  status: Generated<string>;
+  resolved_by_user_id: string | null;
+  resolved_at: string | null;
 }
 
 export interface EntityMergesTable {
@@ -1778,6 +1793,7 @@ export interface DB {
   agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_name_proposals: EntityNameProposalsTable;
   entity_merges: EntityMergesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;

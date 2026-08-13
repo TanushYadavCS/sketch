@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { type Transaction, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { DB } from "../schema";
 import { createEntityRepository, whereLiveEntity } from "./entities";
+import { mergeEntityAliases, upsertEntityNameProposal } from "./entity-aliases";
 
 export type WhatsAppRosterProjectionResult = "created" | "linked" | "disabled" | "ambiguous" | "missing-identity";
 
@@ -9,10 +10,11 @@ export interface WhatsAppRosterProjectionInput {
   groupJid: string;
   phoneE164: string | null;
   lid: string | null;
+  displayName?: string | null;
   observedAt: string;
 }
 
-async function matchingPersonIds(db: Transaction<DB>, input: WhatsAppRosterProjectionInput): Promise<Set<string>> {
+async function matchingPersonIds(db: Kysely<DB>, input: WhatsAppRosterProjectionInput): Promise<Set<string>> {
   const ids = new Set<string>();
   const contactConditions: Array<{ kind: "phone" | "whatsapp_lid"; value: string }> = [];
   if (input.phoneE164) contactConditions.push({ kind: "phone", value: input.phoneE164 });
@@ -57,7 +59,7 @@ async function matchingPersonIds(db: Transaction<DB>, input: WhatsAppRosterProje
 }
 
 async function upsertIdentityContactPoint(
-  db: Transaction<DB>,
+  db: Kysely<DB>,
   entityId: string,
   kind: "phone" | "whatsapp_lid",
   value: string,
@@ -117,7 +119,7 @@ async function upsertIdentityContactPoint(
 }
 
 export async function projectWhatsAppRosterPerson(
-  db: Transaction<DB>,
+  db: Kysely<DB>,
   input: WhatsAppRosterProjectionInput,
 ): Promise<WhatsAppRosterProjectionResult> {
   if (!input.phoneE164 && !input.lid) return "missing-identity";
@@ -139,6 +141,7 @@ export async function projectWhatsAppRosterPerson(
         source: "whatsapp_identity",
         sourceId: input.phoneE164 ? `phone:${input.phoneE164}` : `lid:${input.lid}`,
         provenanceTier: "inferred",
+        nameStatus: "placeholder",
       })
     : await db
         .selectFrom("entities")
@@ -161,6 +164,11 @@ export async function projectWhatsAppRosterPerson(
       source: "whatsapp_identity",
       sourceId: `lid:${input.lid}`,
     });
+  }
+  const displayName = input.displayName?.trim();
+  if (displayName) {
+    await mergeEntityAliases(db, entity.id, [displayName]);
+    await upsertEntityNameProposal(db, entity.id, "whatsapp_pushname", displayName, input.observedAt);
   }
   return created ? "created" : "linked";
 }

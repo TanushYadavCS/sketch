@@ -159,7 +159,7 @@ async function enrichResolvedEntityAliases(
     phone_e164: string | null;
     lid: string | null;
     resolution: WhatsAppIdentityResolution;
-    aliasName?: string;
+    aliasNames: string[];
   }>,
 ): Promise<void> {
   const candidates = participants.filter(
@@ -175,19 +175,19 @@ async function enrichResolvedEntityAliases(
     labels.map((label) => [normalizeWhatsAppIdentityPhone(label.phone_e164), safeEntityAlias(label.display_name)]),
   );
   const additionsByEntityId = new Map<string, string[]>();
-  const identityValuesByEntityId = new Map<string, string[]>();
+  const pushNamesByEntityId = new Map<string, string[]>();
   for (const candidate of candidates) {
     const phone = normalizeWhatsAppIdentityPhone(candidate.phone_e164);
     const additions = additionsByEntityId.get(candidate.resolution.entityId) ?? [];
-    additions.push(candidate.aliasName ?? "", phone ? (labelByPhone.get(phone) ?? "") : "");
+    additions.push(...candidate.aliasNames, phone ? (labelByPhone.get(phone) ?? "") : "");
     additionsByEntityId.set(candidate.resolution.entityId, additions);
-    const identityValues = identityValuesByEntityId.get(candidate.resolution.entityId) ?? [];
-    identityValues.push(phone ?? "", normalizeWhatsAppIdentityLid(candidate.lid) ?? "");
-    identityValuesByEntityId.set(candidate.resolution.entityId, identityValues);
+    const pushNames = pushNamesByEntityId.get(candidate.resolution.entityId) ?? [];
+    pushNames.push(...candidate.aliasNames);
+    pushNamesByEntityId.set(candidate.resolution.entityId, pushNames);
   }
 
   for (const [entityId, additions] of additionsByEntityId) {
-    await enrichWhatsAppRosterPersonName(db, entityId, additions, identityValuesByEntityId.get(entityId) ?? []);
+    await enrichWhatsAppRosterPersonName(db, entityId, additions, pushNamesByEntityId.get(entityId) ?? []);
   }
 }
 
@@ -485,40 +485,53 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
   return { resolve, resolveRoster };
 }
 
-async function loadPushNamesBySenderJid(db: Kysely<DB>, conversationId: number): Promise<Map<string, string>> {
+const MAX_PUSH_NAMES_PER_SENDER = 10;
+
+async function loadPushNamesBySenderJid(db: Kysely<DB>, conversationId: number): Promise<Map<string, string[]>> {
   const ranked = db
     .selectFrom("conversation_messages")
     .select(["sender_jid", "sender_name", "received_at", "id"])
     .select(
-      sql<number>`row_number() over (partition by sender_jid order by received_at desc, id desc)`.as("sender_rank"),
+      sql<number>`row_number() over (
+        partition by sender_jid, lower(trim(sender_name))
+        order by received_at desc, id desc
+      )`.as("name_rank"),
     )
     .where("conversation_id", "=", conversationId)
-    .where("is_bot", "=", 0);
+    .where("is_bot", "=", 0)
+    .where(sql<boolean>`lower(trim(sender_name)) <> 'unknown'`);
   const rows = await db
     .selectFrom(ranked.as("ranked_messages"))
-    .select(["sender_jid", "sender_name"])
-    .where("sender_rank", "=", 1)
+    .select(["sender_jid", "sender_name", "received_at", "id"])
+    .where("name_rank", "=", 1)
+    .orderBy("sender_jid", "asc")
+    .orderBy("received_at", "desc")
+    .orderBy("id", "desc")
     .execute();
 
-  const out = new Map<string, string>();
+  const out = new Map<string, string[]>();
   for (const row of rows) {
     const senderJid = row.sender_jid.trim();
     const senderName = row.sender_name.trim();
-    if (senderJid && senderName) out.set(senderJid, senderName);
+    if (!senderJid || !senderName) continue;
+    const names = out.get(senderJid) ?? [];
+    if (names.length >= MAX_PUSH_NAMES_PER_SENDER) continue;
+    names.push(senderName);
+    out.set(senderJid, names);
   }
   return out;
 }
 
-function rawPushNameForParticipant(
-  pushNamesBySenderJid: Map<string, string>,
+function rawPushNamesForParticipant(
+  pushNamesBySenderJid: Map<string, string[]>,
   participantJid: string,
   phoneE164: string | null,
-): string | undefined {
+): string[] {
   const direct = pushNamesBySenderJid.get(participantJid);
   if (direct) return direct;
   const normalizedPhone = normalizeWhatsAppIdentityPhone(phoneE164);
-  if (!normalizedPhone) return undefined;
-  return pushNamesBySenderJid.get(phoneE164ToWhatsAppJid(normalizedPhone));
+  if (!normalizedPhone) return [];
+  return pushNamesBySenderJid.get(phoneE164ToWhatsAppJid(normalizedPhone)) ?? [];
 }
 
 export async function buildWhatsAppRosterSnapshot({
@@ -544,23 +557,28 @@ export async function buildWhatsAppRosterSnapshot({
 
   const snapshotInputs = participants.map((participant) => {
     const resolution = resolutions.get(participant.participant_jid) ?? { kind: "unresolved" };
-    const rawPushName = rawPushNameForParticipant(
+    const rawPushNames = rawPushNamesForParticipant(
       pushNamesBySenderJid,
       participant.participant_jid,
       participant.phone_e164,
     );
-    return { participant, resolution, pushName: safePushName(rawPushName), aliasName: safeEntityAlias(rawPushName) };
+    return {
+      participant,
+      resolution,
+      pushName: safePushName(rawPushNames[0]),
+      aliasNames: rawPushNames.map(safeEntityAlias).filter((name): name is string => Boolean(name)),
+    };
   });
   if (enrichEntityAliases) {
     try {
       await enrichResolvedEntityAliases(
         db,
         groupJid,
-        snapshotInputs.map(({ participant, resolution, aliasName }) => ({
+        snapshotInputs.map(({ participant, resolution, aliasNames }) => ({
           phone_e164: participant.phone_e164,
           lid: participant.lid,
           resolution,
-          aliasName,
+          aliasNames,
         })),
       );
     } catch (err) {

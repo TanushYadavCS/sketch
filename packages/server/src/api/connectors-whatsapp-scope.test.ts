@@ -8,6 +8,7 @@ import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-group
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 
 const ADMIN_EMAIL = "admin@test.com";
 const MEMBER_EMAIL = "member@test.com";
@@ -83,10 +84,20 @@ describe("WhatsApp connector scope API", () => {
   let app: ReturnType<typeof createApp>;
   let cookie: string;
   let adminId: string;
+  let refreshedGroups: string[];
 
   beforeEach(async () => {
     db = await createTestDb();
-    app = createApp(db, createTestConfig(), { logger });
+    refreshedGroups = [];
+    app = createApp(db, createTestConfig(), {
+      logger,
+      whatsapp: {
+        groupMetadata: async (jid: string) => {
+          refreshedGroups.push(jid);
+          return null;
+        },
+      } as unknown as WhatsAppSocketFacade,
+    });
     adminId = await seedAdmin(db);
     cookie = await login(app);
   });
@@ -117,11 +128,13 @@ describe("WhatsApp connector scope API", () => {
       "beta@g.us": 0,
       "gamma@g.us": 1,
     });
+    expect(refreshedGroups).toEqual(["alpha@g.us"]);
 
     const second = await patchScope(app, cookie, connector.id, {
       groupIndexing: { "alpha@g.us": true, "beta@g.us": false },
     });
     expect(second.status).toBe(200);
+    expect(refreshedGroups).toEqual(["alpha@g.us"]);
     await expect(indexFlags(db)).resolves.toEqual({
       "alpha@g.us": 1,
       "beta@g.us": 0,

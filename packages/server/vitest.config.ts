@@ -34,10 +34,18 @@ const maxWorkers = process.env.VITEST_MAX_WORKERS
  * Pool is "threads": for this suite (many small files) thread workers spawn far
  * cheaper than forked processes.
  */
+/**
+ * `testTimeout` is raised above vitest's 5s default because the migration suite
+ * runs the full chain against a fresh database ~49 times in one file. Each test
+ * takes ~300ms alone but crosses 5s under full-suite worker contention, and
+ * every migration added lengthens all of them. The work is correct, just slow —
+ * a longer ceiling costs nothing when tests pass.
+ */
 const shared = {
   environment: "node" as const,
   globalSetup: ["src/test-global-setup.ts"],
   setupFiles: ["src/test-setup.ts"],
+  testTimeout: 30_000,
   env: {
     DATA_DIR: "/tmp/sketch-test-data",
   },

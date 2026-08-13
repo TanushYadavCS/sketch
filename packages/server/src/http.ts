@@ -648,6 +648,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       connectorRoutes(connectors, db, deps.logger, users, config, {
         taskMintingGenerator: deps.taskMintingGenerator,
         enrichmentGenerator: deps.enrichmentGenerator,
+        whatsapp: deps.whatsapp,
       }),
     );
   }

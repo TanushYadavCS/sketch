@@ -71,6 +71,7 @@ import {
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -243,6 +244,7 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
 export async function applyWhatsAppGroupScope(params: {
   db: Kysely<DB>;
   scopeConfig: Record<string, unknown>;
+  newlyEnabled?: string[];
 }): Promise<Record<string, unknown>> {
   if (hasOwn(params.scopeConfig, "groupJids")) {
     throw new WhatsAppGroupScopeValidationError("groupJids is no longer supported");
@@ -267,7 +269,7 @@ export async function applyWhatsAppGroupScope(params: {
     throw new WhatsAppGroupScopeValidationError(`Unknown WhatsApp group jid: ${unknownJids[0]}`);
   }
 
-  await applyIndexSelection(params.db, parsed.data);
+  params.newlyEnabled?.push(...(await applyIndexSelection(params.db, parsed.data)));
   return scopeConfig;
 }
 
@@ -430,6 +432,7 @@ export function connectorRoutes(
     /** Overrides the settings-derived model, so tests can drive the per-file enrich route. */
     enrichmentGenerator?: GeminiGenerator;
     taskMintingGenerator?: GeminiGenerator;
+    whatsapp?: Pick<WhatsAppSocketFacade, "groupMetadata">;
   },
 ) {
   const routes = new Hono();
@@ -2365,12 +2368,17 @@ export function connectorRoutes(
     }
 
     let requestedScope: Record<string, unknown>;
+    const newlyEnabledWhatsAppGroups: string[] = [];
     try {
       requestedScope = await db.transaction().execute(async (trx) => {
         const txConnectorRepo = createConnectorRepository(trx, appConfig?.ENCRYPTION_KEY);
         const scope =
           config.connector_type === "whatsapp"
-            ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })
+            ? await applyWhatsAppGroupScope({
+                db: trx,
+                scopeConfig: parsed.data.scopeConfig,
+                newlyEnabled: newlyEnabledWhatsAppGroups,
+              })
             : parsed.data.scopeConfig;
         const existingScope =
           config.scope_config && typeof config.scope_config === "string"
@@ -2391,6 +2399,14 @@ export function connectorRoutes(
         return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
       }
       throw err;
+    }
+
+    for (const groupJid of newlyEnabledWhatsAppGroups) {
+      try {
+        await deps?.whatsapp?.groupMetadata(groupJid, { refresh: true });
+      } catch (err) {
+        logger.warn({ err, groupJid }, "Failed to refresh newly enabled WhatsApp group metadata");
+      }
     }
 
     if (config.connector_type === "google_calendar" || config.connector_type === "outlook_calendar") {
