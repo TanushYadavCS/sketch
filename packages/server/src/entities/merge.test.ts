@@ -173,6 +173,79 @@ describe("entity merge core", () => {
     ).resolves.toEqual({ provenance_tier: "declared" });
   });
 
+  it("adopts the loser's confirmed name when the survivor is only a placeholder", async () => {
+    await seedEntity(db, "survivor", "+919891688787");
+    await seedEntity(db, "loser", "Tanush");
+    await db.updateTable("entities").set({ name_status: "placeholder" }).where("id", "=", "survivor").execute();
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    const survivor = await db
+      .selectFrom("entities")
+      .select(["name", "name_status", "aliases"])
+      .where("id", "=", "survivor")
+      .executeTakeFirstOrThrow();
+    expect(survivor.name).toBe("Tanush");
+    expect(survivor.name_status).toBe("confirmed");
+    expect(JSON.parse(survivor.aliases ?? "[]")).toContain("+919891688787");
+  });
+
+  it("keeps the rescued name when a second confirmed entity is merged in later", async () => {
+    await seedEntity(db, "survivor", "+919891688787");
+    await seedEntity(db, "loser", "Tanush");
+    await seedEntity(db, "later", "Bob");
+    await db.updateTable("entities").set({ name_status: "placeholder" }).where("id", "=", "survivor").execute();
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+    await mergeEntities(db, { survivorId: "survivor", loserId: "later", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select("name").where("id", "=", "survivor").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ name: "Tanush" });
+  });
+
+  it("keeps a confirmed survivor name when the loser is the placeholder", async () => {
+    await seedEntity(db, "survivor", "Tanush");
+    await seedEntity(db, "loser", "+919891688787");
+    await db.updateTable("entities").set({ name_status: "placeholder" }).where("id", "=", "loser").execute();
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select("name").where("id", "=", "survivor").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ name: "Tanush" });
+  });
+
+  it("lets an explicit survivor name win over the placeholder rescue", async () => {
+    await seedEntity(db, "survivor", "+919891688787");
+    await seedEntity(db, "loser", "Tanush");
+    await db.updateTable("entities").set({ name_status: "placeholder" }).where("id", "=", "survivor").execute();
+
+    await mergeEntities(db, {
+      survivorId: "survivor",
+      loserId: "loser",
+      userId: USER_ID,
+      survivorName: "Tanush Sharma",
+    });
+
+    await expect(
+      db.selectFrom("entities").select("name").where("id", "=", "survivor").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ name: "Tanush Sharma" });
+  });
+
+  it("restores the placeholder name and status when the rescue merge is undone", async () => {
+    await seedEntity(db, "survivor", "+919891688787");
+    await seedEntity(db, "loser", "Tanush");
+    await db.updateTable("entities").set({ name_status: "placeholder" }).where("id", "=", "survivor").execute();
+
+    const merge = await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+    await unmergeEntities(db, { mergeId: merge.mergeId, userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select(["name", "name_status"]).where("id", "=", "survivor").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ name: "+919891688787", name_status: "placeholder" });
+  });
+
   it.each([
     ["external", "internal"],
     ["internal", "external"],
