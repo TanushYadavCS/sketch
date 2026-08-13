@@ -8,7 +8,7 @@ import { createAutomationStepContentRepository } from "../db/repositories/automa
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestDb } from "../test-utils";
-import { acquireOrRenewLock } from "./lock-service";
+import { acquireOrRenewLock, releaseLock } from "./lock-service";
 import {
   createAutomationDefinition,
   createAutomationDraft,
@@ -1062,5 +1062,233 @@ describe("automation persistence", () => {
 
     expect(result).toEqual({ kind: "deleted" });
     await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeUndefined();
+  });
+
+  it("denies a grantee's next save after a revoke while the grantee still holds the edit lock", async () => {
+    await addUser("grantee-1");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-revoke-locked"),
+      brokerCapable: true,
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-revoke-locked", userId: "grantee-1", grantedByUserId: "user-1" });
+
+    // Grant writes never touch the task row: the revision stays put.
+    await expect(createScheduledTaskRepository(db).getById("automation-revoke-locked")).resolves.toMatchObject({
+      revision: 0,
+    });
+
+    const holder = { userId: "grantee-1", platform: "web", surface: "builder", conversationId: null } as const;
+    await acquireOrRenewLock(db, { taskId: "automation-revoke-locked", holder });
+    const edited = await updateAutomationDefinition({
+      db,
+      taskId: "automation-revoke-locked",
+      patch: { expectedRevision: 0, title: "Grantee edit" },
+      actor: { userId: "grantee-1" },
+      brokerCapable: true,
+    });
+    expect(edited).toMatchObject({ kind: "saved", row: { revision: 1, title: "Grantee edit" } });
+
+    // The owner revokes mid-edit; the grantee's lock row is not cleared.
+    await expect(shares.revoke({ taskId: "automation-revoke-locked", userId: "grantee-1" })).resolves.toBe(true);
+    await expect(createScheduledTaskRepository(db).getById("automation-revoke-locked")).resolves.toMatchObject({
+      revision: 1,
+      title: "Grantee edit",
+    });
+
+    // The in-transaction re-check denies the grantee's next save on both paths.
+    const deniedUpdate = await updateAutomationDefinition({
+      db,
+      taskId: "automation-revoke-locked",
+      patch: { expectedRevision: 1, title: "Revoked edit" },
+      actor: { userId: "grantee-1" },
+      brokerCapable: true,
+    });
+    expect(deniedUpdate).toEqual({ kind: "access_denied" });
+    const deniedReplace = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-revoke-locked",
+      request: makeDefinition({ expectedRevision: 1, title: "Revoked replacement" }),
+      actor: { userId: "grantee-1" },
+      brokerCapable: true,
+    });
+    expect(deniedReplace).toEqual({ kind: "not_found" });
+
+    // Neither the denial nor the revoke bumped the revision or dropped the lock.
+    await expect(createScheduledTaskRepository(db).getById("automation-revoke-locked")).resolves.toMatchObject({
+      revision: 1,
+      title: "Grantee edit",
+    });
+    await expect(createAutomationLocksRepository(db).getByTaskId("automation-revoke-locked")).resolves.toMatchObject({
+      holder_user_id: "grantee-1",
+    });
+  });
+
+  it("applies the same lock discipline to admin edits", async () => {
+    await addUser("admin-1");
+    await addUser("user-2");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-admin-locked"),
+      brokerCapable: true,
+    });
+    const holder = { userId: "user-2", platform: "web", surface: "builder", conversationId: null } as const;
+    await acquireOrRenewLock(db, { taskId: "automation-admin-locked", holder });
+
+    // Even admins must hold the lock to mutate.
+    const denied = await updateAutomationDefinition({
+      db,
+      taskId: "automation-admin-locked",
+      patch: { expectedRevision: 0, title: "Admin must wait" },
+      actor: { userId: "admin-1", role: "admin" },
+      brokerCapable: true,
+    });
+    expect(denied.kind).toBe("locked");
+    if (denied.kind === "locked") expect(denied.lock.holder_user_id).toBe("user-2");
+    const deniedReplace = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-admin-locked",
+      request: makeDefinition({ expectedRevision: 0, title: "Admin replacement must wait" }),
+      actor: { userId: "admin-1", role: "admin" },
+      brokerCapable: true,
+    });
+    expect(deniedReplace.kind).toBe("locked");
+
+    // The admin's acquire loses to the live holder, then wins after release.
+    const adminHolder = { userId: "admin-1", platform: "web", surface: "builder", conversationId: null } as const;
+    const blockedAcquire = await acquireOrRenewLock(db, { taskId: "automation-admin-locked", holder: adminHolder });
+    expect(blockedAcquire.kind).toBe("locked");
+    await releaseLock(db, { taskId: "automation-admin-locked", userId: "user-2" });
+    const held = await acquireOrRenewLock(db, { taskId: "automation-admin-locked", holder: adminHolder });
+    expect(held.kind).toBe("held");
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "automation-admin-locked",
+      patch: { expectedRevision: 0, title: "Admin after lock" },
+      actor: { userId: "admin-1", role: "admin" },
+      brokerCapable: true,
+    });
+    expect(saved).toMatchObject({
+      kind: "saved",
+      row: { title: "Admin after lock", revision: 1, last_edited_by: "admin-1" },
+    });
+  });
+
+  it("lets an admin delete while another user holds the lock and clears lock rows in the transaction", async () => {
+    await addUser("user-2");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-admin-delete-locked"),
+      brokerCapable: true,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "automation-admin-delete-locked",
+      holder: { userId: "user-2", platform: "web", surface: "builder", conversationId: null },
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-admin-delete-locked", userId: "user-2", grantedByUserId: "user-1" });
+
+    const result = await deleteAutomation({
+      db,
+      taskId: "automation-admin-delete-locked",
+      actor: { userId: "admin-1", role: "admin" },
+      scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-locked")).resolves.toBeUndefined();
+    await expect(
+      createAutomationLocksRepository(db).getByTaskId("automation-admin-delete-locked"),
+    ).resolves.toBeUndefined();
+    await expect(
+      db
+        .selectFrom("automation_task_shares")
+        .selectAll()
+        .where("task_id", "=", "automation-admin-delete-locked")
+        .execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("surfaces LOCKED and REVISION_CONFLICT across builder-save and agent-edit seams without silent clobbering", async () => {
+    await addUser("user-1");
+    await addUser("user-2");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-builder-agent"),
+      brokerCapable: true,
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-builder-agent", userId: "user-2", grantedByUserId: "user-1" });
+
+    // Agent edit path (acquire -> update -> release), exactly as the agent tool runs it.
+    const agentHolder = { userId: "user-2", platform: "slack", surface: "dm", conversationId: "C1" } as const;
+    await acquireOrRenewLock(db, { taskId: "automation-builder-agent", holder: agentHolder });
+    const agentEdit = await updateAutomationDefinition({
+      db,
+      taskId: "automation-builder-agent",
+      patch: { expectedRevision: 0, prompt: "Agent-prompt version" },
+      actor: { userId: "user-2" },
+      brokerCapable: true,
+    });
+    expect(agentEdit).toMatchObject({ kind: "saved", row: { revision: 1, prompt: "Agent-prompt version" } });
+    await releaseLock(db, { taskId: "automation-builder-agent", userId: "user-2" });
+
+    // The web builder saves against a stale revision: REVISION_CONFLICT, no clobber.
+    const builderStale = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-builder-agent",
+      request: makeDefinition({ expectedRevision: 0, prompt: "Builder-prompt version" }),
+      actor: { userId: "user-1" },
+      brokerCapable: true,
+    });
+    expect(builderStale).toEqual({ kind: "revision_conflict", currentRevision: 1 });
+    await expect(createScheduledTaskRepository(db).getById("automation-builder-agent")).resolves.toMatchObject({
+      prompt: "Agent-prompt version",
+      revision: 1,
+    });
+
+    // The builder takes the lock; the agent's next edit is LOCKED, no clobber.
+    const builderHolder = { userId: "user-1", platform: "web", surface: "builder", conversationId: null } as const;
+    await acquireOrRenewLock(db, { taskId: "automation-builder-agent", holder: builderHolder });
+    const agentLocked = await updateAutomationDefinition({
+      db,
+      taskId: "automation-builder-agent",
+      patch: { expectedRevision: 1, prompt: "Agent second version" },
+      actor: { userId: "user-2" },
+      brokerCapable: true,
+    });
+    expect(agentLocked.kind).toBe("locked");
+    if (agentLocked.kind === "locked") expect(agentLocked.lock.holder_user_id).toBe("user-1");
+
+    // The builder saves against the current revision: success, revision advances.
+    const builderSave = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-builder-agent",
+      request: makeDefinition({ expectedRevision: 1, prompt: "Builder-prompt version" }),
+      actor: { userId: "user-1" },
+      brokerCapable: true,
+    });
+    expect(builderSave).toMatchObject({ kind: "saved", row: { revision: 2, prompt: "Builder-prompt version" } });
+    await releaseLock(db, { taskId: "automation-builder-agent", userId: "user-1" });
+
+    // The agent's stale edit after the builder's save is REVISION_CONFLICT.
+    const agentStale = await updateAutomationDefinition({
+      db,
+      taskId: "automation-builder-agent",
+      patch: { expectedRevision: 1, prompt: "Agent stale version" },
+      actor: { userId: "user-2" },
+      brokerCapable: true,
+    });
+    expect(agentStale).toEqual({ kind: "revision_conflict", currentRevision: 2 });
+    await expect(createScheduledTaskRepository(db).getById("automation-builder-agent")).resolves.toMatchObject({
+      prompt: "Builder-prompt version",
+      revision: 2,
+    });
   });
 });

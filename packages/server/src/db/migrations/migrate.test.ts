@@ -307,6 +307,26 @@ describe("runMigrations — full sequence", () => {
     expect(names[183]).toBe("185-automation-locks");
   });
 
+  it("keeps the automation-sharing migration ledger (181-185) in order", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration ORDER BY name ASC
+    `.execute(db);
+    const names = rows.rows.map((row) => row.name);
+
+    // Audit of the automation-sharing feature slice: shares (184) must precede
+    // locks (185), and neither may be renumbered relative to the minting and
+    // graph-pass migrations that precede them.
+    expect(names.slice(176, 181)).toEqual([
+      "181-project-minting-verdicts",
+      "182-project-minting-states",
+      "183-graph-pass-runs",
+      "184-automation-shares",
+      "185-automation-locks",
+    ]);
+  });
+
   it("backfills only exact web origin task conversations", async () => {
     const migrator = createMigrator(db);
     await migrator.migrateTo("158-slack-channel-participants");

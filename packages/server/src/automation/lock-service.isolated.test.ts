@@ -350,6 +350,140 @@ describe("automation lock service", () => {
     });
   });
 
+  describe("cross-lane lock races", () => {
+    it("renewal loses when an expired lock is taken over first (expiry-takeover vs renewal)", async () => {
+      const repo = createAutomationLocksRepository(db);
+      await repo.insertIfAbsent(HOLDER_A, {
+        taskId: "task-expiry-renew",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+
+      // B's acquire takes over the lapsed lock at T0.
+      const takeover = await acquireOrRenewLock(db, { taskId: "task-expiry-renew", holder: HOLDER_B, nowMs: T0_MS });
+      expect(takeover.kind).toBe("held");
+      if (takeover.kind !== "held") return;
+
+      // The lapsed holder's heartbeat and re-acquire both lose the CAS.
+      await expect(renewLock(db, { taskId: "task-expiry-renew", userId: "user-a", nowMs: T0_MS })).resolves.toEqual({
+        kind: "not_holder",
+      });
+      const relock = await acquireOrRenewLock(db, { taskId: "task-expiry-renew", holder: HOLDER_A, nowMs: T0_MS });
+      expect(relock.kind).toBe("locked");
+      if (relock.kind !== "locked") return;
+      expect(relock.lock.holder_user_id).toBe("user-b");
+    });
+
+    it("takeover loses when the holder renews before expiry (expiry-takeover vs renewal)", async () => {
+      const repo = createAutomationLocksRepository(db);
+      await repo.insertIfAbsent(HOLDER_A, {
+        taskId: "task-renew-takeover",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+
+      // The holder heartbeats just before the TTL lapses.
+      const renewed = await renewLock(db, { taskId: "task-renew-takeover", userId: "user-a", nowMs: T0_MS });
+      expect(renewed.kind).toBe("renewed");
+      if (renewed.kind !== "renewed") return;
+      expect(renewed.lock.expires_at).toBe(new Date(T0_MS + LOCK_TTL_MS).toISOString());
+
+      // B's acquire sees a live lock; the takeover CAS itself is a no-op.
+      const attempt = await acquireOrRenewLock(db, { taskId: "task-renew-takeover", holder: HOLDER_B, nowMs: T0_MS });
+      expect(attempt.kind).toBe("locked");
+      if (attempt.kind !== "locked") return;
+      expect(attempt.lock.holder_user_id).toBe("user-a");
+
+      await repo.takeoverExpired(HOLDER_B, {
+        taskId: "task-renew-takeover",
+        now: new Date(T0_MS + 60_000).toISOString(),
+        expiresAt: new Date(T0_MS + LOCK_TTL_MS + 60_000).toISOString(),
+      });
+      await expect(repo.getByTaskId("task-renew-takeover")).resolves.toMatchObject({
+        holder_user_id: "user-a",
+        expires_at: new Date(T0_MS + LOCK_TTL_MS).toISOString(),
+      });
+    });
+
+    it("approving a pending steal re-arms a lock whose TTL lapsed before the response (steal-approve vs expiry)", async () => {
+      const repo = createAutomationLocksRepository(db);
+      await repo.insertIfAbsent(HOLDER_A, {
+        taskId: "task-approve-expired",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+      await repo.requestSteal(HOLDER_B, {
+        taskId: "task-approve-expired",
+        stealRequestedAt: "2026-08-01T09:30:00.000Z",
+        stealExpiresAt: "2026-08-01T10:05:00.000Z",
+      });
+
+      // Nobody took over the lapsed lock and the steal is still pending, so
+      // the approve CAS hands over with a fresh TTL for the new holder.
+      const result = await approveSteal(db, { taskId: "task-approve-expired", approverUserId: "user-a", nowMs: T0_MS });
+      expect(result.kind).toBe("approved");
+      if (result.kind !== "approved") return;
+      expect(result.lock).toMatchObject({
+        holder_user_id: "user-b",
+        expires_at: new Date(T0_MS + LOCK_TTL_MS).toISOString(),
+        steal_requester_user_id: null,
+      });
+    });
+
+    it("a late approve loses to an expired-lock takeover (steal vs expiry-takeover interleave)", async () => {
+      const repo = createAutomationLocksRepository(db);
+      await repo.insertIfAbsent(HOLDER_A, {
+        taskId: "task-approve-takeover",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+      await repo.requestSteal(HOLDER_B, {
+        taskId: "task-approve-takeover",
+        stealRequestedAt: "2026-08-01T09:30:00.000Z",
+        stealExpiresAt: "2026-08-01T09:35:00.000Z",
+      });
+
+      // A third editor's acquire takes over the expired lock and clears the steal.
+      const takeover = await acquireOrRenewLock(db, {
+        taskId: "task-approve-takeover",
+        holder: { userId: "user-c", platform: "web", surface: "builder", conversationId: null },
+        nowMs: T0_MS,
+      });
+      expect(takeover.kind).toBe("held");
+
+      // The old holder's late approve cannot promote a cleared steal.
+      const approved = await approveSteal(db, {
+        taskId: "task-approve-takeover",
+        approverUserId: "user-a",
+        nowMs: T0_MS,
+      });
+      expect(approved.kind).toBe("not_holder");
+      await expect(repo.getByTaskId("task-approve-takeover")).resolves.toMatchObject({
+        holder_user_id: "user-c",
+        steal_requester_user_id: null,
+      });
+    });
+
+    it("approving a steal on a swept expired lock row reports not_found", async () => {
+      const repo = createAutomationLocksRepository(db);
+      await repo.insertIfAbsent(HOLDER_A, {
+        taskId: "task-approve-swept",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+      await repo.requestSteal(HOLDER_B, {
+        taskId: "task-approve-swept",
+        stealRequestedAt: "2026-08-01T09:30:00.000Z",
+        stealExpiresAt: "2026-08-01T09:35:00.000Z",
+      });
+      await repo.sweepExpired("2026-08-01T10:00:00.000Z");
+
+      await expect(
+        approveSteal(db, { taskId: "task-approve-swept", approverUserId: "user-a", nowMs: T0_MS }),
+      ).resolves.toEqual({ kind: "not_found" });
+    });
+  });
+
   describe("assertEditableBy", () => {
     it("allows edits with no lock, an expired lock, the holder, or no identity", async () => {
       await expect(assertEditableBy(db, "task-1", "user-a")).resolves.toEqual({ kind: "editable" });
