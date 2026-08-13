@@ -473,6 +473,12 @@ describe("ConnectionsPage direct connect", () => {
     expect(screen.getByText("WhatsApp groups")).toBeInTheDocument();
     expect(screen.getByText("0 selected")).toBeInTheDocument();
 
+    const slackGroup = screen.getByRole("button", { name: /Slack channels/ });
+    expect(slackGroup).toHaveAttribute("aria-expanded", "true");
+    await user.click(slackGroup);
+    expect(slackGroup).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: /#release-planning/ })).not.toBeInTheDocument();
+
     const search = screen.getByRole("textbox", { name: "Search access targets" });
     await user.type(search, "bob@example.com");
     expect(screen.getByRole("button", { name: /Bob Jones/ })).toBeInTheDocument();
@@ -483,6 +489,7 @@ describe("ConnectionsPage direct connect", () => {
 
     await user.clear(search);
     await user.type(search, "release-planning");
+    expect(slackGroup).toHaveAttribute("aria-expanded", "true");
     await user.click(screen.getByRole("button", { name: /#release-planning/ }));
     await user.clear(search);
     await user.type(search, "Launch team");

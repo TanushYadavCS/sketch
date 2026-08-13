@@ -1,6 +1,7 @@
 import { GithubAppIcon } from "@/components/connections/app-icon";
 import { type SlackChannelInfo, type User, type WhatsAppGroupInfo, api } from "@/lib/api";
 import {
+  CaretDownIcon,
   CheckCircleIcon,
   GearSixIcon,
   GlobeIcon,
@@ -39,7 +40,8 @@ import {
 } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
 import { Label } from "@sketch/ui/components/label";
-import { type ReactNode, useEffect, useState } from "react";
+import { Collapsible as CollapsiblePrimitive } from "radix-ui";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 
 const GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens";
@@ -732,6 +734,7 @@ function GithubAccessPicker({
   disabled = false,
   className,
 }: GithubAccessPickerProps) {
+  const pickerId = useId();
   const [search, setSearch] = useState("");
   const query = search.trim().toLowerCase();
   const teammates = users.filter((user) => user.id !== currentUserId && user.type !== "external");
@@ -780,9 +783,12 @@ function GithubAccessPicker({
       <div className="max-h-[min(42vh,360px)] space-y-4 overflow-y-auto rounded-lg border border-border p-3">
         {isAdmin && (
           <TargetGroup
+            contentId={`${pickerId}-organization`}
             title="Organization"
             count={1}
+            selectedCount={targets.filter((target) => target.type === "org").length}
             icon={<GlobeIcon size={15} aria-hidden />}
+            forceOpen={Boolean(query && matches("organization"))}
             empty={query && !matches("organization") ? "No organization target matches your search." : undefined}
           >
             {!query || matches("organization") ? (
@@ -799,9 +805,12 @@ function GithubAccessPicker({
           </TargetGroup>
         )}
         <TargetGroup
+          contentId={`${pickerId}-members`}
           title="Members"
           count={teammates.length}
+          selectedCount={targets.filter((target) => target.type === "user").length}
           icon={<UsersThreeIcon size={15} aria-hidden />}
+          forceOpen={Boolean(query && filteredUsers.length > 0)}
           empty={
             teammates.length === 0
               ? "No other human members are available."
@@ -824,9 +833,12 @@ function GithubAccessPicker({
           ))}
         </TargetGroup>
         <TargetGroup
+          contentId={`${pickerId}-slack-channels`}
           title="Slack channels"
           count={slackChannels.length}
+          selectedCount={targets.filter((target) => target.type === "slack_channel").length}
           icon={<SlackLogoIcon size={15} aria-hidden />}
+          forceOpen={Boolean(query && filteredSlack.length > 0)}
           empty={
             slackChannels.length === 0
               ? "No Slack channels are available."
@@ -848,9 +860,12 @@ function GithubAccessPicker({
           ))}
         </TargetGroup>
         <TargetGroup
+          contentId={`${pickerId}-whatsapp-groups`}
           title="WhatsApp groups"
           count={whatsappGroups.length}
+          selectedCount={targets.filter((target) => target.type === "whatsapp_group").length}
           icon={<WhatsappLogoIcon size={15} aria-hidden />}
+          forceOpen={Boolean(query && filteredWhatsapp.length > 0)}
           empty={
             whatsappGroups.length === 0
               ? "No WhatsApp groups are available."
@@ -890,37 +905,71 @@ function GithubAccessPicker({
 }
 
 function TargetGroup({
+  contentId,
   title,
   count,
+  selectedCount,
   icon,
   empty,
+  forceOpen = false,
   children,
 }: {
+  contentId: string;
   title: string;
   count: number;
+  selectedCount: number;
   icon: ReactNode;
   empty?: string;
+  forceOpen?: boolean;
   children: ReactNode;
 }) {
+  const [expanded, setExpanded] = useState(true);
+  const open = expanded || forceOpen;
+
   return (
-    <section>
-      <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground">
-        <span className="text-muted-foreground">{icon}</span>
-        <span>{title}</span>
-        <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-muted-foreground">
-          {count}
-        </Badge>
-      </div>
-      <div className="space-y-1">
-        {empty ? (
-          <p className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-            {empty}
-          </p>
-        ) : (
-          children
-        )}
-      </div>
-    </section>
+    <CollapsiblePrimitive.Root open={open} onOpenChange={setExpanded} className="rounded-md">
+      <CollapsiblePrimitive.Trigger asChild>
+        <button
+          type="button"
+          aria-expanded={open}
+          className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold text-foreground transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
+            {icon}
+          </span>
+          <span className="min-w-0 flex-1 truncate">{title}</span>
+          <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px] text-muted-foreground">
+            {count}
+          </Badge>
+          {selectedCount > 0 ? (
+            <Badge
+              variant="secondary"
+              className="shrink-0 px-1.5 py-0 text-[10px] text-primary"
+              title={`${selectedCount} selected`}
+              aria-label={`${selectedCount} selected`}
+            >
+              {selectedCount}/{count}
+            </Badge>
+          ) : null}
+          <CaretDownIcon
+            size={14}
+            className={`shrink-0 text-muted-foreground transition-transform duration-150 ${open ? "rotate-180" : ""}`}
+            aria-hidden
+          />
+        </button>
+      </CollapsiblePrimitive.Trigger>
+      <CollapsiblePrimitive.Content id={contentId} className="overflow-hidden">
+        <div className="space-y-1 pt-2">
+          {empty ? (
+            <p className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+              {empty}
+            </p>
+          ) : (
+            children
+          )}
+        </div>
+      </CollapsiblePrimitive.Content>
+    </CollapsiblePrimitive.Root>
   );
 }
 
