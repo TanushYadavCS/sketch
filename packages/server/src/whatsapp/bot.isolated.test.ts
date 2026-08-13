@@ -1,7 +1,7 @@
 import { DisconnectReason, type GroupMetadata, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import { applyIndexSelection, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import {
@@ -1042,6 +1042,120 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
       pushName: "Charlie",
     } as proto.IWebMessageInfo;
   }
+
+  function capturedIdentityMessage(input: {
+    remoteJid: string;
+    id: string;
+    fromMe?: boolean;
+  }): proto.IWebMessageInfo {
+    return {
+      key: {
+        remoteJid: input.remoteJid,
+        fromMe: input.fromMe ?? false,
+        id: input.id,
+        participant: "3878523285582@lid",
+        participantAlt: "919891688787@s.whatsapp.net",
+        addressingMode: "lid",
+      },
+      messageTimestamp: 1786600967,
+      pushName: "Tanush Yadav",
+      broadcast: false,
+      message: { conversation: "What is the context graph" },
+    } as proto.IWebMessageInfo;
+  }
+
+  it("projects identity from a captured group upsert", async () => {
+    await createWhatsAppGroupRepository(db).upsert({
+      jid: "120363409999039961@g.us",
+      name: "sketch-whatsapp-test",
+      description: null,
+      updated_at: "2026-08-13T00:00:00.000Z",
+    });
+    const { fire } = createBotWithMockSocket(async () => null);
+
+    await fire({
+      type: "notify",
+      messages: [capturedIdentityMessage({ remoteJid: "120363409999039961@g.us", id: "3B644913E27A9A2424C8" })],
+    });
+
+    const points = await db
+      .selectFrom("entity_contact_points")
+      .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+      .select(["entities.id", "entity_contact_points.kind", "entity_contact_points.value"])
+      .where("entity_contact_points.kind", "in", ["phone", "whatsapp_lid"])
+      .orderBy("entity_contact_points.kind")
+      .execute();
+    expect(new Set(points.map((row) => row.id)).size).toBe(1);
+    expect(points.map(({ kind, value }) => ({ kind, value }))).toEqual([
+      { kind: "phone", value: "+919891688787" },
+      { kind: "whatsapp_lid", value: "3878523285582@lid" },
+    ]);
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["name", "name_status", "aliases"])
+        .where("id", "=", points[0].id)
+        .executeTakeFirst(),
+    ).resolves.toEqual({ name: "+919891688787", name_status: "placeholder", aliases: '["Tanush Yadav"]' });
+    await expect(
+      db
+        .selectFrom("entity_name_proposals")
+        .select(["source", "value", "observed_count", "status"])
+        .where("entity_id", "=", points[0].id)
+        .execute(),
+    ).resolves.toEqual([{ source: "whatsapp_pushname", value: "Tanush Yadav", observed_count: 1, status: "pending" }]);
+  });
+
+  it("contains identity projection to inbound messages in index-enabled groups", async () => {
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "disabled@g.us",
+      name: "Disabled",
+      description: null,
+      updated_at: "2026-08-13T00:00:00.000Z",
+      index_enabled: 0,
+    });
+    await groups.upsert({
+      jid: "enabled@g.us",
+      name: "Enabled",
+      description: null,
+      updated_at: "2026-08-13T00:00:00.000Z",
+    });
+    const { fire } = createBotWithMockSocket(async () => null);
+
+    await fire({
+      type: "notify",
+      messages: [capturedIdentityMessage({ remoteJid: "disabled@g.us", id: "disabled-1" })],
+    });
+    await fire({
+      type: "notify",
+      messages: [capturedIdentityMessage({ remoteJid: "919891688787@s.whatsapp.net", id: "dm-1" })],
+    });
+    await fire({
+      type: "notify",
+      messages: [capturedIdentityMessage({ remoteJid: "enabled@g.us", id: "from-me-1", fromMe: true })],
+    });
+    await expect(db.selectFrom("entities").select("id").where("source_type", "=", "person").execute()).resolves.toEqual(
+      [],
+    );
+
+    await applyIndexSelection(db, { "disabled@g.us": true });
+    await fire({
+      type: "append",
+      messages: [capturedIdentityMessage({ remoteJid: "disabled@g.us", id: "disabled-2" })],
+    });
+    await expect(
+      db.selectFrom("entities").select("id").where("source_type", "=", "person").execute(),
+    ).resolves.toHaveLength(1);
+
+    await fire({
+      type: "append",
+      messages: [capturedIdentityMessage({ remoteJid: "enabled@g.us", id: "enabled-1" })],
+    });
+    await expect(
+      db.selectFrom("entities").select("id").where("source_type", "=", "person").execute(),
+    ).resolves.toHaveLength(1);
+  });
 
   it("resolves LID senderJid to phone number via resolveLidToPhone", async () => {
     const { fire, captured } = createBotWithMockSocket(async () => "+15550001111");

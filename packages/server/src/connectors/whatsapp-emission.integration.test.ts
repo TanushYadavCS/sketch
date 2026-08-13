@@ -12,7 +12,7 @@ import { createTestDb, createTestLogger, createTestPgDb } from "../test-utils";
 import { runEnrichment } from "./enrichment";
 import type { GeminiGenerator } from "./gemini-generate";
 import { runConnectorSync } from "./sync";
-import { emitWhatsAppSyncedItems, reconcileWhatsAppGroupAcls } from "./whatsapp-salience";
+import { emitWhatsAppSyncedItems, reconcileWhatsAppGroupAcls } from "./whatsapp-emission";
 
 const RAW_IDENTIFIER_PATTERN = /(?:\+?[1-9]\d{9,14}\b|@s\.whatsapp\.net|@lid)/iu;
 const SALIENCE_SIGNALS = JSON.stringify({ signals: ["decision"], entities: [] });

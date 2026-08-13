@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+.env.bak-*
 data
 data/
 tmp/
@@ -22,3 +23,4 @@ docs/superpowers/specs/
 .claude/skills/implement-story
 .claude/skills/remote-tenant-debugging
 .claude/skills/run-canvas-sketch
+.claude/skills/worktree-dev-setup

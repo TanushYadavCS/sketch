@@ -32,7 +32,7 @@ import {
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
 export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
 
-const PROMPT_VERSION = "whatsapp-salience-v1";
+const PROMPT_VERSION = "whatsapp-emission-v1";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SALIENCE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const SALIENCE_SIGNALS = new Set(["decision", "commitment", "question", "named_entity"]);
@@ -552,11 +552,25 @@ function renderedMessageCount(content: string | null): number {
   return transcript ? transcript.split("\n").length : 0;
 }
 
+/**
+ * Why a kept slice produced no synced item. Emission previously reported a bare
+ * `emitted: 0` with a single `skippedNoScope` counter, so the far more common
+ * skips — an open slice under the message threshold, or content that has not
+ * changed since the last file — were indistinguishable from "there was nothing
+ * to do". Debugging a pipeline that looks dead always asks "why not", and a
+ * count alone cannot answer it.
+ */
+export type WhatsAppEmissionSkipReason =
+  | "no_access_scope"
+  | "below_min_messages"
+  | "unchanged_content"
+  | "below_refresh_threshold";
+
 async function syncedItemForKeptSlice(
   db: Kysely<DB>,
   context: SliceContext,
   logger: Logger,
-): Promise<{ item: SyncedItem | null; skippedNoScope: boolean }> {
+): Promise<{ item: SyncedItem | null; skippedNoScope: boolean; skipReason: WhatsAppEmissionSkipReason | null }> {
   const rendered = await renderSlice(db, context, logger);
   if (rendered.serializedRosterSnapshot !== context.slice.roster_snapshot) {
     await db
@@ -571,14 +585,25 @@ async function syncedItemForKeptSlice(
       { sliceId: context.slice.id, conversationId: context.conversationId, groupJid: context.groupJid },
       "Skipped WhatsApp slice indexing because no teammate access scope resolved",
     );
-    return { item: null, skippedNoScope: true };
+    return { item: null, skippedNoScope: true, skipReason: "no_access_scope" };
   }
   const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
   const content = rendered.content;
   const contentHash = stableContentHash(content);
   if (context.slice.status === "open") {
     const minMessages = context.chunkMinMessages ?? DEFAULT_WHATSAPP_LLM_CHUNK_MIN_MESSAGES;
-    if (context.slice.message_count < minMessages) return { item: null, skippedNoScope: false };
+    if (context.slice.message_count < minMessages) {
+      logger.debug(
+        {
+          sliceId: context.slice.id,
+          groupJid: context.groupJid,
+          messageCount: context.slice.message_count,
+          minMessages,
+        },
+        "Skipped WhatsApp open slice below the minimum message threshold",
+      );
+      return { item: null, skippedNoScope: false, skipReason: "below_min_messages" };
+    }
     const indexedFileId = context.slice.indexed_file_id ?? (await findSliceFileId(db, context.slice.id));
     if (indexedFileId) {
       const existing = await db
@@ -586,7 +611,8 @@ async function syncedItemForKeptSlice(
         .select(["content_hash", "content"])
         .where("id", "=", indexedFileId)
         .executeTakeFirst();
-      if (existing?.content_hash === contentHash) return { item: null, skippedNoScope: false };
+      if (existing?.content_hash === contentHash)
+        return { item: null, skippedNoScope: false, skipReason: "unchanged_content" };
       const previousMessageCount = renderedMessageCount(existing?.content ?? null);
       const refreshMessages =
         context.chunkProvisionalRefreshMessages ?? DEFAULT_WHATSAPP_LLM_CHUNK_PROVISIONAL_REFRESH_MESSAGES;
@@ -594,12 +620,13 @@ async function syncedItemForKeptSlice(
         context.slice.message_count >= previousMessageCount &&
         context.slice.message_count - previousMessageCount < refreshMessages
       ) {
-        return { item: null, skippedNoScope: false };
+        return { item: null, skippedNoScope: false, skipReason: "below_refresh_threshold" };
       }
     }
   }
   return {
     skippedNoScope: false,
+    skipReason: null,
     item: {
       providerFileId: context.slice.id,
       providerUrl: null,
@@ -704,11 +731,18 @@ export async function* emitWhatsAppSyncedItems(options: {
   emissionRefreshDays?: number;
   now?: Date;
   onSkippedNoScope?: () => void;
+  /**
+   * Receives one tally per run so the caller can fold the reasons into its own
+   * summary line rather than emitting a log per skipped slice — a busy group
+   * skips many slices per sync, and per-slice lines would bury the signal.
+   */
+  onSkipReason?: (reason: WhatsAppEmissionSkipReason) => void;
 }): AsyncGenerator<SyncedItem> {
   const kept = await listKeptSliceContexts(options.db, options.emissionRefreshDays, options.now);
   for (const context of kept) {
-    const { item, skippedNoScope } = await syncedItemForKeptSlice(options.db, context, options.logger);
+    const { item, skippedNoScope, skipReason } = await syncedItemForKeptSlice(options.db, context, options.logger);
     if (skippedNoScope) options.onSkippedNoScope?.();
+    if (skipReason) options.onSkipReason?.(skipReason);
     if (item) yield item;
   }
 }

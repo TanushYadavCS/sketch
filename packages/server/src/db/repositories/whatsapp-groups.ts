@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
 import { normalizeWhatsAppIdentityLid } from "../../identity-normalization";
 import type {
   DB,
@@ -95,7 +95,7 @@ function normalizedParticipant(participant: WhatsAppGroupParticipantInput) {
 }
 
 async function projectCompleteParticipantIdentity(
-  db: Transaction<DB>,
+  db: Kysely<DB>,
   phoneE164: string,
   lid: string,
   observedAt: string,
@@ -152,7 +152,7 @@ async function projectCompleteParticipantIdentity(
 }
 
 async function projectParticipantIdentity(
-  db: Transaction<DB>,
+  db: Kysely<DB>,
   groupJid: string,
   participant: ReturnType<typeof normalizedParticipant>,
   observedAt: string,
@@ -216,24 +216,41 @@ function enabledJidsFromSelection(selection: WhatsAppGroupIndexSelection): strin
 }
 
 /** Applies only JIDs present in the delta without opening a transaction. */
-export async function applyIndexSelection(db: Kysely<DB>, selection: WhatsAppGroupIndexSelection): Promise<void> {
+export async function applyIndexSelection(db: Kysely<DB>, selection: WhatsAppGroupIndexSelection): Promise<string[]> {
   const enable = enabledJidsFromSelection(selection);
   const disable = Object.entries(selection)
     .filter(([, enabled]) => !enabled)
     .map(([jid]) => jid);
 
+  let newlyEnabled: string[] = [];
   if (enable.length > 0) {
-    const previouslyEnabled = await db
+    const current = await db
       .selectFrom("whatsapp_groups")
-      .select("jid")
-      .where("index_enabled", "=", 1)
+      .select(["jid", "index_enabled"])
       .where("jid", "in", enable)
       .execute();
-    const previous = new Set(previouslyEnabled.map((row) => row.jid));
-    const newlyEnabled = enable.filter((jid) => !previous.has(jid));
+    newlyEnabled = current.filter((row) => row.index_enabled !== 1).map((row) => row.jid);
     if (newlyEnabled.length > 0) {
       await requeueKeptSlicesCore(db, newlyEnabled);
       await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", newlyEnabled).execute();
+      const participants = await db
+        .selectFrom("whatsapp_group_participants")
+        .select(["group_jid", "participant_jid", "phone_e164", "lid", "admin_role", "last_seen_at"])
+        .where("group_jid", "in", newlyEnabled)
+        .execute();
+      for (const participant of participants) {
+        await projectParticipantIdentity(
+          db,
+          participant.group_jid,
+          normalizedParticipant({
+            participantJid: participant.participant_jid,
+            phoneE164: participant.phone_e164,
+            lid: participant.lid,
+            adminRole: participant.admin_role as WhatsAppGroupParticipantAdminRole | null,
+          }),
+          participant.last_seen_at,
+        );
+      }
     }
   }
 
@@ -245,6 +262,7 @@ export async function applyIndexSelection(db: Kysely<DB>, selection: WhatsAppGro
       .where("jid", "in", disable)
       .execute();
   }
+  return newlyEnabled;
 }
 
 export const WHATSAPP_GROUP_INDEXING_KEY = "groupIndexing";

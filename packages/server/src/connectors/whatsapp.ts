@@ -11,7 +11,7 @@ import {
   WHATSAPP_EMISSION_REFRESH_DAYS,
   emitWhatsAppSyncedItems,
   reconcileWhatsAppGroupAcls,
-} from "./whatsapp-salience";
+} from "./whatsapp-emission";
 
 function assertSystemCredentials(credentials: ConnectorCredentials): void {
   if (credentials.type !== "system") {
@@ -130,6 +130,7 @@ export function createWhatsAppConnector(): Connector {
       });
       let skippedNoScope = 0;
       let emitted = 0;
+      const skipReasons: Record<string, number> = {};
       for await (const item of emitWhatsAppSyncedItems({
         db,
         logger,
@@ -137,11 +138,27 @@ export function createWhatsAppConnector(): Connector {
         onSkippedNoScope: () => {
           skippedNoScope += 1;
         },
+        onSkipReason: (reason) => {
+          skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+        },
       })) {
         emitted += 1;
         yield item;
       }
-      logger.info({ emitted, skippedNoScope }, "Completed WhatsApp synced item emission");
+      /**
+       * `skipReasons` is what makes an `emitted: 0` actionable: it names which
+       * gate held every candidate back instead of leaving zero ambiguous
+       * between "nothing to emit" and "everything was blocked".
+       */
+      logger.info(
+        {
+          emitted,
+          skippedNoScope,
+          candidates: emitted + Object.values(skipReasons).reduce((a, b) => a + b, 0),
+          skipReasons,
+        },
+        "Completed WhatsApp synced item emission",
+      );
       if (connectorConfigId) {
         await reconcileWhatsAppGroupAcls({ db, logger, connectorConfigId });
       }

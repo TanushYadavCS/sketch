@@ -6,6 +6,7 @@ function person(id: string, name: string): Entity {
   return {
     id,
     name,
+    name_status: "confirmed",
     source_type: "person",
     subtype: "external",
     aliases: null,

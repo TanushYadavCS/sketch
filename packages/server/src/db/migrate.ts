@@ -186,6 +186,7 @@ import * as m183 from "./migrations/183-graph-pass-runs";
 import * as m184 from "./migrations/184-person-contact-point-cutover";
 import * as m185 from "./migrations/185-queue-pass-reason";
 import * as m186 from "./migrations/186-entity-merge-groups";
+import * as m187 from "./migrations/187-entity-name-proposals";
 import type { DB } from "./schema";
 
 /**
@@ -381,6 +382,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "184-person-contact-point-cutover": m184,
           "185-queue-pass-reason": m185,
           "186-entity-merge-groups": m186,
+          "187-entity-name-proposals": m187,
         };
       },
     },

@@ -13,7 +13,7 @@ import {
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import type { GeminiGenerator } from "./gemini-generate";
 import { SLACK_CONVERSATION_SLICE_FILE_TYPE, type SyncedItem } from "./types";
-import { type WhatsAppSalienceVerdict, parseWhatsAppSalienceResponse } from "./whatsapp-salience";
+import { type WhatsAppSalienceVerdict, parseWhatsAppSalienceResponse } from "./whatsapp-emission";
 
 export const DEFAULT_SLACK_SALIENCE_BATCH_LIMIT = 50;
 export const SLACK_EMISSION_REFRESH_DAYS = 7;

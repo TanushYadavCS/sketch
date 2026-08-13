@@ -177,6 +177,36 @@ describe("createWhatsAppGroupRepository", () => {
     ]);
   });
 
+  it("projects retained participants when applyIndexSelection enables a group", async () => {
+    await repo.upsert({
+      jid: "120363409999039961@g.us",
+      name: "sketch-whatsapp-test",
+      description: null,
+      updated_at: "2026-08-13T00:00:00.000Z",
+      index_enabled: 0,
+    });
+    await repo.refreshParticipants("120363409999039961@g.us", [
+      {
+        participantJid: "149916051591191@lid",
+        phoneE164: "+919969577769",
+        lid: "149916051591191@lid",
+      },
+    ]);
+
+    await expect(applyIndexSelection(db, { "120363409999039961@g.us": true })).resolves.toEqual([
+      "120363409999039961@g.us",
+    ]);
+    await expect(
+      db
+        .selectFrom("entities")
+        .innerJoin("entity_contact_points", "entity_contact_points.entity_id", "entities.id")
+        .select(["entities.name", "entity_contact_points.kind", "entity_contact_points.value"])
+        .where("entity_contact_points.kind", "=", "phone")
+        .where("entity_contact_points.value", "=", "+919969577769")
+        .execute(),
+    ).resolves.toEqual([{ name: "+919969577769", kind: "phone", value: "+919969577769" }]);
+  });
+
   it("requeues kept linked slices when a group flips from disabled to enabled", async () => {
     const seedGroupWithLinkedSlice = async (jid: string, suffix: string) => {
       await repo.upsert({

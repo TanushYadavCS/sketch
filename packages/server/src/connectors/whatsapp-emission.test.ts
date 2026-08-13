@@ -15,7 +15,7 @@ import {
   parseWhatsAppSalienceResponse,
   processWhatsAppSalience,
   renderWhatsAppTranscript,
-} from "./whatsapp-salience";
+} from "./whatsapp-emission";
 
 function fakeLogger(): Logger {
   return { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } as unknown as Logger;

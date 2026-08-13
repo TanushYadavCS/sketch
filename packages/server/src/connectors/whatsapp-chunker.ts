@@ -1186,6 +1186,58 @@ async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptio
     if (result.rangeCompleted) rangesCompleted += 1;
   }
 
+  /**
+   * `chatsServed: 0` is ambiguous across five different predicates in
+   * `findNextGraphCandidate`, and reading the counter alone cannot tell you
+   * which one held. Probe the disqualifying conditions only when nothing was
+   * served, so the normal path pays nothing and a dead-looking pipeline still
+   * names its own cause.
+   *
+   * `groupsByJid.size > 0` is load-bearing, not defensive: an empty list renders
+   * as `IN ()`, which SQLite accepts and Postgres rejects as a syntax error —
+   * the error would escape this function and fail the whole sync. It is also the
+   * one case needing no explanation, since having no enabled groups is itself
+   * the reason nothing was served.
+   */
+  if (servedGroupJids.length === 0 && !skippedForPressure && groupsByJid.size > 0) {
+    const groupJids = [...groupsByJid.keys()];
+    const [ranges, halted] = await Promise.all([
+      options.db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select(({ fn, eb }) => [
+          fn.countAll<number>().as("total"),
+          fn
+            .sum<number>(eb.case().when("status", "in", ["complete", "exhausted"]).then(1).else(0).end())
+            .as("terminal"),
+          fn.sum<number>(eb.case().when("graph_completed_at", "is", null).then(1).else(0).end()).as("ungraphed"),
+        ])
+        .where("group_jid", "in", groupJids)
+        .executeTakeFirst(),
+      options.db
+        .selectFrom("whatsapp_backfill_checkpoints")
+        .select(({ fn }) => fn.countAll<number>().as("halted"))
+        .where("group_jid", "in", groupJids)
+        .where("graph_halted_at", "is not", null)
+        .executeTakeFirst(),
+    ]);
+    const ungraphed = Number(ranges?.ungraphed ?? 0);
+    const fields = {
+      enabledGroups: groupJids.length,
+      ranges: Number(ranges?.total ?? 0),
+      rangesTerminal: Number(ranges?.terminal ?? 0),
+      rangesUngraphed: ungraphed,
+      checkpointsHalted: Number(halted?.halted ?? 0),
+    };
+    /**
+     * Once a group is fully backfilled every range is graph-completed and
+     * serving nothing is the correct steady state, which would otherwise emit
+     * this line at info on every sync forever. Reserve info for the case worth
+     * looking at: ranges still waiting to be graphed while none could be served.
+     */
+    if (ungraphed > 0) options.logger.info(fields, "WhatsApp backfill graph admission served no chat");
+    else options.logger.debug(fields, "WhatsApp backfill graph admission served no chat");
+  }
+
   return {
     chatsServed: servedGroupJids.length,
     messagesRead,
