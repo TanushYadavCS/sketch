@@ -145,11 +145,11 @@ async function main() {
     await writeResult(outDir, result);
     const verdict = result.verdict;
     const agreement = result.voteStats
-      ? ` · state agreement ${result.voteStats.stateAgreement.toFixed(2)}, project set ${result.voteStats.projectSetAgreement.toFixed(2)}`
+      ? ` · axis agreement ${result.voteStats.axisAgreement.toFixed(2)}, project set ${result.voteStats.projectSetAgreement.toFixed(2)}`
       : "";
     const tripwire = result.tripwireFlags?.length ? ` · TRIPWIRE ${result.tripwireFlags.join("; ")}` : "";
     const line = verdict
-      ? `${verdict.relationshipState} · ${verdict.projects.length} projects · trackerFit ${verdict.trackerFit}${agreement}${tripwire}`
+      ? `${verdict.counterpartyKind}${verdict.clientStage ? `/${verdict.clientStage}` : ""} · ${verdict.projects.length} projects · trackerFit ${verdict.trackerFit}${agreement}${tripwire}`
       : `ERROR ${result.error}`;
     console.log(`\n${result.companyName} (${result.fileCount} files): ${line}`);
     summary.push(`## ${result.companyName}`, "", `${result.fileCount} files · ${line}`, "");

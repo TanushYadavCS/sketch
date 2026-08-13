@@ -970,6 +970,8 @@ export interface ProjectMintingVerdictsTable {
   prompt_version: string;
   status: Generated<string>;
   superseded_at: string | null;
+  counterparty_kind: string | null;
+  client_stage: string | null;
   relationship_state: string | null;
   flags: string | null;
   vote_stats: string | null;

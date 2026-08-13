@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   type ClusterVerdict,
+  type RelationshipState,
   channelMatchesCompany,
   chooseMajorityVerdict,
   clusterIsTriggered,
   computeTitleFamilies,
   normalizeTitleFamily,
   productNameTripwireFlags,
+  readClusterVerdict,
 } from "./project-minting";
 
 describe("normalizeTitleFamily", () => {
@@ -58,9 +60,18 @@ describe("channelMatchesCompany", () => {
   });
 });
 
-function verdict(state: ClusterVerdict["relationshipState"], projectNames: string[]): ClusterVerdict {
-  return {
-    relationshipState: state,
+function axesForState(state: RelationshipState): Pick<ClusterVerdict, "counterpartyKind" | "clientStage"> {
+  if (state === "lead") return { counterpartyKind: "client", clientStage: "prospect" };
+  if (state === "trial") return { counterpartyKind: "client", clientStage: "pilot" };
+  if (state === "customer") return { counterpartyKind: "client", clientStage: "active" };
+  if (state === "vendor") return { counterpartyKind: "vendor", clientStage: null };
+  if (state === "investor") return { counterpartyKind: "investor", clientStage: null };
+  return { counterpartyKind: "other", clientStage: null };
+}
+
+function verdict(state: RelationshipState, projectNames: string[]): ClusterVerdict {
+  return readClusterVerdict({
+    ...axesForState(state),
     engagement: null,
     projects: projectNames.map((name) => ({
       name,
@@ -73,27 +84,27 @@ function verdict(state: ClusterVerdict["relationshipState"], projectNames: strin
     existingEntities: [],
     trackerFit: "no_containers",
     notes: [],
-  };
+  });
 }
 
 describe("productNameTripwireFlags", () => {
-  it("hard-flags a product-named project under lead and nothing under trial", () => {
+  it("hard-flags a product-named project under prospect and nothing under pilot", () => {
     const ownNames = ["Canvasx", "Sketch"];
-    const lead = productNameTripwireFlags(
-      "lead",
+    const prospect = productNameTripwireFlags(
+      "prospect",
       verdict("lead", ["Sketch Platform", "Acme proposal"]).projects,
       ownNames,
     );
-    expect(lead).toEqual(["product_named_project_under_lead:Sketch Platform"]);
+    expect(prospect).toEqual(["product_named_project_under_prospect:Sketch Platform"]);
 
-    const trial = productNameTripwireFlags(
-      "trial",
+    const pilot = productNameTripwireFlags(
+      "pilot",
       verdict("trial", ["Sketch deployment for Acme"]).projects,
       ownNames,
     );
-    expect(trial).toEqual([]);
+    expect(pilot).toEqual([]);
 
-    const fragment = productNameTripwireFlags("lead", verdict("lead", ["Sketchbook redesign"]).projects, ownNames);
+    const fragment = productNameTripwireFlags("prospect", verdict("lead", ["Sketchbook redesign"]).projects, ownNames);
     expect(fragment).toEqual([]);
   });
 });
@@ -107,13 +118,13 @@ describe("chooseMajorityVerdict", () => {
     ]);
     expect(chosen.relationshipState).toBe("trial");
     expect(chosen.projects.map((p) => p.name)).toEqual(["Acme deployment"]);
-    expect(voteStats.stateAgreement).toBeCloseTo(2 / 3);
+    expect(voteStats.axisAgreement).toBeCloseTo(2 / 3);
     expect(voteStats.projectSetAgreement).toBeCloseTo(1 / 3);
-    expect(voteStats.stateCounts).toEqual({ trial: 2, none: 1 });
+    expect(voteStats.axisCounts).toEqual({ "client:pilot": 2, "other:": 1 });
     expect(voteStats.projectNameCounts["Acme deployment"]).toBe(2);
 
     const tie = chooseMajorityVerdict([verdict("lead", []), verdict("customer", [])]);
     expect(tie.verdict.relationshipState).toBe("lead");
-    expect(tie.voteStats.stateAgreement).toBeCloseTo(0.5);
+    expect(tie.voteStats.axisAgreement).toBeCloseTo(0.5);
   });
 });

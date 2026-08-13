@@ -9,7 +9,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger, createTestPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
-import { type ClusterVerdict, runProjectMintingPass } from "./project-minting";
+import { type ClusterVerdict, readClusterVerdict, runProjectMintingPass } from "./project-minting";
 
 const logger = createTestLogger();
 const PASSWORD = "testpassword123";
@@ -36,8 +36,9 @@ describe("project minting verdict acceptance", () => {
       counterpartyKind: "client",
       clientStage: "active",
     });
-    const verdict: ClusterVerdict = {
-      relationshipState: "customer",
+    const verdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "active",
       engagement: { name: "Oliver Wyman" },
       projects: [
         {
@@ -65,7 +66,7 @@ describe("project minting verdict acceptance", () => {
       })),
       trackerFit: "containers_hold_clusters",
       notes: [],
-    };
+    });
     const beforeFragments = await loadEntities(db, seeded.fragmentIds);
     const generator = generatorFor(() => verdict);
 
@@ -82,10 +83,11 @@ describe("project minting verdict acceptance", () => {
       .where("superseded_at", "is", null)
       .execute();
     expect(pending).toHaveLength(1);
-    expect((JSON.parse(pending[0].verdict) as ClusterVerdict).projects.map((p) => p.name).sort()).toEqual([
-      "OW Dashboard",
-      "OW Segmentation",
-    ]);
+    expect(
+      readClusterVerdict(JSON.parse(pending[0].verdict))
+        .projects.map((p) => p.name)
+        .sort(),
+    ).toEqual(["OW Dashboard", "OW Segmentation"]);
 
     const response = await app.request(`/api/project-minting/verdicts/${pass.results[0].verdictId}/acceptance`, {
       method: "POST",
@@ -181,8 +183,9 @@ describe("project minting verdict acceptance", () => {
      * gate is never reached, and dropping `"vendor"` from the suppression list
      * leaves every assertion in this test green. Verified by mutation.
      */
-    const vendorVerdict: ClusterVerdict = {
-      relationshipState: "vendor",
+    const vendorVerdict = readClusterVerdict({
+      counterpartyKind: "vendor",
+      clientStage: null,
       engagement: { name: "Pozitivpartners" },
       projects: [
         {
@@ -197,9 +200,10 @@ describe("project minting verdict acceptance", () => {
       existingEntities: [],
       trackerFit: "no_containers",
       notes: ["Recurring payroll administration."],
-    };
-    const praevoriumVerdict: ClusterVerdict = {
-      relationshipState: "lead",
+    });
+    const praevoriumVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "prospect",
       engagement: { name: "Praevorium" },
       projects: [
         {
@@ -214,7 +218,7 @@ describe("project minting verdict acceptance", () => {
       existingEntities: [],
       trackerFit: "no_containers",
       notes: [],
-    };
+    });
     const generator = generatorFor((prompt) =>
       prompt.includes("Pozitivpartners") ? vendorVerdict : praevoriumVerdict,
     );
@@ -259,16 +263,18 @@ describe("project minting verdict acceptance", () => {
 
   it("accepts a lead with no projects as a decided no-write verdict in the same run as a positive control", async () => {
     const seeded = await seedLeadNoProjectAndPraevorium(db);
-    const acmeVerdict: ClusterVerdict = {
-      relationshipState: "lead",
+    const acmeVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "prospect",
       engagement: null,
       projects: [],
       existingEntities: [],
       trackerFit: "no_containers",
       notes: ["Demos only."],
-    };
-    const praevoriumVerdict: ClusterVerdict = {
-      relationshipState: "lead",
+    });
+    const praevoriumVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "prospect",
       engagement: null,
       projects: [
         {
@@ -283,7 +289,7 @@ describe("project minting verdict acceptance", () => {
       existingEntities: [],
       trackerFit: "no_containers",
       notes: [],
-    };
+    });
     const generator = generatorFor((prompt) => (prompt.includes("Acmecorp") ? acmeVerdict : praevoriumVerdict));
 
     await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });

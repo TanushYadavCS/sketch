@@ -170,7 +170,27 @@ describe("194 counterparty axes migration", () => {
         )
     `.execute(db);
     const before = await sql<Record<string, unknown>>`
-      SELECT * FROM project_minting_verdicts
+      SELECT
+        id,
+        company_entity_id,
+        company_name,
+        file_count,
+        dossier,
+        verdict,
+        model,
+        prompt_version,
+        status,
+        superseded_at,
+        relationship_state,
+        flags,
+        vote_stats,
+        decided_at,
+        decided_by_user_id,
+        struck_projects,
+        accepted_result,
+        created_at,
+        updated_at
+      FROM project_minting_verdicts
       WHERE id IN ('accepted-verdict', 'rejected-verdict')
       ORDER BY id ASC
     `.execute(db);
@@ -183,7 +203,27 @@ describe("194 counterparty axes migration", () => {
     expect(pending.rows[0].superseded_at).not.toBeNull();
 
     const after = await sql<Record<string, unknown>>`
-      SELECT * FROM project_minting_verdicts
+      SELECT
+        id,
+        company_entity_id,
+        company_name,
+        file_count,
+        dossier,
+        verdict,
+        model,
+        prompt_version,
+        status,
+        superseded_at,
+        relationship_state,
+        flags,
+        vote_stats,
+        decided_at,
+        decided_by_user_id,
+        struck_projects,
+        accepted_result,
+        created_at,
+        updated_at
+      FROM project_minting_verdicts
       WHERE id IN ('accepted-verdict', 'rejected-verdict')
       ORDER BY id ASC
     `.execute(db);

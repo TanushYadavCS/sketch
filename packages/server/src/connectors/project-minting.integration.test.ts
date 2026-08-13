@@ -19,7 +19,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger, getSharedPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
-import { type ClusterVerdict, clusterClientFiles, runProjectMintingPass } from "./project-minting";
+import { clusterClientFiles, readClusterVerdict, runProjectMintingPass } from "./project-minting";
 
 const logger = createTestLogger();
 
@@ -38,11 +38,200 @@ describe("project minting pass (e2e)", () => {
     await sql`ROLLBACK`.execute(db);
   });
 
+  it("stores nominated axes in columns and JSON, and does not teach stage inference in the prompt", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Axisco", "axisco.example");
+    for (const date of ["2026-07-21", "2026-07-28", "2026-08-04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Axisco partner delivery sync",
+        source: "fireflies",
+        date: `${date}T09:00:00Z`,
+        content: "Partner delivery planning and implementation notes.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Alex Partner", "alex@axisco.example");
+    }
+    let capturedPrompt = "";
+    const verdict = readClusterVerdict({
+      counterpartyKind: "partner",
+      clientStage: "active",
+      engagement: { name: "Axisco" },
+      projects: [
+        {
+          name: "Axisco delivery programme",
+          status: "active",
+          confidence: "high",
+          evidenceTitleFamilies: ["Axisco partner delivery sync"],
+          evidenceRepos: [],
+          evidencePeople: ["Alex Partner"],
+        },
+      ],
+      existingEntities: [],
+      trackerFit: "no_containers",
+      notes: [],
+    });
+    const generator: GeminiGenerator = {
+      async generate() {
+        return "{}";
+      },
+      async generateJSON<T>(prompt: string) {
+        capturedPrompt = prompt;
+        return verdict as T;
+      },
+    };
+
+    const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+
+    expect(pass.results).toHaveLength(1);
+    expect(capturedPrompt).not.toContain("our product is actually running for them");
+    expect(capturedPrompt).not.toContain("declared, or evidenced by sustained delivery work");
+    const row = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("company_entity_id", "=", companyId)
+      .where("status", "=", "pending")
+      .where("superseded_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(row.counterparty_kind).toBe("partner");
+    expect(row.client_stage).toBe("active");
+    expect(row.relationship_state).toBe("customer");
+    const storedJson = JSON.parse(row.verdict) as Record<string, unknown>;
+    expect(storedJson.counterpartyKind).toBe("partner");
+    expect(storedJson.clientStage).toBe("active");
+    expect(storedJson.relationshipState).toBeUndefined();
+    const storedVerdict = readClusterVerdict(storedJson);
+    expect(storedVerdict.relationshipState).toBe("customer");
+  });
+
+  it("renders declared axes exactly and omits the DECLARED line for undeclared counterparties", async () => {
+    const connectorId = await seedConnector(db);
+    const declaredId = await seedCompany(db, "Declaredco", "declaredco.example");
+    const undeclaredId = await seedCompany(db, "Openleadco", "openleadco.example");
+    for (const [company, domain] of [
+      ["Declaredco", "declaredco.example"],
+      ["Openleadco", "openleadco.example"],
+    ] as const) {
+      for (const date of ["2026-07-22", "2026-07-29", "2026-08-05"]) {
+        const fileId = await seedFile(db, connectorId, {
+          fileName: `${company} account sync`,
+          source: "gmail",
+          date: `${date}T10:00:00Z`,
+          content: "Recurring account work.",
+        });
+        await seedAttendee(db, connectorId, fileId, `${company} Lead`, `lead@${domain}`);
+      }
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: declaredId,
+      counterpartyKind: "vendor",
+      clientStage: null,
+    });
+    const prompts = new Map<string, string>();
+    const generator: GeminiGenerator = {
+      async generate() {
+        return "{}";
+      },
+      async generateJSON<T>(prompt: string) {
+        const company = prompt.includes("Declaredco") ? "Declaredco" : "Openleadco";
+        prompts.set(company, prompt);
+        return readClusterVerdict({
+          counterpartyKind: company === "Declaredco" ? "vendor" : "client",
+          clientStage: company === "Declaredco" ? null : "prospect",
+          engagement: null,
+          projects: [],
+          existingEntities: [],
+          trackerFit: "no_containers",
+          notes: [],
+        }) as T;
+      },
+    };
+
+    const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+
+    expect(pass.results.map((result) => result.companyEntityId).sort()).toEqual([declaredId, undeclaredId].sort());
+    expect(prompts.get("Declaredco")).toContain(
+      "DECLARED (from counterparty registry): counterpartyKind = vendor; clientStage = null.",
+    );
+    expect(prompts.get("Declaredco")).not.toContain("managed tenant");
+    expect(prompts.get("Openleadco")).not.toContain("DECLARED (from counterparty registry)");
+    expect(prompts.get("Openleadco")).not.toContain("managed tenant");
+  });
+
+  it("treats undeclared clusters as prospect for product-name tripwire while declared pilot does not trip", async () => {
+    const settings = createSettingsRepository(db);
+    await settings.ensure();
+    await settings.update({ botName: "Sketch" });
+    const connectorId = await seedConnector(db);
+    const undeclaredId = await seedCompany(db, "Pilotguess", "pilotguess.example");
+    const declaredId = await seedCompany(db, "Declaredpilot", "declaredpilot.example");
+    for (const [company, domain] of [
+      ["Pilotguess", "pilotguess.example"],
+      ["Declaredpilot", "declaredpilot.example"],
+    ] as const) {
+      for (const date of ["2026-07-23", "2026-07-30", "2026-08-06"]) {
+        const fileId = await seedFile(db, connectorId, {
+          fileName: `${company} deployment sync`,
+          source: "fireflies",
+          date: `${date}T11:00:00Z`,
+          content: "Deployment operation notes.",
+        });
+        await seedAttendee(db, connectorId, fileId, `${company} Lead`, `lead@${domain}`);
+      }
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: declaredId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+    const generator: GeminiGenerator = {
+      async generate() {
+        return "{}";
+      },
+      async generateJSON<T>() {
+        return readClusterVerdict({
+          counterpartyKind: "client",
+          clientStage: "pilot",
+          engagement: null,
+          projects: [
+            {
+              name: "Sketch Platform",
+              status: "active",
+              confidence: "high",
+              evidenceTitleFamilies: [],
+              evidenceRepos: [],
+              evidencePeople: [],
+            },
+          ],
+          existingEntities: [],
+          trackerFit: "no_containers",
+          notes: [],
+        }) as T;
+      },
+    };
+
+    const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+
+    expect(pass.results.find((result) => result.companyEntityId === undeclaredId)?.tripwireFlags).toEqual([
+      "product_named_project_under_prospect:Sketch Platform",
+    ]);
+    expect(pass.results.find((result) => result.companyEntityId === declaredId)?.tripwireFlags).toEqual([]);
+    const rows = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("company_entity_id", "in", [undeclaredId, declaredId])
+      .where("status", "=", "pending")
+      .where("superseded_at", "is", null)
+      .execute();
+    const flagsByCompany = new Map(rows.map((row) => [row.company_entity_id, row.flags ? JSON.parse(row.flags) : []]));
+    expect(flagsByCompany.get(undeclaredId)).toEqual(["product_named_project_under_prospect:Sketch Platform"]);
+    expect(flagsByCompany.get(declaredId)).toEqual([]);
+  });
+
   it("writes zero entities, leaves every fragment untouched, and stores exactly one pending verdict", async () => {
     const seeded = await seedOliverWymanCluster(db);
     const before = await snapshotEntities(db);
-    const verdict: ClusterVerdict = {
-      relationshipState: "customer",
+    const verdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "active",
       engagement: { name: "Oliver Wyman" },
       projects: [
         {
@@ -70,7 +259,7 @@ describe("project minting pass (e2e)", () => {
       })),
       trackerFit: "containers_hold_clusters",
       notes: [],
-    };
+    });
     let generatorCalls = 0;
     const generator: GeminiGenerator = {
       async generate() {
@@ -155,16 +344,18 @@ describe("project minting pass (e2e)", () => {
       });
       await seedAttendee(db, connectorId, fileId, "Sam Founder", "sam@praevorium.com");
     }
-    const vendorVerdict: ClusterVerdict = {
-      relationshipState: "vendor",
+    const vendorVerdict = readClusterVerdict({
+      counterpartyKind: "vendor",
+      clientStage: null,
       engagement: null,
       projects: [],
       existingEntities: [],
       trackerFit: "no_containers",
       notes: ["Recurring payroll administration, not client work."],
-    };
-    const pursuitVerdict: ClusterVerdict = {
-      relationshipState: "lead",
+    });
+    const pursuitVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "prospect",
       engagement: { name: "Praevorium" },
       projects: [
         {
@@ -179,7 +370,7 @@ describe("project minting pass (e2e)", () => {
       existingEntities: [],
       trackerFit: "no_containers",
       notes: [],
-    };
+    });
     let generatorCalls = 0;
     const generator: GeminiGenerator = {
       async generate() {
@@ -205,7 +396,9 @@ describe("project minting pass (e2e)", () => {
       .where("superseded_at", "is", null)
       .execute();
     expect(pending).toHaveLength(2);
-    const byCompany = new Map(pending.map((row) => [row.company_entity_id, JSON.parse(row.verdict) as ClusterVerdict]));
+    const byCompany = new Map(
+      pending.map((row) => [row.company_entity_id, readClusterVerdict(JSON.parse(row.verdict))]),
+    );
     const poz = byCompany.get(pozId);
     expect(poz?.relationshipState).toBe("vendor");
     expect(poz?.projects).toHaveLength(0);
@@ -227,14 +420,15 @@ describe("project minting pass (e2e)", () => {
       });
       await seedAttendee(db, connectorId, fileId, "Lena Buyer", "lena@acmecorp.io");
     }
-    const leadVerdict: ClusterVerdict = {
-      relationshipState: "lead",
+    const leadVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "prospect",
       engagement: null,
       projects: [],
       existingEntities: [],
       trackerFit: "no_containers",
       notes: ["Demos and follow-ups only; no client-side work object."],
-    };
+    });
     const generator: GeminiGenerator = {
       async generate() {
         return "{}";
@@ -260,8 +454,13 @@ describe("project minting pass (e2e)", () => {
       .where("superseded_at", "is", null)
       .executeTakeFirstOrThrow();
     expect(row.relationship_state).toBe("lead");
+    expect(row.counterparty_kind).toBe("client");
+    expect(row.client_stage).toBe("prospect");
     expect(row.flags).toBeNull();
-    expect((JSON.parse(row.verdict) as ClusterVerdict).projects).toHaveLength(0);
+    const storedVerdict = readClusterVerdict(JSON.parse(row.verdict));
+    expect(storedVerdict.counterpartyKind).toBe("client");
+    expect(storedVerdict.clientStage).toBe("prospect");
+    expect(storedVerdict.projects).toHaveLength(0);
   });
 
   it("a declared-trial cluster carries the DECLARED line and yields exactly one deployment container", async () => {
@@ -286,8 +485,9 @@ describe("project minting pass (e2e)", () => {
       clientStage: "pilot",
     });
     let capturedPrompt = "";
-    const trialVerdict: ClusterVerdict = {
-      relationshipState: "trial",
+    const trialVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "pilot",
       engagement: null,
       projects: [
         {
@@ -302,7 +502,7 @@ describe("project minting pass (e2e)", () => {
       existingEntities: [],
       trackerFit: "no_containers",
       notes: [],
-    };
+    });
     const generator: GeminiGenerator = {
       async generate() {
         return "{}";
@@ -315,9 +515,12 @@ describe("project minting pass (e2e)", () => {
 
     const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
 
-    expect(capturedPrompt).toContain("DECLARED (from tenant registry): managed tenant of ours, status = trial.");
+    expect(capturedPrompt).toContain(
+      "DECLARED (from counterparty registry): counterpartyKind = client; clientStage = pilot.",
+    );
     const result = pass.results.find((r) => r.companyEntityId === habuildId);
-    expect(result?.dossier.declaredState).toBe("trial");
+    expect(result?.dossier.declaredRelationship?.counterparty_kind).toBe("client");
+    expect(result?.dossier.declaredRelationship?.client_stage).toBe("pilot");
     expect(result?.verdict?.relationshipState).toBe("trial");
     expect(result?.verdict?.projects).toHaveLength(1);
     expect(result?.verdict?.projects[0].name).toBe("Habuild deployment");
@@ -330,13 +533,16 @@ describe("project minting pass (e2e)", () => {
       .where("superseded_at", "is", null)
       .executeTakeFirstOrThrow();
     expect(row.relationship_state).toBe("trial");
-    expect((JSON.parse(row.verdict) as ClusterVerdict).projects).toHaveLength(1);
+    expect(row.counterparty_kind).toBe("client");
+    expect(row.client_stage).toBe("pilot");
+    expect(readClusterVerdict(JSON.parse(row.verdict)).projects).toHaveLength(1);
   });
 
   it.skip("accepting the verdict writes the engagement, projects, merges and attachments (PR-P3)", async () => {
     const seeded = await seedOliverWymanCluster(db);
-    const verdict: ClusterVerdict = {
-      relationshipState: "customer",
+    const verdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "active",
       engagement: { name: "Oliver Wyman" },
       projects: [
         {
@@ -364,7 +570,7 @@ describe("project minting pass (e2e)", () => {
       })),
       trackerFit: "containers_hold_clusters",
       notes: [],
-    };
+    });
     const generator: GeminiGenerator = {
       async generate() {
         return "{}";

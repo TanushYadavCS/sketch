@@ -35,6 +35,8 @@ function serializeVerdict(row: ProjectMintingVerdictRow, includeDossier = false)
     companyEntityId: row.company_entity_id,
     companyName: row.company_name,
     fileCount: row.file_count,
+    counterpartyKind: row.counterparty_kind,
+    clientStage: row.client_stage,
     relationshipState: row.relationship_state,
     flags: parseJsonArray(row.flags),
     voteStats: row.vote_stats ? JSON.parse(row.vote_stats) : null,

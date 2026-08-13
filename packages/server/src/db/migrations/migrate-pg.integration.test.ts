@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 197;
+const EXPECTED_MIGRATION_COUNT = 198;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -230,6 +230,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
     expect(names[195]).toBe("200-project-minting-acceptance");
     expect(names[196]).toBe("201-counterparty-axes");
+    expect(names[197]).toBe("202-verdict-counterparty-axes");
   });
   it("stores millisecond builder-lock expiry timestamps as bigint", async () => {
     const expiresAt = Date.now() + 5 * 60 * 1000;

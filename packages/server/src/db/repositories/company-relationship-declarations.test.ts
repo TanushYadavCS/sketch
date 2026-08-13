@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  type CompanyRelationshipDeclarationRow,
-  resolveDeclaration,
-} from "./company-relationship-declarations";
+import { type CompanyRelationshipDeclarationRow, resolveDeclaration } from "./company-relationship-declarations";
 
-function row(
-  subject: string,
-  kind: string,
-  stage: string | null = null,
-): CompanyRelationshipDeclarationRow {
+function row(subject: string, kind: string, stage: string | null = null): CompanyRelationshipDeclarationRow {
   return {
     subject_entity_id: subject,
     counterparty_kind: kind,
