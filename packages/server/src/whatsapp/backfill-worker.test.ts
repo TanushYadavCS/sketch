@@ -309,6 +309,88 @@ describe("WhatsAppBackfillWorker", () => {
     expect(checkpoint).toEqual({ live_start_effective_at: null, live_start_message_id: null });
   });
 
+  it("rescues later history on a newer connection key for a bootstrapped group with no live start", async () => {
+    const conversation = await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "history-bootstrap",
+      eventKey: "event-history-bootstrap",
+      senderName: "History Sender",
+      providerTimestamp: "2026-07-17T09:00:00.000Z",
+      source: "history",
+      connectionKey: KEY_1,
+    });
+
+    await worker(db).reconcile(true);
+
+    const straggler = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "history-straggler",
+      eventKey: "event-history-straggler",
+      senderName: "History Sender",
+      providerTimestamp: "2026-07-17T10:00:00.000Z",
+      source: "history",
+      connectionKey: KEY_3,
+    });
+
+    await worker(db).reconcile(true);
+
+    const rescued = await db
+      .selectFrom("conversation_messages")
+      .select("backfill_range_id")
+      .where("id", "=", straggler.row.id)
+      .executeTakeFirstOrThrow();
+    expect(rescued.backfill_range_id).not.toBeNull();
+    const checkpoint = await db
+      .selectFrom("whatsapp_backfill_checkpoints")
+      .select("live_start_message_id")
+      .where("group_jid", "=", "group@g.us")
+      .executeTakeFirstOrThrow();
+    expect(checkpoint.live_start_message_id).toBeNull();
+  });
+
+  it("leaves a disabled group without a live start out of the orphan rescue sweep", async () => {
+    const conversation = await seedGroup(db);
+    const conversations = createConversationRepository(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "history-disabled-orphan",
+      eventKey: "event-history-disabled-orphan",
+      senderName: "History Sender",
+      providerTimestamp: "2026-07-17T10:00:00.000Z",
+      source: "history",
+      connectionKey: KEY_1,
+    });
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db.selectFrom("whatsapp_backfill_ranges").select("id").where("group_jid", "=", "group@g.us").execute(),
+    ).resolves.toEqual([]);
+  });
+
   it("skips bootstrapping when every stranded row lacks a connection key", async () => {
     const conversation = await seedGroup(db);
     await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();

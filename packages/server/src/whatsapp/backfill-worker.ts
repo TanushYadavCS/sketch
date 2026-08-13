@@ -558,7 +558,19 @@ export class WhatsAppBackfillWorker {
       .where("message.source", "=", "history")
       .where("message.backfill_range_id", "is", null)
       .where("message.connection_key", "is not", null)
-      .where("checkpoint.live_start_message_id", "is not", null);
+      /**
+       * `live_start` alone used to be a fair proxy for "this group has ranges to
+       * adopt into", because a group without it had none. Bootstrapping stranded
+       * history breaks that: those groups now hold an initial range while
+       * `live_start` stays NULL by design, and without them here the rescue sweep
+       * — supplemental ranges for rows behind an advanced graph cursor, gap ranges
+       * for rows on a newer connection key — can never reach them. Enabled groups
+       * qualify on their own. Disabled ones without `live_start` stay out, so no
+       * range is opened, and no history fetched, for a group nobody asked to index.
+       */
+      .where((eb) =>
+        eb.or([eb("checkpoint.live_start_message_id", "is not", null), eb("group.index_enabled", "=", 1)]),
+      );
     if (groupJids && groupJids.length > 0)
       query = query.where("conversation.provider_conversation_id", "in", groupJids);
     const orphans = await query.execute();
