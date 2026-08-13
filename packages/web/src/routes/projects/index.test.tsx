@@ -12,6 +12,8 @@ function entity(
   overrides: Partial<EntityListItem> & Pick<EntityListItem, "id" | "name" | "sourceType">,
 ): EntityListItem {
   return {
+    nameStatus: "confirmed",
+    proposedName: null,
     subtype: null,
     aliases: [],
     contactPoints: [],

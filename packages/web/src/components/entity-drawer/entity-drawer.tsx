@@ -25,7 +25,7 @@ import type {
   TaskStatus,
 } from "@/lib/api";
 import { api } from "@/lib/api";
-import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
+import { EntityAvatar, EntityChip, entityAccent, entityDisplayLabel, useEntityUi } from "@/lib/entity-ui";
 import {
   ArrowLeftIcon,
   ArrowsLeftRightIcon,
@@ -237,7 +237,9 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent, onOpen
         <EntityAvatar entity={entity} size="lg" />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
-            <h2 className="min-w-0 flex-1 truncate font-serif text-[20px] leading-tight">{entity.name}</h2>
+            <h2 className="min-w-0 flex-1 truncate font-serif text-[20px] leading-tight">
+              {entityDisplayLabel(entity)}
+            </h2>
             <div className="flex shrink-0 items-center gap-2">
               {entity.shareWithEveryone ? (
                 <Badge variant="outline" className="gap-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
