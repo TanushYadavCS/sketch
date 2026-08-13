@@ -87,15 +87,20 @@ export function AutomationShareDialog({
 
   const members = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return (usersQuery.data?.users ?? [])
-      .filter((user) => user.id !== ownerUserId)
-      .filter(
-        (user) =>
-          !normalizedQuery ||
-          user.name.toLowerCase().includes(normalizedQuery) ||
-          (user.email ?? "").toLowerCase().includes(normalizedQuery),
-      )
-      .sort((left, right) => left.name.localeCompare(right.name));
+    return (
+      (usersQuery.data?.users ?? [])
+        // Admins already have access to every automation; listing them as share
+        // targets would be redundant, so they are excluded from the picker.
+        .filter((user) => user.auth_role !== "admin")
+        .filter((user) => user.id !== ownerUserId)
+        .filter(
+          (user) =>
+            !normalizedQuery ||
+            user.name.toLowerCase().includes(normalizedQuery) ||
+            (user.email ?? "").toLowerCase().includes(normalizedQuery),
+        )
+        .sort((left, right) => left.name.localeCompare(right.name))
+    );
   }, [ownerUserId, query, usersQuery.data]);
 
   const toggleMutation = useMutation({

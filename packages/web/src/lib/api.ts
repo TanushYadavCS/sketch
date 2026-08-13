@@ -211,13 +211,14 @@ export interface ScheduledTaskConversationSummary {
   lastActiveAt: string;
   archivedAt: string | null;
   state: "active" | "archived";
+  transcriptUserName?: string;
 }
 
 export interface ScheduledTaskConversationsResponse {
   taskId: string;
   conversations: ScheduledTaskConversationSummary[];
   builderLock: ScheduledTaskConversationLock;
-  transcriptAccess: "viewer";
+  transcriptAccess: "owner" | "admin" | "viewer";
 }
 
 export type WebhookAuthentication = "none";

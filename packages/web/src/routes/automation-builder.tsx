@@ -1930,6 +1930,12 @@ function BuilderChatListView({
           <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
             <span className="truncate">{conversationSourceLabel(conversation)}</span>
             <span aria-hidden>·</span>
+            {conversation.transcriptUserName ? (
+              <>
+                <span className="truncate">by {conversation.transcriptUserName}</span>
+                <span aria-hidden>·</span>
+              </>
+            ) : null}
             <span className="shrink-0">
               {conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}
             </span>

@@ -66,9 +66,10 @@ async function resolveUserId(db: Kysely<DB>, subject: string | undefined): Promi
 }
 
 /**
- * Exposes task-scoped conversation association metadata without exposing
- * transcript content. Clients must use the returned conversation ID with the
- * existing viewer-scoped web-chat transcript endpoint.
+ * Exposes task-scoped conversation association metadata. Owners and admins may
+ * list and open every transcript association (including the transcript user's
+ * name); other members remain scoped to their own associations. Transcript
+ * message content is served by the existing web-chat transcript endpoint.
  */
 export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: ScheduledTaskConversationRouteOptions = {}) {
   const routes = new Hono();
@@ -98,7 +99,13 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       return { response: errorResponse(c, "NOT_FOUND", "Scheduled task not found", 404) };
     }
 
-    return { row: accessibleTask, userId };
+    const isOwner = userId !== null && row.created_by === userId;
+    const isAdmin = c.get("role") === "admin";
+    return {
+      row: accessibleTask,
+      userId,
+      transcriptAccess: isOwner ? ("owner" as const) : isAdmin ? ("admin" as const) : ("viewer" as const),
+    };
   }
 
   async function readBody(c: Context): Promise<Record<string, unknown>> {
@@ -113,9 +120,12 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if (!access.userId) return errorResponse(c, "TRANSCRIPT_ACCESS_DENIED", "Transcript access is viewer-scoped", 403);
 
     const includeArchived = c.req.query("includeArchived") === "true";
-    const taskConversations = await conversations.listForTranscriptUser(taskId, access.userId, { includeArchived });
+    const taskConversations =
+      access.transcriptAccess === "viewer"
+        ? await conversations.listForTranscriptUser(taskId, access.userId, { includeArchived })
+        : await conversations.listForTask(taskId, { includeArchived });
     const builderLock = await conversations.getBuilderLock(taskId, access.userId);
-    return c.json({ taskId, conversations: taskConversations, builderLock, transcriptAccess: "viewer" as const });
+    return c.json({ taskId, conversations: taskConversations, builderLock, transcriptAccess: access.transcriptAccess });
   });
 
   routes.post("/:id/conversations", async (c) => {
@@ -225,9 +235,10 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if ("response" in access) return access.response;
     if (!access.userId) return errorResponse(c, "TRANSCRIPT_ACCESS_DENIED", "Transcript access is viewer-scoped", 403);
 
-    const summary = await conversations.getForTranscriptUser(taskId, conversationId, access.userId, {
-      includeArchived: true,
-    });
+    const summary =
+      access.transcriptAccess === "viewer"
+        ? await conversations.getForTranscriptUser(taskId, conversationId, access.userId, { includeArchived: true })
+        : await conversations.getForTask(taskId, conversationId, { includeArchived: true });
     if (!summary)
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
     return c.json({

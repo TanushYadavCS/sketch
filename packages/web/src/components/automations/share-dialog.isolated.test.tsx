@@ -20,20 +20,21 @@ function renderDialog(canShare = true) {
 }
 
 describe("AutomationShareDialog", () => {
-  it("lists every org member except the owner", async () => {
+  it("lists every org member except the owner and admins", async () => {
     renderDialog();
 
-    expect(await screen.findByText("Bob Jones")).toBeInTheDocument();
-    expect(screen.getByText("Carol Davis")).toBeInTheDocument();
+    expect(await screen.findByText("Carol Davis")).toBeInTheDocument();
     expect(screen.getByText("Dave Evans")).toBeInTheDocument();
     expect(screen.queryByText("Alice Smith")).not.toBeInTheDocument();
+    // Admins already have access to every automation, so they are not targets.
+    expect(screen.queryByText("Bob Jones")).not.toBeInTheDocument();
   });
 
   it("filters members by search", async () => {
     const user = userEvent.setup();
     renderDialog();
 
-    await screen.findByText("Bob Jones");
+    await screen.findByText("Carol Davis");
     await user.type(screen.getByLabelText("Search members"), "carol");
 
     expect(screen.getByText("Carol Davis")).toBeInTheDocument();
@@ -53,16 +54,16 @@ describe("AutomationShareDialog", () => {
     const user = userEvent.setup();
     renderDialog();
 
-    const bobSwitch = await screen.findByRole("switch", { name: "Share with Bob Jones" });
-    expect(bobSwitch).not.toBeChecked();
+    const carolSwitch = await screen.findByRole("switch", { name: "Share with Carol Davis" });
+    expect(carolSwitch).not.toBeChecked();
 
-    await user.click(bobSwitch);
+    await user.click(carolSwitch);
 
     await waitFor(() => {
-      expect(bobSwitch).toBeChecked();
+      expect(carolSwitch).toBeChecked();
     });
     await waitFor(() => {
-      expect(grantedUserIds).toEqual(["u2"]);
+      expect(grantedUserIds).toEqual(["u3"]);
     });
   });
 
@@ -73,9 +74,9 @@ describe("AutomationShareDialog", () => {
         return HttpResponse.json({
           shares: [
             {
-              userId: "u2",
-              name: "Bob Jones",
-              email: "bob@example.com",
+              userId: "u3",
+              name: "Carol Davis",
+              email: "carol@example.com",
               grantedByUserId: "u1",
               grantedAt: "2026-01-05T00:00:00Z",
             },
@@ -91,16 +92,16 @@ describe("AutomationShareDialog", () => {
     const user = userEvent.setup();
     renderDialog();
 
-    const bobSwitch = await screen.findByRole("switch", { name: "Share with Bob Jones" });
-    expect(bobSwitch).toBeChecked();
+    const carolSwitch = await screen.findByRole("switch", { name: "Share with Carol Davis" });
+    expect(carolSwitch).toBeChecked();
 
-    await user.click(bobSwitch);
+    await user.click(carolSwitch);
 
     await waitFor(() => {
-      expect(bobSwitch).not.toBeChecked();
+      expect(carolSwitch).not.toBeChecked();
     });
     await waitFor(() => {
-      expect(revokedUserIds).toEqual(["u2"]);
+      expect(revokedUserIds).toEqual(["u3"]);
     });
   });
 
@@ -117,11 +118,11 @@ describe("AutomationShareDialog", () => {
     const user = userEvent.setup();
     renderDialog();
 
-    const bobSwitch = await screen.findByRole("switch", { name: "Share with Bob Jones" });
-    await user.click(bobSwitch);
+    const carolSwitch = await screen.findByRole("switch", { name: "Share with Carol Davis" });
+    await user.click(carolSwitch);
 
     await waitFor(() => {
-      expect(bobSwitch).not.toBeChecked();
+      expect(carolSwitch).not.toBeChecked();
     });
     expect(screen.getByText("Only the owner can share this automation")).toBeInTheDocument();
   });
@@ -129,8 +130,8 @@ describe("AutomationShareDialog", () => {
   it("disables the toggles for non-owners", async () => {
     renderDialog(false);
 
-    const bobSwitch = await screen.findByRole("switch", { name: "Share with Bob Jones" });
-    expect(bobSwitch).toBeDisabled();
+    const carolSwitch = await screen.findByRole("switch", { name: "Share with Carol Davis" });
+    expect(carolSwitch).toBeDisabled();
     expect(screen.getByText("Only the owner can change sharing")).toBeInTheDocument();
   });
 });

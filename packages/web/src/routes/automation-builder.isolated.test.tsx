@@ -103,7 +103,12 @@ vi.mock("@tanstack/react-router", async () => {
 
 vi.mock("./dashboard", () => ({
   dashboardRoute: { id: "__root__/dashboard" },
-  useDashboardAuth: () => ({ userId: "user-1", role: "member", displayName: "Owner Member", displayIdentifier: "owner@example.com" }),
+  useDashboardAuth: () => ({
+    userId: "user-1",
+    role: "member",
+    displayName: "Owner Member",
+    displayIdentifier: "owner@example.com",
+  }),
 }));
 
 vi.mock("sonner", () => ({
@@ -1506,6 +1511,67 @@ describe("AutomationBuilderPage", () => {
     expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
     expect(screen.getAllByText("Automation").length).toBeGreaterThan(0);
     expect(screen.getByText(/(?:Jun 4|4 Jun)/)).toBeInTheDocument();
+  });
+
+  it("labels conversations with the transcript user name in owner/admin views", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-maya",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Maya Chen",
+        },
+        {
+          conversationId: "chat-owner",
+          kinds: ["builder"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-02T00:00:00.000Z",
+          lastActiveAt: "2026-06-02T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Alice Smith",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    expect(await screen.findByText("by Maya Chen")).toBeInTheDocument();
+    expect(screen.getByText("by Alice Smith")).toBeInTheDocument();
+  });
+
+  it("omits the transcript user label for viewer-scoped lists", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-own",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    expect(await screen.findByText("Automation chat")).toBeInTheDocument();
+    expect(screen.queryByText(/by /)).not.toBeInTheDocument();
   });
 
   it("uses a generic title and subdued diagnostic ID when a transcript summary is missing", async () => {
