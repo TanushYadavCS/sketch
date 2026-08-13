@@ -530,7 +530,8 @@ describe("smartEnrichFile — LLM extraction facts", () => {
       .execute();
     expect(secondFacts).toHaveLength(firstFacts.length);
     expect(secondFacts.filter((fact) => fact.deleted_at !== null)).toHaveLength(0);
-    expect(secondRefs).toHaveLength(firstRefs.length);
+    expect(new Set(secondRefs.map((ref) => `${ref.source}:${ref.source_id}`)).size).toBe(secondRefs.length);
+    expect(secondRefs.filter((ref) => ref.source_id.startsWith(`${fileId}:`))).toHaveLength(1);
 
     mentions = ["Jane Doe"];
     await entityRepo.upsertEntityFromTool({
