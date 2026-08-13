@@ -309,6 +309,79 @@ describe("WhatsAppBackfillWorker", () => {
     expect(checkpoint).toEqual({ live_start_effective_at: null, live_start_message_id: null });
   });
 
+  it("repairs downtime for an enabled group that has never seen a live message", async () => {
+    await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
+    await seedLease(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_connection_transitions")
+      .values({
+        connection_key: KEY_3,
+        lease_generation: 1,
+        socket_generation: 3,
+        disconnected_at: "2026-07-17T10:30:00.000Z",
+        connected_at: "2026-07-17T10:45:00.000Z",
+      })
+      .execute();
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select(["range_key", "lower_bound_at", "upper_bound_at"])
+        .where("group_jid", "=", "group@g.us")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        range_key: `gap:${KEY_3}`,
+        lower_bound_at: "2026-07-17T10:30:00.000Z",
+        upper_bound_at: "2026-07-17T10:45:00.000Z",
+      },
+    ]);
+  });
+
+  it("does not repair downtime for a disabled group", async () => {
+    await seedGroup(db);
+    await seedLease(db);
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_connection_transitions")
+      .values({
+        connection_key: KEY_3,
+        lease_generation: 1,
+        socket_generation: 3,
+        disconnected_at: "2026-07-17T10:30:00.000Z",
+        connected_at: "2026-07-17T10:45:00.000Z",
+      })
+      .execute();
+
+    await worker(db).reconcile(true);
+
+    await expect(
+      db.selectFrom("whatsapp_backfill_ranges").select("id").where("group_jid", "=", "group@g.us").execute(),
+    ).resolves.toEqual([]);
+  });
+
   it("rescues later history on a newer connection key for a bootstrapped group with no live start", async () => {
     const conversation = await seedGroup(db);
     await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();

@@ -695,7 +695,16 @@ export class WhatsAppBackfillWorker {
       .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
       .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
       .select("checkpoint.group_jid")
-      .where("checkpoint.live_start_message_id", "is not", null)
+      /**
+       * Gap ranges are how downtime is repaired, and a transition is consumed
+       * once — `reconciled_at` is stamped below whether or not a given group was
+       * covered, so a group missing from this list loses that window for good.
+       * Keying only on `live_start` silently excluded enabled groups that had yet
+       * to see a live message, which is exactly the state bootstrapped groups sit
+       * in permanently. Disabled groups stay out: repairing downtime for them
+       * would mean fetching history nobody asked to index.
+       */
+      .where((eb) => eb.or([eb("checkpoint.live_start_message_id", "is not", null), eb("group.index_enabled", "=", 1)]))
       .execute();
     for (const transition of transitions) {
       if (transition.disconnected_at) {
