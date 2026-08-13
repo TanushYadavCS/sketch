@@ -1,6 +1,6 @@
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -403,6 +403,100 @@ describe("ConnectionsPage direct connect", () => {
     expect(screen.queryByDisplayValue("ghp_test_token")).not.toBeInTheDocument();
     expect(verificationBodies).toEqual([{ token: "ghp_test_token" }]);
     expect(connectBodies).toEqual([{ token: "ghp_test_token", targets: [] }]);
+  });
+
+  it("groups GitHub access targets, filters them, summarizes selection, and protects unsaved setup", async () => {
+    const user = userEvent.setup();
+    setupCommonHandlers();
+    server.use(
+      http.get("/api/integration-apps", () =>
+        HttpResponse.json({
+          apps: [
+            {
+              id: "github",
+              name: "GitHub",
+              description: "Use GitHub through Sketch.",
+              icon: "https://github.com/favicon.svg",
+              executionMode: "cli",
+              connected: false,
+              connectionId: null,
+            },
+          ],
+          executionMode: "cli",
+        }),
+      ),
+      http.get("/api/integration-apps/connections", () => HttpResponse.json({ connections: [] })),
+      http.get("/api/mcp-servers/provider-1/apps", () =>
+        HttpResponse.json({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
+      ),
+      http.get("/api/users", () =>
+        HttpResponse.json({
+          users: [
+            {
+              id: "u1",
+              name: "Alice Smith",
+              email: "alice@example.com",
+              type: "human",
+            },
+            {
+              id: "u2",
+              name: "Bob Jones",
+              email: "bob@example.com",
+              type: "human",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/channels/slack", () =>
+        HttpResponse.json({ channels: [{ id: "c1", name: "release-planning", type: "public", isMember: true }] }),
+      ),
+      http.get("/api/channels/whatsapp/groups", () =>
+        HttpResponse.json({ groups: [{ jid: "g1", name: "Launch team", description: null }] }),
+      ),
+      http.post("/api/integration-apps/github/verification", () =>
+        HttpResponse.json({
+          identity: { externalId: "123", login: "octocat", avatarUrl: null, accountType: "User" },
+        }),
+      ),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+    await user.click(await screen.findByRole("button", { name: "Add integration" }));
+    await user.click(await screen.findByRole("button", { name: /GitHub/ }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(await screen.findByLabelText("Personal access token"), "ghp_test_token");
+    await user.click(screen.getByRole("button", { name: "Verify and continue" }));
+
+    expect(await screen.findByText("Organization")).toBeInTheDocument();
+    expect(screen.getByText("Members")).toBeInTheDocument();
+    expect(screen.getByText("Slack channels")).toBeInTheDocument();
+    expect(screen.getByText("WhatsApp groups")).toBeInTheDocument();
+    expect(screen.getByText("0 selected")).toBeInTheDocument();
+
+    const search = screen.getByRole("textbox", { name: "Search access targets" });
+    await user.type(search, "bob@example.com");
+    expect(screen.getByRole("button", { name: /Bob Jones/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Alice Smith/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Bob Jones/ }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByText("You and 1 shared target can use this connection.")).toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "release-planning");
+    await user.click(screen.getByRole("button", { name: /#release-planning/ }));
+    await user.clear(search);
+    await user.type(search, "Launch team");
+    await user.click(screen.getByRole("button", { name: "Launch team" }));
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]');
+    expect(overlay).toBeInTheDocument();
+    fireEvent.pointerDown(overlay as HTMLElement);
+    fireEvent.pointerUp(overlay as HTMLElement);
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Discard GitHub setup?");
+    expect(screen.getByRole("button", { name: "Keep editing" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
   });
 
   it("shows callback errors without starting a new intent", async () => {
