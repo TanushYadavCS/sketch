@@ -1132,12 +1132,9 @@ export function AutomationBuilderPage() {
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           testingStepId={testingStepId}
-<<<<<<< HEAD
           isSetupPlaceholder={placeholderSetup}
           isBuilderChatBusy={builderChatBusy}
-=======
           readOnly={builderReadOnly}
->>>>>>> b6f58f5e (feat(web): automation lock UI states [subagent:lifecycle-worker/web-lock-ui])
           onSelectStep={setSelectedStepId}
           onUpdateStepPositions={updateStepPositions}
         />
@@ -2806,12 +2803,9 @@ function AutomationCanvas({
         stepOutputs={stepOutputs}
         runStatus={runStatus}
         testingStepId={testingStepId}
-<<<<<<< HEAD
         isSetupPlaceholder={isSetupPlaceholder}
         isBuilderChatBusy={isBuilderChatBusy}
-=======
         readOnly={readOnly}
->>>>>>> b6f58f5e (feat(web): automation lock UI states [subagent:lifecycle-worker/web-lock-ui])
         onSelectStep={onSelectStep}
         onUpdateStepPositions={onUpdateStepPositions}
       />

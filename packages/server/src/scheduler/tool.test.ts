@@ -414,6 +414,7 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       const scheduler = makeMockScheduler();
       const chatAuthoring = { author: vi.fn() };
       const automationRunsRepo = {
+        create: vi.fn().mockResolvedValue("run-1"),
         getLatest: vi.fn().mockResolvedValue({ id: "run-1" }),
         deleteByTaskId: vi.fn().mockResolvedValue(undefined),
       } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
@@ -791,7 +792,7 @@ describe("handleManageScheduledTasks — resume", () => {
 });
 
 describe("handleManageScheduledTasks — run", () => {
-  it("awaits execution and returns the run result", async () => {
+  it("reserves a manual run and returns the tracking link without inlining the result", async () => {
     const runResult = {
       runId: "run-1",
       status: "completed",
@@ -802,19 +803,40 @@ describe("handleManageScheduledTasks — run", () => {
       getTaskById: vi.fn().mockResolvedValue(makeTask({ sessionMode: "fresh" })),
       executeTaskById: vi.fn().mockResolvedValue(runResult),
     });
+    const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
 
     const result = await handleManageScheduledTasks(
       { action: "run", task_id: "task-1" },
-      { scheduler, stepContentRepo, taskContext: dmContext },
+      {
+        scheduler,
+        stepContentRepo,
+        automationRunsRepo,
+        taskContext: dmContext,
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+      },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual", triggeredByUserId: "U123" });
-    expect(result.content[0].text).toContain("Automation task-1 completed");
-    expect(result.content[0].text).toContain('"runId": "run-1"');
-    expect(result.content[0].text).toContain('"ok": true');
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
+    expect(result.content[0].text).toContain(
+      'Automation "Do a thing" run started. Track it here: https://sketch.test/scheduled-tasks/task-1/edit?runId=reserved-run-1',
+    );
+    expect(result.content[0].text).not.toContain("completed");
+    expect(result.content[0].text).not.toContain('"ok": true');
   });
 
-  it("awaits same-thread fresh runs because automation queues are isolated from chat queues", async () => {
+  it("returns the uniform run-started ACK for interactive contexts without the old enqueue branch", async () => {
     const runResult = {
       runId: "run-1",
       status: "completed",
@@ -834,28 +856,45 @@ describe("handleManageScheduledTasks — run", () => {
       executeTaskById: vi.fn().mockResolvedValue(runResult),
       enqueueTaskById: vi.fn().mockResolvedValue(undefined),
     });
+    const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
 
     const result = await handleManageScheduledTasks(
       { action: "run", task_id: "task-1" },
       {
         scheduler,
         stepContentRepo,
+        automationRunsRepo,
         taskContext: channelThreadContext,
         activeQueueKey: "C456:1234567890.123456",
       },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual", triggeredByUserId: "U123" });
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
     expect(scheduler.enqueueTaskById).not.toHaveBeenCalled();
-    expect(result.content[0].text).toContain("Automation task-1 completed");
+    expect(result.content[0].text).toContain('Automation "Do a thing" run started. Track it here:');
+    expect(result.content[0].text).not.toContain("completed");
+    expect(result.content[0].text).not.toContain("queued and will post back");
   });
 
-  it("returns the latest run when a completed once task is run again", async () => {
+  it("reserves a run id even for a completed once task and returns the tracking link", async () => {
     const scheduler = makeMockScheduler({
       getTaskById: vi.fn().mockResolvedValue(makeTask({ scheduleType: "once", status: "completed" })),
-      executeTaskById: vi.fn().mockResolvedValue(null),
+      executeTaskById: vi.fn().mockRejectedValue(new Error("Task task-1 is not active")),
     });
     const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
       getLatest: vi.fn().mockResolvedValue({
         id: "run-1",
         task_id: "task-1",
@@ -873,9 +912,20 @@ describe("handleManageScheduledTasks — run", () => {
       { scheduler, stepContentRepo, automationRunsRepo, taskContext: dmContext },
     );
 
-    expect(automationRunsRepo.getLatest).toHaveBeenCalledWith("task-1");
-    expect(result.content[0].text).toContain("already completed");
-    expect(result.content[0].text).toContain('"id": "run-1"');
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
+    expect(result.content[0].text).toContain('Automation "Do a thing" run started. Track it here:');
+    expect(result.content[0].text).not.toContain("already completed");
+    expect(result.content[0].text).not.toContain('"id": "run-1"');
   });
 });
 

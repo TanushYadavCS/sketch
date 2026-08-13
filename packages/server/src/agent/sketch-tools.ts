@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { createWriteAgentOutputTool } from "./tools/agent-output";
+import { createManageAutomationSharesTool } from "./tools/automation-shares";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { ChatHistoryAccessResolver } from "./tools/chat-search";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
@@ -29,6 +30,7 @@ import { createVisualAnalysisTool } from "./tools/visual-analysis";
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
+export { handleManageAutomationShares } from "./tools/automation-shares";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
 export { IntegrationConnectionCollector };
@@ -67,6 +69,12 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       config: deps.toolConfig,
       encryptionKey: deps.settingsEncryptionKey,
       automationArtifactCollector: deps.automationArtifactCollector,
+    }),
+    createManageAutomationSharesTool({
+      scheduler: deps.scheduler,
+      taskContext: deps.taskContext,
+      db: deps.db,
+      userRepo: deps.userRepo,
     }),
     ...createTeamTools(deps),
     ...createMessagingTools(deps),
