@@ -180,6 +180,9 @@ import * as m177 from "./migrations/177-whatsapp-topic-tables";
 import * as m178 from "./migrations/178-whatsapp-chunk-knobs";
 import * as m179 from "./migrations/179-whatsapp-open-slices";
 import * as m180 from "./migrations/180-whatsapp-chunk-conversion-state";
+import * as m181 from "./migrations/181-project-minting-verdicts";
+import * as m182 from "./migrations/182-project-minting-states";
+import * as m183 from "./migrations/183-graph-pass-runs";
 import type { DB } from "./schema";
 
 /**
@@ -369,6 +372,9 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "178-whatsapp-chunk-knobs": m178,
           "179-whatsapp-open-slices": m179,
           "180-whatsapp-chunk-conversion-state": m180,
+          "181-project-minting-verdicts": m181,
+          "182-project-minting-states": m182,
+          "183-graph-pass-runs": m183,
         };
       },
     },

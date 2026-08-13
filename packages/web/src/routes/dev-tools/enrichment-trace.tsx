@@ -7,21 +7,29 @@
  * inline would push the rest of the run off screen just when the reader needs
  * to compare it against the others.
  */
-import { type DevLlmCallHeader, type DevStageReport, type DevTraceRunHeader, type DevTraceStep, api } from "@/lib/api";
+import {
+  type DevLlmCallHeader,
+  type DevStageReport,
+  type DevTraceRunHeader,
+  type DevTraceRunKind,
+  type DevTraceStep,
+  api,
+} from "@/lib/api";
 import { CaretRightIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { useEffect, useRef, useState } from "react";
 import { StageDetail } from "./stage-detail";
 import { type RailSelection, StageRail } from "./stage-rail";
-import { STAGES } from "./stages";
+import { type StageDefinition, stagesFor } from "./stages";
 
-export function EnrichmentTrace({ runId }: { runId: string }) {
+export function EnrichmentTrace({ runId, kind }: { runId: string; kind: DevTraceRunKind }) {
+  const stages = stagesFor(kind);
   const [header, setHeader] = useState<DevTraceRunHeader | null>(null);
   const [stageReports, setStageReports] = useState<DevStageReport[]>([]);
   const [steps, setSteps] = useState<DevTraceStep[]>([]);
   const [calls, setCalls] = useState<DevLlmCallHeader[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [selection, setSelection] = useState<RailSelection>({ kind: "stage", stage: STAGES[0].stage });
+  const [selection, setSelection] = useState<RailSelection>({ kind: "stage", stage: stages[0].stage });
   /** Once the reader picks a stage, the run stops moving the selection under them. */
   const pinned = useRef(false);
   const lastSeq = useRef(0);
@@ -35,7 +43,7 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
     setCalls([]);
     setHeader(null);
     setError(null);
-    setSelection({ kind: "stage", stage: STAGES[0].stage });
+    setSelection({ kind: "stage", stage: stages[0].stage });
 
     async function poll() {
       if (cancelled) return;
@@ -53,7 +61,7 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
           setSteps((prev) => [...prev, ...runData.steps]);
         }
         if (!pinned.current) {
-          const latest = latestReportedStage(runData.stageReports);
+          const latest = latestReportedStage(runData.stageReports, stages);
           if (latest) setSelection({ kind: "stage", stage: latest });
         }
         if (runData.run.status === "running") setTimeout(poll, 1000);
@@ -66,7 +74,7 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, stages]);
 
   const reportByStage = new Map(stageReports.map((report) => [report.stage, report]));
   const callByStage = new Map(calls.map((call) => [call.stage, call]));
@@ -75,8 +83,8 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
   const totals = callTotals(calls);
   const running = header?.status === "running";
 
-  const activeIndex = selection.kind === "stage" ? STAGES.findIndex((s) => s.stage === selection.stage) : -1;
-  const activeDefinition = activeIndex >= 0 ? STAGES[activeIndex] : null;
+  const activeIndex = selection.kind === "stage" ? stages.findIndex((entry) => entry.stage === selection.stage) : -1;
+  const activeDefinition = activeIndex >= 0 ? stages[activeIndex] : null;
 
   function select(next: RailSelection) {
     pinned.current = true;
@@ -88,7 +96,7 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-5 py-2.5">
         {header && <RunStatusBadge status={header.status} />}
         <span className="text-xs text-muted-foreground">
-          {ranCount} of {STAGES.length} stages ran
+          {ranCount} of {stages.length} stages ran
           {totals.tokens > 0 && ` · ${totals.tokens.toLocaleString()} tok`}
           {totals.cost > 0 && ` · $${totals.cost.toFixed(4)}`}
         </span>
@@ -107,7 +115,7 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
 
       <div className="flex min-h-0 flex-1">
         <StageRail
-          stages={STAGES}
+          stages={stages}
           reportByStage={reportByStage}
           callByStage={callByStage}
           selected={selection}
@@ -133,10 +141,10 @@ export function EnrichmentTrace({ runId }: { runId: string }) {
 }
 
 /** The furthest stage the run has reported, so a live run follows itself down the rail. */
-function latestReportedStage(reports: DevStageReport[]): string | null {
+function latestReportedStage(reports: DevStageReport[], stages: StageDefinition[]): string | null {
   let best: { stage: string; index: number } | null = null;
   for (const report of reports) {
-    const index = STAGES.findIndex((stage) => stage.stage === report.stage);
+    const index = stages.findIndex((entry) => entry.stage === report.stage);
     if (index >= 0 && (!best || index > best.index)) best = { stage: report.stage, index };
   }
   return best?.stage ?? null;

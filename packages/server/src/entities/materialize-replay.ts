@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import type { StageOutcome } from "../connectors/enrichment-stage-report";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -15,7 +15,6 @@ import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
 import { buildMaterializeDeps } from "./materialize-deps";
-import { materializeFeature } from "./materialize-feature";
 import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializeMilestone } from "./materialize-milestone";
@@ -83,6 +82,7 @@ interface FactTypeFilter {
   factType?: string;
   factTypesIn?: readonly string[];
   factTypesNotIn?: readonly string[];
+  indexedFileIds?: readonly string[];
 }
 
 /**
@@ -151,6 +151,12 @@ export function buildOpenFactCandidateQuery(
   if (filter.factType) query = query.where("fact_type", "=", filter.factType);
   if (filter.factTypesIn) query = query.where("fact_type", "in", [...filter.factTypesIn]);
   if (filter.factTypesNotIn) query = query.where("fact_type", "not in", [...filter.factTypesNotIn]);
+  if (filter.indexedFileIds) {
+    query =
+      filter.indexedFileIds.length === 0
+        ? query.where(sql<boolean>`1 = 0`)
+        : query.where("indexed_file_id", "in", [...filter.indexedFileIds]);
+  }
   return query;
 }
 
@@ -221,7 +227,7 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
     return materializeCommitment(deps, fact);
   }
   if (fact.fact_type === "feature") {
-    return materializeFeature(deps, fact);
+    return { kind: "skipped", reason: "feature_disabled" };
   }
   if (fact.fact_type === "decision") {
     return materializeDecision(deps, fact);
@@ -269,10 +275,6 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
   }
-  if (result.kind === "feature_materialized") {
-    if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
-    return;
-  }
   if (result.kind === "decision_materialized") {
     if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
@@ -308,7 +310,6 @@ export async function replaySourceFacts(
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
-    featureAutoMintThreshold: opts.featureAutoMintThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
@@ -378,23 +379,16 @@ async function materializeUnmaterializedFactsInner(
     mentionsWritten: 0,
     relationshipsWritten: 0,
     skipped: 0,
+    eligibleFacts: 0,
+    indexBuilds: 0,
+    scopeKeyReads: 0,
     materialized: 0,
     deferred: 0,
     deferredBelowThreshold: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, {
-    llmPromotionThreshold: opts.llmPromotionThreshold,
-    llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
-    featureAutoMintThreshold: opts.featureAutoMintThreshold,
-    logger,
-    birthGateTypes: opts.birthGateTypes,
-    birthGateLiveTypes: opts.birthGateLiveTypes,
-    structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
-    birthGateDryRun: opts.birthGateDryRun,
-    embeddingProvider: opts.embeddingProvider,
-  });
   const factTypesFilter = opts.factTypes && opts.factTypes.length > 0 ? opts.factTypes : null;
+  const indexedFileIdsFilter = opts.indexedFileIds ? [...new Set(opts.indexedFileIds.filter(Boolean))] : null;
 
   let countQuery = db
     .selectFrom("indexed_file_facts")
@@ -405,9 +399,35 @@ async function materializeUnmaterializedFactsInner(
   if (factTypesFilter) {
     countQuery = countQuery.where("fact_type", "in", factTypesFilter);
   }
+  if (indexedFileIdsFilter) {
+    countQuery =
+      indexedFileIdsFilter.length === 0
+        ? countQuery.where(sql<boolean>`1 = 0`)
+        : countQuery.where("indexed_file_id", "in", indexedFileIdsFilter);
+  }
   const total = Number((await countQuery.executeTakeFirst())?.count ?? 0);
+  summary.eligibleFacts = total;
   let completed = 0;
   opts.onProgress?.({ phase: "materialize", completed: 0, total });
+
+  if (total === 0) {
+    await cleanupEmptyRelationships(db);
+    reportMaterializeSummary(opts, summary);
+    logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
+    return summary;
+  }
+
+  const deps = await buildMaterializeDeps(db, {
+    llmPromotionThreshold: opts.llmPromotionThreshold,
+    llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
+    logger,
+    birthGateTypes: opts.birthGateTypes,
+    birthGateLiveTypes: opts.birthGateLiveTypes,
+    structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
+    birthGateDryRun: opts.birthGateDryRun,
+    embeddingProvider: opts.embeddingProvider,
+  });
+  summary.indexBuilds++;
 
   const processFact = async (fact: IndexedFileFactRow): Promise<void> => {
     if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
@@ -434,7 +454,6 @@ async function materializeUnmaterializedFactsInner(
         if (
           result.kind !== "task_materialized" &&
           result.kind !== "commitment_materialized" &&
-          result.kind !== "feature_materialized" &&
           result.kind !== "decision_materialized" &&
           result.kind !== "milestone_materialized"
         )
@@ -490,9 +509,14 @@ async function materializeUnmaterializedFactsInner(
    * open set; until then every open candidate passes, so this bounds retained raw
    * rows to one page but does not reduce total payload reads.
    */
+  const scopedFilter = (filter: FactTypeFilter): FactTypeFilter => ({
+    ...filter,
+    ...(indexedFileIdsFilter ? { indexedFileIds: indexedFileIdsFilter } : {}),
+  });
+
   const sweepFactType = (filter: FactTypeFilter) =>
     forEachFactCandidatePage(
-      (cursor, limit) => fetchOpenFactCandidateBatch(db, cursor, limit, filter),
+      (cursor, limit) => fetchOpenFactCandidateBatch(db, cursor, limit, scopedFilter(filter)),
       (ids) => fetchOpenFactRowsByIds(db, ids),
       async (facts) => {
         for (const fact of facts) await processFact(fact);
@@ -516,8 +540,24 @@ async function materializeUnmaterializedFactsInner(
   }
 
   await cleanupEmptyRelationships(db);
+  summary.scopeKeyReads = deps.index.personScopeKeyReads;
+  reportMaterializeSummary(opts, summary);
   logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
   return summary;
+}
+
+function reportMaterializeSummary(opts: MaterializeUnmaterializedOptions, summary: MaterializeFactsSummary): void {
+  opts.stageReport?.({
+    stage: "materialize",
+    label: "Materialise",
+    kind: "code",
+    status: "done",
+    materializeSummary: {
+      eligibleFacts: summary.eligibleFacts,
+      indexBuilds: summary.indexBuilds,
+      scopeKeyReads: summary.scopeKeyReads,
+    },
+  });
 }
 
 function materializeOutcome(
@@ -555,7 +595,6 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
     result.kind === "relationship_materialized" ||
     result.kind === "task_materialized" ||
     result.kind === "commitment_materialized" ||
-    result.kind === "feature_materialized" ||
     result.kind === "decision_materialized" ||
     result.kind === "milestone_materialized" ||
     result.kind === "structural"

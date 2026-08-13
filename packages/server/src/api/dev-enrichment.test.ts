@@ -184,8 +184,31 @@ function labelRecordingGenerator(labels: string[]): GeminiGenerator {
   };
 }
 
+/** Returns one task the fact pipeline can act on, and one it must refuse. */
+function mintGenerator(): GeminiGenerator {
+  return {
+    async generate() {
+      return "";
+    },
+    async generateJSON<T>(_prompt: string, options?: Omit<GenerateOptions, "responseMimeType">) {
+      if (!options?.label?.startsWith("extractLlmTask")) return {} as T;
+      return {
+        tasks: [
+          {
+            title: "Send the trace product brief",
+            hasOwnerVerbObject: true,
+            owner: { name: "Ada Trace", email: "ada@trace.test" },
+            sourceExcerpt: "Ada will send the brief.",
+          },
+          { title: "Unowned follow-up", hasOwnerVerbObject: false },
+        ],
+      } as T;
+    },
+  };
+}
+
 async function startRun(app: ReturnType<typeof createApp>, cookie: string, fileId: string): Promise<string> {
-  const start = await app.request("/api/dev/enrichment-runs", {
+  const start = await app.request("/api/dev/runs", {
     method: "POST",
     headers: { Cookie: cookie, "Content-Type": "application/json" },
     body: JSON.stringify({ fileId }),
@@ -197,21 +220,33 @@ async function startRun(app: ReturnType<typeof createApp>, cookie: string, fileI
 async function waitForRun(app: ReturnType<typeof createApp>, cookie: string, runId: string) {
   await vi.waitFor(
     async () => {
-      const res = await app.request(`/api/dev/enrichment-runs/${runId}`, { headers: { Cookie: cookie } });
+      const res = await app.request(`/api/dev/runs/${runId}`, { headers: { Cookie: cookie } });
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
         run: { status: string };
-        stageReports: Array<{ stage: string; status: string; error?: string }>;
+        stageReports: Array<{
+          stage: string;
+          status: string;
+          error?: string;
+          materializeSummary?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number };
+        }>;
       };
       expect(body.run.status).not.toBe("running");
     },
     { timeout: 10_000, interval: 25 },
   );
-  const res = await app.request(`/api/dev/enrichment-runs/${runId}`, { headers: { Cookie: cookie } });
+  const res = await app.request(`/api/dev/runs/${runId}`, { headers: { Cookie: cookie } });
   expect(res.status).toBe(200);
   return (await res.json()) as {
-    run: { status: string };
-    stageReports: Array<{ stage: string; status: string; error?: string }>;
+    run: { status: string; kind: string };
+    stageReports: Array<{
+      stage: string;
+      status: string;
+      error?: string;
+      materializeSummary?: { eligibleFacts: number; indexBuilds: number; scopeKeyReads: number };
+      context?: Array<{ key: string }>;
+      outcomes?: Array<{ result: string; reason?: string }>;
+    }>;
   };
 }
 
@@ -244,7 +279,7 @@ describe("Dev enrichment trace routes", () => {
     const runId = await startRun(app, cookie, fileId);
     const runBody = await waitForRun(app, cookie, runId);
 
-    const callsRes = await app.request(`/api/dev/enrichment-runs/${runId}/calls`, { headers: { Cookie: cookie } });
+    const callsRes = await app.request(`/api/dev/runs/${runId}/calls`, { headers: { Cookie: cookie } });
     expect(callsRes.status).toBe(200);
     const callsBody = (await callsRes.json()) as { calls: Array<{ seq: number; stage: string; promptChars: number }> };
     const extractCall = callsBody.calls.find((call) => call.stage === "extractEntities");
@@ -255,14 +290,14 @@ describe("Dev enrichment trace routes", () => {
       expect(Object.keys(call)).not.toContain("systemPrompt");
     }
 
-    const callRes = await app.request(`/api/dev/enrichment-runs/${runId}/calls/${extractCall?.seq}`, {
+    const callRes = await app.request(`/api/dev/runs/${runId}/calls/${extractCall?.seq}`, {
       headers: { Cookie: cookie },
     });
     expect(callRes.status).toBe(200);
     const callBody = (await callRes.json()) as {
       call: { prompt: string; text: string; parsed: { mentions: unknown[] }; promptChars: number };
     };
-    const runHeader = await app.request(`/api/dev/enrichment-runs/${runId}`, { headers: { Cookie: cookie } });
+    const runHeader = await app.request(`/api/dev/runs/${runId}`, { headers: { Cookie: cookie } });
     const { run } = (await runHeader.json()) as { run: { dumpDir: string } };
     const dumpFiles = (await readdir(run.dumpDir)).filter((name) => name.includes("extractEntities")).sort();
     const onDisk = JSON.parse(await readFile(join(run.dumpDir, dumpFiles[0]), "utf8")) as { prompt: string };
@@ -285,15 +320,20 @@ describe("Dev enrichment trace routes", () => {
     const knownBlock = extractReport?.context?.find((block) => block.key === "knownEntities");
     expect(knownBlock?.total).toBeGreaterThan(knownBlock?.items.length ?? 0);
     expect(knownBlock?.truncated).toBe(true);
+    expect(runBody.stageReports.find((report) => report.stage === "materialize")?.materializeSummary).toMatchObject({
+      eligibleFacts: expect.any(Number),
+      indexBuilds: expect.any(Number),
+      scopeKeyReads: expect.any(Number),
+    });
   });
 
   it("does not expose call payloads through either dev-tools gate", async () => {
     const hiddenApp = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: false }), { logger });
     const adminCookie = await login(hiddenApp, ADMIN_EMAIL);
-    const hiddenList = await hiddenApp.request("/api/dev/enrichment-runs/run/calls", {
+    const hiddenList = await hiddenApp.request("/api/dev/runs/run/calls", {
       headers: { Cookie: adminCookie },
     });
-    const hiddenBody = await hiddenApp.request("/api/dev/enrichment-runs/run/calls/1", {
+    const hiddenBody = await hiddenApp.request("/api/dev/runs/run/calls/1", {
       headers: { Cookie: adminCookie },
     });
     expect(hiddenList.status).toBe(404);
@@ -301,10 +341,10 @@ describe("Dev enrichment trace routes", () => {
 
     const flaggedApp = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
     const memberCookie = await login(flaggedApp, MEMBER_EMAIL);
-    const forbiddenList = await flaggedApp.request("/api/dev/enrichment-runs/run/calls", {
+    const forbiddenList = await flaggedApp.request("/api/dev/runs/run/calls", {
       headers: { Cookie: memberCookie },
     });
-    const forbiddenBody = await flaggedApp.request("/api/dev/enrichment-runs/run/calls/1", {
+    const forbiddenBody = await flaggedApp.request("/api/dev/runs/run/calls/1", {
       headers: { Cookie: memberCookie },
     });
     expect(forbiddenList.status).toBe(403);
@@ -331,13 +371,13 @@ describe("Dev enrichment trace routes", () => {
     });
     expect(runBody.stageReports.find((report) => report.stage === "materialize")).toMatchObject({ status: "skipped" });
 
-    const callsRes = await app.request(`/api/dev/enrichment-runs/${runId}/calls`, { headers: { Cookie: cookie } });
+    const callsRes = await app.request(`/api/dev/runs/${runId}/calls`, { headers: { Cookie: cookie } });
     const callsBody = (await callsRes.json()) as { calls: Array<{ seq: number; stage: string }> };
     expect(callsBody.calls.some((call) => call.stage === "extractEntityFacts")).toBe(false);
     const extractCall = callsBody.calls.find((call) => call.stage === "extractEntities");
     expect(extractCall).toBeTruthy();
 
-    const callRes = await app.request(`/api/dev/enrichment-runs/${runId}/calls/${extractCall?.seq}`, {
+    const callRes = await app.request(`/api/dev/runs/${runId}/calls/${extractCall?.seq}`, {
       headers: { Cookie: cookie },
     });
     expect(callRes.status).toBe(200);
@@ -384,5 +424,45 @@ describe("Dev enrichment trace routes", () => {
         { timeout: 10_000, interval: 25 },
       );
     }
+  });
+
+  it("reports minting as four stages, including the candidates the write stage refused", async () => {
+    const fileId = await seedTraceFile(db);
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true, DATA_DIR: dataDir }), {
+      logger,
+      enrichmentGenerator: mintGenerator(),
+    });
+    const cookie = await login(app, ADMIN_EMAIL);
+
+    const start = await app.request("/api/dev/runs", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ fileId, kind: "mint" }),
+    });
+    expect(start.status).toBe(201);
+    const runId = ((await start.json()) as { runId: string }).runId;
+
+    const body = await waitForRun(app, cookie, runId);
+    expect(body.run.status).toBe("done");
+    expect(body.run.kind).toBe("mint");
+    expect(body.stageReports.map((report) => report.stage)).toEqual([
+      "neighbourhood",
+      "gatherContext",
+      "extractCandidates",
+      "writeCandidates",
+    ]);
+
+    const gather = body.stageReports.find((report) => report.stage === "gatherContext");
+    expect(gather?.context?.map((block) => block.key)).toContain("existing_tasks");
+
+    const write = body.stageReports.find((report) => report.stage === "writeCandidates");
+    expect(write?.outcomes?.length).toBe(2);
+    for (const outcome of write?.outcomes ?? []) {
+      expect(outcome.result).toBeTruthy();
+    }
+
+    const listRes = await app.request("/api/dev/runs", { headers: { Cookie: cookie } });
+    const list = (await listRes.json()) as { runs: Array<{ id: string; kind: string }> };
+    expect(list.runs.find((run) => run.id === runId)?.kind).toBe("mint");
   });
 });

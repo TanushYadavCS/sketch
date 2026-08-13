@@ -66,11 +66,12 @@ export async function materializeStructuralSeed(
         isPrimary: index === 0,
       });
       if (result === "inserted" || result === "updated" || result === "unchanged") {
-        const bucket = deps.index.companyIdsByDomain.get(domain);
+        const indexDomain = domain.toLowerCase();
+        const bucket = deps.index.companyIdsByDomain.get(indexDomain);
         if (bucket) {
           if (!bucket.includes(entity.id)) bucket.push(entity.id);
         } else {
-          deps.index.companyIdsByDomain.set(domain, [entity.id]);
+          deps.index.companyIdsByDomain.set(indexDomain, [entity.id]);
         }
       }
       if (result === "skipped_manual_conflict" || result === "skipped_auto_conflict") {

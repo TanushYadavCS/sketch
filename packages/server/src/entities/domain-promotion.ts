@@ -1,12 +1,13 @@
-import type { Kysely, Selectable } from "kysely";
+import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
-import type { DB, EntitiesTable } from "../db/schema";
-import type { IndexEntityRow } from "./materialize-types";
+import type { DB } from "../db/schema";
+import { buildLookupIndex, createEntityLookupFromIndex, registerEntity } from "./materialize-deps";
+import { readPersonEmailFromMetadata } from "./materialize-json";
 import { isPersonalOrSharedDomain, isWellKnownNonClientDomain } from "./personal-domains";
-import { type Entity, type EntityLookup, proposeEntity } from "./propose";
+import { proposeEntity } from "./propose";
 import { isEmailProviderName } from "./validators";
 
 export const DOMAIN_PROMOTION_THRESHOLD = 1;
@@ -36,24 +37,6 @@ function parseStringArray(raw: string | null): string[] {
     return [];
   }
   return [];
-}
-
-function readEmail(entity: IndexEntityRow): string | null {
-  if (!entity.metadata) return null;
-  try {
-    const metadata = JSON.parse(entity.metadata);
-    return typeof metadata.email === "string" ? metadata.email : null;
-  } catch {
-    return null;
-  }
-}
-
-function makeLookup(entities: Entity[]): EntityLookup {
-  return {
-    getByNormalizedName: () => [],
-    getByAlias: () => [],
-    listByType: (t) => entities.filter((e) => e.source_type === t),
-  };
 }
 
 async function attachDomainCandidate(db: Kysely<DB>, reviewId: string, candidateId: string): Promise<void> {
@@ -191,21 +174,19 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
   }
 
   /**
-   * The company-promotion flow only ever consults `lookup.listByType("company")`
-   * (the email fast-path is person-only; `evidenceDomain`, name-dedup, and
-   * embedding hooks are all absent from `makeLookup`). Loading only live company
-   * rows instead of every live entity of every type preserves the fuzzy ranker's
-   * inputs exactly while cutting the per-sync corpus scan to the fraction that
-   * can actually match. When there are no candidates the scan is skipped
-   * entirely.
+   * Domain promotion proposes only companies, so it builds the real lookup over
+   * company rows and company domain associations while skipping unrelated
+   * materializer-only indexes. The sweep still starts after the candidate query
+   * so empty runs avoid the corpus scan entirely.
    */
-  const companyEntities = (await db
-    .selectFrom("entities")
-    .selectAll()
-    .where(whereLiveEntity())
-    .where("source_type", "=", "company")
-    .execute()) as Selectable<EntitiesTable>[];
-  const lookup = makeLookup(companyEntities);
+  const index = await buildLookupIndex(db, { types: ["company"] });
+  const lookup = createEntityLookupFromIndex({
+    db,
+    index,
+    normalizationBackfillComplete: false,
+    logger,
+  });
+  const reviewRepo = createEntityReviewRepo(db);
 
   for (const candidate of candidates) {
     const domain = candidate.domain;
@@ -244,10 +225,10 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     const proposal = await proposeEntity(
       {
         entityRepo,
-        reviewRepo: createEntityReviewRepo(db),
+        reviewRepo,
         domainsRepo,
         lookup,
-        readEmail,
+        readEmail: (entity) => readPersonEmailFromMetadata(entity.metadata),
       },
       {
         name: proposedName,
@@ -259,6 +240,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
         triggeredByUserId: candidate.first_observed_by_user_id ?? "system",
         metadata: { origin: "domain_promotion", domain },
         provenanceTier: "inferred",
+        evidenceDomain: domain,
       },
     );
 
@@ -272,6 +254,8 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
       logger.info({ domain, proposedName, reason: proposal.reason }, "Domain candidate proposal suppressed");
       continue;
     }
+
+    registerEntity(index, proposal.entity);
 
     await finalizeDomainPromotion(db, {
       candidateId: candidate.id,

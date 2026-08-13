@@ -45,6 +45,7 @@ import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { indexedFileIdsForMaterializeScope } from "../entities/materialize-types";
 import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { parseActionItemOwners } from "./participant-block";
@@ -234,6 +235,7 @@ export async function floorRetryForDomains(
     emitted: 0,
     cappedDomains: 0,
   };
+  const materializeFileIds = new Set<string>();
   if (normalizedDomains.length === 0) return result;
   if (scopedFileIds?.length === 0) return result;
 
@@ -277,11 +279,15 @@ export async function floorRetryForDomains(
         contentHash: file.content_hash,
       });
       result.emitted += floor.emitted;
+      if (floor.emitted > 0) materializeFileIds.add(file.id);
     }
   }
 
   if (result.emitted > 0 && opts?.materialize !== false && deps.logger) {
-    await materializeUnmaterializedFacts(deps.db, deps.logger, { factTypes: ["llm_relation"] });
+    await materializeUnmaterializedFacts(deps.db, deps.logger, {
+      factTypes: ["llm_relation"],
+      indexedFileIds: indexedFileIdsForMaterializeScope([...materializeFileIds]),
+    });
   }
 
   deps.logger?.info(result, "engagement-floor: domain retry complete");

@@ -56,6 +56,35 @@ describe("createTaskRepository sqlite", () => {
     expect(rows[0]).toMatchObject({ id: first.taskId, title: "Renamed title", status: "done", valid_to: null });
   });
 
+  it("keeps creator-owned llm tasks out of durable daily-brief input", async () => {
+    await seedUser(db, "mint-owner", "mint-owner@example.com", { emailVerified: true });
+    const repo = createTaskRepository(db);
+    const minted = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "llm",
+      externalRef: null,
+      title: "Send the launch plan",
+      status: "open",
+      statusRaw: null,
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "llm",
+      sourceTaskId: "minted-brief-suppression",
+      createdByUserId: "mint-owner",
+    });
+
+    const durable = await repo.loadOpenDurableTasksForBrief({
+      userId: "mint-owner",
+      userPrincipals: ["mint-owner@example.com"],
+    });
+
+    expect(durable.map((task) => task.id)).not.toContain(minted.taskId);
+  });
+
   it("promotes brief tasks with stable owner identity, read isolation, and a fileId gate", async () => {
     await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
     await seedUser(db, "brief-u2", "u2@example.com", { emailVerified: true });

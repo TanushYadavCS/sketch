@@ -9,7 +9,7 @@ import type { EntitySuppressionRepository } from "../db/repositories/entity-supp
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import type { MentionType } from "./graph";
-import type { CandidatePool } from "./name-dedup";
+import type { CandidatePool, CandidatePoolEntry } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 export interface ReplayFactsSummary {
@@ -23,6 +23,9 @@ export interface ReplayFactsSummary {
 }
 
 export interface MaterializeFactsSummary extends ReplayFactsSummary {
+  eligibleFacts: number;
+  indexBuilds: number;
+  scopeKeyReads: number;
   materialized: number;
   deferred: number;
   deferredBelowThreshold: number;
@@ -62,14 +65,21 @@ export const ENTITY_INDEX_COLUMNS = [
  */
 export type IndexEntityRow = Pick<EntityRow, (typeof ENTITY_INDEX_COLUMNS)[number]>;
 
+export const lookupIndexScopeBrand: unique symbol = Symbol("lookupIndexScope");
+
+export type LookupIndexScope = { kind: "full" } | { kind: "scoped"; types: ReadonlySet<ProposeEntityType> };
+
 export interface LookupIndex {
+  readonly [lookupIndexScopeBrand]: LookupIndexScope;
   entitiesByType: Map<ProposeEntityType, IndexEntityRow[]>;
   byNormalizedName: Map<string, IndexEntityRow[]>;
   byNormalizedAlias: Map<string, IndexEntityRow[]>;
+  dedupEntriesByType: Map<ProposeEntityType, CandidatePoolEntry[]>;
   dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, IndexEntityRow>;
   companyIdsByDomain: Map<string, string[]>;
   personScopeKeysByEntityId: Map<string, string[]>;
+  personScopeKeyReads: number;
 }
 
 export interface MaterializeDeps {
@@ -91,7 +101,6 @@ export interface MaterializeDeps {
   } | null>;
   llmPromotionThreshold: number;
   llmTaskCorroborationThreshold: number;
-  featureAutoMintThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateLiveTypes: Set<ProposeEntityType>;
   structuralAutoBirthTypes: Set<ProposeEntityType>;
@@ -128,7 +137,6 @@ export type MaterializeResult =
     }
   | { kind: "task_materialized"; taskId: string; created: boolean }
   | { kind: "commitment_materialized" }
-  | { kind: "feature_materialized" }
   | { kind: "decision_materialized" }
   | { kind: "milestone_materialized" }
   | { kind: "structural"; entity: IndexEntityRow }
@@ -139,7 +147,6 @@ export type MaterializeResult =
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -162,13 +169,13 @@ export interface MaterializeProgress {
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
+  indexedFileIds?: string[];
   /**
    * Rows fetched per keyset page. Bounds peak heap: only one page of facts
    * (including their `raw` payloads) is held at a time. Defaults to
@@ -183,4 +190,12 @@ export interface MaterializeUnmaterializedOptions {
   onProgress?: (progress: MaterializeProgress) => void;
   shouldCancel?: () => boolean;
   stageReport?: StageReporter;
+}
+
+export const MAX_MATERIALIZE_INDEXED_FILE_ID_FILTER = 1000;
+
+export function indexedFileIdsForMaterializeScope(fileIds: readonly string[]): string[] | undefined {
+  const unique = [...new Set(fileIds.filter(Boolean))];
+  if (unique.length > MAX_MATERIALIZE_INDEXED_FILE_ID_FILTER) return undefined;
+  return unique;
 }

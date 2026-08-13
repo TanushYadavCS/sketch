@@ -624,9 +624,11 @@ async function decideNameCandidates(
   ranked: RankedCandidate[],
 ): Promise<ProposeResult> {
   if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
-  if (ranked.length === 1) return linkNameDedupCandidate(deps, input, ranked[0].entity);
+  if (ranked.length === 1 && canAutoLinkNameDedupCandidate(input, ranked[0])) {
+    return linkNameDedupCandidate(deps, input, ranked[0].entity);
+  }
   const winner = pickConfirmedCanonical(
-    ranked.map((candidate) => candidate.entity),
+    ranked.filter((candidate) => canAutoLinkNameDedupCandidate(input, candidate)).map((candidate) => candidate.entity),
     input,
     deps.lookup,
   );

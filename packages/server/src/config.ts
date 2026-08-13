@@ -76,16 +76,28 @@ export const configSchema = z.object({
       .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
       .optional(),
   ),
+  TASK_MINTING_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .string()
+      .trim()
+      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
+      .optional(),
+  ),
+  PROJECT_MINTING_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .string()
+      .trim()
+      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
+      .optional(),
+  ),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
   LLM_TASK_CORROBORATION_THRESHOLD: z.coerce.number().int().min(1).default(2),
-  FEATURE_AUTO_MINT_THRESHOLD: z.coerce.number().int().min(1).default(1),
   CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
   FLOOR_RETRY_MAX_FILES_PER_DOMAIN: z.coerce.number().int().min(1).default(5000),
-  FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
-  FEATURE_ARCHIVE_AGE_DAYS: z.coerce.number().int().min(1).default(30),
-  FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
   GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
   GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
   AGENT_RUNTIME: z.enum(["sdk", "aisdk"]).default("aisdk"),

@@ -914,6 +914,41 @@ export interface ScheduledTaskBuilderLocksTable {
   expires_at: number;
 }
 
+export interface GraphPassRunsTable {
+  id: string;
+  status: string;
+  started_at: Generated<string>;
+  finished_at: string | null;
+  error_message: string | null;
+  input_snapshot_json: string;
+}
+
+export interface ProjectMintingVerdictsTable {
+  id: string;
+  company_entity_id: string;
+  company_name: string;
+  file_count: number;
+  dossier: string;
+  verdict: string;
+  model: string;
+  prompt_version: string;
+  status: Generated<string>;
+  superseded_at: string | null;
+  relationship_state: string | null;
+  flags: string | null;
+  vote_stats: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface CompanyRelationshipDeclarationsTable {
+  company_entity_id: string;
+  declared_state: string;
+  note: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface AgentOutputsTable {
   id: string;
   agent_key: string;
@@ -1729,6 +1764,9 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;
+  graph_pass_runs: GraphPassRunsTable;
+  project_minting_verdicts: ProjectMintingVerdictsTable;
+  company_relationship_declarations: CompanyRelationshipDeclarationsTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
   agent_output_deliveries: AgentOutputDeliveriesTable;

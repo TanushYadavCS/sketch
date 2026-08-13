@@ -1,11 +1,11 @@
 /**
- * The eight stages of a single-file enrichment, in run order.
+ * The stages of each traced pipeline, in run order.
  *
  * Listed here rather than derived from what the server has reported so far, so a
  * run in flight shows the stages it has not reached yet instead of growing a
  * list from nothing.
  */
-import type { DevStageKey } from "@/lib/api";
+import type { DevStageKey, DevTraceRunKind } from "@/lib/api";
 
 export interface StageDefinition {
   stage: DevStageKey;
@@ -25,3 +25,19 @@ export const STAGES: StageDefinition[] = [
   { stage: "engagementFloor", label: "Engagement floor", kind: "code" },
   { stage: "materialize", label: "Materialise", kind: "code" },
 ];
+
+/**
+ * Minting is four stages, and the last one carries the answer people actually
+ * come for: a candidate the model proposed that never became a task, and the
+ * reason the fact pipeline gave for that.
+ */
+export const MINT_STAGES: StageDefinition[] = [
+  { stage: "neighbourhood", label: "Nearest files", kind: "code" },
+  { stage: "gatherContext", label: "Gather context", kind: "code" },
+  { stage: "extractCandidates", label: "Extract candidates", kind: "model" },
+  { stage: "writeCandidates", label: "Write candidates", kind: "code" },
+];
+
+export function stagesFor(kind: DevTraceRunKind): StageDefinition[] {
+  return kind === "mint" ? MINT_STAGES : STAGES;
+}

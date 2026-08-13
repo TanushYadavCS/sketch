@@ -54,6 +54,14 @@ export interface TaskAccessOptions {
   canReadAllLocalTasks?: boolean;
 }
 
+export interface OpenVisibleTaskOptions extends TaskAccessOptions {
+  limit: number;
+}
+
+export interface OpenVisibleTaskWithEvidence extends Selectable<TasksTable> {
+  matchingEvidenceRefIds: string[];
+}
+
 export interface PromoteBriefTaskInput {
   userId: string;
   todo: AgentOutputItemInput;
@@ -403,6 +411,81 @@ export function createTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async listOpenVisibleTasks(
+      opts: OpenVisibleTaskOptions,
+    ): Promise<{ tasks: Selectable<TasksTable>[]; total: number }> {
+      const base = visibleTaskQuery(db, opts.viewer, {
+        userId: opts.userId,
+        assigneeEntityIds: opts.assigneeEntityIds,
+        canReadAllLocalTasks: opts.canReadAllLocalTasks === true,
+      }).where("tasks.status", "in", ["open", "in_progress"]);
+      const totalRow = await base
+        .clearSelect()
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .executeTakeFirst();
+      const tasks = await base
+        .orderBy("tasks.updated_at", "desc")
+        .orderBy("tasks.id", "asc")
+        .limit(opts.limit)
+        .execute();
+      return { tasks, total: Number(totalRow?.count ?? 0) };
+    },
+
+    async listOpenVisibleTasksByEvidenceFiles(
+      fileIds: string[],
+      opts: TaskAccessOptions,
+      limit: number,
+    ): Promise<{ tasks: OpenVisibleTaskWithEvidence[]; total: number }> {
+      const ids = [...new Set(fileIds)].filter(Boolean);
+      if (ids.length === 0) return { tasks: [], total: 0 };
+      const base = openVisibleTaskQuery(db, opts).where(taskEvidenceFilePredicate(ids));
+      const totalRow = await base
+        .clearSelect()
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .executeTakeFirst();
+      const tasks = await base.orderBy("tasks.updated_at", "desc").orderBy("tasks.id", "asc").limit(limit).execute();
+      const taskIds = tasks.map((task) => task.id);
+      const evidenceRows =
+        taskIds.length === 0
+          ? []
+          : await db
+              .selectFrom("task_evidence")
+              .select(["task_id", "ref_id"])
+              .where("task_id", "in", taskIds)
+              .where("kind", "=", "file")
+              .where("ref_id", "in", ids)
+              .execute();
+      const evidenceByTaskId = new Map<string, string[]>();
+      for (const row of evidenceRows) {
+        const refs = evidenceByTaskId.get(row.task_id) ?? [];
+        refs.push(row.ref_id);
+        evidenceByTaskId.set(row.task_id, refs);
+      }
+      return {
+        tasks: tasks.map((task) => ({
+          ...task,
+          matchingEvidenceRefIds: evidenceByTaskId.get(task.id) ?? [],
+        })),
+        total: Number(totalRow?.count ?? 0),
+      };
+    },
+
+    async listOpenVisibleTasksByAssignees(
+      entityIds: string[],
+      opts: TaskAccessOptions,
+      limit: number,
+    ): Promise<{ tasks: Selectable<TasksTable>[]; total: number }> {
+      const ids = [...new Set(entityIds)].filter(Boolean);
+      if (ids.length === 0) return { tasks: [], total: 0 };
+      const base = openVisibleTaskQuery(db, opts).where("tasks.assignee_entity_id", "in", ids);
+      const totalRow = await base
+        .clearSelect()
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .executeTakeFirst();
+      const tasks = await base.orderBy("tasks.updated_at", "desc").orderBy("tasks.id", "asc").limit(limit).execute();
+      return { tasks, total: Number(totalRow?.count ?? 0) };
+    },
+
     async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
       const visibleFileEvidence =
         opts.userPrincipals.length === 0
@@ -498,7 +581,7 @@ export function createTaskRepository(db: Kysely<DB>) {
               input.canEditAllLocalTasks === true,
             ) ||
             existing.status_authority !== "local" ||
-            (existing.provenance !== "brief" && existing.provenance !== "summary")
+            (existing.provenance !== "brief" && existing.provenance !== "summary" && existing.provenance !== "llm")
           ) {
             return null;
           }
@@ -522,8 +605,10 @@ export function createTaskRepository(db: Kysely<DB>) {
             .where("valid_to", "is", null)
             .where("status", "=", existing.status)
             .where("status_authority", "=", "local")
-            .where("provenance", "in", ["brief", "summary"]);
-          if (input.canEditAllLocalTasks !== true) {
+            .where("provenance", "in", ["brief", "summary", "llm"]);
+          if (existing.provenance === "llm") {
+            update = update.where("created_by_user_id", "=", input.userId);
+          } else if (input.canEditAllLocalTasks !== true) {
             update = update.where((eb) =>
               eb.or([
                 eb("created_by_user_id", "=", input.userId),
@@ -1321,6 +1406,46 @@ function readMessageIds(payload: AgentOutputItemInput["structuredPayload"]): str
   });
 }
 
+export async function countOpenVisibleTasksByEvidenceFilesOrAssignees(
+  db: Kysely<DB>,
+  fileIds: string[],
+  entityIds: string[],
+  opts: TaskAccessOptions,
+): Promise<number> {
+  const evidenceFileIds = [...new Set(fileIds)].filter(Boolean);
+  const assigneeEntityIds = [...new Set(entityIds)].filter(Boolean);
+  if (evidenceFileIds.length === 0 && assigneeEntityIds.length === 0) return 0;
+  const predicates = [
+    ...(evidenceFileIds.length > 0 ? [taskEvidenceFilePredicate(evidenceFileIds)] : []),
+    ...(assigneeEntityIds.length > 0
+      ? [sql<boolean>`tasks.assignee_entity_id IN (${sql.join(assigneeEntityIds)})`]
+      : []),
+  ];
+  const totalRow = await openVisibleTaskQuery(db, opts)
+    .where((eb) => eb.or(predicates))
+    .clearSelect()
+    .select((eb) => eb.fn.countAll<number>().as("count"))
+    .executeTakeFirst();
+  return Number(totalRow?.count ?? 0);
+}
+
+function openVisibleTaskQuery(db: Kysely<DB>, opts: TaskAccessOptions) {
+  return visibleTaskQuery(db, opts.viewer, {
+    userId: opts.userId,
+    assigneeEntityIds: opts.assigneeEntityIds,
+    canReadAllLocalTasks: opts.canReadAllLocalTasks === true,
+  }).where("tasks.status", "in", ["open", "in_progress"]);
+}
+
+function taskEvidenceFilePredicate(fileIds: string[]) {
+  return sql<boolean>`EXISTS (
+    SELECT 1 FROM task_evidence
+    WHERE task_evidence.task_id = tasks.id
+      AND task_evidence.kind = 'file'
+      AND task_evidence.ref_id IN (${sql.join(fileIds)})
+  )`;
+}
+
 function visibleTaskQuery(
   db: Kysely<DB>,
   viewer: FileViewer,
@@ -1348,7 +1473,7 @@ function visibleTaskQuery(
               eb.and([
                 eb("tasks.created_by_user_id", "=", opts.userId),
                 eb("tasks.status_authority", "=", "local"),
-                eb("tasks.provenance", "in", ["brief", "summary"]),
+                eb("tasks.provenance", "in", ["brief", "summary", "llm"]),
               ]),
             ]
           : []),
@@ -1374,6 +1499,7 @@ function canEditLocalTask(
   assigneeEntityIds: string[],
   canEditAllLocalTasks = false,
 ): boolean {
+  if (task.provenance === "llm") return task.created_by_user_id === userId;
   if (canEditAllLocalTasks) return true;
   if (task.created_by_user_id === userId) return true;
   return Boolean(task.assignee_entity_id && assigneeEntityIds.includes(task.assignee_entity_id));

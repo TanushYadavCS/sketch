@@ -11,10 +11,6 @@ vi.mock("../entities/co-mention-sweep", () => ({
   sweepCoMentionContributesTo: vi.fn(),
 }));
 
-vi.mock("../entities/feature-archive-sweep", () => ({
-  runFeatureArchiveSweep: vi.fn(),
-}));
-
 type SpyLogger = Logger & {
   child: ReturnType<typeof vi.fn>;
   debug: ReturnType<typeof vi.fn>;
@@ -38,9 +34,7 @@ function createSpyLogger(): SpyLogger {
 async function loadRunAllSyncs() {
   vi.resetModules();
   const coMentionModule = await import("../entities/co-mention-sweep");
-  const featureArchiveModule = await import("../entities/feature-archive-sweep");
   const sweepCoMentionContributesTo = vi.mocked(coMentionModule.sweepCoMentionContributesTo);
-  const runFeatureArchiveSweep = vi.mocked(featureArchiveModule.runFeatureArchiveSweep);
   sweepCoMentionContributesTo.mockReset();
   sweepCoMentionContributesTo.mockResolvedValue({
     scannedPairs: 0,
@@ -48,14 +42,6 @@ async function loadRunAllSyncs() {
     addedEvidence: 0,
     removedEvidence: 0,
     removedRelationships: 0,
-  });
-  runFeatureArchiveSweep.mockReset();
-  runFeatureArchiveSweep.mockResolvedValue({
-    scanned: 0,
-    archived: 0,
-    skippedRecent: 0,
-    skippedEnoughMentions: 0,
-    skippedNonLlmEvidence: 0,
   });
   const syncModule = await import("./sync");
   return { runAllSyncs: syncModule.runAllSyncs, sweepCoMentionContributesTo };

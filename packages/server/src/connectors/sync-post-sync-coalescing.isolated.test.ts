@@ -19,10 +19,6 @@ vi.mock("../entities/co-mention-sweep", () => ({
   sweepCoMentionContributesTo: vi.fn().mockResolvedValue({ scannedPairs: 0 }),
 }));
 
-vi.mock("../entities/feature-archive-sweep", () => ({
-  runFeatureArchiveSweep: vi.fn().mockResolvedValue({ scanned: 0 }),
-}));
-
 vi.mock("./registry", () => ({
   getConnector: vi.fn((type: ConnectorType) => ({
     type,

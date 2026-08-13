@@ -17,7 +17,6 @@ type MaterializeDefaultsSnapshot = Pick<
   BuildMaterializeDepsOptions,
   | "llmPromotionThreshold"
   | "llmTaskCorroborationThreshold"
-  | "featureAutoMintThreshold"
   | "birthGateTypes"
   | "birthGateLiveTypes"
   | "structuralAutoBirthTypes"
@@ -29,7 +28,6 @@ async function snapshotMaterializeDefaults(db: Kysely<DB>): Promise<MaterializeD
   return {
     llmPromotionThreshold: deps.llmPromotionThreshold,
     llmTaskCorroborationThreshold: deps.llmTaskCorroborationThreshold,
-    featureAutoMintThreshold: deps.featureAutoMintThreshold,
     birthGateTypes: new Set(deps.birthGateTypes),
     birthGateLiveTypes: new Set(deps.birthGateLiveTypes),
     structuralAutoBirthTypes: new Set(deps.structuralAutoBirthTypes),

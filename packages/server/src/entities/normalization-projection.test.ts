@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { coerceMentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
-import { projectFeatureCorroborationKey, projectLlmExtractedNormalization } from "./normalization-projection";
+import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 /**
  * The projection columns must reproduce each legacy consumer's exact key:
@@ -56,15 +56,5 @@ describe("projectLlmExtractedNormalization", () => {
     expect(projection.raw_mention_type).toBe("company");
     expect(projection.normalized_subject_name).toBe("slack");
     expect(projection.mention_type).toBe("tool");
-  });
-});
-
-describe("projectFeatureCorroborationKey", () => {
-  it("returns the key only for LLM feature sources with a string key", () => {
-    expect(projectFeatureCorroborationKey("llm_extraction", { corroborationKey: "k1" })).toBe("k1");
-    expect(projectFeatureCorroborationKey("llm", { corroborationKey: "k2" })).toBe("k2");
-    expect(projectFeatureCorroborationKey("structural", { corroborationKey: "k3" })).toBeNull();
-    expect(projectFeatureCorroborationKey("llm_extraction", {})).toBeNull();
-    expect(projectFeatureCorroborationKey("llm_extraction", { corroborationKey: "" })).toBeNull();
   });
 });

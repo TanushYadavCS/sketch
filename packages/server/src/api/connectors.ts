@@ -40,6 +40,7 @@ import { buildCredentialHint } from "../connectors/fireflies";
 import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
+import { createOpenRouterGenerator } from "../connectors/openrouter-generate";
 import { buildOtterCredentialHint } from "../connectors/otter";
 import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
 import {
@@ -53,6 +54,7 @@ import {
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
 import { parseCredentials, serializeCredentials } from "../connectors/sync-utils";
+import { mintTasksFromFile } from "../connectors/task-minting";
 import type { AuthType, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository, viewerPrincipals } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
@@ -78,6 +80,7 @@ import {
   getFileViewer,
   isAdmin,
 } from "./auth-helpers";
+import { resolveTaskAccessContext } from "./task-access";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -418,12 +421,15 @@ export function connectorRoutes(
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
       | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OPENROUTER_API_KEY"
+      | "TASK_MINTING_MODEL"
+      | "LLM_TASK_CORROBORATION_THRESHOLD"
       | "SLACK_ENTITY_SYNC"
     >
   >,
   deps?: {
     /** Overrides the settings-derived model, so tests can drive the per-file enrich route. */
     enrichmentGenerator?: GeminiGenerator;
+    taskMintingGenerator?: GeminiGenerator;
   },
 ) {
   const routes = new Hono();
@@ -453,6 +459,7 @@ export function connectorRoutes(
       canUpdateCredentials: permissions.canUpdateCredentials,
       canBrowseScope: permissions.canBrowseScope,
       canEnrich: permissions.canEnrich,
+      canMint: permissions.canMint,
     };
   }
 
@@ -2554,6 +2561,101 @@ export function connectorRoutes(
       debugDumpDir,
     }).catch((err) => {
       logger.error({ err, fileId }, "Single file enrichment failed");
+    });
+
+    return c.json({ success: true, fileId, fileName: file.file_name });
+  });
+
+  routes.post("/files/:fileId/tasks", async (c) => {
+    const fileId = c.req.param("fileId");
+    const file = await db
+      .selectFrom("indexed_files")
+      .select([
+        "id",
+        "connector_config_id",
+        "file_name",
+        "source",
+        "content",
+        "content_hash",
+        "source_created_at",
+        "source_updated_at",
+      ])
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    if (!file) {
+      return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    }
+
+    const owningConfig = await connectorRepo.findConfigByFileId(fileId);
+    if (!owningConfig || !configVisible(owningConfig)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Owning connector not found" } }, 404);
+    }
+    const { permissions } = permissionsForConfig(c, owningConfig);
+    const denied = denyUnless(c, permissions.canMint);
+    if (denied) return denied;
+
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const configuredModel = appConfig?.TASK_MINTING_MODEL;
+    const generator =
+      deps?.taskMintingGenerator ??
+      (configuredModel
+        ? openRouterConfig.openRouterApiKey
+          ? createOpenRouterGenerator(openRouterConfig.openRouterApiKey, { model: configuredModel })
+          : null
+        : createEnrichmentGenerator(providerConfig));
+    if (!generator) {
+      return c.json(
+        { error: { code: "LLM_NOT_CONFIGURED", message: "Configure an enrichment model before minting tasks" } },
+        503,
+      );
+    }
+
+    const userId = c.get("sub") as string;
+    const taskAccess = await resolveTaskAccessContext(db, c, userId);
+    const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const dumpDir = `data/llm-dumps/${fileId}__${dumpStamp}`;
+    const model =
+      configuredModel ??
+      (settings?.gemini_api_key ? "gemini-2.5-flash" : openRouterConfig.openRouterModel || "google/gemini-2.5-flash");
+    /**
+     * Runs in the background, like the enrich route above it.
+     *
+     * The report `mintTasksFromFile` returns is pipeline detail — the context
+     * blocks it assembled, a slice of the file body, the model's candidates —
+     * and it belongs on the dev trace, not on a tenant surface. Nothing is lost
+     * by dropping it here: minting writes its facts and materialises its tasks
+     * before it returns, so this was never a preview anyone approved.
+     */
+    void mintTasksFromFile({
+      db,
+      logger: logger.child({ component: "task-minting", fileId }),
+      file: {
+        id: file.id,
+        connectorConfigId: file.connector_config_id,
+        fileName: file.file_name,
+        source: file.source,
+        content: file.content ?? "",
+        contentHash: file.content_hash,
+        sourceCreatedAt: file.source_created_at,
+        sourceUpdatedAt: file.source_updated_at,
+      },
+      userId,
+      viewer: getFileViewer(c),
+      taskAccess,
+      generator,
+      model,
+      dumpDir,
+      llmTaskCorroborationThreshold: appConfig?.LLM_TASK_CORROBORATION_THRESHOLD,
+    }).catch((err) => {
+      logger.error({ err, fileId }, "Task minting failed");
     });
 
     return c.json({ success: true, fileId, fileName: file.file_name });

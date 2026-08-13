@@ -10,6 +10,15 @@ export type EnrichmentStageKey =
   | "engagementFloor"
   | "materialize";
 
+/**
+ * Task minting's own stages. Kept in the same vocabulary as enrichment so one
+ * ring, one dump reader and one rail serve both pipelines; the keys are
+ * disjoint, so a report always says which pipeline it came from.
+ */
+export type MintStageKey = "neighbourhood" | "gatherContext" | "extractCandidates" | "writeCandidates";
+
+export type StageKey = EnrichmentStageKey | MintStageKey;
+
 export type EnrichmentStageKind = "model" | "code";
 export type EnrichmentStageStatus = "done" | "failed" | "skipped";
 
@@ -20,8 +29,14 @@ export type StageOutcome = {
   reason?: string;
 };
 
+export interface MaterializeStageSummary {
+  eligibleFacts: number;
+  indexBuilds: number;
+  scopeKeyReads: number;
+}
+
 export interface StageReport {
-  stage: EnrichmentStageKey;
+  stage: StageKey;
   label: string;
   kind: EnrichmentStageKind;
   status: EnrichmentStageStatus;
@@ -30,6 +45,7 @@ export interface StageReport {
   error?: string;
   parallelGroup?: string;
   summary?: Record<string, unknown>;
+  materializeSummary?: MaterializeStageSummary;
 }
 
 export type StageReporter = (report: StageReport) => void;

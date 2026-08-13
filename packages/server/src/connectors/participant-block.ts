@@ -135,9 +135,10 @@ export async function buildParticipantBlock(
       if (isRoleAccountEmail(email)) continue;
       const domain = domainsRepo.normalizeEmailDomain(email);
       if (domain) {
-        if (await domainsRepo.isPersonalOrShared(domain)) continue;
-        const company = await domainsRepo.lookupCompanyByDomain(domain);
-        if (company) companyLabel = company.name;
+        if (!(await domainsRepo.isPersonalOrShared(domain))) {
+          const company = await domainsRepo.lookupCompanyByDomain(domain);
+          if (company) companyLabel = company.name;
+        }
       }
     }
 

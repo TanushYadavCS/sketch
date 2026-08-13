@@ -68,6 +68,26 @@ async function seedPersonSeeds(db: Kysely<DB>, count: number): Promise<void> {
   }
 }
 
+async function seedFilePersonSeeds(db: Kysely<DB>, count: number): Promise<void> {
+  const repo = createIndexedFileFactRepository(db);
+  for (let i = 0; i < count; i++) {
+    await repo.upsertFact({
+      indexedFileId: FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: `file-person-${i}`,
+      source: "manual",
+      factType: "person_seed",
+      relation: "seeded",
+      subjectName: `File Person ${i}`,
+      subjectEmail: `file-person-${i}@example.com`,
+      subjectSource: "manual",
+      subjectSourceId: `file-person-${i}`,
+      raw: { subtype: "external" },
+    });
+  }
+}
+
 const graphSnapshot = async (db: Kysely<DB>) => ({
   entities: (await db.selectFrom("entities").select(["name"]).orderBy("name").execute()).map((e) => e.name),
   mentions: (await db.selectFrom("entity_mentions").select("id").execute()).length,
@@ -301,6 +321,21 @@ describe("lean candidate scan", () => {
     const detail = plan.rows.map((r) => r.detail).join(" | ");
 
     expect(detail).toContain("idx_indexed_file_facts_open_materializable");
+    expect(detail).not.toMatch(/scan indexed_file_facts\b/i);
+  });
+
+  it("plans a file-scoped candidate scan without a full fact-table scan (SQLite)", async () => {
+    await seedFilePersonSeeds(db, 40);
+
+    const compiled = buildOpenFactCandidateQuery(db, { createdAt: "", id: "" }, 250, {
+      factType: "person_seed",
+      indexedFileIds: [FILE_ID],
+    }).compile();
+    const plan = await db.executeQuery<{ detail: string }>(
+      CompiledQuery.raw(`EXPLAIN QUERY PLAN ${compiled.sql}`, [...compiled.parameters]),
+    );
+    const detail = plan.rows.map((r) => r.detail).join(" | ");
+
     expect(detail).not.toMatch(/scan indexed_file_facts\b/i);
   });
 });

@@ -16,7 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import type { StageReport } from "../connectors/enrichment-stage-report";
+import type { MaterializeStageSummary, StageReport } from "../connectors/enrichment-stage-report";
 
 /** Level methods intercepted on the wrapped logger. */
 const LEVEL_METHODS = new Set(["trace", "debug", "info", "warn", "error", "fatal"]);
@@ -35,9 +35,16 @@ const STAGE_ORDER = new Map([
   ["extractEntityFacts", 6],
   ["engagementFloor", 7],
   ["materialize", 8],
+  ["neighbourhood", 1],
+  ["gatherContext", 2],
+  ["extractCandidates", 3],
+  ["writeCandidates", 4],
 ]);
 
 export type DevTraceRunStatus = "running" | "done" | "failed";
+
+/** Which pipeline a run traced. Decides the stage list the UI renders against. */
+export type DevTraceRunKind = "enrichment" | "mint";
 
 export interface DevTraceStep {
   /** 1-based, monotonic within a run. Clients poll with `since` to fetch only new steps. */
@@ -51,6 +58,7 @@ export interface DevTraceStep {
 
 export interface DevTraceRun {
   id: string;
+  kind: DevTraceRunKind;
   fileId: string;
   fileName: string;
   startedAt: string;
@@ -67,9 +75,15 @@ export interface DevTraceRun {
 
 const runs = new Map<string, DevTraceRun>();
 
-export function startTraceRun(input: { fileId: string; fileName: string; dumpDir: string }): DevTraceRun {
+export function startTraceRun(input: {
+  kind?: DevTraceRunKind;
+  fileId: string;
+  fileName: string;
+  dumpDir: string;
+}): DevTraceRun {
   const run: DevTraceRun = {
     id: randomUUID(),
+    kind: input.kind ?? "enrichment",
     fileId: input.fileId,
     fileName: input.fileName,
     startedAt: new Date().toISOString(),
@@ -102,12 +116,26 @@ export function appendTraceStageReport(run: DevTraceRun, report: StageReport): v
       context: report.context ?? existing.context,
       outcomes: [...(existing.outcomes ?? []), ...(report.outcomes ?? [])],
       summary: { ...(existing.summary ?? {}), ...(report.summary ?? {}) },
+      materializeSummary: mergeMaterializeSummary(existing.materializeSummary, report.materializeSummary),
     };
     sortStageReports(run);
     return;
   }
   run.stageReports.push(report);
   sortStageReports(run);
+}
+
+function mergeMaterializeSummary(
+  existing: MaterializeStageSummary | undefined,
+  incoming: MaterializeStageSummary | undefined,
+): MaterializeStageSummary | undefined {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  return {
+    eligibleFacts: existing.eligibleFacts + incoming.eligibleFacts,
+    indexBuilds: existing.indexBuilds + incoming.indexBuilds,
+    scopeKeyReads: existing.scopeKeyReads + incoming.scopeKeyReads,
+  };
 }
 
 function sortStageReports(run: DevTraceRun): void {

@@ -31,10 +31,11 @@ export function canEditTaskStatus(
   const isCreator = task.created_by_user_id === access.userId;
   const isAssignee = Boolean(task.assignee_entity_id && access.assigneeEntityIds.includes(task.assignee_entity_id));
   const isAdminEditable = access.canEditAllLocalTasks && task.status_authority === "local";
+  const canEditCreatorOwnedLlm = isCreator && task.provenance === "llm";
   return (
-    (isCreator || isAssignee || isAdminEditable) &&
     task.status_authority === "local" &&
-    (task.provenance === "brief" || task.provenance === "summary")
+    (canEditCreatorOwnedLlm ||
+      ((isCreator || isAssignee || isAdminEditable) && (task.provenance === "brief" || task.provenance === "summary")))
   );
 }
 
@@ -44,7 +45,7 @@ export function readonlyReason(
 ): "not_owner" | "external_authority" | null {
   if (canEditTaskStatus(task, access)) return null;
   if (task.status_authority === "external" || task.provenance === "structural") return "external_authority";
-  if (task.provenance === "brief" || task.provenance === "summary") return "not_owner";
+  if (task.provenance === "brief" || task.provenance === "summary" || task.provenance === "llm") return "not_owner";
   return "external_authority";
 }
 

@@ -993,6 +993,12 @@ export interface ConnectorConfig {
   canUpdateCredentials?: boolean;
   canBrowseScope?: boolean;
   canEnrich?: boolean;
+  /**
+   * Minting reads content that is already indexed, so unlike canEnrich it does not
+   * require the connector to still be syncing — a disabled connector's files are exactly
+   * the ones worth minting from.
+   */
+  canMint?: boolean;
 }
 
 export interface ConnectorListResponse {
@@ -1073,7 +1079,13 @@ export interface DevTraceStep {
 }
 
 /** The eight stages a single-file enrichment runs, in the order the server reports them. */
+/** Which pipeline a run traced. Picks the stage list the rail renders against. */
+export type DevTraceRunKind = "enrichment" | "mint";
+
+export type DevMintStageKey = "neighbourhood" | "gatherContext" | "extractCandidates" | "writeCandidates";
+
 export type DevStageKey =
+  | DevMintStageKey
   | "extractEntities"
   | "dedupAdjudicate"
   | "reconcileFacts"
@@ -1129,6 +1141,7 @@ export interface DevLlmCallBody extends DevLlmCallHeader {
 
 export interface DevTraceRunHeader {
   id: string;
+  kind: DevTraceRunKind;
   fileId: string;
   fileName: string;
   startedAt: string;
@@ -2251,6 +2264,15 @@ export const api = {
         },
       );
     },
+    /**
+     * Starts task extraction against one file. Returns as soon as the run is
+     * queued — the report it produces is internal, and lives in /dev-tools.
+     */
+    mintTasks(fileId: string) {
+      return request<{ success: boolean; fileId: string; fileName: string }>(`/api/connectors/files/${fileId}/tasks`, {
+        method: "POST",
+      });
+    },
     browseGoogleDrive(credentials: { client_id: string; client_secret: string; refresh_token: string }) {
       return request<{
         sharedDrives: Array<{ id: string; name: string }>;
@@ -3133,28 +3155,28 @@ export const api = {
    * started with DEV_TOOLS_ENABLED; every call 404s otherwise.
    */
   dev: {
-    startEnrichmentRun(fileId: string) {
-      return request<{ runId: string; fileId: string; fileName: string }>("/api/dev/enrichment-runs", {
+    startEnrichmentRun(fileId: string, kind: DevTraceRunKind = "enrichment") {
+      return request<{ runId: string; fileId: string; fileName: string }>("/api/dev/runs", {
         method: "POST",
-        body: JSON.stringify({ fileId }),
+        body: JSON.stringify({ fileId, kind }),
       });
     },
     enrichmentRuns() {
-      return request<{ runs: DevTraceRunHeader[] }>("/api/dev/enrichment-runs");
+      return request<{ runs: DevTraceRunHeader[] }>("/api/dev/runs");
     },
     /** `since` fetches only steps after that sequence number, for incremental polling. */
     enrichmentRun(runId: string, since = 0) {
       const qs = since > 0 ? `?since=${since}` : "";
       return request<{ run: DevTraceRunHeader; steps: DevTraceStep[]; stageReports: DevStageReport[] }>(
-        `/api/dev/enrichment-runs/${runId}${qs}`,
+        `/api/dev/runs/${runId}${qs}`,
       );
     },
     enrichmentCalls(runId: string) {
-      return request<{ calls: DevLlmCallHeader[] }>(`/api/dev/enrichment-runs/${runId}/calls`);
+      return request<{ calls: DevLlmCallHeader[] }>(`/api/dev/runs/${runId}/calls`);
     },
     /** Fetched per call on expand — the prompt bodies are far too large for the list. */
     enrichmentCall(runId: string, seq: number) {
-      return request<{ call: DevLlmCallBody }>(`/api/dev/enrichment-runs/${runId}/calls/${seq}`);
+      return request<{ call: DevLlmCallBody }>(`/api/dev/runs/${runId}/calls/${seq}`);
     },
   },
   workspace: {

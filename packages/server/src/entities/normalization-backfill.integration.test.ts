@@ -8,7 +8,7 @@ import {
 import type { DB } from "../db/schema";
 import { readJsonObject } from "./materialize-json";
 import { runNormalizationBackfill } from "./normalization-backfill";
-import { projectFeatureCorroborationKey, projectLlmExtractedNormalization } from "./normalization-projection";
+import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | null = null): Promise<void> {
   await db
@@ -53,6 +53,12 @@ async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | nu
     .execute();
 }
 
+function projectFeatureCorroborationKey(source: string, raw: Record<string, unknown>): string | null {
+  if (source !== "llm_extraction" && source !== "llm") return null;
+  const key = raw.corroborationKey;
+  return typeof key === "string" && key.length > 0 ? key : null;
+}
+
 /** Snapshots the write-path `materialization_input_hash` per fact id before the columns are cleared. */
 async function captureWritePathHashes(db: Kysely<DB>): Promise<Map<string, string | null>> {
   const rows = await db.selectFrom("indexed_file_facts").select(["id", "materialization_input_hash"]).execute();
@@ -88,7 +94,7 @@ function featureFact(fileId: string, key: string): UpsertIndexedFileFactInput {
       corroborationKey: key,
       parentProductName: "Atlas",
       evidence: { fileIds: [fileId], entityIds: [] },
-    },
+    } as never,
   };
 }
 

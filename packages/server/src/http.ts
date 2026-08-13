@@ -22,6 +22,7 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { devEnrichmentRoutes } from "./api/dev-enrichment";
 import { entityRoutes } from "./api/entities";
+import { graphPassRoutes } from "./api/graph-passes";
 import { healthRoutes } from "./api/health";
 import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
@@ -155,6 +156,7 @@ interface AppDeps {
   reconcileManagedMembers?: () => Promise<ManagedMemberReconciliationResult>;
   /** Injected so the dev trace route, and its tests, can drive a specific model. */
   enrichmentGenerator?: GeminiGenerator;
+  taskMintingGenerator?: GeminiGenerator;
 }
 
 /**
@@ -481,8 +483,15 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
   if (config.DEV_TOOLS_ENABLED) {
-    app.route("/api/dev", devEnrichmentRoutes(db, logger, config, { enrichmentGenerator: deps?.enrichmentGenerator }));
+    app.route(
+      "/api/dev",
+      devEnrichmentRoutes(db, logger, config, {
+        enrichmentGenerator: deps?.enrichmentGenerator,
+        taskMintingGenerator: deps?.taskMintingGenerator,
+      }),
+    );
   }
+  app.route("/api/graph-passes", graphPassRoutes(db, logger));
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",
@@ -637,6 +646,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route(
       "/api/connectors",
       connectorRoutes(connectors, db, deps.logger, users, config, {
+        taskMintingGenerator: deps.taskMintingGenerator,
         enrichmentGenerator: deps.enrichmentGenerator,
       }),
     );
