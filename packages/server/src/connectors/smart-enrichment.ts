@@ -75,6 +75,7 @@ import {
   selectRelevantFacts,
 } from "./learned-fact-selector";
 import { normalizeName } from "./name-normalize";
+import { SLACK_CONVERSATION_SLICE_FILE_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "./types";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
 const MAX_CONTENT_CHARS = 32000;
@@ -231,6 +232,12 @@ interface FileContext {
   connectorConfigId: string;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
+}
+
+function isConversationalFile(file: Pick<FileContext, "fileType">): boolean {
+  return (
+    file.fileType === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE || file.fileType === SLACK_CONVERSATION_SLICE_FILE_TYPE
+  );
 }
 
 type FileContentVersion = {
@@ -1007,6 +1014,132 @@ interface LearnedFact {
   fact: string;
 }
 
+interface LearnedFactRetraction {
+  factKey?: string;
+  entityId?: string;
+  fact?: string;
+}
+
+interface EntityFactExtractionResult {
+  facts: Map<string, LearnedFact[]>;
+  retractions: LearnedFactRetraction[];
+}
+
+interface ExistingIndexedLlmFact {
+  factKey: string;
+  factType: string;
+  relation: string;
+  subjectName: string | null;
+  raw: string | null;
+}
+
+interface ConversationalSliceState {
+  conversational: boolean;
+  open: boolean;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function renderDifferentialLearnedFacts(facts: LearnedFactStored[]): string {
+  return facts
+    .map((fact) => {
+      const key = learnedFactKey(fact);
+      return key ? `${fact.fact} [learned_fact_key: ${key}]` : fact.fact;
+    })
+    .join("; ");
+}
+
+function indexedFactText(fact: ExistingIndexedLlmFact): string {
+  if (fact.factType === "llm_relation" && fact.raw) {
+    try {
+      const raw = JSON.parse(fact.raw) as {
+        relationType?: unknown;
+        source?: { name?: unknown };
+        target?: { name?: unknown };
+      };
+      if (
+        typeof raw.source?.name === "string" &&
+        typeof raw.target?.name === "string" &&
+        typeof (raw.relationType ?? fact.relation) === "string"
+      ) {
+        return `${raw.source.name} ${raw.relationType ?? fact.relation} ${raw.target.name}`;
+      }
+    } catch {
+      return fact.subjectName ?? fact.relation;
+    }
+  }
+  if (fact.raw) {
+    try {
+      const raw = JSON.parse(fact.raw) as { mention?: unknown };
+      if (typeof raw.mention === "string") return raw.mention;
+    } catch {
+      return fact.subjectName ?? fact.relation;
+    }
+  }
+  return fact.subjectName ?? fact.relation;
+}
+
+function parseEntityFactResponse(value: unknown, existingFacts: ExistingIndexedLlmFact[]): EntityFactExtractionResult {
+  if (!isObject(value)) return { facts: new Map(), retractions: [] };
+  const factContainer = isObject(value.facts) ? value.facts : value;
+  const facts = new Map<string, LearnedFact[]>();
+  for (const [entityId, rawFacts] of Object.entries(factContainer)) {
+    if (entityId === "facts" || entityId === "retractions" || entityId === "retracted_fact_keys") continue;
+    if (!Array.isArray(rawFacts)) continue;
+    const validFacts = rawFacts.filter(
+      (fact): fact is LearnedFact => isObject(fact) && typeof fact.fact === "string" && fact.fact.trim().length > 0,
+    );
+    if (validFacts.length > 0) facts.set(entityId, validFacts);
+  }
+
+  const rawRetractions = [
+    ...(Array.isArray(value.retracted_fact_keys) ? value.retracted_fact_keys : []),
+    ...(Array.isArray(value.retractions) ? value.retractions : []),
+  ];
+  const existingByText = new Map(
+    existingFacts.map((fact) => [normalizeLearnedFactContent(indexedFactText(fact)), fact.factKey]),
+  );
+  const existingKeys = new Set(existingFacts.map((fact) => fact.factKey));
+  const retractions: LearnedFactRetraction[] = [];
+  for (const rawRetraction of rawRetractions) {
+    if (typeof rawRetraction === "string") {
+      if (existingKeys.has(rawRetraction)) retractions.push({ factKey: rawRetraction });
+      continue;
+    }
+    if (!isObject(rawRetraction)) continue;
+    const factKey = typeof rawRetraction.fact_key === "string" ? rawRetraction.fact_key : undefined;
+    const fact =
+      typeof rawRetraction.fact === "string"
+        ? rawRetraction.fact
+        : typeof rawRetraction.text === "string"
+          ? rawRetraction.text
+          : undefined;
+    const entityId =
+      typeof rawRetraction.entity_id === "string"
+        ? rawRetraction.entity_id
+        : typeof rawRetraction.entityId === "string"
+          ? rawRetraction.entityId
+          : undefined;
+    const mappedFactKey = factKey ?? (fact ? existingByText.get(normalizeLearnedFactContent(fact)) : undefined);
+    if (!mappedFactKey || !existingKeys.has(mappedFactKey)) continue;
+    retractions.push({ factKey: mappedFactKey, entityId, fact });
+  }
+  return { facts, retractions };
+}
+
+async function readConversationalSliceState(db: Kysely<DB>, file: FileContext): Promise<ConversationalSliceState> {
+  const conversational = isConversationalFile(file);
+  if (!conversational) return { conversational: false, open: false };
+  const slice = await db
+    .selectFrom("conversation_slices")
+    .select("status")
+    .where("indexed_file_id", "=", file.id)
+    .executeTakeFirst();
+  return { conversational, open: slice?.status === "open" };
+}
+
 /**
  * Extract new facts about matched entities from file content.
  * Returns a map of entity ID → new facts.
@@ -1018,10 +1151,21 @@ export async function extractEntityFacts(
   context: FactSelectionContext,
   cache: FactSelectionCache,
   dumpDir?: string,
-): Promise<Map<string, LearnedFact[]>> {
-  if (matchedEntities.length === 0) return new Map();
+): Promise<EntityFactExtractionResult> {
+  if (matchedEntities.length === 0) return { facts: new Map(), retractions: [] };
 
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
+  const conversational = isConversationalFile(file);
+  const existingFacts = conversational
+    ? await deps.db
+        .selectFrom("indexed_file_facts")
+        .select(["fact_key as factKey", "fact_type as factType", "relation", "subject_name as subjectName", "raw"])
+        .where("indexed_file_id", "=", file.id)
+        .where("source", "=", "llm_extraction")
+        .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+        .where("deleted_at", "is", null)
+        .execute()
+    : [];
   let candidateFactCount = 0;
   let selectedFactCount = 0;
   let knownFactChars = 0;
@@ -1029,8 +1173,10 @@ export async function extractEntityFacts(
     await Promise.all(
       matchedEntities.map(async (e) => {
         candidateFactCount += e.learnedFacts.length;
-        const selectedFacts = await selectRelevantFacts(deps, e, context, cache);
-        const facts = renderFactsForPrompt(selectedFacts);
+        const selectedFacts = conversational ? e.learnedFacts : await selectRelevantFacts(deps, e, context, cache);
+        const facts = conversational
+          ? renderDifferentialLearnedFacts(selectedFacts)
+          : renderFactsForPrompt(selectedFacts);
         selectedFactCount += selectedFacts.length;
         knownFactChars += facts.length;
         return `- ID: ${e.entityId} | Name: ${e.name} (${e.sourceType}) | Definition: ${e.definition || "none"} | Known facts: ${facts || "none"}`;
@@ -1049,15 +1195,27 @@ export async function extractEntityFacts(
     "extractEntityFacts: selected learned facts for prompt",
   );
 
-  const prompt = `Extract NEW facts about these entities from the document below. Max 3 facts per entity, each under 20 words.
+  const existingIndexedFactsSection = conversational
+    ? `
+Existing indexed facts from earlier passes. Treat these as prior knowledge. Emit only genuinely new facts. If the current messages contradict or reverse one, include its exact fact_key in retractions.
+${existingFacts.map((fact) => `- fact_key: ${fact.factKey}; fact: ${indexedFactText(fact)}`).join("\n")}
+`
+    : "";
+  const differentialOutputSection = conversational
+    ? 'Return JSON: { "facts": { "entity-id": [{ "fact": "short fact" }] }, "retractions": [{ "fact_key": "...", "entity_id": "...", "fact": "prior learned fact text" }] }'
+    : 'Return JSON: { "entity-id": [{ "fact": "short fact" }] }';
+  const prompt = `Extract NEW facts about these entities from the document below. Max 3 facts per entity, each under 20 words.${
+    conversational ? " Existing facts are already stored; do not repeat them." : ""
+  }
 
 Entities:
 ${entityDescriptions}
+${existingIndexedFactsSection}
 
 Document: ${file.fileName} (${file.sourceCreatedAt || file.sourceUpdatedAt || "unknown"})
 ${file.threadContext ? `\nEmail thread context for resolving references only:\n${file.threadContext}\n` : ""}
 
-Return JSON: { "entity-id": [{ "fact": "short fact" }] }
+${differentialOutputSection}
 Return {} if no new facts.
 Only return facts supported by the document content. Thread context may disambiguate references but is not evidence by itself.
 
@@ -1065,14 +1223,13 @@ Only return facts supported by the document content. Thread context may disambig
 ${truncatedContent}
 </content>`;
 
-  return new Map(
-    Object.entries(
-      await deps.generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
-        maxTokens: 8192,
-        label: `extractEntityFacts:${file.id}`,
-        dumpDir,
-      }),
-    ),
+  return parseEntityFactResponse(
+    await deps.generator.generateJSON<unknown>(prompt, {
+      maxTokens: 8192,
+      label: `extractEntityFacts:${file.id}`,
+      dumpDir,
+    }),
+    existingFacts,
   );
 }
 
@@ -1090,6 +1247,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const entityRepo = createEntityRepository(db);
   const fileVersion = contentVersionOf(file);
   const validExtractionTypes = extractionValidTypes(file.fileType);
+  const conversationalState = await readConversationalSliceState(db, file);
 
   const fileMeta = {
     fileId: file.id,
@@ -1147,7 +1305,13 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   applyCanonicalRewriteMap(extraction, canonicalRewriteMap);
 
   await deps.ensureFresh?.();
-  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction, validExtractionTypes);
+  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(
+    deps,
+    file,
+    extraction,
+    validExtractionTypes,
+    conversationalState,
+  );
   try {
     await deps.ensureFresh?.();
   } catch (err) {
@@ -1185,7 +1349,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
-  const factsMap = factsResult.status === "fulfilled" ? factsResult.value : new Map<string, LearnedFact[]>();
+  const factsMap = factsResult.status === "fulfilled" ? factsResult.value.facts : new Map<string, LearnedFact[]>();
 
   if (summaryResult.status === "rejected") {
     logger.error({ ...fileMeta, stage: "generateSummary", err: summaryResult.reason }, "smartEnrichFile: stage failed");
@@ -1195,6 +1359,10 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       { ...fileMeta, stage: "extractEntityFacts", matchedEntityCount: allMatched.length, err: factsResult.reason },
       "smartEnrichFile: stage failed (continuing without entity facts)",
     );
+    if (conversationalState.conversational) {
+      await markConversationalFactsPending(db, file, fileVersion);
+      throw factsResult.reason;
+    }
   }
 
   if (!summary) {
@@ -1245,6 +1413,15 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       }
     }
 
+    if (conversationalState.conversational && factsResult.status === "fulfilled") {
+      const retractions = factsResult.value.retractions;
+      const factKeys = retractions.flatMap((retraction) => (retraction.factKey ? [retraction.factKey] : []));
+      if (factKeys.length > 0) {
+        await createIndexedFileFactRepository(db).tombstoneByFactKeys(factKeys);
+      }
+      await removeRetractedLearnedFacts(db, file.id, retractions);
+    }
+
     // Update entity definitions with new facts
     for (const [entityId, facts] of factsMap) {
       if (facts.length === 0) continue;
@@ -1291,6 +1468,15 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       if (appendedCount > 0) logger.debug({ entityId, newFactCount: appendedCount }, "Updated entity definition");
       await yieldToEventLoop();
     }
+
+    if (conversationalState.conversational && factsResult.status === "fulfilled") {
+      await deps.ensureFresh?.();
+      await db
+        .updateTable("conversation_slices")
+        .set({ facts_enriched_content_hash: file.contentHash })
+        .where("indexed_file_id", "=", file.id)
+        .execute();
+    }
   } catch (err) {
     if (isStaleEnrichmentError(err)) {
       await tombstoneWrittenLlmFacts(deps, writtenLlmFactKeys);
@@ -1304,6 +1490,7 @@ async function reconcileLlmExtractionFacts(
   file: FileContext,
   extraction: EntityExtractionResult,
   allowedTypes: Set<string>,
+  conversationalState: ConversationalSliceState,
 ): Promise<string[]> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
@@ -1420,6 +1607,7 @@ async function reconcileLlmExtractionFacts(
       }
       const input: UpsertIndexedFileFactInput = {
         indexedFileId: file.id,
+        fileType: file.fileType,
         connectorConfigId: file.connectorConfigId,
         createdByUserId: owner?.created_by ?? null,
         contentHash,
@@ -1428,7 +1616,9 @@ async function reconcileLlmExtractionFacts(
         relation: "mentioned",
         subjectName: mention.mention,
         subjectSource: "llm_extraction",
-        subjectSourceId: `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
+        subjectSourceId: isConversationalFile(file)
+          ? `${file.id}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`
+          : `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
         contextSnippet: null,
         raw: {
           contentHash,
@@ -1467,32 +1657,34 @@ async function reconcileLlmExtractionFacts(
     }
 
     await deps.ensureFresh?.();
-    const featureCorroborationKeys = await collectStaleFeatureCorroborationKeys(
-      db,
-      file.id,
-      new Set(emittedFeatureKeys),
-    );
-    const mentionReconcile = await factRepo.reconcileStaleFacts(
-      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
-      new Set(emittedMentionKeys),
-    );
-    const relationReconcile = await factRepo.reconcileStaleFacts(
-      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
-      new Set(emittedRelationKeys),
-    );
-    await factRepo.reconcileStaleFacts(
-      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "feature" },
-      new Set(emittedFeatureKeys),
-    );
-    await cleanupRelationshipEvidenceForFacts(db, [
-      ...mentionReconcile.tombstonedFactIds,
-      ...relationReconcile.tombstonedFactIds,
-    ]);
-    await cleanupEmptyRelationships(db);
-    if (featureCorroborationKeys.length > 0) {
-      materializeDeps ??= await buildMaterializeDeps(db);
-      for (const corroborationKey of featureCorroborationKeys) {
-        await reconcileFeatureSubEntity(materializeDeps, corroborationKey);
+    if (!conversationalState.open) {
+      const featureCorroborationKeys = await collectStaleFeatureCorroborationKeys(
+        db,
+        file.id,
+        new Set(emittedFeatureKeys),
+      );
+      const mentionReconcile = await factRepo.reconcileStaleFacts(
+        { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
+        new Set(emittedMentionKeys),
+      );
+      const relationReconcile = await factRepo.reconcileStaleFacts(
+        { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
+        new Set(emittedRelationKeys),
+      );
+      await factRepo.reconcileStaleFacts(
+        { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "feature" },
+        new Set(emittedFeatureKeys),
+      );
+      await cleanupRelationshipEvidenceForFacts(db, [
+        ...mentionReconcile.tombstonedFactIds,
+        ...relationReconcile.tombstonedFactIds,
+      ]);
+      await cleanupEmptyRelationships(db);
+      if (featureCorroborationKeys.length > 0) {
+        materializeDeps ??= await buildMaterializeDeps(db);
+        for (const corroborationKey of featureCorroborationKeys) {
+          await reconcileFeatureSubEntity(materializeDeps, corroborationKey);
+        }
       }
     }
 
@@ -1566,6 +1758,58 @@ function readFeatureCorroborationKey(raw: string | null): string | null {
   }
 }
 
+async function markConversationalFactsPending(
+  db: Kysely<DB>,
+  file: FileContext,
+  fileVersion: FileContentVersion,
+): Promise<void> {
+  const result = await applyContentVersionWhere(
+    db
+      .updateTable("indexed_files")
+      .set({ embedding_status: "pending", embedding_next_retry_at: null })
+      .where("id", "=", file.id),
+    fileVersion,
+  ).executeTakeFirst();
+  assertFreshUpdate(result, file.id);
+}
+
+async function removeRetractedLearnedFacts(
+  db: Kysely<DB>,
+  indexedFileId: string,
+  retractions: LearnedFactRetraction[],
+): Promise<void> {
+  const removalKeys = new Set(
+    retractions
+      .filter(
+        (retraction): retraction is LearnedFactRetraction & { fact: string } => typeof retraction.fact === "string",
+      )
+      .map((retraction) => learnedFactKey({ fact: retraction.fact, source_file_id: indexedFileId }))
+      .filter((key): key is string => key !== null),
+  );
+  if (removalKeys.size === 0) return;
+  const entityIds = [
+    ...new Set(retractions.flatMap((retraction) => (retraction.entityId ? [retraction.entityId] : []))),
+  ];
+  let query = db.selectFrom("entities").select(["id", "metadata"]);
+  if (entityIds.length > 0) query = query.where("id", "in", entityIds);
+  const entities = await query.execute();
+  for (const entity of entities) {
+    const metadata = parseEntityMetadata(entity.metadata);
+    const learnedFacts = metadata.learned_facts ?? [];
+    const retained = learnedFacts.filter((fact) => {
+      const key = learnedFactKey(fact);
+      return key === null || !removalKeys.has(key);
+    });
+    if (retained.length === learnedFacts.length) continue;
+    metadata.learned_facts = retained;
+    await db
+      .updateTable("entities")
+      .set({ metadata: JSON.stringify(metadata), updated_at: new Date().toISOString() })
+      .where("id", "=", entity.id)
+      .execute();
+  }
+}
+
 async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: string[]): Promise<void> {
   const keys = [...new Set(factKeys)];
   if (keys.length === 0) return;
@@ -1612,6 +1856,48 @@ async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: str
       await reconcileFeatureSubEntity(materializeDeps, corroborationKey);
     }
   }
+}
+
+export async function purgeConversationalFactsForFile(db: Kysely<DB>, indexedFileId: string): Promise<void> {
+  const factRows = await db
+    .selectFrom("indexed_file_facts")
+    .select("fact_key")
+    .where("indexed_file_id", "=", indexedFileId)
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "in", ["llm_extracted", "llm_relation", "feature"])
+    .where("deleted_at", "is", null)
+    .execute();
+  await createIndexedFileFactRepository(db).tombstoneByFactKeys(factRows.map((row) => row.fact_key));
+
+  const entities = await db.selectFrom("entities").select(["id", "metadata"]).execute();
+  for (const entity of entities) {
+    const metadata = parseEntityMetadata(entity.metadata);
+    const learnedFacts = metadata.learned_facts ?? [];
+    const retained = learnedFacts.filter((fact) => fact.source_file_id !== indexedFileId);
+    if (retained.length === learnedFacts.length) continue;
+    metadata.learned_facts = retained;
+    await db
+      .updateTable("entities")
+      .set({ metadata: JSON.stringify(metadata), updated_at: new Date().toISOString() })
+      .where("id", "=", entity.id)
+      .execute();
+  }
+
+  await db
+    .deleteFrom("entity_mentions")
+    .where("indexed_file_id", "=", indexedFileId)
+    .where("source", "in", ["llm_extraction", "llm_relation"])
+    .execute();
+  await db
+    .deleteFrom("entity_source_refs")
+    .where("source", "in", ["llm_extraction", "llm_relation"])
+    .where("source_id", "like", `${indexedFileId}:%`)
+    .execute();
+  await db
+    .updateTable("conversation_slices")
+    .set({ facts_enriched_content_hash: null })
+    .where("indexed_file_id", "=", indexedFileId)
+    .execute();
 }
 
 /**
@@ -1671,6 +1957,7 @@ function buildRelationFactInput(input: {
 
   return {
     indexedFileId: input.file.id,
+    fileType: input.file.fileType,
     connectorConfigId: input.file.connectorConfigId,
     createdByUserId: input.ownerUserId,
     contentHash: input.contentHash,
@@ -1679,7 +1966,9 @@ function buildRelationFactInput(input: {
     relation: relationType,
     subjectName: sourceName,
     subjectSource: "llm_extraction",
-    subjectSourceId: `${input.file.id}:${input.contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`,
+    subjectSourceId: isConversationalFile(input.file)
+      ? `${input.file.id}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`
+      : `${input.file.id}:${input.contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`,
     contextSnippet: input.relation.context ?? null,
     raw: {
       contentHash: input.contentHash,

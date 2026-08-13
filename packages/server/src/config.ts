@@ -52,10 +52,6 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),
-  WHATSAPP_LLM_CHUNKING_ENABLED: z
-    .enum(["true", "false", "1", "0"])
-    .default("false")
-    .transform((v) => v === "true" || v === "1"),
   VISION_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")

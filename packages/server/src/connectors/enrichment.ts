@@ -597,7 +597,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 file.content,
               );
               const participantBlock = await buildParticipantBlock(
-                { db },
+                { db, logger },
                 { fileId: file.id, fileContent: file.content },
               );
               await smartEnrichFile(
@@ -889,7 +889,10 @@ async function enrichTextDocument(
         deps.knownEntities ?? [],
         file.content,
       );
-      const participantBlock = await buildParticipantBlock({ db }, { fileId: file.id, fileContent: file.content });
+      const participantBlock = await buildParticipantBlock(
+        { db, logger },
+        { fileId: file.id, fileContent: file.content },
+      );
       await smartEnrichFile(
         {
           db,

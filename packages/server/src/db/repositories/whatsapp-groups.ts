@@ -9,6 +9,7 @@ import type {
 } from "../schema";
 import { normalizeContactPointValue } from "./entities";
 import { createUserWhatsAppLidRepository } from "./user-whatsapp-lids";
+import { projectWhatsAppRosterPerson } from "./whatsapp-roster-person-projection";
 
 export type WhatsAppGroupRow = Selectable<WhatsAppGroupsTable>;
 export type NewWhatsAppGroup = Insertable<WhatsAppGroupsTable>;
@@ -24,12 +25,41 @@ export interface WhatsAppGroupIndexingConfig {
   sliceGapMinutes: number | null;
   sliceMaxAgeMinutes: number | null;
   sliceMaxMessages: number | null;
+  chunkWindowMessages?: number | null;
+  chunkWindowTokens?: number | null;
+  chunkMinMessages?: number | null;
+  chunkTargetMessages?: number | null;
+  chunkMaxMessages?: number | null;
+  chunkMaxTokens?: number | null;
+  chunkTickMinutes?: number | null;
+  chunkIdleCloseHours?: number | null;
+  chunkProvisionalRefreshMessages?: number | null;
+  chunkModel?: string | null;
+  chunkReasoningEffort?: string | null;
+  chunkBurstThresholdMessages?: number | null;
+  chunkTopicRegistryCap?: number | null;
+  chunkGroupWorkerPool?: number | null;
+  chunkLastLlmAttemptAt?: string | null;
 }
 
 export interface WhatsAppGroupIndexingOverrides {
   sliceGapMinutes?: number | null;
   sliceMaxAgeMinutes?: number | null;
   sliceMaxMessages?: number | null;
+  chunkWindowMessages?: number | null;
+  chunkWindowTokens?: number | null;
+  chunkMinMessages?: number | null;
+  chunkTargetMessages?: number | null;
+  chunkMaxMessages?: number | null;
+  chunkMaxTokens?: number | null;
+  chunkTickMinutes?: number | null;
+  chunkIdleCloseHours?: number | null;
+  chunkProvisionalRefreshMessages?: number | null;
+  chunkModel?: string | null;
+  chunkReasoningEffort?: string | null;
+  chunkBurstThresholdMessages?: number | null;
+  chunkTopicRegistryCap?: number | null;
+  chunkGroupWorkerPool?: number | null;
 }
 
 export interface WhatsAppGroupMemberLabelInput {
@@ -121,6 +151,23 @@ async function projectCompleteParticipantIdentity(
   await createUserWhatsAppLidRepository(db).attachIfPhoneUnchanged(userId, phoneE164, lid, observedAt);
 }
 
+async function projectParticipantIdentity(
+  db: Transaction<DB>,
+  groupJid: string,
+  participant: ReturnType<typeof normalizedParticipant>,
+  observedAt: string,
+): Promise<void> {
+  if (participant.phoneE164 && participant.lid) {
+    await projectCompleteParticipantIdentity(db, participant.phoneE164, participant.lid, observedAt);
+  }
+  await projectWhatsAppRosterPerson(db, {
+    groupJid,
+    phoneE164: participant.phoneE164,
+    lid: participant.lid,
+    observedAt,
+  });
+}
+
 function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
   return {
     jid: row.jid,
@@ -130,6 +177,21 @@ function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
     sliceGapMinutes: row.slice_gap_minutes,
     sliceMaxAgeMinutes: row.slice_max_age_minutes,
     sliceMaxMessages: row.slice_max_messages,
+    chunkWindowMessages: row.chunk_window_messages,
+    chunkWindowTokens: row.chunk_window_tokens,
+    chunkMinMessages: row.chunk_min_messages,
+    chunkTargetMessages: row.chunk_target_messages,
+    chunkMaxMessages: row.chunk_max_messages,
+    chunkMaxTokens: row.chunk_max_tokens,
+    chunkTickMinutes: row.chunk_tick_minutes,
+    chunkIdleCloseHours: row.chunk_idle_close_hours,
+    chunkProvisionalRefreshMessages: row.chunk_provisional_refresh_messages,
+    chunkModel: row.chunk_model,
+    chunkReasoningEffort: row.chunk_reasoning_effort,
+    chunkBurstThresholdMessages: row.chunk_burst_threshold_messages,
+    chunkTopicRegistryCap: row.chunk_topic_registry_cap,
+    chunkGroupWorkerPool: row.chunk_group_worker_pool,
+    chunkLastLlmAttemptAt: row.chunk_last_llm_attempt_at,
   };
 }
 
@@ -278,6 +340,25 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       if (overrides.sliceGapMinutes !== undefined) values.slice_gap_minutes = overrides.sliceGapMinutes;
       if (overrides.sliceMaxAgeMinutes !== undefined) values.slice_max_age_minutes = overrides.sliceMaxAgeMinutes;
       if (overrides.sliceMaxMessages !== undefined) values.slice_max_messages = overrides.sliceMaxMessages;
+      if (overrides.chunkWindowMessages !== undefined) values.chunk_window_messages = overrides.chunkWindowMessages;
+      if (overrides.chunkWindowTokens !== undefined) values.chunk_window_tokens = overrides.chunkWindowTokens;
+      if (overrides.chunkMinMessages !== undefined) values.chunk_min_messages = overrides.chunkMinMessages;
+      if (overrides.chunkTargetMessages !== undefined) values.chunk_target_messages = overrides.chunkTargetMessages;
+      if (overrides.chunkMaxMessages !== undefined) values.chunk_max_messages = overrides.chunkMaxMessages;
+      if (overrides.chunkMaxTokens !== undefined) values.chunk_max_tokens = overrides.chunkMaxTokens;
+      if (overrides.chunkTickMinutes !== undefined) values.chunk_tick_minutes = overrides.chunkTickMinutes;
+      if (overrides.chunkIdleCloseHours !== undefined) values.chunk_idle_close_hours = overrides.chunkIdleCloseHours;
+      if (overrides.chunkProvisionalRefreshMessages !== undefined) {
+        values.chunk_provisional_refresh_messages = overrides.chunkProvisionalRefreshMessages;
+      }
+      if (overrides.chunkModel !== undefined) values.chunk_model = overrides.chunkModel;
+      if (overrides.chunkReasoningEffort !== undefined) values.chunk_reasoning_effort = overrides.chunkReasoningEffort;
+      if (overrides.chunkBurstThresholdMessages !== undefined) {
+        values.chunk_burst_threshold_messages = overrides.chunkBurstThresholdMessages;
+      }
+      if (overrides.chunkTopicRegistryCap !== undefined)
+        values.chunk_topic_registry_cap = overrides.chunkTopicRegistryCap;
+      if (overrides.chunkGroupWorkerPool !== undefined) values.chunk_group_worker_pool = overrides.chunkGroupWorkerPool;
       /**
        * Deliberately not wrapped in an explicit transaction: repository
        * methods run inside shared-PGlite test transactions where an inner
@@ -448,7 +529,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
               : [];
           if (!participant.phoneE164 || !participant.lid) {
             if (matches.length > 0) {
-              await trx
+              const updated = await trx
                 .updateTable("whatsapp_group_participants")
                 .set({
                   participant_jid: participant.participantJid,
@@ -461,7 +542,10 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                   matches.map((row) => row.id),
                 )
                 .where("last_seen_at", "<=", lastSeenAt)
-                .execute();
+                .executeTakeFirst();
+              if (Number(updated.numUpdatedRows) > 0) {
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
+              }
               continue;
             }
           } else {
@@ -480,7 +564,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                 .where("last_seen_at", "<=", lastSeenAt)
                 .executeTakeFirst();
               if (Number(updated.numUpdatedRows) === 1) {
-                await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
               }
               continue;
             }
@@ -511,7 +595,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
                   .where("lid", "=", participant.lid)
                   .where("last_seen_at", "=", lidOnly[0].last_seen_at)
                   .execute();
-                await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
+                await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
                 continue;
               }
             }
@@ -537,16 +621,14 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
               }),
             )
             .execute();
-          if (participant.phoneE164 && participant.lid) {
-            const stored = await trx
-              .selectFrom("whatsapp_group_participants")
-              .select("last_seen_at")
-              .where("group_jid", "=", groupJid)
-              .where("observation_key", "=", whatsappParticipantObservationKey(participant.phoneE164, participant.lid))
-              .executeTakeFirst();
-            if (stored?.last_seen_at === lastSeenAt) {
-              await projectCompleteParticipantIdentity(trx, participant.phoneE164, participant.lid, lastSeenAt);
-            }
+          const stored = await trx
+            .selectFrom("whatsapp_group_participants")
+            .select("last_seen_at")
+            .where("group_jid", "=", groupJid)
+            .where("observation_key", "=", whatsappParticipantObservationKey(participant.phoneE164, participant.lid))
+            .executeTakeFirst();
+          if (stored?.last_seen_at === lastSeenAt) {
+            await projectParticipantIdentity(trx, groupJid, participant, lastSeenAt);
           }
         }
       });

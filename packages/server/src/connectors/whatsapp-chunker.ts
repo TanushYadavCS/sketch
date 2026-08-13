@@ -18,6 +18,10 @@ import {
   effectiveWhatsAppMessageTimestamp,
 } from "../whatsapp/provider-timestamp";
 import { estimateTokens } from "./chunking";
+import { isRetryableProviderError } from "./provider-fallback";
+import { purgeConversationalFactsForFile } from "./smart-enrichment";
+import { runWithConcurrency } from "./sync-utils";
+import { evaluateIdleClose, runLlmChunkingPass } from "./whatsapp-llm-chunker";
 
 export const DEFAULT_WHATSAPP_SLICE_GAP_MINUTES = 25;
 export const DEFAULT_WHATSAPP_SLICE_MAX_AGE_MINUTES = 120;
@@ -164,6 +168,9 @@ interface ChunkWhatsAppGroupOptions {
   claimStaleMs?: number;
   onConversationClaimed?: (conversationId: number) => Promise<void>;
   defaultKnobs?: Partial<WhatsAppChunkerKnobs>;
+  defaultLlmKnobs?: Partial<WhatsAppLlmChunkerKnobs>;
+  llmGenerate?: WhatsAppLlmGenerate;
+  onOpenChunkShrunk?: (indexedFileId: string) => Promise<void>;
 }
 
 interface ChunkWhatsAppGroupsOptions {
@@ -174,10 +181,23 @@ interface ChunkWhatsAppGroupsOptions {
   claimStaleMs?: number;
   onConversationClaimed?: (conversationId: number) => Promise<void>;
   defaultKnobs?: Partial<WhatsAppChunkerKnobs>;
+  defaultLlmKnobs?: Partial<WhatsAppLlmChunkerKnobs>;
+  llmGenerate?: WhatsAppLlmGenerate;
+  onOpenChunkShrunk?: (indexedFileId: string) => Promise<void>;
   backfillGraphKnobs?: Partial<WhatsAppBackfillGraphKnobs>;
   onBackfillConversationClaimed?: (conversationId: number) => Promise<void>;
   onBackfillSlicesInserted?: (rangeId: string) => Promise<void>;
 }
+
+type WhatsAppLlmGenerate = (
+  prompt: string,
+  opts: {
+    model: string | null;
+    reasoningEffort: WhatsAppLlmReasoningEffort;
+    maxTokens?: number;
+    label?: string;
+  },
+) => Promise<string>;
 
 export function resolveWhatsAppChunkerKnobs(
   group: WhatsAppGroupIndexingConfig,
@@ -494,14 +514,21 @@ async function listMessagesAfterCursor(
   conversationId: number,
   cursor: ConversationSliceCursorRow,
   now: Date,
+  openFirstMessageId?: number,
 ): Promise<WhatsAppChunkerMessage[]> {
   const lowerBound = cursorReceivedAtLowerBound(cursor);
+  const open = await createConversationSlicesRepository(db).getOpenSlice(conversationId);
+  const historyStartId = open?.first_message_id ?? openFirstMessageId;
   let query = db
     .selectFrom("conversation_messages")
     .select(["id", "provider_message_id", "is_bot", "text", "attachments", "provider_timestamp", "received_at"])
-    .where("conversation_id", "=", conversationId)
-    .where("source", "=", "live");
-  if (lowerBound) query = query.where("received_at", ">", lowerBound);
+    .where("conversation_id", "=", conversationId);
+  query = query.where((eb) =>
+    eb.or([
+      eb.and([eb("source", "=", "live"), ...(lowerBound ? [eb("received_at", ">", lowerBound)] : [])]),
+      ...(historyStartId !== undefined ? [eb.and([eb("source", "=", "history"), eb("id", ">=", historyStartId)])] : []),
+    ]),
+  );
   const rows = await query.orderBy("id", "asc").execute();
 
   return rows
@@ -542,132 +569,124 @@ async function countLateArrivals(
   ).length;
 }
 
+async function runLlmChunkingWithBackoff(
+  options: ChunkWhatsAppGroupOptions,
+  params: Parameters<typeof runLlmChunkingPass>[1],
+): Promise<Awaited<ReturnType<typeof runLlmChunkingPass>>> {
+  if (!options.llmGenerate) return { windowsProcessed: 0, slicesClosed: 0, openSliceId: null };
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await runLlmChunkingPass(
+        {
+          db: options.db,
+          logger: options.logger,
+          generate: options.llmGenerate,
+          now: () => (options.now ?? new Date()).getTime(),
+          onOpenChunkShrunk:
+            options.onOpenChunkShrunk ??
+            ((indexedFileId) => purgeConversationalFactsForFile(options.db, indexedFileId)),
+        },
+        params,
+      );
+    } catch (error) {
+      if (!isRetryableProviderError(error) || attempt >= 2) throw error;
+      const waitMs = Math.min(100 * 2 ** attempt, 1000);
+      options.logger.warn({ groupJid: params.groupJid, attempt: attempt + 1, waitMs }, "WhatsApp LLM provider backoff");
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+}
+
 async function chunkWhatsAppGroup(options: ChunkWhatsAppGroupOptions): Promise<WhatsAppChunkerRunSummary> {
   const { db, group, logger } = options;
   const now = options.now ?? new Date();
   const conversation = await findGroupConversation(db, group.jid);
   if (!conversation) return emptyRunSummary();
-
-  const claimToken = randomUUID();
   const repo = createConversationSlicesRepository(db);
-  const nowIso = now.toISOString();
-  const staleBefore = new Date(now.getTime() - (options.claimStaleMs ?? DEFAULT_CLAIM_STALE_MS)).toISOString();
-  const claimed = await repo.claimCursor({
+  const knobs = resolveWhatsAppLlmChunkerKnobs(group, options.defaultLlmKnobs);
+  const openBeforeIdleClose = await repo.getOpenSlice(conversation.id);
+  await evaluateIdleClose(
+    {
+      db,
+      logger,
+      generate: options.llmGenerate ?? (async () => ""),
+      now: () => now.getTime(),
+      onOpenChunkShrunk: options.onOpenChunkShrunk,
+    },
+    { conversationId: conversation.id, knobs, mode: "live" },
+  );
+  const coordinationToken = randomUUID();
+  const coordinated = await repo.claimCursor({
     conversationId: conversation.id,
-    claimToken,
-    now: nowIso,
-    staleBefore,
+    claimToken: coordinationToken,
+    now: now.toISOString(),
+    staleBefore: new Date(now.getTime() - (options.claimStaleMs ?? DEFAULT_CLAIM_STALE_MS)).toISOString(),
   });
-
-  if (!claimed) return emptyRunSummary();
-
+  if (!coordinated) return emptyRunSummary();
   try {
     await options.onConversationClaimed?.(conversation.id);
+    const enabledGroup = await db
+      .selectFrom("whatsapp_groups")
+      .select("index_enabled")
+      .where("jid", "=", group.jid)
+      .executeTakeFirst();
+    if (enabledGroup?.index_enabled !== 1) return emptyRunSummary();
+  } finally {
+    await repo.releaseCursorClaim({ conversationId: conversation.id, claimToken: coordinationToken });
+  }
+  const cursor = await repo.getCursor(conversation.id);
+  if (!cursor) return emptyRunSummary();
+  const messages = await listMessagesAfterCursor(
+    db,
+    conversation.id,
+    cursor,
+    now,
+    openBeforeIdleClose?.first_message_id,
+  );
+  const denoisedMessages = messages.filter(isIndexableWhatsAppChunkMessage);
+  const lateArrivals = await countLateArrivals(db, conversation.id, cursor, now);
+  if (lateArrivals > 0) logger.info({ conversationId: conversation.id, lateArrivals }, "late_arrival_skipped");
+  if (denoisedMessages.length === 0 || !options.llmGenerate) {
+    return { ...emptyRunSummary(), conversationsProcessed: 1, lateArrivals };
+  }
 
-    return await db.transaction().execute(async (trx) => {
-      const txRepo = createConversationSlicesRepository(trx);
-      const cursor = await txRepo.getCursor(conversation.id);
-      if (!cursor || cursor.claim_token !== claimToken) {
-        return emptyRunSummary();
-      }
+  const lastAttemptMs = group.chunkLastLlmAttemptAt ? Date.parse(group.chunkLastLlmAttemptAt) : Number.NaN;
+  const open = await repo.getOpenSlice(conversation.id);
+  const burstThreshold = knobs.burstThresholdMessages ?? Math.max(1, knobs.windowMessages - (open?.message_count ?? 0));
+  if (
+    Number.isFinite(lastAttemptMs) &&
+    now.getTime() - lastAttemptMs < knobs.tickMinutes * MINUTE_MS &&
+    denoisedMessages.length < burstThreshold
+  ) {
+    return emptyRunSummary();
+  }
 
-      const enabledGroup = await trx
-        .selectFrom("whatsapp_groups")
-        .select("index_enabled")
-        .where("jid", "=", group.jid)
-        .executeTakeFirst();
-      if (enabledGroup?.index_enabled !== 1) {
-        const released = await txRepo.releaseCursorClaim({ conversationId: conversation.id, claimToken });
-        if (!released) throw new ConversationSliceClaimLostError();
-        return emptyRunSummary();
-      }
+  await db
+    .updateTable("whatsapp_groups")
+    .set({ chunk_last_llm_attempt_at: now.toISOString() })
+    .where("jid", "=", group.jid)
+    .where("index_enabled", "=", 1)
+    .execute();
 
-      const lateArrivals = await countLateArrivals(trx, conversation.id, cursor, now);
-      if (lateArrivals > 0) {
-        logger.info({ conversationId: conversation.id, lateArrivals }, "late_arrival_skipped");
-      }
-
-      const messages = await listMessagesAfterCursor(trx, conversation.id, cursor, now);
-      const plan = planWhatsAppConversationSlices(
-        messages,
-        resolveWhatsAppChunkerKnobs(group, options.defaultKnobs),
-        now,
-      );
-      let slicesCreated = 0;
-      let maxAgeFlushes = 0;
-      let maxSizeFlushes = 0;
-
-      for (const planned of plan.slices) {
-        if (planned.flushReason === "max_age") maxAgeFlushes += 1;
-        if (planned.flushReason === "max_size") maxSizeFlushes += 1;
-        const inserted = await txRepo.insertIfAbsent({
-          conversationId: conversation.id,
-          firstMessageId: planned.firstMessageId,
-          lastMessageId: planned.lastMessageId,
-          startedAt: planned.startedAt,
-          endedAt: planned.endedAt,
-          messageCount: planned.messageCount,
-          denoisedMessageIds: planned.denoisedMessageIds,
-          flushReason: planned.flushReason,
-          rosterSnapshot: "[]",
-          salienceVerdict: null,
-        });
-
-        if (inserted.created) {
-          slicesCreated += 1;
-          logger.info(
-            {
-              conversationId: conversation.id,
-              messageCount: planned.messageCount,
-              durationSeconds: Math.max(
-                0,
-                Math.round((effectiveTimeMs(planned.endedAt) - effectiveTimeMs(planned.startedAt)) / 1000),
-              ),
-              flushReason: planned.flushReason,
-            },
-            "Created WhatsApp conversation slice",
-          );
-        }
-      }
-
-      const lastSlice = plan.slices[plan.slices.length - 1];
-      if (lastSlice) {
-        const advanced = await txRepo.advanceCursorIfClaimed({
-          conversationId: conversation.id,
-          lastEffectiveAt: lastSlice.cursor.lastEffectiveAt,
-          lastMessageId: lastSlice.cursor.lastMessageId,
-          claimToken,
-        });
-        if (!advanced) throw new ConversationSliceClaimLostError();
-      }
-      const released = await txRepo.releaseCursorClaim({ conversationId: conversation.id, claimToken });
-      if (lastSlice && !released) throw new ConversationSliceClaimLostError();
-
-      logger.info(
-        {
-          conversationId: conversation.id,
-          slicesCreated,
-          messagesProcessed: messages.length,
-          lateArrivals,
-          maxAgeFlushes,
-          maxSizeFlushes,
-        },
-        "Completed WhatsApp conversation chunking",
-      );
-
-      return {
-        conversationsProcessed: 1,
-        slicesCreated,
-        lateArrivals,
-        messagesProcessed: messages.length,
-        maxAgeFlushes,
-        maxSizeFlushes,
-      };
+  try {
+    const result = await runLlmChunkingWithBackoff(options, {
+      conversationId: conversation.id,
+      groupJid: group.jid,
+      knobs,
+      mode: "live",
+      pendingMessageIds: messages.map((message) => message.id),
     });
-  } catch (err) {
-    await repo.releaseCursorClaim({ conversationId: conversation.id, claimToken });
-    if (err instanceof ConversationSliceClaimLostError) return emptyRunSummary();
-    throw err;
+    return {
+      conversationsProcessed: 1,
+      slicesCreated: result.slicesClosed,
+      lateArrivals,
+      messagesProcessed: messages.length,
+      maxAgeFlushes: 0,
+      maxSizeFlushes: 0,
+    };
+  } catch (error) {
+    logger.warn({ err: error, conversationId: conversation.id, groupJid: group.jid }, "WhatsApp LLM chunking failed");
+    return emptyRunSummary();
   }
 }
 
@@ -682,6 +701,70 @@ interface WhatsAppBackfillGraphChatResult {
   messagesRead: number;
   slicesCreated: number;
   rangeCompleted: boolean;
+}
+
+async function isBackfillRangeCovered(
+  db: Kysely<DB>,
+  conversationId: number,
+  rangeId: string,
+  cursor: ConversationSliceCursorRow,
+): Promise<boolean> {
+  if (cursor.last_effective_at === null || cursor.last_message_id === null) return false;
+  const next = await db
+    .selectFrom("conversation_messages")
+    .select(["id", "effective_at"])
+    .where("conversation_id", "=", conversationId)
+    .where("source", "=", "history")
+    .where("backfill_range_id", "=", rangeId)
+    .where("effective_at", "is not", null)
+    .where((eb) =>
+      eb.or([
+        eb("effective_at", ">", cursor.last_effective_at as string),
+        eb.and([
+          eb("effective_at", "=", cursor.last_effective_at as string),
+          eb("id", ">", cursor.last_message_id as number),
+        ]),
+      ]),
+    )
+    .executeTakeFirst();
+  if (next) return false;
+
+  const messages = await db
+    .selectFrom("conversation_messages")
+    .select(["id", "provider_message_id", "text", "attachments", "effective_at", "is_bot"])
+    .where("conversation_id", "=", conversationId)
+    .where("source", "=", "history")
+    .where("backfill_range_id", "=", rangeId)
+    .where("effective_at", "is not", null)
+    .execute();
+  const slices = await db
+    .selectFrom("conversation_slices")
+    .select(["status", "first_message_id", "last_message_id", "started_at", "ended_at"])
+    .where("conversation_id", "=", conversationId)
+    .execute();
+  return messages
+    .filter((message) =>
+      isIndexableWhatsAppChunkMessage({
+        id: message.id,
+        providerMessageId: message.provider_message_id,
+        effectiveAt: message.effective_at as string,
+        text: message.text,
+        attachments: message.attachments,
+        isBot: message.is_bot === 1,
+      }),
+    )
+    .every((message) =>
+      slices.some((slice) => {
+        const inSpan =
+          message.id >= slice.first_message_id &&
+          message.id <= slice.last_message_id &&
+          (message.effective_at as string) >= slice.started_at &&
+          (message.effective_at as string) <= slice.ended_at;
+        const inClosedSlice = slice.status === "closed" && inSpan;
+        const inOpenTail = slice.status === "open" && inSpan;
+        return inClosedSlice || inOpenTail;
+      }),
+    );
 }
 
 function resolveWhatsAppBackfillGraphKnobs(
@@ -738,10 +821,6 @@ function exceedsWhatsAppBackfillGraphPressure(
   );
 }
 
-function sameSliceMembership(row: { denoised_message_ids: string | null }, planned: PlannedWhatsAppSlice): boolean {
-  return row.denoised_message_ids === JSON.stringify(planned.denoisedMessageIds);
-}
-
 async function admitWhatsAppBackfillGraphChat(input: {
   db: Kysely<DB>;
   group: WhatsAppGroupIndexingConfig;
@@ -752,32 +831,26 @@ async function admitWhatsAppBackfillGraphChat(input: {
   now: Date;
   logger: Logger;
   claimStaleMs?: number;
-  defaultKnobs?: Partial<WhatsAppChunkerKnobs>;
+  defaultLlmKnobs?: Partial<WhatsAppLlmChunkerKnobs>;
+  llmGenerate?: WhatsAppLlmGenerate;
+  onOpenChunkShrunk?: (indexedFileId: string) => Promise<void>;
   onBackfillConversationClaimed?: (conversationId: number) => Promise<void>;
   onBackfillSlicesInserted?: (rangeId: string) => Promise<void>;
 }): Promise<WhatsAppBackfillGraphChatResult> {
-  const claimToken = randomUUID();
   const nowIso = input.now.toISOString();
-  const staleBefore = new Date(input.now.getTime() - (input.claimStaleMs ?? DEFAULT_CLAIM_STALE_MS)).toISOString();
-  const sliceRepo = createConversationSlicesRepository(input.db);
-  if (
-    !(await sliceRepo.claimCursor({
-      conversationId: input.conversationId,
-      claimToken,
-      now: nowIso,
-      staleBefore,
-    }))
-  ) {
-    return { claimed: false, messagesRead: 0, slicesCreated: 0, rangeCompleted: false };
-  }
-
+  let page: {
+    groupJid: string;
+    rows: Array<{
+      id: number;
+      provider_message_id: string;
+      is_bot: number;
+      text: string;
+      attachments: string | null;
+      effective_at: string | null;
+    }>;
+  };
   try {
-    await input.onBackfillConversationClaimed?.(input.conversationId);
-    const result = await input.db.transaction().execute(async (trx) => {
-      const txSliceRepo = createConversationSlicesRepository(trx);
-      const cursorClaim = await txSliceRepo.getCursor(input.conversationId);
-      if (cursorClaim?.claim_token !== claimToken) throw new ConversationSliceClaimLostError();
-
+    page = await input.db.transaction().execute(async (trx) => {
       let rangeQuery = trx.selectFrom("whatsapp_backfill_ranges").selectAll().where("id", "=", input.rangeId);
       if (isPg(trx)) rangeQuery = rangeQuery.forUpdate();
       const range = await rangeQuery.executeTakeFirst();
@@ -801,7 +874,6 @@ async function admitWhatsAppBackfillGraphChat(input: {
       if (!checkpoint || checkpoint.index_enabled !== 1 || checkpoint.graph_halted_at) {
         throw new ConversationSliceClaimLostError();
       }
-
       const olderIncomplete = await trx
         .selectFrom("whatsapp_backfill_ranges")
         .select("id")
@@ -827,7 +899,6 @@ async function admitWhatsAppBackfillGraphChat(input: {
         )
         .executeTakeFirst();
       if (olderIncomplete) throw new ConversationSliceClaimLostError();
-
       const invalidTimestamp = await trx
         .selectFrom("conversation_messages")
         .select("id")
@@ -843,7 +914,6 @@ async function admitWhatsAppBackfillGraphChat(input: {
           "terminal WhatsApp backfill range contains a row without persisted effective_at",
         );
       }
-
       let pageQuery = trx
         .selectFrom("conversation_messages")
         .select(["id", "provider_message_id", "is_bot", "text", "attachments", "effective_at"])
@@ -875,161 +945,184 @@ async function admitWhatsAppBackfillGraphChat(input: {
         rows.push(row);
         pageTokens += rowTokens;
       }
-      const messages: WhatsAppChunkerMessage[] = rows.map((row) => ({
-        id: row.id,
-        providerMessageId: row.provider_message_id,
-        effectiveAt: row.effective_at as string,
-        text: row.text,
-        attachments: row.attachments,
-        isBot: row.is_bot === 1,
-      }));
-      const plan = planWhatsAppConversationSlices(
-        messages,
-        resolveWhatsAppChunkerKnobs(input.group, input.defaultKnobs),
-        input.now,
-      );
-      let slicesCreated = 0;
-      for (const planned of plan.slices) {
-        const inserted = await txSliceRepo.insertIfAbsent({
-          conversationId: input.conversationId,
-          firstMessageId: planned.firstMessageId,
-          lastMessageId: planned.lastMessageId,
-          startedAt: planned.startedAt,
-          endedAt: planned.endedAt,
-          messageCount: planned.messageCount,
-          denoisedMessageIds: planned.denoisedMessageIds,
-          flushReason: planned.flushReason,
-          rosterSnapshot: "[]",
-          salienceVerdict: null,
-        });
-        if (!inserted.created && !sameSliceMembership(inserted.row, planned)) {
-          throw new WhatsAppBackfillGraphInvariantError(
-            range.group_jid,
-            range.id,
-            `conversation slice membership conflict for first message ${planned.firstMessageId}`,
-          );
-        }
-        if (inserted.created) slicesCreated += 1;
-      }
-      await input.onBackfillSlicesInserted?.(range.id);
-
-      const lastSlice = plan.slices[plan.slices.length - 1];
-      const lastPageMessage = messages[messages.length - 1];
-      const admittedThrough =
-        plan.activeTailMessageIds.length === 0 && lastPageMessage
-          ? { effectiveAt: lastPageMessage.effectiveAt, messageId: lastPageMessage.id }
-          : lastSlice
-            ? { effectiveAt: lastSlice.cursor.lastEffectiveAt, messageId: lastSlice.cursor.lastMessageId }
-            : range.graph_cursor_effective_at !== null && range.graph_cursor_message_id !== null
-              ? { effectiveAt: range.graph_cursor_effective_at, messageId: range.graph_cursor_message_id }
-              : null;
-
-      let nextQuery = trx
-        .selectFrom("conversation_messages")
-        .select(["id", "effective_at"])
-        .where("conversation_id", "=", input.conversationId)
-        .where("source", "=", "history")
-        .where("backfill_range_id", "=", range.id)
-        .where("effective_at", "is not", null);
-      if (admittedThrough) {
-        nextQuery = nextQuery.where((eb) =>
-          eb.or([
-            eb("effective_at", ">", admittedThrough.effectiveAt),
-            eb.and([eb("effective_at", "=", admittedThrough.effectiveAt), eb("id", ">", admittedThrough.messageId)]),
-          ]),
-        );
-      }
-      const next = await nextQuery.orderBy("effective_at", "asc").orderBy("id", "asc").executeTakeFirst();
-      const rangeCompleted = plan.activeTailMessageIds.length === 0 && !next;
-      await trx
-        .updateTable("whatsapp_backfill_ranges")
-        .set({
-          ...(admittedThrough
-            ? {
-                graph_cursor_effective_at: admittedThrough.effectiveAt,
-                graph_cursor_message_id: admittedThrough.messageId,
-              }
-            : {}),
-          graph_completed_at: rangeCompleted ? nowIso : null,
-          updated_at: nowIso,
-        })
-        .where("id", "=", range.id)
-        .where("status", "in", ["complete", "exhausted"])
-        .where("graph_completed_at", "is", null)
-        .execute();
-      await trx
-        .updateTable("whatsapp_backfill_checkpoints")
-        .set({ graph_last_served_at: nowIso, updated_at: nowIso })
-        .where("group_jid", "=", range.group_jid)
-        .where("graph_halted_at", "is", null)
-        .execute();
-
-      const remaining = next
-        ? await trx
-            .selectFrom("conversation_messages")
-            .select((eb) => eb.fn.countAll().as("count"))
-            .where("conversation_id", "=", input.conversationId)
-            .where("source", "=", "history")
-            .where("backfill_range_id", "=", range.id)
-            .where((eb) =>
-              admittedThrough
-                ? eb.or([
-                    eb("effective_at", ">", admittedThrough.effectiveAt),
-                    eb.and([
-                      eb("effective_at", "=", admittedThrough.effectiveAt),
-                      eb("id", ">", admittedThrough.messageId),
-                    ]),
-                  ])
-                : eb("id", ">", 0),
-            )
-            .executeTakeFirst()
-        : null;
-      return {
-        claimed: true,
-        messagesRead: messages.length,
-        slicesCreated,
-        rangeCompleted,
-        remainingMessages: Number(remaining?.count ?? 0),
-        backlogOldestEffectiveAt: next?.effective_at ?? null,
-        cursorEffectiveAt: admittedThrough?.effectiveAt ?? null,
-        cursorMessageId: admittedThrough?.messageId ?? null,
-        groupJid: range.group_jid,
-      };
+      return { groupJid: range.group_jid, rows };
     });
-
-    await sliceRepo.releaseCursorClaim({ conversationId: input.conversationId, claimToken });
-    input.logger.info(
-      {
-        groupJid: result.groupJid,
-        conversationId: input.conversationId,
-        rangeId: input.rangeId,
-        messagesRead: result.messagesRead,
-        slicesCreated: result.slicesCreated,
-        remainingMessages: result.remainingMessages,
-        rangeCompleted: result.rangeCompleted,
-        cursorEffectiveAt: result.cursorEffectiveAt,
-        cursorMessageId: result.cursorMessageId,
-        backlogAgeSeconds: result.backlogOldestEffectiveAt
-          ? Math.max(0, Math.floor((input.now.getTime() - Date.parse(result.backlogOldestEffectiveAt)) / 1000))
-          : 0,
-      },
-      "Admitted WhatsApp backfill history into context graph slices",
-    );
-    return result;
-  } catch (err) {
-    if (err instanceof WhatsAppBackfillGraphInvariantError) {
-      await createWhatsAppBackfillRangeRepository(input.db).haltGraphAdmission(err.groupJid, err.message, nowIso);
+  } catch (error) {
+    if (error instanceof WhatsAppBackfillGraphInvariantError) {
+      await createWhatsAppBackfillRangeRepository(input.db).haltGraphAdmission(input.group.jid, error.message, nowIso);
       input.logger.error(
-        { err, groupJid: err.groupJid, conversationId: input.conversationId, rangeId: err.rangeId },
+        { err: error, groupJid: error.groupJid, conversationId: input.conversationId, rangeId: error.rangeId },
         "Halted WhatsApp backfill graph admission after invariant failure",
       );
     }
-    await sliceRepo.releaseCursorClaim({ conversationId: input.conversationId, claimToken });
-    if (err instanceof ConversationSliceClaimLostError || err instanceof WhatsAppBackfillGraphInvariantError) {
+    if (error instanceof ConversationSliceClaimLostError || error instanceof WhatsAppBackfillGraphInvariantError) {
       return { claimed: false, messagesRead: 0, slicesCreated: 0, rangeCompleted: false };
     }
-    throw err;
+    throw error;
   }
+
+  await input.onBackfillConversationClaimed?.(input.conversationId);
+  await evaluateIdleClose(
+    {
+      db: input.db,
+      logger: input.logger,
+      generate: input.llmGenerate ?? (async () => ""),
+      now: () => input.now.getTime(),
+      onOpenChunkShrunk: input.onOpenChunkShrunk,
+    },
+    {
+      conversationId: input.conversationId,
+      knobs: resolveWhatsAppLlmChunkerKnobs(input.group, input.defaultLlmKnobs),
+      mode: "backfill",
+    },
+  );
+  if (page.rows.length === 0) {
+    const completed = await input.db
+      .updateTable("whatsapp_backfill_ranges")
+      .set({ graph_completed_at: nowIso, updated_at: nowIso })
+      .where("id", "=", input.rangeId)
+      .where("status", "in", ["complete", "exhausted"])
+      .where("graph_completed_at", "is", null)
+      .executeTakeFirst();
+    await input.db
+      .updateTable("whatsapp_backfill_checkpoints")
+      .set({ graph_last_served_at: nowIso, updated_at: nowIso })
+      .where("group_jid", "=", page.groupJid)
+      .where("graph_halted_at", "is", null)
+      .execute();
+    return {
+      claimed: true,
+      messagesRead: 0,
+      slicesCreated: 0,
+      rangeCompleted: Number(completed.numUpdatedRows ?? 0) === 1,
+    };
+  }
+  const llmResult = await runLlmChunkingWithBackoff(
+    {
+      db: input.db,
+      group: input.group,
+      logger: input.logger,
+      now: input.now,
+      claimStaleMs: input.claimStaleMs,
+      defaultLlmKnobs: input.defaultLlmKnobs,
+      llmGenerate: input.llmGenerate,
+      onOpenChunkShrunk: input.onOpenChunkShrunk,
+    },
+    {
+      conversationId: input.conversationId,
+      groupJid: page.groupJid,
+      knobs: resolveWhatsAppLlmChunkerKnobs(input.group, input.defaultLlmKnobs),
+      mode: "backfill",
+      pendingMessageIds: page.rows.map((row) => row.id),
+    },
+  );
+  if (llmResult.skippedReason === "overlap_guard") {
+    const reason = "WhatsApp LLM boundary overlapped existing slice membership";
+    await createWhatsAppBackfillRangeRepository(input.db).haltGraphAdmission(input.group.jid, reason, nowIso);
+    input.logger.error(
+      { groupJid: input.group.jid, conversationId: input.conversationId, rangeId: input.rangeId, reason },
+      "Halted WhatsApp backfill graph admission after invariant failure",
+    );
+    return { claimed: false, messagesRead: page.rows.length, slicesCreated: 0, rangeCompleted: false };
+  }
+  if (llmResult.windowsProcessed > 0) await input.onBackfillSlicesInserted?.(input.rangeId);
+  const cursor = await createConversationSlicesRepository(input.db).getCursor(input.conversationId);
+  if (!cursor) return { claimed: true, messagesRead: page.rows.length, slicesCreated: 0, rangeCompleted: false };
+
+  const result = await input.db.transaction().execute(async (trx) => {
+    const range = await trx
+      .selectFrom("whatsapp_backfill_ranges")
+      .selectAll()
+      .where("id", "=", input.rangeId)
+      .executeTakeFirst();
+    if (!range || range.graph_completed_at) return null;
+    const rangeCompleted = await isBackfillRangeCovered(trx, input.conversationId, input.rangeId, cursor);
+    const next = await trx
+      .selectFrom("conversation_messages")
+      .select("effective_at")
+      .where("conversation_id", "=", input.conversationId)
+      .where("source", "=", "history")
+      .where("backfill_range_id", "=", input.rangeId)
+      .where("effective_at", "is not", null)
+      .where((eb) =>
+        eb.or([
+          eb("effective_at", ">", cursor.last_effective_at as string),
+          eb.and([
+            eb("effective_at", "=", cursor.last_effective_at as string),
+            eb("id", ">", cursor.last_message_id as number),
+          ]),
+        ]),
+      )
+      .orderBy("effective_at", "asc")
+      .orderBy("id", "asc")
+      .executeTakeFirst();
+    const remaining = next
+      ? await trx
+          .selectFrom("conversation_messages")
+          .select((eb) => eb.fn.countAll().as("count"))
+          .where("conversation_id", "=", input.conversationId)
+          .where("source", "=", "history")
+          .where("backfill_range_id", "=", input.rangeId)
+          .where((eb) =>
+            eb.or([
+              eb("effective_at", ">", cursor.last_effective_at as string),
+              eb.and([
+                eb("effective_at", "=", cursor.last_effective_at as string),
+                eb("id", ">", cursor.last_message_id as number),
+              ]),
+            ]),
+          )
+          .executeTakeFirst()
+      : null;
+    await trx
+      .updateTable("whatsapp_backfill_ranges")
+      .set({
+        graph_cursor_effective_at: cursor.last_effective_at,
+        graph_cursor_message_id: cursor.last_message_id,
+        graph_completed_at: rangeCompleted ? nowIso : null,
+        updated_at: nowIso,
+      })
+      .where("id", "=", input.rangeId)
+      .where("status", "in", ["complete", "exhausted"])
+      .where("graph_completed_at", "is", null)
+      .execute();
+    await trx
+      .updateTable("whatsapp_backfill_checkpoints")
+      .set({ graph_last_served_at: nowIso, updated_at: nowIso })
+      .where("group_jid", "=", range.group_jid)
+      .where("graph_halted_at", "is", null)
+      .execute();
+    return {
+      groupJid: range.group_jid,
+      remainingMessages: Number(remaining?.count ?? 0),
+      backlogOldestEffectiveAt: next?.effective_at ?? null,
+      rangeCompleted,
+    };
+  });
+  if (!result) return { claimed: true, messagesRead: page.rows.length, slicesCreated: 0, rangeCompleted: false };
+  input.logger.info(
+    {
+      groupJid: result.groupJid,
+      conversationId: input.conversationId,
+      rangeId: input.rangeId,
+      messagesRead: page.rows.length,
+      slicesCreated: llmResult.slicesClosed,
+      remainingMessages: result.remainingMessages,
+      rangeCompleted: result.rangeCompleted,
+      cursorEffectiveAt: cursor.last_effective_at,
+      cursorMessageId: cursor.last_message_id,
+      backlogAgeSeconds: result.backlogOldestEffectiveAt
+        ? Math.max(0, Math.floor((input.now.getTime() - Date.parse(result.backlogOldestEffectiveAt)) / 1000))
+        : 0,
+    },
+    "Admitted WhatsApp backfill history into context graph slices",
+  );
+  return {
+    claimed: true,
+    messagesRead: page.rows.length,
+    slicesCreated: llmResult.slicesClosed,
+    rangeCompleted: result.rangeCompleted,
+  };
 }
 
 async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptions): Promise<{
@@ -1080,7 +1173,9 @@ async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptio
       now: options.now ?? new Date(),
       logger: options.logger,
       claimStaleMs: options.claimStaleMs,
-      defaultKnobs: options.defaultKnobs,
+      defaultLlmKnobs: options.defaultLlmKnobs,
+      llmGenerate: options.llmGenerate,
+      onOpenChunkShrunk: options.onOpenChunkShrunk,
       onBackfillConversationClaimed: options.onBackfillConversationClaimed,
       onBackfillSlicesInserted: options.onBackfillSlicesInserted,
     });
@@ -1104,9 +1199,17 @@ export async function chunkWhatsAppIndexingGroups(
   options: ChunkWhatsAppGroupsOptions,
 ): Promise<WhatsAppChunkerRunSummary> {
   const summary = emptyRunSummary();
-
-  for (const group of options.groups) {
+  const results: WhatsAppChunkerRunSummary[] = [];
+  const groupWorkerPool = Math.max(
+    1,
+    ...options.groups.map((group) => resolveWhatsAppLlmChunkerKnobs(group, options.defaultLlmKnobs).groupWorkerPool),
+  );
+  await runWithConcurrency(options.groups, groupWorkerPool, async (group) => {
     const result = await chunkWhatsAppGroup({ ...options, group });
+    results.push(result);
+  });
+
+  for (const result of results) {
     summary.conversationsProcessed += result.conversationsProcessed;
     summary.slicesCreated += result.slicesCreated;
     summary.lateArrivals += result.lateArrivals;

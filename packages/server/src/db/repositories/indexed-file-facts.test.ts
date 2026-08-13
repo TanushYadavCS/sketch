@@ -2,7 +2,11 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { type UpsertIndexedFileFactInput, createIndexedFileFactRepository } from "./indexed-file-facts";
+import {
+  type UpsertIndexedFileFactInput,
+  buildIndexedFileFactKey,
+  createIndexedFileFactRepository,
+} from "./indexed-file-facts";
 
 describe("createIndexedFileFactRepository", () => {
   let db: Kysely<DB>;
@@ -307,6 +311,232 @@ describe("createIndexedFileFactRepository", () => {
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.content_hash).sort()).toEqual(["hash-1", "hash-2"]);
     expect(new Set(rows.map((r) => r.fact_key)).size).toBe(2);
+  });
+
+  it("keeps conversational LLM fact keys independent of content hash and source id churn", () => {
+    const base: UpsertIndexedFileFactInput = {
+      indexedFileId: "slice-file",
+      connectorConfigId: "connector-1",
+      fileType: "whatsapp_conversation_slice",
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "slice-file:hash-1:llm-extraction-v1:Jane Doe",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: [],
+      },
+    };
+
+    expect(
+      buildIndexedFileFactKey({
+        ...base,
+        contentHash: "hash-2",
+        subjectSourceId: "slice-file:hash-2:llm-extraction-v1:Jane Doe",
+        raw: {
+          contentHash: "hash-2",
+          promptVersion: "llm-extraction-v1",
+          model: "gemini",
+          mention: "Jane Doe",
+          type: "person",
+          variations: [],
+        },
+      }),
+    ).toBe(buildIndexedFileFactKey(base));
+  });
+
+  it("keeps conversational LLM relation keys independent of content hash and source id churn", () => {
+    const base: UpsertIndexedFileFactInput = {
+      indexedFileId: "slice-file",
+      fileType: "slack_conversation_slice",
+      connectorConfigId: "connector-1",
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "llm_relation",
+      relation: "leads",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "slice-file:hash-1:llm-extraction-v1:leads:Jane Doe:Project Atlas",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        relationType: "leads",
+        confidence: 0.95,
+        source: { name: "Jane Doe", type: "person", variations: [] },
+        target: { name: "Project Atlas", type: "project", variations: [] },
+      },
+    };
+
+    expect(
+      buildIndexedFileFactKey({
+        ...base,
+        contentHash: "hash-2",
+        subjectSourceId: "slice-file:hash-2:llm-extraction-v1:leads:Jane Doe:Project Atlas",
+        raw: {
+          contentHash: "hash-2",
+          promptVersion: "llm-extraction-v1",
+          model: "gemini",
+          relationType: "leads",
+          confidence: 0.95,
+          source: { name: "Jane Doe", type: "person", variations: [] },
+          target: { name: "Project Atlas", type: "project", variations: [] },
+        },
+      }),
+    ).toBe(buildIndexedFileFactKey(base));
+  });
+
+  it("tombstones only requested LLM keys and cleans their graph evidence", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-1",
+        connector_type: "whatsapp",
+        auth_type: "system",
+        credentials: "{}",
+        created_by: "user-1",
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-1",
+        connector_config_id: "connector-1",
+        provider_file_id: "provider-file-1",
+        file_name: "Conversation",
+        file_type: "whatsapp_conversation_slice",
+        content_category: "document",
+        source: "whatsapp",
+        content_hash: "hash-1",
+        synced_at: new Date().toISOString(),
+      })
+      .execute();
+    const factInput: UpsertIndexedFileFactInput = {
+      indexedFileId: "file-1",
+      fileType: "whatsapp_conversation_slice",
+      connectorConfigId: "connector-1",
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Alice",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:llm-extraction-v1:Alice",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Alice",
+        type: "person",
+        variations: [],
+      },
+    };
+    await repo.upsertFact(factInput);
+    await repo.upsertFact({ ...factInput, subjectName: "Bob", subjectSourceId: "file-1:llm-extraction-v1:Bob" });
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", "file-1")
+      .orderBy("subject_name")
+      .execute();
+    const alice = facts[0];
+    const bob = facts[1];
+    const aliceEntityId = "alice-entity";
+    const bobEntityId = "bob-entity";
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: aliceEntityId,
+          name: "Alice",
+          source_type: "person",
+          status: "confirmed",
+          hotness: 0,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: bobEntityId,
+          name: "Bob",
+          source_type: "person",
+          status: "confirmed",
+          hotness: 0,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_source_refs")
+      .values({
+        id: "alice-ref",
+        entity_id: aliceEntityId,
+        source: "llm_extraction",
+        source_id: alice.subject_source_id ?? "",
+        last_seen_at: new Date().toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "alice-mention",
+        entity_id: aliceEntityId,
+        indexed_file_id: "file-1",
+        confidence: "EXTRACTED",
+        source: "llm_extraction",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: "alice-bob-relationship",
+        source_entity_id: aliceEntityId,
+        target_entity_id: bobEntityId,
+        relationship_type: "works_at",
+        confidence: "EXTRACTED",
+        confidence_score: 0.9,
+        source: "llm_extraction",
+      })
+      .execute();
+    await db
+      .insertInto("entity_relationship_evidence")
+      .values({
+        id: "alice-bob-evidence",
+        relationship_id: "alice-bob-relationship",
+        indexed_file_id: "file-1",
+        source_fact_id: alice.id,
+        note: "llm relation",
+      })
+      .execute();
+
+    await repo.tombstoneByFactKeys([alice.fact_key]);
+
+    const after = await db
+      .selectFrom("indexed_file_facts")
+      .select(["subject_name", "deleted_at"])
+      .where("indexed_file_id", "=", "file-1")
+      .orderBy("subject_name")
+      .execute();
+    expect(after[0]?.deleted_at).not.toBeNull();
+    expect(after[1]?.deleted_at).toBeNull();
+    expect(await db.selectFrom("entity_source_refs").selectAll().where("id", "=", "alice-ref").execute()).toEqual([]);
+    expect(await db.selectFrom("entity_mentions").selectAll().where("id", "=", "alice-mention").execute()).toEqual([]);
+    expect(
+      await db.selectFrom("entity_relationship_evidence").selectAll().where("id", "=", "alice-bob-evidence").execute(),
+    ).toEqual([]);
+    expect(
+      await db.selectFrom("entity_relationships").selectAll().where("id", "=", "alice-bob-relationship").execute(),
+    ).toEqual([]);
   });
 
   it("stores owner state and resets materialization markers when a fact reappears", async () => {

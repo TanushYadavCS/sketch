@@ -17,11 +17,14 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
+import { pino } from "pino";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { buildParticipantBlock, parseActionItemOwners } from "./participant-block";
+
+const testLogger = pino({ enabled: false });
 
 const CONNECTOR_ID = "cfg-pb";
 
@@ -177,7 +180,7 @@ describe("participant-block", () => {
     await seedAttendee(db, { fileId, name: "Ohoud Zitan", email: "ohoud.zitan@oliverwyman.com" });
     await seedAttendee(db, { fileId, name: "Shikah Alshuwaish", email: "shikah.alshuwaish@oliverwyman.com" });
 
-    const block = await buildParticipantBlock({ db }, { fileId, fileContent: CANVAS_OW_BODY });
+    const block = await buildParticipantBlock({ db, logger: testLogger }, { fileId, fileContent: CANVAS_OW_BODY });
 
     expect(block).toContain("## Meeting participants");
     expect(block).toContain("Vedant Parikh — Canvas (vedant@canvasx.ai) [action-item owner]");
@@ -215,7 +218,7 @@ Task B (01:00)
     await seedAttendee(db, { fileId, name: "Vedant Parikh", email: "vedant@canvasx.ai" });
     await seedAttendee(db, { fileId, name: "Himanshu Kalra", email: "himanshu@canvasx.ai" });
 
-    const block = await buildParticipantBlock({ db }, { fileId, fileContent: body });
+    const block = await buildParticipantBlock({ db, logger: testLogger }, { fileId, fileContent: body });
     expect(block).toContain("Vedant Parikh — Canvas (vedant@canvasx.ai) [action-item owner]");
     expect(block).toContain("Himanshu Kalra — Canvas (himanshu@canvasx.ai) [action-item owner]");
   });
@@ -231,10 +234,103 @@ Task B (01:00)
     await seedAttendee(db, { fileId, name: "Role Mailbox", email: "noreply@somebodyelse.com" });
     await seedAttendee(db, { fileId, name: "Personal Acct", email: "stranger@gmail.com" });
 
-    const block = await buildParticipantBlock({ db }, { fileId, fileContent: "no action items here" });
+    const block = await buildParticipantBlock(
+      { db, logger: testLogger },
+      { fileId, fileContent: "no action items here" },
+    );
     expect(block).toContain("Vedant Parikh — Canvas (vedant@canvasx.ai)");
     expect(block).toContain("Unknown Client — external (no resolved company) (client@somebodyelse.com)");
     expect(block).not.toContain("Role Mailbox");
     expect(block).not.toContain("Personal Acct");
+  });
+});
+
+describe("buildWhatsAppSpeakerBlock via buildParticipantBlock", () => {
+  it("lists only speakers of the chunk with name, phone, and teammate email", async () => {
+    const db = await createTestDb();
+    await seedConnector(db);
+    const groupJid = "grp-pb@g.us";
+    const conversation = await db
+      .insertInto("conversations")
+      .values({ platform: "whatsapp", kind: "group", provider_conversation_id: groupJid, display_name: "PB Group" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const conversationId = conversation.id;
+    const speakerJid = "911111111111@s.whatsapp.net";
+    const silentJid = "922222222222@s.whatsapp.net";
+    await db.insertInto("whatsapp_groups").values({ jid: groupJid, name: "PB Group", index_enabled: 1 }).execute();
+    await db
+      .insertInto("whatsapp_group_participants")
+      .values([
+        { group_jid: groupJid, participant_jid: speakerJid, phone_e164: "+911111111111", observation_key: "obs-1" },
+        { group_jid: groupJid, participant_jid: silentJid, phone_e164: "+922222222222", observation_key: "obs-2" },
+      ])
+      .execute();
+    await db
+      .insertInto("whatsapp_group_member_labels")
+      .values({
+        group_jid: groupJid,
+        phone_e164: "+911111111111",
+        display_name: "Priya Sharma",
+        company_name: "Acme",
+        created_by: "admin-pb",
+      })
+      .execute();
+    const message = await db
+      .insertInto("conversation_messages")
+      .values({
+        conversation_id: conversationId,
+        provider_message_id: "m1",
+        sender_jid: speakerJid,
+        sender_name: "Priya",
+        text: "I will own the vendor contract",
+        received_at: new Date().toISOString(),
+        effective_at: new Date().toISOString(),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    await db
+      .updateTable("indexed_files")
+      .set({ file_type: "whatsapp_conversation_slice" })
+      .where("id", "=", fileId)
+      .execute();
+    await db
+      .insertInto("conversation_slices")
+      .values({
+        id: "slice-pb-1",
+        conversation_id: conversationId,
+        first_message_id: message.id,
+        last_message_id: message.id,
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString(),
+        message_count: 1,
+        denoised_message_ids: JSON.stringify([message.id]),
+        flush_reason: "llm_boundary",
+        roster_snapshot: "{}",
+        salience_verdict: "kept",
+        indexed_file_id: fileId,
+      })
+      .execute();
+
+    const block = await buildParticipantBlock({ db, logger: testLogger }, { fileId, fileContent: "Group: PB Group" });
+
+    expect(block).toContain("Conversation participants");
+    expect(block).toContain("Priya Sharma (Acme)");
+    expect(block).toContain("+911111111111");
+    expect(block).not.toContain("+922222222222");
+    await db.destroy();
+  });
+
+  it("returns null path untouched for non-WhatsApp files (attendee facts still render)", async () => {
+    const db = await createTestDb();
+    await seedConnector(db);
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    await seedAttendee(db, { fileId, name: "Jane Doe", email: "jane@acme.com" });
+    const block = await buildParticipantBlock({ db, logger: testLogger }, { fileId, fileContent: "" });
+    expect(block).toContain("Meeting participants");
+    await db.destroy();
   });
 });

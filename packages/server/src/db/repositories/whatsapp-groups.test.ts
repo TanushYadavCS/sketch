@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveWhatsAppLlmChunkerKnobs } from "../../connectors/whatsapp-chunker";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { applyIndexSelection, createWhatsAppGroupRepository } from "./whatsapp-groups";
@@ -100,6 +101,12 @@ describe("createWhatsAppGroupRepository", () => {
       sliceGapMinutes: 20,
       sliceMaxAgeMinutes: 90,
       sliceMaxMessages: 40,
+      chunkWindowMessages: 120,
+      chunkMinMessages: 8,
+      chunkModel: "gpt-5.6-luna",
+      chunkReasoningEffort: "high",
+      chunkBurstThresholdMessages: 16,
+      chunkGroupWorkerPool: 2,
     });
 
     expect(enabled).toEqual({
@@ -110,12 +117,37 @@ describe("createWhatsAppGroupRepository", () => {
       sliceGapMinutes: 20,
       sliceMaxAgeMinutes: 90,
       sliceMaxMessages: 40,
+      chunkWindowMessages: 120,
+      chunkWindowTokens: null,
+      chunkMinMessages: 8,
+      chunkTargetMessages: null,
+      chunkMaxMessages: null,
+      chunkMaxTokens: null,
+      chunkTickMinutes: null,
+      chunkIdleCloseHours: null,
+      chunkProvisionalRefreshMessages: null,
+      chunkModel: "gpt-5.6-luna",
+      chunkReasoningEffort: "high",
+      chunkBurstThresholdMessages: 16,
+      chunkTopicRegistryCap: null,
+      chunkGroupWorkerPool: 2,
+      chunkLastLlmAttemptAt: null,
+    });
+    if (!enabled) throw new Error("expected enabled WhatsApp group");
+    expect(resolveWhatsAppLlmChunkerKnobs(enabled)).toMatchObject({
+      windowMessages: 120,
+      minMessages: 8,
+      model: "gpt-5.6-luna",
+      reasoningEffort: "high",
+      burstThresholdMessages: 16,
+      groupWorkerPool: 2,
     });
     await expect(repo.listIndexEnabled()).resolves.toEqual([enabled]);
 
     const disabled = await repo.setIndexEnabled("123@g.us", false);
     expect(disabled?.indexEnabled).toBe(false);
     expect(disabled?.sliceGapMinutes).toBe(20);
+    expect(disabled?.chunkWindowMessages).toBe(120);
     await expect(repo.listIndexEnabled()).resolves.toEqual([]);
   });
 

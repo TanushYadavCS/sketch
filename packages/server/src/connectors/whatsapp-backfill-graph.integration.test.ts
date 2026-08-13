@@ -13,6 +13,17 @@ import { chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
 
 const NOW = new Date("2026-07-17T12:00:00.000Z");
 
+async function generateWholeBoundary(prompt: string): Promise<string> {
+  const count = [...prompt.matchAll(/^\d+\. \[/gmu)].length;
+  if (count <= 1) return JSON.stringify({ segments: [{ start: 1, end: 1, threads: ["topic"] }] });
+  return JSON.stringify({
+    segments: [
+      { start: 1, end: count - 1, threads: ["topic-a"] },
+      { start: count, end: count, threads: ["topic-b"] },
+    ],
+  });
+}
+
 function logger(): Logger {
   return {
     info: vi.fn(),
@@ -42,7 +53,7 @@ async function seedGraphChat(
     reasoning_text: null,
     updated_at: "2026-07-17T11:00:00.000Z",
   });
-  const group = await groups.setIndexEnabled(input.groupJid, true);
+  const group = await groups.setIndexEnabled(input.groupJid, true, { chunkMinMessages: 1 });
   if (!group) throw new Error("failed to enable test group");
   const conversation = await createConversationRepository(db).getOrCreate({
     platform: "whatsapp",
@@ -121,6 +132,7 @@ async function runAdmission(
     },
     onBackfillConversationClaimed: overrides.onBackfillConversationClaimed,
     onBackfillSlicesInserted: overrides.onBackfillSlicesInserted,
+    llmGenerate: overrides.llmGenerate ?? generateWholeBoundary,
   });
 }
 
@@ -250,7 +262,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .select(["graph_cursor_message_id", "graph_completed_at"])
           .where("id", "=", seeded.rangeId)
           .executeTakeFirstOrThrow(),
-      ).resolves.toEqual({ graph_cursor_message_id: third, graph_completed_at: NOW.toISOString() });
+      ).resolves.toEqual({ graph_cursor_message_id: liveId, graph_completed_at: NOW.toISOString() });
     });
 
     it("closes a graph read page at the token bound before the message-count bound", async () => {
@@ -308,6 +320,35 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .execute()
       ).flatMap((slice) => JSON.parse(slice.denoised_message_ids ?? "[]") as number[]);
       expect(memberships.sort((left, right) => left - right)).toEqual([first, second, third]);
+    });
+
+    it("closes an idle backfill tail before an empty graph page returns", async () => {
+      const seeded = await seedGraphChat(db, { groupJid: "idle-backfill@g.us" });
+      await insertHistory(db, seeded.conversationId, seeded.rangeId, "idle-history", "2026-07-01T09:00:00.000Z");
+
+      await runAdmission(db, [seeded.group]);
+      const emptyRange = await seedGraphChat(db, {
+        groupJid: seeded.group.jid,
+        rangeId: "idle-backfill-empty",
+        lowerBoundAt: "2026-07-02T00:00:00.000Z",
+        upperBoundAt: "2026-07-03T00:00:00.000Z",
+      });
+      await runAdmission(db, [emptyRange.group]);
+
+      const slices = await db
+        .selectFrom("conversation_slices")
+        .select(["status", "salience_verdict"])
+        .where("conversation_id", "=", seeded.conversationId)
+        .execute();
+
+      expect(slices).toEqual([{ status: "closed", salience_verdict: "kept" }]);
+      await expect(
+        db
+          .selectFrom("whatsapp_backfill_ranges")
+          .select("graph_completed_at")
+          .where("id", "=", emptyRange.rangeId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ graph_completed_at: NOW.toISOString() });
     });
 
     it("routes a cursor-behind orphan into a fresh supplemental range", async () => {
@@ -459,7 +500,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ).resolves.toEqual({ parent_range_id: seeded.rangeId, graph_completed_at: null });
     });
 
-    it("rolls back slice insertion and resumes the same page after a mid-page crash", async () => {
+    it("keeps the LLM page idempotent when the post-insert hook fails", async () => {
       const seeded = await seedGraphChat(db, { groupJid: "crash@g.us" });
       await insertHistory(db, seeded.conversationId, seeded.rangeId, "history-1", "2026-07-01T09:00:00.000Z");
       await insertHistory(db, seeded.conversationId, seeded.rangeId, "history-2", "2026-07-01T09:01:00.000Z");
@@ -474,7 +515,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           },
         }),
       ).rejects.toThrow("simulated crash");
-      await expect(db.selectFrom("conversation_slices").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("conversation_slices").select("id").execute()).resolves.toHaveLength(2);
       await expect(
         db
           .selectFrom("whatsapp_backfill_ranges")
@@ -484,7 +525,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ).resolves.toEqual({ graph_cursor_effective_at: null, graph_cursor_message_id: null });
 
       await runAdmission(db, [seeded.group]);
-      await expect(db.selectFrom("conversation_slices").select("id").execute()).resolves.toHaveLength(1);
+      await expect(db.selectFrom("conversation_slices").select("id").execute()).resolves.toHaveLength(2);
       await expect(
         db
           .selectFrom("whatsapp_backfill_ranges")
@@ -548,7 +589,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ).resolves.toEqual({ graph_completed_at: null });
     });
 
-    it("halts the chat on conflicting slice membership without advancing the range cursor", async () => {
+    it("halts the chat on conflicting LLM slice membership without advancing the range cursor", async () => {
       const seeded = await seedGraphChat(db, { groupJid: "conflict@g.us" });
       const first = await insertHistory(
         db,
@@ -591,7 +632,7 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .executeTakeFirstOrThrow(),
       ).resolves.toMatchObject({
         graph_halted_at: NOW.toISOString(),
-        graph_halt_reason: expect.stringContaining("membership conflict"),
+        graph_halt_reason: expect.stringContaining("overlapped existing slice membership"),
       });
       await expect(
         db
@@ -642,7 +683,7 @@ describe("WhatsApp backfill graph admission scheduling", () => {
     );
   });
 
-  it("uses deterministic least-recently-served selection, a global budget, and between-chat backpressure", async () => {
+  it("uses least-recently-served selection and a global message budget without a salience backlog", async () => {
     const a = await seedGraphChat(db, { groupJid: "a@g.us", graphLastServedAt: null });
     const b = await seedGraphChat(db, {
       groupJid: "b@g.us",
@@ -692,10 +733,10 @@ describe("WhatsApp backfill graph admission scheduling", () => {
         .select("graph_completed_at")
         .where("id", "=", c.rangeId)
         .executeTakeFirstOrThrow(),
-    ).resolves.toEqual({ graph_completed_at: null });
+    ).resolves.toEqual({ graph_completed_at: NOW.toISOString() });
     expect(testLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ pendingSlices: 2, pendingSlicesMax: 0 }),
-      "Skipped WhatsApp backfill graph admission under pipeline backpressure",
+      expect.objectContaining({ rangeCompleted: true, slicesCreated: 0 }),
+      "Admitted WhatsApp backfill history into context graph slices",
     );
   });
 

@@ -530,6 +530,15 @@ export interface Connector {
      */
     resolveNameToEmail?: NameResolver;
     salienceGenerator?: GeminiGenerator | null;
+    whatsappChunkerGenerate?: (
+      prompt: string,
+      opts: {
+        model: string | null;
+        reasoningEffort: "low" | "medium" | "high";
+        maxTokens?: number;
+        label?: string;
+      },
+    ) => Promise<string>;
     /**
      * Narrow Slack API facade injected from bootstrap for the slack-indexing
      * connector (rosters, member channels, user emails). Other connectors

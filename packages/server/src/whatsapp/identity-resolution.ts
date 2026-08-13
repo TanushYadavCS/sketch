@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
-import { mergeEntityAliases } from "../db/repositories/entity-aliases";
+import { enrichWhatsAppRosterPersonName } from "../db/repositories/entity-aliases";
 import { createUserWhatsAppLidRepository } from "../db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -155,7 +155,12 @@ function isHumanReadableAlias(raw: string, sanitized: string): boolean {
 async function enrichResolvedEntityAliases(
   db: Kysely<DB>,
   groupJid: string,
-  participants: Array<{ phone_e164: string | null; resolution: WhatsAppIdentityResolution; aliasName?: string }>,
+  participants: Array<{
+    phone_e164: string | null;
+    lid: string | null;
+    resolution: WhatsAppIdentityResolution;
+    aliasName?: string;
+  }>,
 ): Promise<void> {
   const candidates = participants.filter(
     (
@@ -170,25 +175,35 @@ async function enrichResolvedEntityAliases(
     labels.map((label) => [normalizeWhatsAppIdentityPhone(label.phone_e164), safeEntityAlias(label.display_name)]),
   );
   const additionsByEntityId = new Map<string, string[]>();
+  const identityValuesByEntityId = new Map<string, string[]>();
   for (const candidate of candidates) {
     const phone = normalizeWhatsAppIdentityPhone(candidate.phone_e164);
     const additions = additionsByEntityId.get(candidate.resolution.entityId) ?? [];
     additions.push(candidate.aliasName ?? "", phone ? (labelByPhone.get(phone) ?? "") : "");
     additionsByEntityId.set(candidate.resolution.entityId, additions);
+    const identityValues = identityValuesByEntityId.get(candidate.resolution.entityId) ?? [];
+    identityValues.push(phone ?? "", normalizeWhatsAppIdentityLid(candidate.lid) ?? "");
+    identityValuesByEntityId.set(candidate.resolution.entityId, identityValues);
   }
 
   for (const [entityId, additions] of additionsByEntityId) {
-    await mergeEntityAliases(db, entityId, additions);
+    await enrichWhatsAppRosterPersonName(db, entityId, additions, identityValuesByEntityId.get(entityId) ?? []);
   }
 }
 
 function displayNameForResolution(
   resolution: WhatsAppIdentityResolution,
   phoneE164: string | null,
+  participantJid: string,
   pushName: string | undefined,
 ): string {
   if (resolution.kind === "teammate") return resolution.name;
-  if (resolution.kind === "entity") return formatWithCompany(resolution.name, resolution.company);
+  if (resolution.kind === "entity") {
+    const lid = normalizeWhatsAppIdentityLid(participantJid);
+    const fallbackValues = new Set([phoneE164, lid].filter((value): value is string => Boolean(value)));
+    if (pushName && fallbackValues.has(resolution.name)) return pushName;
+    return formatWithCompany(resolution.name, resolution.company);
+  }
   if (resolution.kind === "labeled") return formatWithCompany(resolution.name, resolution.company);
   if (pushName) return pushName;
   return unresolvedDisplayName(phoneE164);
@@ -211,7 +226,7 @@ function snapshotParticipant(
   }
   const safeParticipantPushName = safePushName(pushName);
   const displayName = sanitizeWhatsAppDisplayText(
-    displayNameForResolution(resolution, normalizedPhone, safeParticipantPushName),
+    displayNameForResolution(resolution, normalizedPhone, participant.participant_jid, safeParticipantPushName),
   );
   const company =
     "company" in resolution && resolution.company ? sanitizeWhatsAppDisplayText(resolution.company) : undefined;
@@ -289,16 +304,23 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
     const teammateByPhone = await loadTeammatesByPhone(phones);
     const teammateByLid = await loadTeammatesByLid(lids);
     const entityByPhone = await loadEntitiesByPhone(phones);
+    const entityByLid = await loadEntitiesByLid(lids);
     const labelByPhone = await loadLabelsByPhone(groupJid, phones);
 
     for (const participant of participants) {
       const phone = normalizeWhatsAppIdentityPhone(participant.phoneE164);
       const lid = normalizeWhatsAppIdentityLid(participant.lid ?? participant.participantJid);
+      const entity = (phone ? entityByPhone.get(phone) : undefined) ?? (lid ? entityByLid.get(lid) : undefined);
+      const label = phone ? labelByPhone.get(phone) : undefined;
+      const entityWithLabel =
+        entity?.kind === "entity" && label?.kind === "labeled" && (entity.name === phone || entity.name === lid)
+          ? { ...entity, name: label.name, ...(label.company ? { company: label.company } : {}) }
+          : entity;
       resolutions.set(
         participant.participantJid,
         (phone ? teammateByPhone.get(phone) : undefined) ??
           (lid ? teammateByLid.get(lid) : undefined) ??
-          (phone ? entityByPhone.get(phone) : undefined) ??
+          entityWithLabel ??
           (phone ? labelByPhone.get(phone) : undefined) ?? { kind: "unresolved" },
       );
     }
@@ -380,6 +402,34 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
         name: candidate.name,
         ...(company ? { company } : {}),
       });
+    }
+    return out;
+  }
+
+  async function loadEntitiesByLid(lids: string[]): Promise<Map<string, WhatsAppIdentityResolution>> {
+    if (lids.length === 0) return new Map();
+    const rows = await db
+      .selectFrom("entity_contact_points")
+      .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+      .select(["entity_contact_points.value", "entities.id as entity_id", "entities.name as entity_name"])
+      .where("entity_contact_points.kind", "=", "whatsapp_lid")
+      .where("entity_contact_points.value", "in", lids)
+      .where("entities.status", "!=", "archived")
+      .where("entities.deleted_at", "is", null)
+      .execute();
+    const candidates = new Map<string, Map<string, EntityResolutionCandidate>>();
+    for (const row of rows) {
+      const lid = normalizeWhatsAppIdentityLid(row.value);
+      if (!lid) continue;
+      const bucket = candidates.get(lid) ?? new Map<string, EntityResolutionCandidate>();
+      bucket.set(row.entity_id, { entityId: row.entity_id, name: row.entity_name });
+      candidates.set(lid, bucket);
+    }
+    const out = new Map<string, WhatsAppIdentityResolution>();
+    for (const [lid, bucket] of candidates) {
+      if (bucket.size !== 1) continue;
+      const candidate = [...bucket.values()][0];
+      if (candidate) out.set(lid, { kind: "entity", entityId: candidate.entityId, name: candidate.name });
     }
     return out;
   }
@@ -508,6 +558,7 @@ export async function buildWhatsAppRosterSnapshot({
         groupJid,
         snapshotInputs.map(({ participant, resolution, aliasName }) => ({
           phone_e164: participant.phone_e164,
+          lid: participant.lid,
           resolution,
           aliasName,
         })),

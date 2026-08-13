@@ -3,6 +3,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
+import { createEntityRepository } from "./entities";
 import { createUserRepository } from "./users";
 import { createWhatsAppGroupRepository } from "./whatsapp-groups";
 
@@ -144,6 +145,170 @@ function observationSuite(label: string, createDb: DbFactory) {
       ).resolves.toEqual([
         { kind: "phone", value: phone },
         { kind: "whatsapp_lid", value: lid },
+      ]);
+    }, 30_000);
+
+    it("creates a Person for a phone-only participant in an enabled group", async () => {
+      const phone = "+14155550992";
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `phone-only-${randomUUID()}@g.us`;
+      await repo.upsert({ jid: groupJid, name: "Phone only", description: null, updated_at: "2026-08-10T00:00:00Z" });
+      await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", groupJid).execute();
+
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: "14155550992@s.whatsapp.net", phoneE164: phone }],
+        "2026-08-10T03:00:00Z",
+      );
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: "14155550992@s.whatsapp.net", phoneE164: phone }],
+        "2026-08-10T04:00:00Z",
+      );
+
+      const people = await db
+        .selectFrom("entities")
+        .innerJoin("entity_contact_points", "entity_contact_points.entity_id", "entities.id")
+        .select(["entities.name", "entities.subtype", "entity_contact_points.kind", "entity_contact_points.value"])
+        .where("entities.source_type", "=", "person")
+        .where("entity_contact_points.kind", "=", "phone")
+        .where("entity_contact_points.value", "=", phone)
+        .execute();
+      expect(people).toEqual([{ name: phone, subtype: "external", kind: "phone", value: phone }]);
+    }, 30_000);
+
+    it("creates a Person for a LID-only participant in an enabled group", async () => {
+      const lid = `lid-only-${randomUUID()}@lid`;
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `lid-only-${randomUUID()}@g.us`;
+      await repo.upsert({ jid: groupJid, name: "LID only", description: null, updated_at: "2026-08-10T00:00:00Z" });
+
+      await repo.refreshParticipants(groupJid, [{ participantJid: lid, lid }], "2026-08-10T03:00:00Z");
+
+      const person = await db
+        .selectFrom("entities")
+        .innerJoin("entity_contact_points", "entity_contact_points.entity_id", "entities.id")
+        .select(["entities.name", "entities.subtype", "entity_contact_points.kind", "entity_contact_points.value"])
+        .where("entities.source_type", "=", "person")
+        .where("entity_contact_points.kind", "=", "whatsapp_lid")
+        .where("entity_contact_points.value", "=", lid)
+        .executeTakeFirstOrThrow();
+      expect(person).toEqual({ name: lid, subtype: "external", kind: "whatsapp_lid", value: lid });
+    }, 30_000);
+
+    it("projects a retained participant after its group becomes enabled", async () => {
+      const phone = "+14155550993";
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `enable-later-${randomUUID()}@g.us`;
+      await repo.upsert({ jid: groupJid, name: "Enable later", description: null, updated_at: "2026-08-10T00:00:00Z" });
+      await db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).where("jid", "=", groupJid).execute();
+
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: "14155550993@s.whatsapp.net", phoneE164: phone }],
+        "2026-08-10T03:00:00Z",
+      );
+      await expect(
+        db
+          .selectFrom("entity_contact_points")
+          .select("id")
+          .where("kind", "=", "phone")
+          .where("value", "=", phone)
+          .execute(),
+      ).resolves.toEqual([]);
+
+      await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", groupJid).execute();
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: "14155550993@s.whatsapp.net", phoneE164: phone }],
+        "2026-08-10T04:00:00Z",
+      );
+
+      await expect(
+        db
+          .selectFrom("entity_contact_points")
+          .select(["kind", "value"])
+          .where("kind", "=", "phone")
+          .where("value", "=", phone)
+          .execute(),
+      ).resolves.toEqual([{ kind: "phone", value: phone }]);
+    }, 30_000);
+
+    it("converges a phone-only observation when the complete identity arrives", async () => {
+      const phone = "+14155550994";
+      const lid = `converge-${randomUUID()}@lid`;
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `converge-${randomUUID()}@g.us`;
+      await repo.upsert({ jid: groupJid, name: "Converge", description: null, updated_at: "2026-08-10T00:00:00Z" });
+
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: "14155550994@s.whatsapp.net", phoneE164: phone }],
+        "2026-08-10T03:00:00Z",
+      );
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: lid, phoneE164: phone, lid }],
+        "2026-08-10T04:00:00Z",
+      );
+
+      const contactPoints = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .select(["entities.id", "entity_contact_points.kind", "entity_contact_points.value"])
+        .where("entities.source_type", "=", "person")
+        .where((eb) =>
+          eb.or([eb("entity_contact_points.value", "=", phone), eb("entity_contact_points.value", "=", lid)]),
+        )
+        .orderBy("entity_contact_points.kind")
+        .execute();
+      expect(new Set(contactPoints.map((row) => row.id)).size).toBe(1);
+      expect(contactPoints.map(({ kind, value }) => ({ kind, value }))).toEqual([
+        { kind: "phone", value: phone },
+        { kind: "whatsapp_lid", value: lid },
+      ]);
+    }, 30_000);
+
+    it("does not cross-link a phone and LID that already belong to different Persons", async () => {
+      const phone = "+14155550995";
+      const lid = `conflict-${randomUUID()}@lid`;
+      const entities = createEntityRepository(db);
+      const phonePerson = await entities.upsertPersonEntity({
+        name: "Phone Person",
+        subtype: "external",
+        source: "test",
+        sourceId: `phone-person-${randomUUID()}`,
+        provenanceTier: "inferred",
+      });
+      const lidPerson = await entities.upsertPersonEntity({
+        name: "LID Person",
+        subtype: "external",
+        source: "test",
+        sourceId: `lid-person-${randomUUID()}`,
+        provenanceTier: "inferred",
+      });
+      await entities.upsertContactPoint({ entityId: phonePerson.id, kind: "phone", value: phone, source: "test" });
+      await entities.upsertContactPoint({
+        entityId: lidPerson.id,
+        kind: "whatsapp_lid",
+        value: lid,
+        source: "test",
+      });
+      const groups = createWhatsAppGroupRepository(db);
+      const groupJid = `conflict-${randomUUID()}@g.us`;
+      await groups.upsert({ jid: groupJid, name: "Conflict", description: null, updated_at: "2026-08-10T00:00:00Z" });
+
+      await groups.refreshParticipants(groupJid, [{ participantJid: lid, phoneE164: phone, lid }]);
+
+      const contacts = await db
+        .selectFrom("entity_contact_points")
+        .select(["entity_id", "kind", "value"])
+        .where("entity_id", "in", [phonePerson.id, lidPerson.id])
+        .orderBy("kind")
+        .execute();
+      expect(contacts).toEqual([
+        { entity_id: phonePerson.id, kind: "phone", value: phone },
+        { entity_id: lidPerson.id, kind: "whatsapp_lid", value: lid },
       ]);
     }, 30_000);
   });

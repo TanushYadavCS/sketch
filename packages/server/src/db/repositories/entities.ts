@@ -842,7 +842,12 @@ export function createEntityRepository(db: Kysely<DB>) {
       await db
         .deleteFrom("entity_mentions")
         .where("indexed_file_id", "=", indexedFileId)
-        .where("confidence", "!=", "EXTRACTED")
+        .where((eb) =>
+          eb.or([
+            eb("confidence", "!=", "EXTRACTED"),
+            eb.and([eb("confidence", "=", "EXTRACTED"), eb("source", "in", ["llm_extraction", "llm_relation"])]),
+          ]),
+        )
         .execute();
     },
 

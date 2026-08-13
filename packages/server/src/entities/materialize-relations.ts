@@ -269,7 +269,9 @@ async function materializeRelationEndpoint(
       entityType: endpoint.type,
       subtype: "external",
       source: "llm_relation",
-      sourceId: `${fact.indexed_file_id ?? "no-file"}:${fact.content_hash ?? "no-hash"}:${role}:${endpoint.name}`,
+      sourceId: options.linkOnly
+        ? `${fact.indexed_file_id ?? "no-file"}:${role}:${endpoint.name}`
+        : `${fact.indexed_file_id ?? "no-file"}:${fact.content_hash ?? "no-hash"}:${role}:${endpoint.name}`,
       evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
       triggeredByUserId,
       aliases: endpoint.variations,

@@ -17,6 +17,17 @@ interface SeededGroup {
   conversationId: number;
 }
 
+async function generateWholeBoundary(prompt: string): Promise<string> {
+  const count = [...prompt.matchAll(/^\d+\. \[/gmu)].length;
+  if (count <= 1) return JSON.stringify({ segments: [{ start: 1, end: 1, threads: ["topic"] }] });
+  return JSON.stringify({
+    segments: [
+      { start: 1, end: count - 1, threads: ["topic-a"] },
+      { start: count, end: count, threads: ["topic-b"] },
+    ],
+  });
+}
+
 function createLogger(): Logger {
   return {
     info: vi.fn(),
@@ -32,6 +43,16 @@ async function seedEnabledGroup(
     sliceGapMinutes?: number | null;
     sliceMaxAgeMinutes?: number | null;
     sliceMaxMessages?: number | null;
+    chunkMinMessages?: number | null;
+    chunkWindowMessages?: number | null;
+    chunkWindowTokens?: number | null;
+    chunkTargetMessages?: number | null;
+    chunkMaxMessages?: number | null;
+    chunkMaxTokens?: number | null;
+    chunkTickMinutes?: number | null;
+    chunkIdleCloseHours?: number | null;
+    chunkBurstThresholdMessages?: number | null;
+    chunkGroupWorkerPool?: number | null;
   } = {},
 ): Promise<SeededGroup> {
   const groupJid = `${randomUUID()}@g.us`;
@@ -44,7 +65,10 @@ async function seedEnabledGroup(
     reasoning_text: null,
     updated_at: "2026-07-07T09:00:00.000Z",
   });
-  const group = await groups.setIndexEnabled(groupJid, true, overrides);
+  const group = await groups.setIndexEnabled(groupJid, true, {
+    chunkMinMessages: 1,
+    ...overrides,
+  });
   if (!group) throw new Error("Failed to seed WhatsApp group");
 
   const conversation = await createConversationRepository(db).getOrCreate({
@@ -128,6 +152,10 @@ async function runChunker(
     now?: Date;
     logger?: Logger;
     onConversationClaimed?: (conversationId: number) => Promise<void>;
+    llmGenerate?: (
+      prompt: string,
+      opts: { model: string | null; reasoningEffort: "low" | "medium" | "high"; maxTokens?: number; label?: string },
+    ) => Promise<string>;
   } = {},
 ) {
   return chunkWhatsAppIndexingGroups({
@@ -136,6 +164,7 @@ async function runChunker(
     logger: options.logger ?? createLogger(),
     now: options.now ?? new Date("2026-07-07T10:00:00.000Z"),
     onConversationClaimed: options.onConversationClaimed,
+    llmGenerate: options.llmGenerate ?? generateWholeBoundary,
   });
 }
 
@@ -151,14 +180,14 @@ function runConnectorSyncSuite(label: string, getDb: () => Promise<Kysely<DB>>) 
       await db.destroy();
     });
 
-    it("passes app-level WhatsApp slice gap config through sync into chunking without a group override", async () => {
+    it("does not invoke deterministic slice settings when no LLM boundary generator is configured", async () => {
       const connectorConfig = await seedWhatsAppConnector(db);
       const defaultSeeded = await seedEnabledGroup(db);
-      const defaultFirstId = await insertMessage(db, defaultSeeded.conversationId, {
+      await insertMessage(db, defaultSeeded.conversationId, {
         providerMessageId: "default-m-1",
         effectiveAt: "2025-01-01T09:00:00.000Z",
       });
-      const defaultSecondId = await insertMessage(db, defaultSeeded.conversationId, {
+      await insertMessage(db, defaultSeeded.conversationId, {
         providerMessageId: "default-m-2",
         effectiveAt: "2025-01-01T09:06:00.000Z",
       });
@@ -171,20 +200,14 @@ function runConnectorSyncSuite(label: string, getDb: () => Promise<Kysely<DB>>) 
         sliceMaxAgeMinutes: null,
         sliceMaxMessages: null,
       });
-      expect(defaultSlices).toHaveLength(1);
-      expect(defaultSlices[0]).toMatchObject({
-        first_message_id: defaultFirstId,
-        last_message_id: defaultSecondId,
-        message_count: 2,
-        flush_reason: "gap",
-      });
+      expect(defaultSlices).toEqual([]);
 
       const configuredSeeded = await seedEnabledGroup(db);
-      const configuredFirstId = await insertMessage(db, configuredSeeded.conversationId, {
+      await insertMessage(db, configuredSeeded.conversationId, {
         providerMessageId: "configured-m-1",
         effectiveAt: "2025-01-01T09:00:00.000Z",
       });
-      const configuredSecondId = await insertMessage(db, configuredSeeded.conversationId, {
+      await insertMessage(db, configuredSeeded.conversationId, {
         providerMessageId: "configured-m-2",
         effectiveAt: "2025-01-01T09:06:00.000Z",
       });
@@ -201,19 +224,7 @@ function runConnectorSyncSuite(label: string, getDb: () => Promise<Kysely<DB>>) 
         sliceMaxAgeMinutes: null,
         sliceMaxMessages: null,
       });
-      expect(configuredSlices).toHaveLength(2);
-      expect(configuredSlices[0]).toMatchObject({
-        first_message_id: configuredFirstId,
-        last_message_id: configuredFirstId,
-        message_count: 1,
-        flush_reason: "gap",
-      });
-      expect(configuredSlices[1]).toMatchObject({
-        first_message_id: configuredSecondId,
-        last_message_id: configuredSecondId,
-        message_count: 1,
-        flush_reason: "gap",
-      });
+      expect(configuredSlices).toEqual([]);
     });
   });
 }
@@ -241,19 +252,174 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
         effectiveAt: "2026-07-07T09:30:00.000Z",
       });
 
-      const first = await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:31:00.000Z") });
+      const logger = createLogger();
+      const first = await runChunker(db, seeded.group, {
+        now: new Date("2026-07-07T09:31:00.000Z"),
+        logger,
+      });
       const second = await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:31:00.000Z") });
       const slices = await listSlices(db);
 
-      expect(first.slicesCreated).toBe(1);
+      expect(logger.warn).not.toHaveBeenCalled();
+
+      expect(first).toEqual({
+        conversationsProcessed: 1,
+        slicesCreated: 1,
+        lateArrivals: 0,
+        messagesProcessed: 2,
+        maxAgeFlushes: 0,
+        maxSizeFlushes: 0,
+      });
       expect(second.slicesCreated).toBe(0);
-      expect(slices).toHaveLength(1);
+      expect(slices).toHaveLength(2);
       expect(slices[0]).toMatchObject({
+        status: "closed",
         message_count: 1,
-        flush_reason: "gap",
-        salience_verdict: null,
+        flush_reason: "llm_boundary",
+        salience_verdict: "kept",
         indexed_file_id: null,
       });
+      expect(slices[1]).toMatchObject({ status: "open", message_count: 1, flush_reason: "llm_boundary" });
+    });
+
+    it("gates recent ticks, honors the burst override, and drains multiple FIFO windows", async () => {
+      const seeded = await seedEnabledGroup(db, {
+        chunkWindowMessages: 4,
+        chunkTickMinutes: 30,
+      });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "tick-1",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      const calls: string[] = [];
+      const generate = async (prompt: string): Promise<string> => {
+        calls.push(prompt);
+        return generateWholeBoundary(prompt);
+      };
+
+      await runChunker(db, seeded.group, {
+        now: new Date("2026-07-07T09:30:00.000Z"),
+        llmGenerate: generate,
+      });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "tick-2",
+        effectiveAt: "2026-07-07T09:31:00.000Z",
+      });
+      await db
+        .updateTable("whatsapp_groups")
+        .set({ chunk_last_llm_attempt_at: "2026-07-07T09:30:00.000Z" })
+        .where("jid", "=", seeded.group.jid)
+        .execute();
+      const recentGroup = await createWhatsAppGroupRepository(db).getIndexingConfig(seeded.group.jid);
+      if (!recentGroup) throw new Error("expected recent WhatsApp group config");
+
+      await runChunker(db, recentGroup, {
+        now: new Date("2026-07-07T09:31:00.000Z"),
+        llmGenerate: generate,
+      });
+      expect(calls).toHaveLength(1);
+
+      await createWhatsAppGroupRepository(db).setIndexEnabled(seeded.group.jid, true, {
+        chunkBurstThresholdMessages: 1,
+      });
+      const burstGroup = await createWhatsAppGroupRepository(db).getIndexingConfig(seeded.group.jid);
+      if (!burstGroup) throw new Error("expected burst WhatsApp group config");
+      await runChunker(db, burstGroup, {
+        now: new Date("2026-07-07T09:32:00.000Z"),
+        llmGenerate: generate,
+      });
+      expect(calls).toHaveLength(2);
+
+      const drain = await seedEnabledGroup(db, {
+        chunkWindowMessages: 2,
+        chunkTargetMessages: 2,
+        chunkMaxMessages: 2,
+      });
+      const drainIds: number[] = [];
+      for (let index = 1; index <= 5; index += 1) {
+        drainIds.push(
+          await insertMessage(db, drain.conversationId, {
+            providerMessageId: `drain-${index}`,
+            effectiveAt: `2026-07-07T09:0${index}:00.000Z`,
+          }),
+        );
+      }
+      const drainCalls: string[] = [];
+      const drainResult = await runChunker(db, drain.group, {
+        now: new Date("2026-07-07T10:00:00.000Z"),
+        llmGenerate: async (prompt) => {
+          drainCalls.push(prompt);
+          return generateWholeBoundary(prompt);
+        },
+      });
+      const drainCursor = await db
+        .selectFrom("conversation_slice_cursors")
+        .select(["last_message_id"])
+        .where("conversation_id", "=", drain.conversationId)
+        .executeTakeFirstOrThrow();
+
+      expect(drainCalls.length).toBeGreaterThanOrEqual(3);
+      expect(drainResult.messagesProcessed).toBe(5);
+      expect(drainCursor.last_message_id).toBe(drainIds[4]);
+    });
+
+    it("closes an idle live tail before the empty-pending return", async () => {
+      const seeded = await seedEnabledGroup(db, { chunkIdleCloseHours: 96 });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "idle-live",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:30:00.000Z") });
+      await db
+        .updateTable("whatsapp_groups")
+        .set({ chunk_last_llm_attempt_at: "2026-07-12T09:59:00.000Z" })
+        .where("jid", "=", seeded.group.jid)
+        .execute();
+      const freshGroup = await createWhatsAppGroupRepository(db).getIndexingConfig(seeded.group.jid);
+      if (!freshGroup) throw new Error("expected idle WhatsApp group config");
+
+      await runChunker(db, freshGroup, { now: new Date("2026-07-12T10:00:00.000Z") });
+      const slices = await listSlicesForConversation(db, seeded.conversationId);
+
+      expect(slices).toHaveLength(1);
+      expect(slices[0]).toMatchObject({ status: "closed", salience_verdict: "kept" });
+    });
+
+    it("bounds concurrent group LLM calls by the configured worker pool", async () => {
+      const first = await seedEnabledGroup(db, { chunkGroupWorkerPool: 1 });
+      const second = await seedEnabledGroup(db, { chunkGroupWorkerPool: 1 });
+      await insertMessage(db, first.conversationId, {
+        providerMessageId: "pool-1",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      await insertMessage(db, second.conversationId, {
+        providerMessageId: "pool-2",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      let active = 0;
+      let maximum = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const run = chunkWhatsAppIndexingGroups({
+        db,
+        groups: [first.group, second.group],
+        logger: createLogger(),
+        now: new Date("2026-07-07T09:30:00.000Z"),
+        llmGenerate: async (prompt) => {
+          active += 1;
+          maximum = Math.max(maximum, active);
+          await gate;
+          active -= 1;
+          return generateWholeBoundary(prompt);
+        },
+      });
+      await vi.waitFor(() => expect(active).toBe(1));
+      release();
+      await run;
+
+      expect(maximum).toBe(1);
     });
 
     it("skips slice creation when a group is disabled after the sync snapshot", async () => {
@@ -315,9 +481,10 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
         .where("conversation_id", "=", seeded.conversationId)
         .executeTakeFirstOrThrow();
 
-      expect(first.slicesCreated).toBe(1);
+      expect(first.slicesCreated).toBe(0);
       expect(second.slicesCreated).toBe(0);
       expect(slices).toHaveLength(1);
+      expect(slices[0]?.status).toBe("open");
       expect(cursor.claim_token).toBeNull();
       expect(cursor.last_message_id).toBe(slices[0]?.last_message_id);
     });
@@ -344,12 +511,13 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:41:00.000Z") });
       const slices = await listSlices(db);
 
-      expect(slices).toHaveLength(1);
+      expect(slices).toHaveLength(2);
       expect(slices[0]).toMatchObject({
         started_at: "2026-07-07T09:00:00.000Z",
         ended_at: "2026-07-07T09:05:00.000Z",
         denoised_message_ids: JSON.stringify([firstId, secondId]),
       });
+      expect(slices[1]).toMatchObject({ denoised_message_ids: JSON.stringify([3]), status: "open" });
     });
 
     it("falls back to received_at for pre-existing invalid provider timestamps", async () => {
@@ -372,12 +540,13 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:41:00.000Z") });
       const slices = await listSlices(db);
 
-      expect(slices).toHaveLength(1);
+      expect(slices).toHaveLength(2);
       expect(slices[0]).toMatchObject({
         started_at: "2026-07-07T09:00:00.000Z",
         ended_at: "2026-07-07T09:05:00.000Z",
         denoised_message_ids: JSON.stringify([firstId, secondId]),
       });
+      expect(slices[1]).toMatchObject({ denoised_message_ids: JSON.stringify([3]), status: "open" });
     });
 
     it("counts and logs late arrivals behind the composite cursor", async () => {
@@ -406,7 +575,7 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       );
     });
 
-    it("excludes history rows from both live reads and late-arrival accounting", async () => {
+    it("reconciles history rows at the open-tail seam without counting older history as late", async () => {
       const seeded = await seedEnabledGroup(db);
       await insertMessage(db, seeded.conversationId, {
         providerMessageId: "live-cursor",
@@ -426,10 +595,12 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
 
       const result = await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:31:00.000Z") });
 
-      expect(result.messagesProcessed).toBe(0);
+      expect(result.messagesProcessed).toBe(1);
       expect(result.lateArrivals).toBe(0);
-      expect(result.slicesCreated).toBe(0);
-      await expect(listSlices(db)).resolves.toHaveLength(1);
+      expect(result.slicesCreated).toBe(1);
+      const slices = await listSlices(db);
+      expect(slices).toHaveLength(2);
+      expect(slices.flatMap((slice) => JSON.parse(slice.denoised_message_ids ?? "[]"))).toEqual([1, 3]);
     });
 
     it("bounds incremental scans by received_at while preserving cursor filtering", async () => {
@@ -461,7 +632,7 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       expect(slices).toHaveLength(1);
     });
 
-    it("respects per-group gap overrides", async () => {
+    it("uses LLM boundaries even when legacy gap overrides are present", async () => {
       const seeded = await seedEnabledGroup(db, { sliceGapMinutes: 5 });
       await insertMessage(db, seeded.conversationId, {
         providerMessageId: "m-1",
@@ -476,11 +647,12 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       const slices = await listSlices(db);
 
       expect(result.slicesCreated).toBe(1);
-      expect(slices).toHaveLength(1);
-      expect(slices[0]?.flush_reason).toBe("gap");
+      expect(slices).toHaveLength(2);
+      expect(slices[0]?.flush_reason).toBe("llm_boundary");
+      expect(slices[0]?.salience_verdict).toBe("kept");
     });
 
-    it("logs per-conversation summary counters without message content", async () => {
+    it("logs the LLM chunker summary without message content", async () => {
       const seeded = await seedEnabledGroup(db, { sliceMaxMessages: 2 });
       await insertMessage(db, seeded.conversationId, {
         providerMessageId: "m-1",
@@ -496,14 +668,14 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
 
       expect(logger.info).toHaveBeenCalledWith(
         {
-          conversationId: seeded.conversationId,
+          conversationsProcessed: 1,
           slicesCreated: 1,
-          messagesProcessed: 2,
           lateArrivals: 0,
+          messagesProcessed: 2,
           maxAgeFlushes: 0,
-          maxSizeFlushes: 1,
+          maxSizeFlushes: 0,
         },
-        "Completed WhatsApp conversation chunking",
+        "Completed WhatsApp chunker run",
       );
     });
 
@@ -547,13 +719,22 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:40:00.000Z") });
       const slices = await listSlices(db);
 
-      expect(slices).toHaveLength(1);
+      expect(slices).toHaveLength(2);
       expect(slices[0]).toMatchObject({
         first_message_id: keptStart,
+        last_message_id: keptStart,
+        message_count: 1,
+        denoised_message_ids: JSON.stringify([keptStart]),
+        flush_reason: "llm_boundary",
+        salience_verdict: "kept",
+      });
+      expect(slices[1]).toMatchObject({
+        first_message_id: keptEnd,
         last_message_id: keptEnd,
-        message_count: 2,
-        denoised_message_ids: JSON.stringify([keptStart, keptEnd]),
-        flush_reason: "gap",
+        message_count: 1,
+        denoised_message_ids: JSON.stringify([keptEnd]),
+        flush_reason: "llm_boundary",
+        salience_verdict: "kept",
       });
     });
   });
