@@ -1,3 +1,10 @@
+import { AutomationLockBanner } from "@/components/automations/lock-banner";
+import {
+  AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS,
+  AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+} from "@/components/automations/lock-banner";
+import { AutomationLockHolderResponseDialog } from "@/components/automations/lock-holder-response-dialog";
+import { AutomationLockStealDialog } from "@/components/automations/lock-steal-dialog";
 import { AutomationShareDialog } from "@/components/automations/share-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { SketchMessage, UserMessage } from "@/components/sketch/chat-message";
@@ -14,6 +21,7 @@ import {
   type AutomationArtifact,
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
+  type AutomationEditLockView,
   type AutomationRunRecord,
   type AutomationStepContent,
   type CanvasWebhookEndpoint,
@@ -575,6 +583,8 @@ export function AutomationBuilderPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [builderChatBusy, setBuilderChatBusy] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [stealDialogOpen, setStealDialogOpen] = useState(false);
+  const [holderResponseDialogOpen, setHolderResponseDialogOpen] = useState(false);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
@@ -612,6 +622,26 @@ export function AutomationBuilderPage() {
         : AUTOMATION_REFRESH_INTERVAL_MS,
     refetchOnWindowFocus: true,
   });
+
+  const editLockQueryKey = useMemo(() => ["automation-edit-lock", taskId] as const, [taskId]);
+  const editLockQuery = useQuery({
+    queryKey: editLockQueryKey,
+    queryFn: async () => {
+      const definition = await api.scheduledTasks.get(taskId);
+      return definition.lock ?? null;
+    },
+    initialData: automationQuery.data?.lock ?? null,
+    initialDataUpdatedAt: Date.now(),
+    staleTime: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    refetchInterval: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    enabled: Boolean(automationQuery.data),
+  });
+  const definitionLock = automationQuery.data?.lock ?? null;
+  const lockView = editLockQuery.data ?? definitionLock;
+  const canEditAutomation = automationQuery.data?.canEdit !== false;
+  const lockHeldByOther = Boolean(lockView?.heldByUserId && !lockView.isHeldByMe);
+  const builderReadOnly = canEditAutomation && lockHeldByOther;
+  const isLockHolder = Boolean(lockView?.isHeldByMe);
 
   const hasAttributedRuns = Boolean(
     automationQuery.data?.recentRuns.some((run) => Boolean(run.triggeredByUserId)) ||
@@ -712,6 +742,7 @@ export function AutomationBuilderPage() {
       patch: (current: DraftAutomation) => DraftAutomation,
       options: { message?: string; promptStepId?: string; onSaved?: () => void } = {},
     ) => {
+      if (builderReadOnly) return;
       if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
       pendingSaveCountRef.current += 1;
       const save = saveQueueRef.current
@@ -757,8 +788,35 @@ export function AutomationBuilderPage() {
         });
       saveQueueRef.current = save.catch(() => undefined);
     },
-    [queryClient, queryKey, taskId],
+    [builderReadOnly, queryClient, queryKey, taskId],
   );
+
+  const acquireLockMutation = useMutation({
+    mutationFn: () => api.scheduledTasks.acquireLock(taskId),
+    onSuccess: ({ lock }) => {
+      queryClient.setQueryData(editLockQueryKey, lock);
+    },
+    onError: (error) => {
+      if (!(error instanceof ApiRequestError) || error.code !== "LOCKED") return;
+      const lock = error.details.lock as AutomationEditLockView | undefined;
+      if (lock) queryClient.setQueryData(editLockQueryKey, lock);
+    },
+  });
+  const acquireLock = acquireLockMutation.mutate;
+
+  const autoAcquireEnabled = automationQuery.data != null && automationQuery.data.canEdit !== false;
+  useEffect(() => {
+    if (!autoAcquireEnabled) return;
+    void acquireLock();
+  }, [acquireLock, autoAcquireEnabled]);
+
+  useEffect(() => {
+    if (!isLockHolder) return;
+    const interval = window.setInterval(() => {
+      if (document.hasFocus()) void acquireLock();
+    }, AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [acquireLock, isLockHolder]);
 
   const updateAgentPrompt = useCallback(
     (stepId: string, content: string) => {
@@ -798,6 +856,7 @@ export function AutomationBuilderPage() {
 
   const updateExecutionMode = useCallback(
     (executionMode: AutomationExecutionMode) => {
+      if (builderReadOnly) return;
       executionModeRequestIdRef.current += 1;
       const requestId = executionModeRequestIdRef.current;
       const selected = () => {
@@ -825,7 +884,7 @@ export function AutomationBuilderPage() {
         onSaved: selected,
       });
     },
-    [automationQuery.data, queryClient, queryKey, saveDraftPatch, taskId],
+    [automationQuery.data, builderReadOnly, queryClient, queryKey, saveDraftPatch, taskId],
   );
   const handleExecutionModeSelectionHandled = useCallback((selectionId: number) => {
     setExecutionModeSelection((current) => (current?.id === selectionId ? null : current));
@@ -946,34 +1005,42 @@ export function AutomationBuilderPage() {
         aria-busy={runMutation.isPending || selectedRun?.status === "running"}
       >
         <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div
-            data-testid="automation-builder-toolbar"
-            className="automation-builder-toolbar-enter pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-border/70 bg-card/90 p-1.5 shadow-md backdrop-blur"
-          >
-            <RunsMenu
-              runs={automation.recentRuns}
-              activeRunId={selectedRun?.id ?? null}
-              memberNameById={memberNameById}
-              onSelectRun={(runId) => {
-                setTriggeredRunId(null);
-                setRunRequestError(null);
-                navigateRun(runId);
-              }}
-            />
-            {selectedRunId ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className={canvasToolbarButtonClass}
-                onClick={() => {
+          <div className="pointer-events-auto flex min-w-0 flex-col items-start gap-2">
+            <div
+              data-testid="automation-builder-toolbar"
+              className="automation-builder-toolbar-enter pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-border/70 bg-card/90 p-1.5 shadow-md backdrop-blur"
+            >
+              <RunsMenu
+                runs={automation.recentRuns}
+                activeRunId={selectedRun?.id ?? null}
+                memberNameById={memberNameById}
+                onSelectRun={(runId) => {
                   setTriggeredRunId(null);
                   setRunRequestError(null);
-                  navigateRun(null);
+                  navigateRun(runId);
                 }}
-              >
-                Latest
-              </Button>
-            ) : null}
+              />
+              {selectedRunId ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={canvasToolbarButtonClass}
+                  onClick={() => {
+                    setTriggeredRunId(null);
+                    setRunRequestError(null);
+                    navigateRun(null);
+                  }}
+                >
+                  Latest
+                </Button>
+              ) : null}
+            </div>
+            <AutomationLockBanner
+              lock={lockView}
+              canEdit={canEditAutomation}
+              onRequestTakeover={() => setStealDialogOpen(true)}
+              onReviewStealRequest={() => setHolderResponseDialogOpen(true)}
+            />
           </div>
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
@@ -1065,8 +1132,12 @@ export function AutomationBuilderPage() {
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           testingStepId={testingStepId}
+<<<<<<< HEAD
           isSetupPlaceholder={placeholderSetup}
           isBuilderChatBusy={builderChatBusy}
+=======
+          readOnly={builderReadOnly}
+>>>>>>> b6f58f5e (feat(web): automation lock UI states [subagent:lifecycle-worker/web-lock-ui])
           onSelectStep={setSelectedStepId}
           onUpdateStepPositions={updateStepPositions}
         />
@@ -1089,6 +1160,7 @@ export function AutomationBuilderPage() {
         run={selectedRun ?? null}
         status={selectedStepStatus}
         executionActivity={selectedStep?.id === executingStepId ? executionActivity : null}
+        readOnly={builderReadOnly}
         onClose={() => setSelectedStepId(null)}
         onTest={(stepId) => testMutation.mutate(stepId)}
         testingStepId={testingStepId}
@@ -1103,6 +1175,20 @@ export function AutomationBuilderPage() {
         canShare={canShareAutomation}
         open={shareDialogOpen}
         onOpenChange={setShareDialogOpen}
+      />
+
+      <AutomationLockStealDialog
+        taskId={taskId}
+        open={stealDialogOpen}
+        onOpenChange={setStealDialogOpen}
+        lock={lockView}
+      />
+
+      <AutomationLockHolderResponseDialog
+        taskId={taskId}
+        open={holderResponseDialogOpen}
+        onOpenChange={setHolderResponseDialogOpen}
+        lock={lockView}
       />
     </div>
   );
@@ -2697,6 +2783,7 @@ function AutomationCanvas({
   testingStepId,
   isSetupPlaceholder,
   isBuilderChatBusy,
+  readOnly,
   onSelectStep,
   onUpdateStepPositions,
 }: {
@@ -2707,6 +2794,7 @@ function AutomationCanvas({
   testingStepId: string | null;
   isSetupPlaceholder: boolean;
   isBuilderChatBusy: boolean;
+  readOnly: boolean;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
@@ -2718,8 +2806,12 @@ function AutomationCanvas({
         stepOutputs={stepOutputs}
         runStatus={runStatus}
         testingStepId={testingStepId}
+<<<<<<< HEAD
         isSetupPlaceholder={isSetupPlaceholder}
         isBuilderChatBusy={isBuilderChatBusy}
+=======
+        readOnly={readOnly}
+>>>>>>> b6f58f5e (feat(web): automation lock UI states [subagent:lifecycle-worker/web-lock-ui])
         onSelectStep={onSelectStep}
         onUpdateStepPositions={onUpdateStepPositions}
       />
@@ -2843,6 +2935,7 @@ function AutomationCanvasFlow({
   testingStepId,
   isSetupPlaceholder,
   isBuilderChatBusy,
+  readOnly,
   onSelectStep,
   onUpdateStepPositions,
 }: {
@@ -2853,6 +2946,7 @@ function AutomationCanvasFlow({
   testingStepId: string | null;
   isSetupPlaceholder: boolean;
   isBuilderChatBusy: boolean;
+  readOnly: boolean;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
@@ -2976,7 +3070,7 @@ function AutomationCanvasFlow({
           );
         }}
         onPaneClick={() => onSelectStep(null)}
-        nodesDraggable
+        nodesDraggable={!readOnly}
         nodesConnectable={false}
         edgesReconnectable={false}
         nodesFocusable
@@ -3246,6 +3340,7 @@ function NodeDrawer({
   run,
   status,
   executionActivity,
+  readOnly,
   onClose,
   onTest,
   testingStepId,
@@ -3259,6 +3354,7 @@ function NodeDrawer({
   run: AutomationRunRecord | null;
   status: UiStatus;
   executionActivity: ExecutionActivity;
+  readOnly: boolean;
   onClose: () => void;
   onTest: (stepId: string) => void;
   testingStepId: string | null;
@@ -3330,6 +3426,7 @@ function NodeDrawer({
             draft={draft}
             step={step}
             content={content}
+            readOnly={readOnly}
             onUpdateAgentPrompt={onUpdateAgentPrompt}
             savingPrompt={savingPromptStepId === step.id}
           />
@@ -3439,6 +3536,7 @@ function NodeInputPanel({
   draft,
   step,
   content,
+  readOnly,
   onUpdateAgentPrompt,
   savingPrompt,
 }: {
@@ -3446,6 +3544,7 @@ function NodeInputPanel({
   draft: DraftAutomation;
   step: WorkflowStep;
   content?: AutomationStepContent;
+  readOnly: boolean;
   onUpdateAgentPrompt: (stepId: string, content: string) => void;
   savingPrompt: boolean;
 }) {
@@ -3477,6 +3576,8 @@ function NodeInputPanel({
             <Textarea
               value={agentPrompt}
               className={cn(builderTextareaClass, "min-h-[320px] flex-1 resize-none font-mono")}
+              readOnly={readOnly}
+              aria-readonly={readOnly}
               onChange={(event) => setAgentPrompt(event.target.value)}
             />
           </Field>
@@ -3485,7 +3586,7 @@ function NodeInputPanel({
               type="button"
               size="sm"
               className="h-8 gap-1.5 rounded-[7px] bg-brand-accent px-3 font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-[#161300] shadow-none hover:bg-brand-accent/90"
-              disabled={!agentPromptDirty || !agentPrompt.trim() || savingPrompt}
+              disabled={readOnly || !agentPromptDirty || !agentPrompt.trim() || savingPrompt}
               onClick={() => onUpdateAgentPrompt(step.id, agentPrompt)}
             >
               {savingPrompt ? (

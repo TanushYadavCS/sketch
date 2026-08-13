@@ -186,6 +186,23 @@ export interface ScheduledTaskConversationLock {
   expiresAt: string | null;
 }
 
+export interface AutomationEditStealPending {
+  requesterName: string;
+  expiresAt: string;
+}
+
+export interface AutomationEditLockView {
+  heldByUserId: string | null;
+  heldByName: string | null;
+  heldByPlatform: "slack" | "web" | "whatsapp" | null;
+  heldBySurface: "builder" | "admin" | null;
+  expiresAt: string | null;
+  isHeldByMe: boolean;
+  stealPending: AutomationEditStealPending | null;
+}
+
+export type AutomationDefinitionWithLock = AutomationDefinition & { lock?: AutomationEditLockView | null };
+
 export interface ScheduledTaskConversationSummary {
   conversationId: string;
   kinds: ScheduledTaskConversationKind[];
@@ -2599,7 +2616,7 @@ export const api = {
       return { run: normalizeAutomationRun(res.run, taskId) };
     },
     async get(taskId: string) {
-      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
+      const res = await request<{ automation: AutomationDefinitionWithLock }>(`/api/scheduled-tasks/${taskId}`);
       return res.automation;
     },
     originChatMessages(taskId: string) {
@@ -2675,6 +2692,27 @@ export const api = {
       return request<{ run: unknown }>(`/api/scheduled-tasks/${taskId}/steps/${stepId}/runs`, {
         method: "POST",
         body: JSON.stringify(body),
+      });
+    },
+    acquireLock(taskId: string) {
+      return request<{ lock: AutomationEditLockView }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
+        method: "POST",
+      });
+    },
+    releaseLock(taskId: string) {
+      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
+        method: "DELETE",
+      });
+    },
+    requestSteal(taskId: string) {
+      return request<{ status: "pending" }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`, {
+        method: "POST",
+      });
+    },
+    respondToStealRequest(taskId: string, approve: boolean) {
+      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`, {
+        method: "POST",
+        body: JSON.stringify({ approve }),
       });
     },
     async getStepContent(taskId: string) {
