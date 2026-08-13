@@ -351,6 +351,7 @@ export interface ManageScheduledTasksDeps {
   chatAuthoring?: ChatAutomationAuthoring;
   currentAutomation?: CurrentAutomation;
   db?: Kysely<DB>;
+  notifyStealRequest?: (taskId: string) => Promise<void>;
 }
 
 async function lockedAutomationMessage(
@@ -1597,6 +1598,9 @@ export async function handleManageScheduledTasks(
       const holder = await holderDisplayName(deps, stolen.lock.holder_user_id);
       if (stolen.kind === "locked") {
         return text(`Another user has already asked to take over this automation. Waiting for ${holder} to respond.`);
+      }
+      if (deps.notifyStealRequest) {
+        void deps.notifyStealRequest(task_id).catch(() => {});
       }
       return text(`Waiting for ${holder} to approve your request to take over this automation.`);
     }

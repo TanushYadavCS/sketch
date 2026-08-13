@@ -14,6 +14,7 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createAskUserQuestionTool, createAskUserQuestionsTool } from "./tools/questions";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
@@ -69,6 +70,30 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       config: deps.toolConfig,
       encryptionKey: deps.settingsEncryptionKey,
       automationArtifactCollector: deps.automationArtifactCollector,
+      notifyStealRequest:
+        deps.getSlack && deps.logger && deps.db
+          ? ((stealSlack, stealLogger, stealDb) =>
+              (taskId: string) =>
+                notifyStealRequested({
+                  db: stealDb,
+                  logger: stealLogger,
+                  taskId,
+                  senders: {
+                    slack: {
+                      postLockStealRequest: async (p) => {
+                        const slack = stealSlack();
+                        if (!slack) return;
+                        return slack.postLockStealRequestMessage(p.channelId, p);
+                      },
+                      sendText: async (channelId, text) => {
+                        const slack = stealSlack();
+                        if (!slack) return;
+                        return slack.postMessage(channelId, text);
+                      },
+                    },
+                  },
+                }))(deps.getSlack, deps.logger, deps.db)
+          : undefined,
     }),
     createManageAutomationSharesTool({
       scheduler: deps.scheduler,

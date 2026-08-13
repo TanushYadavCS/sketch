@@ -37,7 +37,13 @@ import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
+<<<<<<< HEAD
 import { denyIfNotAdmin } from "./auth-helpers";
+=======
+import type { SlackBot } from "../slack/bot";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
+>>>>>>> 6210bcf8 (feat(sharing): wire steal-request notifications into API route and agent steal action [parent])
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
@@ -70,6 +76,8 @@ interface ScheduledTaskRouteOptions {
   baseUrl?: string | null;
   port?: number;
   encryptionKey?: string;
+  getSlack?: () => SlackBot | null;
+  whatsappRuntime?: WhatsAppRuntime;
 }
 
 interface ScheduledTaskListItem {
@@ -830,6 +838,41 @@ export function scheduledTaskRoutes(
     const lock = await toLockView(stolen.lock, result.userId, users);
     if (stolen.kind === "locked") {
       return c.json({ error: { code: "LOCKED", message: "A steal request is already pending", lock } }, 409);
+    }
+    if (logger) {
+      void notifyStealRequested({
+        db,
+        logger,
+        taskId: id,
+        senders: {
+        ...(options.getSlack
+          ? {
+              slack: {
+                postLockStealRequest: async (p: { channelId: string; taskId: string; requesterName: string; taskTitle: string }) => {
+                  const slack = options.getSlack?.();
+                  if (!slack) return;
+                  return slack.postLockStealRequestMessage(p.channelId, p);
+                },
+                sendText: async (channelId: string, text: string) => {
+                  const slack = options.getSlack?.();
+                  if (!slack) return;
+                  return slack.postMessage(channelId, text);
+                },
+              },
+            }
+          : {}),
+        ...(options.whatsappRuntime
+          ? {
+              whatsapp: {
+                sendText: async (target: Parameters<WhatsAppRuntime["sendText"]>[0], text: string) =>
+                  options.whatsappRuntime?.sendText(target, text),
+              },
+            }
+          : {}),
+        },
+      }).catch((err) => {
+        logger.warn({ err, taskId: id }, "Steal request notification delivery failed");
+      });
     }
     return c.json({ status: "pending", lock });
   });

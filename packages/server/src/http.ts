@@ -600,6 +600,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         baseUrl: config.BASE_URL,
         port: config.PORT,
         encryptionKey: config.ENCRYPTION_KEY,
+        getSlack: deps.getSlack,
+        whatsappRuntime: deps.whatsappRuntime,
       }),
     );
   }

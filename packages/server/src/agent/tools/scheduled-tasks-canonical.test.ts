@@ -2252,6 +2252,7 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
     await acquireOrRenewLock(db, { taskId: "steal-task", holder });
     const scheduler = schedulerFor("steal-task");
+    const notifyStealRequest = vi.fn().mockResolvedValue(undefined);
 
     const result = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-task" },
@@ -2259,6 +2260,7 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
         db,
         scheduler,
         taskContext: taskContextFor("steal-task"),
+        notifyStealRequest,
         userRepo: {
           list: async () => [],
           getAllEmailsForUser: async () => [],
@@ -2271,6 +2273,7 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     expect(result.content[0].text).toBe(
       "Waiting for Holder Person to approve your request to take over this automation.",
     );
+    expect(notifyStealRequest).toHaveBeenCalledWith("steal-task");
     await expect(createAutomationLocksRepository(db).getByTaskId("steal-task")).resolves.toMatchObject({
       holder_user_id: "holder-1",
       steal_requester_user_id: "owner-1",

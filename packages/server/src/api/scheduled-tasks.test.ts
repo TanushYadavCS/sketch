@@ -16,6 +16,8 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
+import { acquireOrRenewLock } from "../automation/lock-service";
+import type { SlackBot } from "../slack/bot";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb } from "../test-utils";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
@@ -2214,6 +2216,60 @@ describe("Scheduled Tasks API", () => {
     const afterReleaseBody = await afterRelease.json();
     expect(afterReleaseBody).toMatchObject({ automation: { id: "task-lock" } });
     expect(afterReleaseBody.automation).not.toHaveProperty("lock");
+  });
+
+  it("notifies a Slack holder when a web member requests a steal", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-slack-hold@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob-slack-steal@test.com" });
+    await tasks.add({
+      id: "task-slack-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D9",
+      thread_ts: null,
+      prompt: "Slack-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({ taskId: "task-slack-lock", userId: bob.id, grantedByUserId: alice.id });
+    await acquireOrRenewLock(db, {
+      taskId: "task-slack-lock",
+      holder: { userId: alice.id, platform: "slack", surface: "slack_dm", conversationId: "D9" },
+    });
+
+    const postLockStealRequestMessage = vi.fn().mockResolvedValue(undefined);
+    const postMessage = vi.fn().mockResolvedValue(undefined);
+    const getSlack = () => ({ postLockStealRequestMessage, postMessage }) as unknown as SlackBot;
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler, getSlack });
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    const res = await app.request("/api/scheduled-tasks/task-slack-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(postLockStealRequestMessage).toHaveBeenCalled();
+    });
+    expect(postLockStealRequestMessage).toHaveBeenCalledWith(
+      "D9",
+      expect.objectContaining({ taskId: "task-slack-lock", requesterName: "Bob" }),
+    );
   });
 
   it("returns 409 LOCKED on PUT and steal edge cases without a valid holder", async () => {
