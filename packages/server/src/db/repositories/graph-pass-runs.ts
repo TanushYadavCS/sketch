@@ -33,6 +33,7 @@ export type DuplicateDrainRunSnapshot = {
   groupIds: string[];
   m5SkippedPassReason: number;
   m3EmailVetoes: number;
+  m5EmailVetoes: number;
   aliasOnlyQueued: number;
   aliasOnlyDropped: number;
 };
@@ -95,6 +96,7 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
         : [],
       m5SkippedPassReason: readNumber(parsed.m5SkippedPassReason),
       m3EmailVetoes: readNumber(parsed.m3EmailVetoes),
+      m5EmailVetoes: readNumber(parsed.m5EmailVetoes),
       aliasOnlyQueued: readNumber(parsed.aliasOnlyQueued),
       aliasOnlyDropped: readNumber(parsed.aliasOnlyDropped),
     };

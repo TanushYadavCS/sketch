@@ -511,6 +511,51 @@ describe("duplicate drain", () => {
     expect(duplicateGreenMerge).toHaveLength(1);
   });
 
+  it("keeps M5 people pending when both sides have disjoint emails", async () => {
+    harness = await createHarness();
+    const { db, ownerId } = harness;
+
+    await seedEntity(db, "abhishek-onestop", {
+      name: "Abhishek Sharma",
+      email: "abhishek.sharma@onestop.ai",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedEntity(db, "abhishek-moonshot", {
+      name: "Abhishek Sharma",
+      email: "abhinav.sharma@moonshotcom.com",
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    const rowId = await seedQueueRow(db, ownerId, {
+      proposedName: "Abhishek Sharma",
+      candidateEntityId: "abhishek-onestop",
+      passReason: null,
+    });
+
+    const response = await triggerDuplicateDrain(harness);
+
+    expect(await liveCount(db, ["abhishek-onestop", "abhishek-moonshot"])).toBe(2);
+    const entities = await db
+      .selectFrom("entities")
+      .select(["id", "merged_into_entity_id"])
+      .where("id", "in", ["abhishek-onestop", "abhishek-moonshot"])
+      .execute();
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "abhishek-onestop", merged_into_entity_id: null }),
+        expect.objectContaining({ id: "abhishek-moonshot", merged_into_entity_id: null }),
+      ]),
+    );
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", rowId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("pending");
+    expect(row.pass_reason).toBeNull();
+    expect(row.resolved_entity_id).toBeNull();
+    expect(response.run?.inputSnapshot).toMatchObject({ m5EmailVetoes: 1 });
+  });
+
   it("reverses a chained group as a set without touching another group", async () => {
     harness = await createHarness();
     const { db, app, cookie } = harness;

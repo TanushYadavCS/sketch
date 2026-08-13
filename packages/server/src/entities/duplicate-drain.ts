@@ -53,6 +53,7 @@ function emptySummary(status: "running" | "complete" = "running"): DuplicateDrai
     groupIds: [],
     m5SkippedPassReason: 0,
     m3EmailVetoes: 0,
+    m5EmailVetoes: 0,
     aliasOnlyQueued: 0,
     aliasOnlyDropped: 0,
   };
@@ -71,6 +72,7 @@ function parseSummary(raw: string): DuplicateDrainSummary {
       groupIds: Array.isArray(parsed.groupIds) ? parsed.groupIds.filter((id) => typeof id === "string") : [],
       m5SkippedPassReason: typeof parsed.m5SkippedPassReason === "number" ? parsed.m5SkippedPassReason : 0,
       m3EmailVetoes: typeof parsed.m3EmailVetoes === "number" ? parsed.m3EmailVetoes : 0,
+      m5EmailVetoes: typeof parsed.m5EmailVetoes === "number" ? parsed.m5EmailVetoes : 0,
       aliasOnlyQueued: typeof parsed.aliasOnlyQueued === "number" ? parsed.aliasOnlyQueued : 0,
       aliasOnlyDropped: typeof parsed.aliasOnlyDropped === "number" ? parsed.aliasOnlyDropped : 0,
     };
@@ -207,6 +209,14 @@ async function loadContactPointEmails(db: Kysely<DB>, entities: Entity[]): Promi
 function disjoint(left: Set<string>, right: Set<string>): boolean {
   for (const value of left) if (right.has(value)) return false;
   return true;
+}
+
+function hasDisjointEmails(left: Set<string>, right: Set<string>): boolean {
+  return left.size > 0 && right.size > 0 && disjoint(left, right);
+}
+
+function emailsForEntity(entity: Entity, emails: Map<string, Set<string>>): Set<string> {
+  return emails.get(entity.id) ?? emailsFromEntity(entity);
 }
 
 function groupEntities(entities: Entity[], keyFor: (entity: Entity) => string): Entity[][] {
@@ -388,9 +398,7 @@ async function applyPersonTokenSetGroups(
     let vetoed = false;
     for (let i = 0; i < group.length && !vetoed; i += 1) {
       for (let j = i + 1; j < group.length; j += 1) {
-        const left = emails.get(group[i].id) ?? new Set<string>();
-        const right = emails.get(group[j].id) ?? new Set<string>();
-        if (left.size > 0 && right.size > 0 && disjoint(left, right)) {
+        if (hasDisjointEmails(emailsForEntity(group[i], emails), emailsForEntity(group[j], emails))) {
           vetoed = true;
           summary.m3EmailVetoes++;
           break;
@@ -441,7 +449,11 @@ async function loadM5Rows(db: Kysely<DB>): Promise<{ mergeable: QueueRow[]; skip
   };
 }
 
-async function applyM5Rows(db: Kysely<DB>, summary: DuplicateDrainSummary): Promise<void> {
+async function applyM5Rows(
+  db: Kysely<DB>,
+  emails: Map<string, Set<string>>,
+  summary: DuplicateDrainSummary,
+): Promise<void> {
   const { mergeable, skippedPassReason } = await loadM5Rows(db);
   summary.m5SkippedPassReason += skippedPassReason;
   for (const row of mergeable) {
@@ -461,6 +473,14 @@ async function applyM5Rows(db: Kysely<DB>, summary: DuplicateDrainSummary): Prom
       .orderBy("id", "asc")
       .executeTakeFirst();
     if (!proposal) continue;
+    if (
+      candidate.source_type === "person" &&
+      proposal.source_type === "person" &&
+      hasDisjointEmails(emailsForEntity(candidate, emails), emailsForEntity(proposal, emails))
+    ) {
+      summary.m5EmailVetoes++;
+      continue;
+    }
     const groupId = `duplicate-drain:v2:m5:${row.id}`;
     await applyEntityGroup(db, groupId, candidate.id, [proposal.id], summary);
     await db
@@ -498,7 +518,7 @@ export async function runDuplicateDrain(
       await applyProductGroups(db, entities, state);
       await applyPersonTokenSetGroups(db, entities, emails, state);
       await applyPersonStrictGroups(db, entities, emails, state);
-      await applyM5Rows(db, state);
+      await applyM5Rows(db, emails, state);
       const complete = { ...state, status: "complete" as const, cursorCreatedAt: null, cursorId: null };
       await writeState(db, complete);
       opts.logger?.info(complete, "duplicate drain complete");
