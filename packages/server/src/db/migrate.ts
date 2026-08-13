@@ -187,8 +187,8 @@ import * as m184 from "./migrations/184-person-contact-point-cutover";
 import * as m185 from "./migrations/185-queue-pass-reason";
 import * as m186 from "./migrations/186-entity-merge-groups";
 import * as m187 from "./migrations/187-entity-name-proposals";
-import * as m181Shares from "./migrations/181-automation-shares";
-import * as m185Locks from "./migrations/185-automation-locks";
+import * as m187Shares from "./migrations/187-automation-shares";
+import * as m188Locks from "./migrations/188-automation-locks";
 import type { DB } from "./schema";
 
 /**
@@ -385,8 +385,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "185-queue-pass-reason": m185,
           "186-entity-merge-groups": m186,
           "187-entity-name-proposals": m187,
-          "181-automation-shares": m181Shares,
-          "185-automation-locks": m185Locks,
+          "187-automation-shares": m187Shares,
+          "188-automation-locks": m188Locks,
         };
       },
     },

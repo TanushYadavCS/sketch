@@ -303,8 +303,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[179]).toBe("184-person-contact-point-cutover");
     expect(names[180]).toBe("185-queue-pass-reason");
     expect(names[181]).toBe("186-entity-merge-groups");
-    expect(names[182]).toBe("181-automation-shares");
-    expect(names[183]).toBe("185-automation-locks");
+    expect(names[182]).toBe("187-automation-shares");
+    expect(names[183]).toBe("188-automation-locks");
   });
 
   it("keeps the automation-sharing migration ledger (181-185) in order", async () => {
@@ -315,15 +315,18 @@ describe("runMigrations — full sequence", () => {
     `.execute(db);
     const names = rows.rows.map((row) => row.name);
 
-    // Audit of the automation-sharing feature slice: shares (184) must precede
-    // locks (185), and neither may be renumbered relative to the minting and
-    // graph-pass migrations that precede them.
-    expect(names.slice(176, 181)).toEqual([
+    // Audit of the automation-sharing feature slice: shares (187) must precede
+    // locks (188), and neither may be renumbered relative to the minting,
+    // cutover, queue-pass, and merge-groups migrations that precede them.
+    expect(names.slice(176, 184)).toEqual([
       "181-project-minting-verdicts",
       "182-project-minting-states",
       "183-graph-pass-runs",
-      "184-automation-shares",
-      "185-automation-locks",
+      "184-person-contact-point-cutover",
+      "185-queue-pass-reason",
+      "186-entity-merge-groups",
+      "187-automation-shares",
+      "188-automation-locks",
     ]);
   });
 
