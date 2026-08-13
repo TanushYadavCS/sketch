@@ -17,6 +17,8 @@ import {
   type AutomationSketchToolName,
   automationExecutionModeAllowsStep,
   automationExecutionModeSchema,
+  cliIntegrationAppDefinition,
+  cliIntegrationAppDefinitions,
   cliSkillRequiredEnv,
   workflowEdgeSchema,
   workflowStepSchema,
@@ -1010,6 +1012,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorId, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
   const usesIntegrationActions = workflowStepUsesIntegrationActions(step);
   const sketchTools = step.actionCapabilities?.sketchTools ?? [];
+  const cliIntegrationIds = step.actionCapabilities?.cliIntegrations ?? [];
   if (hasInvalidAutomationSketchToolNamespace(script)) {
     throw new Error(`Action step ${step.id} uses an invalid Sketch tool namespace; use ctx.tools.<capability>`);
   }
@@ -1041,9 +1044,11 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
     }
 
     const env = await buildScriptEnv({
+      stepId: step.id,
       runtimeContext: buildAgentEnvironmentRuntimeContext(params.task),
       listAgentEnvForRuntime: params.listAgentEnvForRuntime,
       integrationEnv: integrationAccess?.envVars ?? {},
+      cliIntegrationIds,
     });
 
     const timeoutMs = (step.timeout ?? 1800) * 1000;
@@ -1137,22 +1142,48 @@ function normalizeActionScript(script: string): string {
 }
 
 async function buildScriptEnv(params: {
+  stepId: string;
   runtimeContext: AgentEnvironmentRuntimeContext;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   integrationEnv: Record<string, string>;
+  cliIntegrationIds: readonly string[];
 }): Promise<Readonly<Record<string, string>>> {
-  const userEnv = Object.fromEntries(
-    Object.entries(
-      params.listAgentEnvForRuntime
-        ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.runtimeContext))
-        : {},
-    ).filter(([name]) => name !== "GH_TOKEN"),
+  const runtimeEnv = params.listAgentEnvForRuntime
+    ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.runtimeContext))
+    : {};
+  const allCliEnvNames = new Set(
+    Object.values(cliIntegrationAppDefinitions).flatMap((definition) =>
+      definition.credentialFields.map((field) => field.envName),
+    ),
   );
+  const allowedCliEnvNames = new Set<string>();
+  const missingCliIntegrations: string[] = [];
+  for (const appId of params.cliIntegrationIds) {
+    const definition = cliIntegrationAppDefinition(appId);
+    if (!definition) {
+      throw new Error(`Action step ${params.stepId} declares unsupported CLI integration "${appId}"`);
+    }
+    for (const field of definition.credentialFields) allowedCliEnvNames.add(field.envName);
+    if (definition.credentialFields.some((field) => !runtimeEnv[field.envName])) {
+      missingCliIntegrations.push(definition.name);
+    }
+  }
+  if (missingCliIntegrations.length > 0) {
+    throw new Error(
+      `Action step ${params.stepId} requires an active managed CLI integration: ${missingCliIntegrations.join(", ")}. Connect or share the integration in Sketch Integrations.`,
+    );
+  }
+
+  const filterCliEnv = (env: Record<string, string>) =>
+    Object.fromEntries(
+      Object.entries(env).filter(([name]) => !allCliEnvNames.has(name) || allowedCliEnvNames.has(name)),
+    );
+  const userEnv = filterCliEnv(runtimeEnv);
   const env: Record<string, string> = {
     PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
     NODE_NO_WARNINGS: "1",
     ...userEnv,
-    ...params.integrationEnv,
+    ...filterCliEnv(params.integrationEnv),
   };
   if (env.CANVAS_CLI && !env.INTEGRATION_CLI) {
     env.INTEGRATION_CLI = env.CANVAS_CLI;

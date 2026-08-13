@@ -168,6 +168,8 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].instructions).toContain("server-authenticated localPath");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.tools");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.sketch and ctx.sketchTools are invalid");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain('cliIntegrations: ["github"]');
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("managed gh executable");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("human-readable message string");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("JSON.stringify output");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("short headings and bullet lists");

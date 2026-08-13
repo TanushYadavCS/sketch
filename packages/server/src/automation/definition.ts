@@ -665,11 +665,16 @@ export function validateAutomationBuilderSaveRequest(params: {
         }
       }
       if (step.actionCapabilities) {
-        if (!step.actionCapabilities.usesIntegrationActions && step.actionCapabilities.sketchTools.length === 0) {
+        const cliIntegrations = step.actionCapabilities.cliIntegrations ?? [];
+        if (
+          !step.actionCapabilities.usesIntegrationActions &&
+          step.actionCapabilities.sketchTools.length === 0 &&
+          cliIntegrations.length === 0
+        ) {
           addIssue(
             issues,
             "ACTION_CAPABILITIES_REQUIRED",
-            `Action step "${step.label}" must declare a Sketch tool or integration action capability`,
+            `Action step "${step.label}" must declare a Sketch tool, CLI integration, or integration action capability`,
             `steps.${step.id}.actionCapabilities`,
           );
         }
@@ -682,6 +687,17 @@ export function validateAutomationBuilderSaveRequest(params: {
             "DUPLICATE_SKETCH_TOOL",
             `Action step "${step.label}" declares the Sketch tool "${duplicateTools[0]}" more than once`,
             `steps.${step.id}.actionCapabilities.sketchTools`,
+          );
+        }
+        const duplicateCliIntegrations = [
+          ...new Set(cliIntegrations.filter((app, index, apps) => apps.indexOf(app) !== index)),
+        ];
+        if (duplicateCliIntegrations.length > 0) {
+          addIssue(
+            issues,
+            "DUPLICATE_CLI_INTEGRATION",
+            `Action step "${step.label}" declares the CLI integration "${duplicateCliIntegrations[0]}" more than once`,
+            `steps.${step.id}.actionCapabilities.cliIntegrations`,
           );
         }
       }

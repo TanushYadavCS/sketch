@@ -886,6 +886,104 @@ describe("executeAutomation action steps", () => {
     );
   });
 
+  it("runs a managed GitHub CLI action without a Canvas broker", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({
+      GH_TOKEN: "managed-token",
+      OTHER_SAFE_VALUE: "safe-value",
+    });
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "List GitHub pull requests",
+            icon: "github",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: "return { token: ctx.env.GH_TOKEN, safeValue: ctx.env.OTHER_SAFE_VALUE };",
+        },
+      ]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toEqual({ token: "managed-token", safeValue: "safe-value" });
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUserId: "user-1", contextType: "scheduled_task" }),
+    );
+  });
+
+  it("strips managed CLI credentials from actions that do not declare them", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(makeBrokerProvider());
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "managed-token" });
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Inspect environment",
+            icon: "code",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: true },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return Boolean(ctx.env.GH_TOKEN);" }]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toBe(false);
+    expect(loadIntegrationProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a CLI action clearly when its managed connection is unavailable", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({});
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "List GitHub pull requests",
+            icon: "github",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'return "should not run";' }]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("requires an active managed CLI integration: GitHub");
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+  });
+
   it("fails action steps that use the legacy Sketch tool namespace", async () => {
     const automationCapabilityRegistry = { createTools: vi.fn() };
     const loadIntegrationProvider = vi.fn().mockResolvedValue(null);

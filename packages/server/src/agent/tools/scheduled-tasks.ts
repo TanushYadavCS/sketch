@@ -75,7 +75,9 @@ const workflowStepSchema = z.object({
     .optional()
     .describe("MCP servers available to an agent step. Not used by action steps."),
   actionCapabilities: automationActionCapabilitiesSchema
-    .describe("Capabilities available to action scripts. Sketch tools are creator-scoped and read-only.")
+    .describe(
+      "Capabilities available to action scripts. Sketch tools are creator-scoped and read-only. For managed GitHub CLI access, declare cliIntegrations: ['github'] with usesIntegrationActions: false; any gh subcommand, including write operations, is allowed once declared.",
+    )
     .optional(),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z

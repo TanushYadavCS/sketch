@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { cliIntegrationAppIdSchema } from "./cli-integrations";
 
 export const canvasWebhookEndpointSchema = z
   .object({
@@ -59,6 +60,7 @@ export const automationActionCapabilitiesSchema = z
   .object({
     sketchTools: z.array(automationSketchToolNameSchema).max(8),
     usesIntegrationActions: z.boolean(),
+    cliIntegrations: z.array(cliIntegrationAppIdSchema).max(8).optional(),
   })
   .strict();
 

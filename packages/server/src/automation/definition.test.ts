@@ -132,6 +132,41 @@ describe("automation action capability validation", () => {
     ).not.toThrow();
   });
 
+  it("allows a managed CLI action without a broker", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] });
+    request.stepContent.action.content = "return 'ok';";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).not.toThrow();
+  });
+
+  it("rejects duplicate managed CLI integrations", () => {
+    const request = requestForAction({
+      sketchTools: [],
+      usesIntegrationActions: false,
+      cliIntegrations: ["github", "github"],
+    });
+    request.stepContent.action.content = "return 'ok';";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "DUPLICATE_CLI_INTEGRATION" })]),
+      }),
+    );
+  });
+
+  it("rejects unknown managed CLI integrations in the request schema", () => {
+    const request = JSON.parse(
+      JSON.stringify(requestForAction({ sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] })),
+    ) as { steps: Array<Record<string, unknown>> };
+    request.steps[1].actionCapabilities = {
+      sketchTools: [],
+      usesIntegrationActions: false,
+      cliIntegrations: ["not-registered"],
+    };
+
+    expect(() => parseAutomationBuilderSaveRequest(request)).toThrow();
+  });
+
   it("keeps legacy actions broker-required", () => {
     expect(() =>
       validateAutomationBuilderSaveRequest({ request: requestForAction(), brokerCapable: false }),
