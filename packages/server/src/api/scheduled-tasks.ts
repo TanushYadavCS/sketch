@@ -20,6 +20,7 @@ import {
 import { parseAutomationTriggerConfig } from "../automation/webhook";
 
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
 import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
@@ -45,7 +46,12 @@ interface ScheduledTaskMutationDeps {
   removeTaskRuntime?: (id: string) => Promise<boolean>;
   executeTaskById: (
     id: string,
-    options?: { preserveTaskState?: boolean; runMode?: "production" | "manual" | "test"; runId?: string },
+    options?: {
+      preserveTaskState?: boolean;
+      runMode?: "production" | "manual" | "test";
+      runId?: string;
+      triggeredByUserId?: string | null;
+    },
   ) => Promise<unknown>;
   refreshTaskSchedule?: (id: string) => Promise<unknown>;
   executeStepById?: (
@@ -86,6 +92,11 @@ interface ScheduledTaskListItem {
   canPause: boolean;
   canResume: boolean;
   canDelete: boolean;
+  isOwner: boolean;
+  sharedWithMe: boolean;
+  canShare: boolean;
+  canEdit: boolean;
+  shareCount: number;
   title: string | null;
   description: string | null;
   originChat: {
@@ -104,6 +115,14 @@ interface ScheduledTaskListItem {
   delivery: WorkflowDelivery & { label: string };
   lastRunStatus: string | null;
   runCount: number;
+}
+
+interface AutomationShareSummary {
+  userId: string;
+  name: string | null;
+  email: string | null;
+  grantedByUserId: string;
+  grantedAt: string;
 }
 
 interface ScheduledTaskOriginChatMessage {
@@ -193,7 +212,9 @@ function toOriginChatMessage(message: StoredConversationMessage): ScheduledTaskO
 async function buildTaskListItems(
   db: Kysely<DB>,
   rows: ScheduledTaskRow[],
-  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> = {},
+  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> & {
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string> };
+  },
 ): Promise<ScheduledTaskListItem[]> {
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
@@ -273,6 +294,11 @@ async function buildTaskListItems(
   const slackUserNames = new Map(slackUserEntries);
   const groupNames = new Map(groupEntries);
 
+  const shareCounts = await loadShareCounts(
+    db,
+    rows.map((row) => row.id),
+  );
+
   // Single grouped query — avoids N+1 per task.
   const runData = await runsRepo.getRunSummaries(rows.map((r) => r.id));
 
@@ -317,6 +343,8 @@ async function buildTaskListItems(
         })
       : triggerConfig;
 
+    const isOwner = options.viewer.userId !== null && row.created_by === options.viewer.userId;
+    const sharedWithMe = !isOwner && options.viewer.grantedTaskIds.has(row.id);
     const rd = runData.get(row.id);
     const delivery = resolveWorkflowDelivery(row);
     let deliveryLabel = delivery.targetId;
@@ -355,7 +383,12 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
-      canDelete: true,
+      canDelete: isOwner,
+      isOwner,
+      sharedWithMe,
+      canShare: isOwner,
+      canEdit: isOwner || options.viewer.grantedTaskIds.has(row.id),
+      shareCount: shareCounts.get(row.id) ?? 0,
       title: row.title,
       description: row.description,
       originChat:
@@ -382,6 +415,34 @@ async function buildTaskListItems(
   });
 }
 
+async function loadShareCounts(db: Kysely<DB>, taskIds: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (taskIds.length === 0) return counts;
+  const rows = await db
+    .selectFrom("automation_task_shares")
+    .select(({ fn }) => ["task_id", fn.count("id").as("share_count")])
+    .where("task_id", "in", taskIds)
+    .groupBy("task_id")
+    .execute();
+  for (const row of rows) counts.set(row.task_id, Number(row.share_count));
+  return counts;
+}
+
+async function listSharesWithNames(db: Kysely<DB>, taskId: string): Promise<AutomationShareSummary[]> {
+  const rows = await db.selectFrom("automation_task_shares").selectAll().where("task_id", "=", taskId).execute();
+  if (rows.length === 0) return [];
+  const userIds = [...new Set(rows.map((row) => row.user_id))];
+  const users = await db.selectFrom("users").select(["id", "name", "email"]).where("id", "in", userIds).execute();
+  const userById = new Map(users.map((user) => [user.id, user]));
+  return rows.map((row) => ({
+    userId: row.user_id,
+    name: userById.get(row.user_id)?.name ?? null,
+    email: userById.get(row.user_id)?.email ?? null,
+    grantedByUserId: row.granted_by_user_id,
+    grantedAt: row.granted_at,
+  }));
+}
+
 export function scheduledTaskRoutes(
   db: Kysely<DB>,
   scheduler: ScheduledTaskMutationDeps,
@@ -389,6 +450,7 @@ export function scheduledTaskRoutes(
 ) {
   const routes = new Hono();
   const repo = createScheduledTaskRepository(db);
+  const sharesRepo = createAutomationSharesRepository(db);
   const users = createUserRepository(db);
   const logger = options.logger;
   const runsRepo = createAutomationRunsRepository(db);
@@ -403,10 +465,15 @@ export function scheduledTaskRoutes(
     });
   }
 
-  async function reserveManualRun(taskId: string): Promise<string | null> {
+  async function reserveManualRun(taskId: string, triggeredByUserId?: string | null): Promise<string | null> {
     const runId = randomUUID();
     try {
-      await runsRepo.create({ id: runId, taskId, triggerData: { type: "manual" } });
+      await runsRepo.create({
+        id: runId,
+        taskId,
+        triggerData: { type: "manual" },
+        triggeredByUserId: triggeredByUserId ?? null,
+      });
       return runId;
     } catch (error) {
       logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to reserve manual run");
@@ -414,12 +481,17 @@ export function scheduledTaskRoutes(
     }
   }
 
-  async function enqueueReservedManualRun(taskId: string, runId: string): Promise<boolean> {
+  async function enqueueReservedManualRun(
+    taskId: string,
+    runId: string,
+    triggeredByUserId?: string | null,
+  ): Promise<boolean> {
     try {
       const execution = scheduler.executeTaskById(taskId, {
         preserveTaskState: true,
         runMode: "manual",
         runId,
+        triggeredByUserId: triggeredByUserId ?? null,
       });
       void Promise.resolve(execution)
         .then((run) => {
@@ -453,7 +525,15 @@ export function scheduledTaskRoutes(
     return user?.id ?? null;
   }
 
-  async function loadAccessibleTask(c: Context, id: string) {
+  async function loadGrantedTaskIds(userId: string | null): Promise<Set<string>> {
+    if (!userId) return new Set<string>();
+    return new Set(await sharesRepo.listTaskIdsForUser(userId));
+  }
+
+  async function loadAccessibleTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string | null; grantedTaskIds: Set<string> }> {
     const row = await repo.getById(id);
     if (!row) {
       return {
@@ -461,7 +541,9 @@ export function scheduledTaskRoutes(
       };
     }
     const userId = await resolveUserId(c.get("sub"));
-    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, new Set<string>(), {
+    const hasGrant = userId ? await sharesRepo.hasGrant(id, userId) : false;
+    const grantedUserIds = hasGrant && userId ? new Set([userId]) : new Set<string>();
+    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, grantedUserIds, {
       userId,
     });
     if (!accessibleRow) {
@@ -473,10 +555,35 @@ export function scheduledTaskRoutes(
         response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
       };
     }
-    return { row: accessibleRow };
+    return {
+      row: accessibleRow,
+      userId,
+      grantedTaskIds: hasGrant && userId ? new Set([id]) : new Set<string>(),
+    };
   }
 
-  async function loadFullDefinition(row: ScheduledTaskRow) {
+  async function loadOwnedTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result;
+    if (!result.userId || result.userId !== result.row.created_by) {
+      logger?.warn(
+        { userId: result.userId, taskId: id, ownerUserId: result.row.created_by },
+        "scheduled-tasks: non-owner denied ownership operation",
+      );
+      return {
+        response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
+      };
+    }
+    return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
+  }
+
+  async function loadFullDefinition(
+    row: ScheduledTaskRow,
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string> },
+  ) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
     const [stepContentRows, runRows, owner, editor, webhookEndpoint] = await Promise.all([
@@ -486,7 +593,7 @@ export function scheduledTaskRoutes(
       row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
       createWebhookEndpointRepository(db, options.encryptionKey).getByTaskId(row.id),
     ]);
-    return buildAutomationDefinition({
+    const definition = await buildAutomationDefinition({
       row,
       stepContentRows,
       runRows,
@@ -496,6 +603,14 @@ export function scheduledTaskRoutes(
       webhookPort: options.port,
       webhookEndpoint,
     });
+    const isOwner = viewer.userId !== null && row.created_by === viewer.userId;
+    return {
+      ...definition,
+      isOwner,
+      canShare: isOwner,
+      canEdit: isOwner || viewer.grantedTaskIds.has(row.id),
+      shares: isOwner ? await listSharesWithNames(db, row.id) : [],
+    };
   }
 
   async function hasBrokerCapableProvider(): Promise<boolean> {
@@ -545,17 +660,13 @@ export function scheduledTaskRoutes(
   });
 
   routes.get("/", async (c) => {
-    const role = c.get("role");
     const userId = await resolveUserId(c.get("sub"));
-
-    let rows: ScheduledTaskRow[];
-    if (role === "admin" && userId) {
-      rows = await repo.listAll();
-    } else if (userId) {
-      rows = await repo.listByCreatedBy(userId);
-    } else {
-      rows = [];
+    if (!userId) {
+      return c.json({ tasks: [] });
     }
+    const grantedTaskIds = await loadGrantedTaskIds(userId);
+
+    let rows: ScheduledTaskRow[] = await repo.listAccessibleByUser(userId);
 
     const stepContentRepo = createAutomationStepContentRepository(db);
     rows = (
@@ -578,6 +689,7 @@ export function scheduledTaskRoutes(
         baseUrl: options.baseUrl,
         port: options.port,
         encryptionKey: options.encryptionKey,
+        viewer: { userId, grantedTaskIds },
       }),
     });
   });
@@ -613,12 +725,48 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
-    return c.json({ automation: await loadFullDefinition(result.row) });
+    return c.json({
+      automation: await loadFullDefinition(result.row, {
+        userId: result.userId,
+        grantedTaskIds: result.grantedTaskIds,
+      }),
+    });
+  });
+
+  routes.get("/:id/shares", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    return c.json({ shares: await listSharesWithNames(db, id) });
+  });
+
+  routes.put("/:id/shares/:userId", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    const targetUserId = c.req.param("userId");
+    if (targetUserId === result.userId) {
+      return c.json({ error: { code: "INVALID_TARGET", message: "Cannot share an automation with yourself" } }, 400);
+    }
+    const target = await users.findById(targetUserId);
+    if (!target) {
+      return c.json({ error: { code: "INVALID_TARGET", message: "Target user not found" } }, 400);
+    }
+    await sharesRepo.grant({ taskId: id, userId: targetUserId, grantedByUserId: result.userId });
+    return c.json({ success: true });
+  });
+
+  routes.delete("/:id/shares/:userId", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    await sharesRepo.revoke({ taskId: id, userId: c.req.param("userId") });
+    return c.json({ success: true });
   });
 
   routes.patch("/:id/execution-mode", async (c) => {
     const id = c.req.param("id");
-    const accessible = await loadAccessibleTask(c, id);
+    const accessible = await loadOwnedTask(c, id);
     if ("response" in accessible) return accessible.response;
     const body = await c.req.json().catch(() => null);
     const executionMode =
@@ -649,7 +797,12 @@ export function scheduledTaskRoutes(
         409,
       );
     }
-    return c.json({ automation: await loadFullDefinition(saveResult.row) });
+    return c.json({
+      automation: await loadFullDefinition(saveResult.row, {
+        userId: accessible.userId,
+        grantedTaskIds: accessible.grantedTaskIds,
+      }),
+    });
   });
 
   routes.put("/:id", async (c) => {
@@ -714,7 +867,12 @@ export function scheduledTaskRoutes(
 
     await scheduler.refreshTaskSchedule(id);
     const refreshed = (await repo.getById(id)) ?? saveResult.row;
-    return c.json({ automation: await loadFullDefinition(refreshed) });
+    return c.json({
+      automation: await loadFullDefinition(refreshed, {
+        userId: result.userId,
+        grantedTaskIds: result.grantedTaskIds,
+      }),
+    });
   });
 
   routes.post("/:id/runs", async (c) => {
@@ -726,14 +884,14 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id);
+    const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId))) {
+    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 
@@ -786,6 +944,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds },
         })
       )[0],
     });
@@ -811,6 +970,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds },
         })
       )[0],
     });
@@ -818,7 +978,7 @@ export function scheduledTaskRoutes(
 
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadAccessibleTask(c, id);
+    const access = await loadOwnedTask(c, id);
     if ("response" in access) return access.response;
     const removeTaskRuntime = scheduler.removeTaskRuntime;
     if (!removeTaskRuntime) {
@@ -901,14 +1061,14 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id);
+    const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId))) {
+    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 

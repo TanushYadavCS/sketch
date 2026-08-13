@@ -9,6 +9,7 @@ import type { RunAgentParams } from "../agent/runner";
 import { getSessionId, saveSessionId } from "../agent/sessions";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -2002,6 +2003,45 @@ describe("web chat API", () => {
     await expect(readFile(webChatTranscriptPath(dataDir, member.id, "chat-private"), "utf-8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("opens the builder context to an explicit grantee of a shared automation", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-grantee-wc@test.com" });
+    const member = await users.create({ name: "Member", email: "member-grantee-wc@test.com" });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = makeBuilderScheduler("task-granted-builder", owner.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await getMemberCookie(db, member.id);
+
+    const denied = await app.request("/api/web-chat?conversationId=granted-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+    });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
+
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-granted-builder",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const allowed = await app.request("/api/web-chat?conversationId=granted-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+    });
+    expect(allowed.status).toBe(404);
+    expect(await allowed.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
+    expect(runAgent).not.toHaveBeenCalled();
   });
 
   it("streams connected account cards from provider state for account enquiries", async () => {

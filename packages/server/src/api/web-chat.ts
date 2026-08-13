@@ -50,6 +50,7 @@ import {
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -654,9 +655,16 @@ async function resolveAutomationBuilderContext(params: {
     params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
     return null;
   });
-  const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, new Set<string>(), {
-    userId: params.currentUserId,
-  });
+  const shares = createAutomationSharesRepository(params.deps.db);
+  const hasGrant = await shares.hasGrant(params.automationTaskId, params.currentUserId);
+  const accessibleTask = resolveScheduledTaskAccess(
+    task,
+    task?.createdBy,
+    hasGrant ? new Set([params.currentUserId]) : new Set<string>(),
+    {
+      userId: params.currentUserId,
+    },
+  );
   if (!accessibleTask) {
     return null;
   }
@@ -2054,9 +2062,16 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         deps.logger.warn({ err, taskId: automationTaskId }, "Failed to resolve builder interruption task");
         return null;
       });
-      const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, new Set<string>(), {
-        userId: currentUser.id,
-      });
+      const shares = createAutomationSharesRepository(deps.db);
+      const hasGrant = await shares.hasGrant(automationTaskId, currentUser.id);
+      const accessibleTask = resolveScheduledTaskAccess(
+        task,
+        task?.createdBy,
+        hasGrant ? new Set([currentUser.id]) : new Set<string>(),
+        {
+          userId: currentUser.id,
+        },
+      );
       if (!accessibleTask) {
         return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);
       }

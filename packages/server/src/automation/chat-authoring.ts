@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
@@ -177,9 +178,18 @@ export function createChatAutomationAuthoring(deps: {
     const currentAutomation = input.currentAutomation ?? input.taskContext.currentAutomation;
     const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const row = await tasks.getById(input.taskId);
-    const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, new Set<string>(), {
-      userId: input.taskContext.createdBy,
-    });
+    const shares = createAutomationSharesRepository(deps.db);
+    const hasGrant = input.taskContext.createdBy
+      ? await shares.hasGrant(input.taskId, input.taskContext.createdBy)
+      : false;
+    const accessibleRow = resolveScheduledTaskAccess(
+      row,
+      row?.created_by,
+      hasGrant ? new Set(input.taskContext.createdBy ? [input.taskContext.createdBy] : []) : new Set<string>(),
+      {
+        userId: input.taskContext.createdBy,
+      },
+    );
     if (!accessibleRow) {
       return { kind: "error", message: "Automation not found." };
     }

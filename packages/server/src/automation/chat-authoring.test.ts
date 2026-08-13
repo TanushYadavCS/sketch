@@ -1,8 +1,10 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
+import { createUserRepository } from "../db/repositories/users";
 import type { CurrentAutomation } from "../scheduler/types";
 import { createTestDb } from "../test-utils";
 import { createChatAutomationAuthoring } from "./chat-authoring";
@@ -476,6 +478,108 @@ describe("chat automation authoring orchestration", () => {
       origin_conversation_id: "creation-chat",
       revision: 1,
       title: "Edited brief",
+    });
+  });
+
+  it("lets an explicit grantee edit another owner's automation", async () => {
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-grantee-edit@test.com" });
+    const grantee = await users.create({ name: "Grantee", email: "grantee-edit@test.com" });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "grantee-edit-task",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: owner.id,
+        originPlatform: "web",
+        originConversationId: "creation-chat",
+        originProviderThreadId: null,
+        originMessageId: 42,
+      },
+      brokerCapable: true,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "grantee-edit-task",
+      userId: grantee.id,
+      grantedByUserId: owner.id,
+    });
+
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: {
+        create: vi.fn(),
+        edit: vi.fn().mockResolvedValue({
+          kind: "definition" as const,
+          definition: definition({ expectedRevision: 0, title: "Grantee-edited brief" }),
+        }),
+      },
+      scheduler: {
+        refreshTaskSchedule: vi.fn().mockResolvedValue({ id: "grantee-edit-task" }),
+        getTaskById: vi.fn(),
+      },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Tighten the brief",
+        taskId: "grantee-edit-task",
+        taskContext: { ...taskContext(), createdBy: grantee.id },
+      }),
+    ).resolves.toMatchObject({ kind: "saved", task: { id: "grantee-edit-task" } });
+    await expect(createScheduledTaskRepository(db).getById("grantee-edit-task")).resolves.toMatchObject({
+      title: "Grantee-edited brief",
+      revision: 1,
+    });
+  });
+
+  it("keeps an un-granted member out of another owner's automation edit", async () => {
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-ungranted@test.com" });
+    const member = await users.create({ name: "Member", email: "member-ungranted@test.com" });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "ungranted-edit-task",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: owner.id,
+        originPlatform: null,
+        originConversationId: null,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      brokerCapable: true,
+    });
+
+    const edit = vi.fn();
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: { create: vi.fn(), edit },
+      scheduler: { refreshTaskSchedule: vi.fn(), getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Expose the prompt",
+        taskId: "ungranted-edit-task",
+        taskContext: { ...taskContext(), createdBy: member.id },
+      }),
+    ).resolves.toEqual({ kind: "error", message: "Automation not found." });
+    expect(edit).not.toHaveBeenCalled();
+    await expect(createScheduledTaskRepository(db).getById("ungranted-edit-task")).resolves.toMatchObject({
+      created_by: owner.id,
+      revision: 0,
     });
   });
 });

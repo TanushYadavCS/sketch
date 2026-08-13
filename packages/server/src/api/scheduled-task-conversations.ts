@@ -7,6 +7,7 @@ import {
   type BuilderConversationAccessResult,
   createAutomationTaskConversationService,
 } from "../automation/task-conversations";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -72,6 +73,7 @@ async function resolveUserId(db: Kysely<DB>, subject: string | undefined): Promi
 export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: ScheduledTaskConversationRouteOptions = {}) {
   const routes = new Hono();
   const tasks = createScheduledTaskRepository(db);
+  const shares = createAutomationSharesRepository(db);
   const conversations = createAutomationTaskConversationService(db);
 
   async function loadAccessibleTask(c: Context, taskId: string) {
@@ -81,9 +83,15 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     }
 
     const userId = await resolveUserId(db, c.get("sub"));
-    const accessibleTask = resolveScheduledTaskAccess(row, row.created_by, new Set<string>(), {
-      userId,
-    });
+    const hasGrant = userId ? await shares.hasGrant(taskId, userId) : false;
+    const accessibleTask = resolveScheduledTaskAccess(
+      row,
+      row.created_by,
+      hasGrant ? new Set(userId ? [userId] : []) : new Set<string>(),
+      {
+        userId,
+      },
+    );
     if (!accessibleTask) {
       options.logger?.warn({ taskId, userId, ownerUserId: row.created_by }, "task-conversations: task access denied");
       return { response: errorResponse(c, "NOT_FOUND", "Scheduled task not found", 404) };

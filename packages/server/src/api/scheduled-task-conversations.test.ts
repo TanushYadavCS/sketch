@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import { createAutomationTaskConversationService } from "../automation/task-conversations";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -219,6 +220,51 @@ describe("scheduled task conversation API", () => {
     expect(ownerList.status).toBe(200);
     await expect(ownerList.json()).resolves.toMatchObject({ transcriptAccess: "viewer" });
     expect(admin.id).not.toBe(owner.id);
+  });
+
+  it("opens task conversations to an explicit grantee", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-grantee-conv@test.com" });
+    const member = await createUserRepository(db).create({ name: "Member", email: "member-grantee-conv@test.com" });
+    await seedTask(db, "granted-task", owner.id);
+    await createAutomationSharesRepository(db).grant({
+      taskId: "granted-task",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+    await createAutomationTaskConversationService(db).associate({
+      taskId: "granted-task",
+      conversationId: "shared-builder-chat",
+      transcriptUserId: member.id,
+      kind: "builder",
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const memberCookieValue = await memberCookie(db, member.id);
+
+    const listRes = await app.request("/api/scheduled-tasks/granted-task/conversations", {
+      headers: { Cookie: memberCookieValue },
+    });
+    expect(listRes.status).toBe(200);
+    const listBody = await listRes.json();
+    expect(listBody.conversations).toEqual([
+      expect.objectContaining({ conversationId: "shared-builder-chat", state: "active" }),
+    ]);
+
+    const detailRes = await app.request("/api/scheduled-tasks/granted-task/conversations/shared-builder-chat", {
+      headers: { Cookie: memberCookieValue },
+    });
+    expect(detailRes.status).toBe(200);
+    await expect(detailRes.json()).resolves.toMatchObject({
+      conversation: { conversationId: "shared-builder-chat" },
+    });
   });
 
   it("does not let an admin create a second active builder chat while the owner holds one", async () => {
