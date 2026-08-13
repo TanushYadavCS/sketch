@@ -18,7 +18,7 @@ import { mergeEntities } from "./merge";
 import { normalizeStrict, normalizeTokenSet } from "./name-dedup";
 
 const PASS_ID = "duplicate-drain";
-const PASS_VERSION = 1;
+const PASS_VERSION = 2;
 const STATE_ROW_ID = `${PASS_ID}:v${PASS_VERSION}`;
 const ACTOR = `correction:${PASS_ID}@${PASS_VERSION}`;
 const DEFAULT_PAGE_SIZE = 250;
@@ -53,7 +53,9 @@ function emptySummary(status: "running" | "complete" = "running"): DuplicateDrai
     groupIds: [],
     m5SkippedPassReason: 0,
     m3EmailVetoes: 0,
+    m5EmailVetoes: 0,
     aliasOnlyQueued: 0,
+    aliasOnlyDropped: 0,
   };
 }
 
@@ -70,7 +72,9 @@ function parseSummary(raw: string): DuplicateDrainSummary {
       groupIds: Array.isArray(parsed.groupIds) ? parsed.groupIds.filter((id) => typeof id === "string") : [],
       m5SkippedPassReason: typeof parsed.m5SkippedPassReason === "number" ? parsed.m5SkippedPassReason : 0,
       m3EmailVetoes: typeof parsed.m3EmailVetoes === "number" ? parsed.m3EmailVetoes : 0,
+      m5EmailVetoes: typeof parsed.m5EmailVetoes === "number" ? parsed.m5EmailVetoes : 0,
       aliasOnlyQueued: typeof parsed.aliasOnlyQueued === "number" ? parsed.aliasOnlyQueued : 0,
+      aliasOnlyDropped: typeof parsed.aliasOnlyDropped === "number" ? parsed.aliasOnlyDropped : 0,
     };
   } catch {
     return emptySummary();
@@ -207,6 +211,14 @@ function disjoint(left: Set<string>, right: Set<string>): boolean {
   return true;
 }
 
+function hasDisjointEmails(left: Set<string>, right: Set<string>): boolean {
+  return left.size > 0 && right.size > 0 && disjoint(left, right);
+}
+
+function emailsForEntity(entity: Entity, emails: Map<string, Set<string>>): Set<string> {
+  return emails.get(entity.id) ?? emailsFromEntity(entity);
+}
+
 function groupEntities(entities: Entity[], keyFor: (entity: Entity) => string): Entity[][] {
   const groups = new Map<string, Entity[]>();
   for (const entity of entities) {
@@ -279,13 +291,13 @@ async function applyCompanyHardGroups(db: Kysely<DB>, summary: DuplicateDrainSum
   const groups = buildCompanyDedupGroups(members, HARD_COMPANY_EDGES);
   for (const group of groups.filter((candidate) => candidate.members.length > 1)) {
     const survivor = chooseCanonicalCompany(group);
-    const survivorName = spacedCompanyName(group, survivor.name);
+    const survivorName = group.ownOrg ? undefined : spacedCompanyName(group, survivor.name);
     const losers = group.members
       .filter((member) => member.entityId !== survivor.entityId)
       .map((member) => member.entityId);
     await applyEntityGroup(
       db,
-      `duplicate-drain:v1:m1:${compactEntityNameKey("company", survivorName ?? survivor.name)}`,
+      `duplicate-drain:v2:m1:${compactEntityNameKey("company", survivorName ?? survivor.name)}`,
       survivor.entityId,
       losers,
       summary,
@@ -297,25 +309,54 @@ async function applyCompanyHardGroups(db: Kysely<DB>, summary: DuplicateDrainSum
 async function queueAliasOnlyCompanyGroups(db: Kysely<DB>, summary: DuplicateDrainSummary): Promise<void> {
   const members = await loadCompanyDedupMembers(db);
   const hardGroups = buildCompanyDedupGroups(members, HARD_COMPANY_EDGES).filter((group) => group.members.length > 1);
-  const hardMembers = new Set(hardGroups.flatMap((group) => group.members.map((member) => member.entityId)));
+  const hardSurvivorByMember = new Map<string, string>();
+  for (const group of hardGroups) {
+    const survivor = chooseCanonicalCompany(group);
+    for (const member of group.members) hardSurvivorByMember.set(member.entityId, survivor.entityId);
+  }
   const aliasGroups = buildCompanyDedupGroups(members).filter(
     (group) => group.members.length > 1 && group.edges.some((edge) => edge.kind === "name_alias"),
   );
   const repo = createEntityReviewRepo(db);
   for (const group of aliasGroups) {
-    const aliasOnlyMembers = group.members.filter((member) => !hardMembers.has(member.entityId));
-    if (aliasOnlyMembers.length < 2) continue;
-    const survivor = chooseCanonicalCompany({ ...group, members: aliasOnlyMembers });
-    for (const member of aliasOnlyMembers) {
-      if (member.entityId === survivor.entityId) continue;
+    const memberById = new Map(group.members.map((member) => [member.entityId, member]));
+    const rows = new Map<string, { member: (typeof group.members)[number]; candidateEntityId: string }>();
+    for (const edge of group.edges.filter((candidate) => candidate.kind === "name_alias")) {
+      const candidateIds = [
+        ...new Set(
+          edge.entityIds.map((entityId) => hardSurvivorByMember.get(entityId)).filter((id) => id !== undefined),
+        ),
+      ];
+      for (const entityId of edge.entityIds) {
+        if (hardSurvivorByMember.has(entityId)) continue;
+        const member = memberById.get(entityId);
+        if (!member) continue;
+        for (const candidateEntityId of candidateIds) {
+          rows.set(`${entityId}:${candidateEntityId}`, { member, candidateEntityId });
+        }
+      }
+    }
+    if (rows.size === 0 && !group.members.some((member) => hardSurvivorByMember.has(member.entityId))) {
+      const survivor = chooseCanonicalCompany(group);
+      for (const member of group.members) {
+        if (member.entityId !== survivor.entityId)
+          rows.set(`${member.entityId}:${survivor.entityId}`, { member, candidateEntityId: survivor.entityId });
+      }
+    }
+    for (const { member, candidateEntityId } of rows.values()) {
+      const candidateEntityIds = [...new Set([member.entityId, candidateEntityId])];
+      if (candidateEntityIds.length < 2) {
+        summary.aliasOnlyDropped++;
+        continue;
+      }
       await repo.upsertQueueRow({
         proposedName: member.name,
         normalizedName: normalizeName(member.name),
         entityType: "company",
         source: PASS_ID,
-        sourceId: `v1:alias:${member.entityId}:${survivor.entityId}`,
-        candidateEntityId: survivor.entityId,
-        candidateEntityIds: aliasOnlyMembers.map((m) => m.entityId),
+        sourceId: `v2:alias:${member.entityId}:${candidateEntityId}`,
+        candidateEntityId,
+        candidateEntityIds,
         candidateScore: 1,
         candidateReason: "name_alias",
         triggeredByUserId: "system",
@@ -334,7 +375,7 @@ async function applyProductGroups(db: Kysely<DB>, entities: Entity[], summary: D
     const losers = group.filter((entity) => entity.id !== survivor.id).map((entity) => entity.id);
     await applyEntityGroup(
       db,
-      `duplicate-drain:v1:m2:${compactEntityNameKey("product", survivor.name)}`,
+      `duplicate-drain:v2:m2:${compactEntityNameKey("product", survivor.name)}`,
       survivor.id,
       losers,
       summary,
@@ -357,9 +398,7 @@ async function applyPersonTokenSetGroups(
     let vetoed = false;
     for (let i = 0; i < group.length && !vetoed; i += 1) {
       for (let j = i + 1; j < group.length; j += 1) {
-        const left = emails.get(group[i].id) ?? new Set<string>();
-        const right = emails.get(group[j].id) ?? new Set<string>();
-        if (left.size > 0 && right.size > 0 && disjoint(left, right)) {
+        if (hasDisjointEmails(emailsForEntity(group[i], emails), emailsForEntity(group[j], emails))) {
           vetoed = true;
           summary.m3EmailVetoes++;
           break;
@@ -371,7 +410,7 @@ async function applyPersonTokenSetGroups(
     const losers = group.filter((entity) => entity.id !== survivor.id).map((entity) => entity.id);
     await applyEntityGroup(
       db,
-      `duplicate-drain:v1:m3:${normalizeTokenSet(survivor.name)}`,
+      `duplicate-drain:v2:m3:${normalizeTokenSet(survivor.name)}`,
       survivor.id,
       losers,
       summary,
@@ -393,7 +432,7 @@ async function applyPersonStrictGroups(
     if (withEmail.length > 1) continue;
     const survivor = chooseGenericSurvivor(group);
     const losers = group.filter((entity) => entity.id !== survivor.id).map((entity) => entity.id);
-    await applyEntityGroup(db, `duplicate-drain:v1:m4:${normalizeStrict(survivor.name)}`, survivor.id, losers, summary);
+    await applyEntityGroup(db, `duplicate-drain:v2:m4:${normalizeStrict(survivor.name)}`, survivor.id, losers, summary);
   }
 }
 
@@ -410,7 +449,11 @@ async function loadM5Rows(db: Kysely<DB>): Promise<{ mergeable: QueueRow[]; skip
   };
 }
 
-async function applyM5Rows(db: Kysely<DB>, summary: DuplicateDrainSummary): Promise<void> {
+async function applyM5Rows(
+  db: Kysely<DB>,
+  emails: Map<string, Set<string>>,
+  summary: DuplicateDrainSummary,
+): Promise<void> {
   const { mergeable, skippedPassReason } = await loadM5Rows(db);
   summary.m5SkippedPassReason += skippedPassReason;
   for (const row of mergeable) {
@@ -430,7 +473,15 @@ async function applyM5Rows(db: Kysely<DB>, summary: DuplicateDrainSummary): Prom
       .orderBy("id", "asc")
       .executeTakeFirst();
     if (!proposal) continue;
-    const groupId = `duplicate-drain:v1:m5:${row.id}`;
+    if (
+      candidate.source_type === "person" &&
+      proposal.source_type === "person" &&
+      hasDisjointEmails(emailsForEntity(candidate, emails), emailsForEntity(proposal, emails))
+    ) {
+      summary.m5EmailVetoes++;
+      continue;
+    }
+    const groupId = `duplicate-drain:v2:m5:${row.id}`;
     await applyEntityGroup(db, groupId, candidate.id, [proposal.id], summary);
     await db
       .updateTable("entity_review_queue")
@@ -462,12 +513,12 @@ export async function runDuplicateDrain(
         db,
         entities.filter((entity) => entity.source_type === "person"),
       );
-      await applyCompanyHardGroups(db, state);
       await queueAliasOnlyCompanyGroups(db, state);
+      await applyCompanyHardGroups(db, state);
       await applyProductGroups(db, entities, state);
       await applyPersonTokenSetGroups(db, entities, emails, state);
       await applyPersonStrictGroups(db, entities, emails, state);
-      await applyM5Rows(db, state);
+      await applyM5Rows(db, emails, state);
       const complete = { ...state, status: "complete" as const, cursorCreatedAt: null, cursorId: null };
       await writeState(db, complete);
       opts.logger?.info(complete, "duplicate drain complete");

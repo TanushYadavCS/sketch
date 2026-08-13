@@ -114,6 +114,26 @@ async function seedDomain(db: Kysely<DB>, entityId: string, domain: string): Pro
     .execute();
 }
 
+async function seedRedseerShape(db: Kysely<DB>, params: { consultingDomain?: boolean } = {}): Promise<void> {
+  await seedEntity(db, "red-seer", {
+    name: "Red Seer",
+    type: "company",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  await seedEntity(db, "redseer", {
+    name: "Redseer",
+    type: "company",
+    createdAt: "2026-01-02T00:00:00.000Z",
+  });
+  await seedEntity(db, "redseerconsulting", {
+    name: "Redseerconsulting",
+    type: "company",
+    aliases: ["RedSeer"],
+    createdAt: "2026-01-03T00:00:00.000Z",
+  });
+  if (params.consultingDomain) await seedDomain(db, "redseerconsulting", "redseerconsulting.com");
+}
+
 async function seedQueueRow(
   db: Kysely<DB>,
   ownerId: string,
@@ -154,6 +174,67 @@ async function liveCount(db: Kysely<DB>, ids: string[]): Promise<number> {
     .where("merged_into_entity_id", "is", null)
     .executeTakeFirstOrThrow();
   return Number(row.count);
+}
+
+async function seedCompletedDuplicateDrainV1(db: Kysely<DB>): Promise<void> {
+  await db
+    .insertInto("graph_pass_runs")
+    .values({
+      id: "duplicate-drain:v1",
+      status: "complete",
+      started_at: "2026-08-13T00:00:00.000Z",
+      finished_at: "2026-08-13T00:00:01.000Z",
+      error_message: null,
+      input_snapshot_json: JSON.stringify({
+        kind: "duplicate_drain",
+        passId: "duplicate-drain",
+        version: 1,
+        status: "complete",
+        cursorCreatedAt: null,
+        cursorId: null,
+        scannedEntities: 3,
+        merged: 1,
+        groupIds: ["duplicate-drain:v1:m1:greenmentor"],
+        m5SkippedPassReason: 0,
+        m3EmailVetoes: 0,
+        aliasOnlyQueued: 0,
+      }),
+    })
+    .execute();
+}
+
+async function seedAlreadyDrainedCompanyPair(db: Kysely<DB>): Promise<void> {
+  await seedEntity(db, "green-mentor", {
+    name: "Green Mentor",
+    type: "company",
+    aliases: ["Greenmentor"],
+    createdAt: "2026-02-01T00:00:00.000Z",
+  });
+  await seedEntity(db, "greenmentor", {
+    name: "Greenmentor",
+    type: "company",
+    createdAt: "2026-02-02T00:00:00.000Z",
+  });
+  await db
+    .updateTable("entities")
+    .set({ deleted_at: "2026-08-13T00:00:01.000Z", merged_into_entity_id: "green-mentor" })
+    .where("id", "=", "greenmentor")
+    .execute();
+  await db
+    .insertInto("entity_merges")
+    .values({
+      id: randomUUID(),
+      survivor_entity_id: "green-mentor",
+      merged_entity_id: "greenmentor",
+      entity_type: "company",
+      moves: "[]",
+      merged_by_user_id: null,
+      group_id: "duplicate-drain:v1:m1:greenmentor",
+      merged_by: "correction:duplicate-drain@1",
+      unmerged_at: null,
+      unmerged_by_user_id: null,
+    })
+    .execute();
 }
 
 async function mergeCount(db: Kysely<DB>): Promise<number> {
@@ -340,9 +421,139 @@ describe("duplicate drain", () => {
     expect(state.status).toBe("complete");
     expect(JSON.parse(state.input_snapshot_json)).toMatchObject({
       kind: "duplicate_drain",
-      version: 1,
+      version: 2,
       status: "complete",
     });
+  });
+
+  it("queues an alias-only company whose partner is merged in the same drain", async () => {
+    harness = await createHarness();
+    const { db } = harness;
+    await seedRedseerShape(db);
+
+    const response = await triggerDuplicateDrain(harness);
+
+    const consulting = await db
+      .selectFrom("entities")
+      .select(["deleted_at", "merged_into_entity_id"])
+      .where("id", "=", "redseerconsulting")
+      .executeTakeFirstOrThrow();
+    expect(consulting.deleted_at).toBeNull();
+    expect(consulting.merged_into_entity_id).toBeNull();
+    expect(await liveCount(db, ["red-seer", "redseer"])).toBe(1);
+    const review = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("proposed_name", "=", "Redseerconsulting")
+      .executeTakeFirstOrThrow();
+    expect(review).toMatchObject({
+      status: "pending",
+      candidate_entity_id: "red-seer",
+      candidate_reason: "name_alias",
+      triggered_by_user_id: "system",
+    });
+    expect(JSON.parse(review.candidate_entity_ids ?? "[]")).toEqual(["redseerconsulting", "red-seer"]);
+    expect(response.run?.inputSnapshot).toMatchObject({ version: 2, aliasOnlyQueued: 1, aliasOnlyDropped: 0 });
+  });
+
+  it("queues the hard-group survivor instead of the full alias group survivor", async () => {
+    harness = await createHarness();
+    const { db } = harness;
+    await seedRedseerShape(db, { consultingDomain: true });
+
+    await triggerDuplicateDrain(harness);
+
+    const review = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("proposed_name", "=", "Redseerconsulting")
+      .executeTakeFirstOrThrow();
+    expect(review.candidate_entity_id).toBe("red-seer");
+    expect(review.candidate_entity_id).not.toBe("redseerconsulting");
+    expect(await liveCount(db, ["red-seer", "redseerconsulting"])).toBe(2);
+  });
+
+  it("runs version 2 after version 1 completed without re-merging already drained pairs", async () => {
+    harness = await createHarness();
+    const { db } = harness;
+    await seedCompletedDuplicateDrainV1(db);
+    await seedAlreadyDrainedCompanyPair(db);
+    await seedRedseerShape(db);
+    const mergesBefore = await mergeCount(db);
+
+    const response = await triggerDuplicateDrain(harness);
+
+    const review = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("proposed_name", "=", "Redseerconsulting")
+      .where("candidate_entity_id", "=", "red-seer")
+      .executeTakeFirst();
+    expect(review).toMatchObject({ status: "pending" });
+    const state = await db
+      .selectFrom("graph_pass_runs")
+      .select(["status", "input_snapshot_json"])
+      .where("id", "=", "duplicate-drain:v2")
+      .executeTakeFirstOrThrow();
+    expect(state.status).toBe("complete");
+    expect(JSON.parse(state.input_snapshot_json)).toMatchObject({
+      kind: "duplicate_drain",
+      version: 2,
+      status: "complete",
+    });
+    expect(response.run?.inputSnapshot).toMatchObject({ version: 2 });
+    expect(await mergeCount(db)).toBe(mergesBefore + 1);
+    const duplicateGreenMerge = await db
+      .selectFrom("entity_merges")
+      .selectAll()
+      .where("merged_entity_id", "=", "greenmentor")
+      .execute();
+    expect(duplicateGreenMerge).toHaveLength(1);
+  });
+
+  it("keeps M5 people pending when both sides have disjoint emails", async () => {
+    harness = await createHarness();
+    const { db, ownerId } = harness;
+
+    await seedEntity(db, "abhishek-onestop", {
+      name: "Abhishek Sharma",
+      email: "abhishek.sharma@onestop.ai",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedEntity(db, "abhishek-moonshot", {
+      name: "Abhishek Sharma",
+      email: "abhinav.sharma@moonshotcom.com",
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    const rowId = await seedQueueRow(db, ownerId, {
+      proposedName: "Abhishek Sharma",
+      candidateEntityId: "abhishek-onestop",
+      passReason: null,
+    });
+
+    const response = await triggerDuplicateDrain(harness);
+
+    expect(await liveCount(db, ["abhishek-onestop", "abhishek-moonshot"])).toBe(2);
+    const entities = await db
+      .selectFrom("entities")
+      .select(["id", "merged_into_entity_id"])
+      .where("id", "in", ["abhishek-onestop", "abhishek-moonshot"])
+      .execute();
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "abhishek-onestop", merged_into_entity_id: null }),
+        expect.objectContaining({ id: "abhishek-moonshot", merged_into_entity_id: null }),
+      ]),
+    );
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", rowId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("pending");
+    expect(row.pass_reason).toBeNull();
+    expect(row.resolved_entity_id).toBeNull();
+    expect(response.run?.inputSnapshot).toMatchObject({ m5EmailVetoes: 1 });
   });
 
   it("reverses a chained group as a set without touching another group", async () => {
