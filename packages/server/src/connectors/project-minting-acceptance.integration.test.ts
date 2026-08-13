@@ -32,8 +32,9 @@ describe("project minting verdict acceptance", () => {
   it("writes nothing until accept, then writes engagement, projects, merges, attachments and task parents", async () => {
     const seeded = await seedOliverWymanCluster(db);
     await createCompanyRelationshipDeclarationRepository(db).declare({
-      companyEntityId: seeded.companyId,
-      declaredState: "paying",
+      subjectEntityId: seeded.companyId,
+      counterpartyKind: "client",
+      clientStage: "active",
     });
     const verdict: ClusterVerdict = {
       relationshipState: "customer",

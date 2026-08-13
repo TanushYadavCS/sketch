@@ -30,7 +30,7 @@ import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calend
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
-const EXPECTED_MIGRATION_COUNT = 196;
+const EXPECTED_MIGRATION_COUNT = 197;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -312,7 +312,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
     expect(names[188]).toBe("193-automation-lock-sessions");
     expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
-    expect(names[193]).toBe("198-project-minting-acceptance");
+    expect(names[195]).toBe("200-project-minting-acceptance");
+    expect(names[196]).toBe("201-counterparty-axes");
   });
 
   it("adds portable session fencing columns with safe legacy defaults", async () => {
@@ -345,7 +346,6 @@ describe("runMigrations — full sequence", () => {
         expires_at: "2026-08-17T10:15:00.000Z",
       })
       .execute();
-
     await expect(
       db
         .selectFrom("automation_task_locks")
@@ -385,15 +385,12 @@ describe("runMigrations — full sequence", () => {
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ holder_session_id: "legacy", generation: 1, steal_requester_session_id: "legacy" });
   });
-
   it("keeps the automation-sharing migration ledger in order", async () => {
     await runMigrations(db, { quiet: true });
-
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
     const names = rows.rows.map((row) => row.name);
-
     expect(names.slice(176, 185)).toEqual([
       "181-project-minting-verdicts",
       "182-project-minting-states",
@@ -406,19 +403,15 @@ describe("runMigrations — full sequence", () => {
       "189-automation-locks",
     ]);
   });
-
   it("upgrades databases that already applied entity-name proposals before automation sharing", async () => {
     const migrator = createMigrator(db);
     await migrator.migrateTo("186-entity-merge-groups");
-
     await entityNameProposalsMigration.up(db as unknown as Kysely<unknown>);
     await sql`
       INSERT INTO kysely_migration (name, timestamp)
       VALUES ('187-entity-name-proposals', ${new Date().toISOString()})
     `.execute(db);
-
     const { error } = await migrator.migrateToLatest();
-
     expect(error).toBeUndefined();
   });
 

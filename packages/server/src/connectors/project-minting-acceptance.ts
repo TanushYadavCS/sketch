@@ -3,7 +3,8 @@ import { type Kysely, sql } from "kysely";
 import {
   type DeclaredRelationshipState,
   createCompanyRelationshipDeclarationRepository,
-  isDeclaredRelationshipState,
+  mapDeclarationToRelationshipState,
+  resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import {
@@ -107,10 +108,6 @@ export function maxProjectConfidence(verdict: ClusterVerdict): number {
   return verdict.projects.reduce((max, project) => Math.max(max, CONFIDENCE_RANK[project.confidence]), 0);
 }
 
-function mapDeclarationToRelationshipState(state: DeclaredRelationshipState): RelationshipState {
-  return state === "paying" ? "customer" : "trial";
-}
-
 function normalizeProjectName(name: string): string {
   return (
     normalizeName(name)
@@ -148,11 +145,13 @@ async function currentDeclaredStateForCluster(
   db: Kysely<DB>,
   cluster: ClientCluster,
 ): Promise<DeclaredRelationshipState | null> {
-  const declaredById = new Map<string, DeclaredRelationshipState>();
-  for (const row of await createCompanyRelationshipDeclarationRepository(db).list()) {
-    if (isDeclaredRelationshipState(row.declared_state)) declaredById.set(row.company_entity_id, row.declared_state);
-  }
-  return cluster.groupMembers.map((member) => declaredById.get(member.entityId)).find((state) => state != null) ?? null;
+  const declaredById = new Map(
+    (await createCompanyRelationshipDeclarationRepository(db).list()).map((row) => [row.subject_entity_id, row]),
+  );
+  const declaration = resolveDeclaration(
+    cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
+  );
+  return declaration ? mapDeclarationToRelationshipState(declaration) : null;
 }
 
 async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerdictRow): Promise<ClientCluster> {
@@ -439,7 +438,7 @@ async function computeAcceptance(
   const cluster = await findCurrentCluster(db, row);
   const currentDeclared = await currentDeclaredStateForCluster(db, cluster);
   if (currentDeclared) {
-    const currentState = mapDeclarationToRelationshipState(currentDeclared);
+    const currentState = currentDeclared;
     if (currentState !== verdict.relationshipState) {
       throw new ProjectMintingAcceptanceError("STALE_VERDICT", "stale verdict — re-run the cluster", {
         storedRelationshipState: verdict.relationshipState,

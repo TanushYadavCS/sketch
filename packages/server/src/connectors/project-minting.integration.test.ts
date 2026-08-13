@@ -281,8 +281,9 @@ describe("project minting pass (e2e)", () => {
       await seedAttendee(db, connectorId, fileId, "Dev Ops", "dev@habuild.in");
     }
     await createCompanyRelationshipDeclarationRepository(db).declare({
-      companyEntityId: habuildId,
-      declaredState: "trial",
+      subjectEntityId: habuildId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
     });
     let capturedPrompt = "";
     const trialVerdict: ClusterVerdict = {

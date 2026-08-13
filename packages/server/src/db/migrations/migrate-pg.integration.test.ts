@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 196;
+const EXPECTED_MIGRATION_COUNT = 197;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -229,8 +229,8 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[188]).toBe("193-automation-lock-sessions");
     expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
     expect(names[195]).toBe("200-project-minting-acceptance");
+    expect(names[196]).toBe("201-counterparty-axes");
   });
-
   it("stores millisecond builder-lock expiry timestamps as bigint", async () => {
     const expiresAt = Date.now() + 5 * 60 * 1000;
     const column = await sql<{ data_type: string; udt_name: string }>`
@@ -240,15 +240,12 @@ describe("runMigrations on Postgres — full sequence", () => {
         AND table_name = 'scheduled_task_builder_locks'
         AND column_name = 'expires_at'
     `.execute(db);
-
     expect(column.rows).toEqual([{ data_type: "bigint", udt_name: "int8" }]);
-
     await sql`
       INSERT INTO scheduled_task_builder_locks
         (task_id, conversation_id, transcript_user_id, expires_at)
       VALUES ('m192-builder-lock', 'm192-conversation', 'm192-user', ${expiresAt})
     `.execute(db);
-
     const row = await sql<{ expires_at: number | string }>`
       SELECT expires_at
       FROM scheduled_task_builder_locks
@@ -256,15 +253,12 @@ describe("runMigrations on Postgres — full sequence", () => {
     `.execute(db);
     expect(Number(row.rows[0]?.expires_at)).toBe(expiresAt);
   });
-
   it("keeps the automation-sharing migration ledger in order", async () => {
     await runMigrations(db, { quiet: true });
-
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
     const names = rows.rows.map((row) => row.name);
-
     // Audit of the automation-sharing feature slice: shares (187) must precede
     // locks (188), and neither may be renumbered relative to the minting,
     // cutover, queue-pass, and merge-groups migrations that precede them.

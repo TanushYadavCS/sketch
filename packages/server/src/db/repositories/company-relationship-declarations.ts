@@ -1,49 +1,115 @@
 /**
- * The declared-state registry for outside companies.
+ * The declared counterparty registry for outside companies.
  *
- * Trial and customer are declared, never inferred: measured on two full
- * stage-3 re-runs, inferred-trial precision was 2 of 6 and payment never
- * appears in communication exhaust, so any product access reads as a trial
- * and the richest paying customer reads as one too. A declaration here is
- * authoritative over inference; deterministic signals (support channel,
- * onboarding families) only nominate candidates for declaration.
+ * Kind and stage are declared, never inferred: measured on two full stage-3
+ * re-runs, inferred-pilot precision was 2 of 6 and payment never appears in
+ * communication exhaust, so any product access reads as a pilot and the richest
+ * active client reads as one too. A declaration here is authoritative over
+ * inference; deterministic signals (support channel, onboarding families) only
+ * nominate candidates for declaration.
  *
- * `paying` maps to the `customer` relationship state; `trial` to `trial`.
  * When a CRM is connected, its stage becomes the declaration source.
  */
 import type { Kysely, Selectable } from "kysely";
 import type { CompanyRelationshipDeclarationsTable, DB } from "../schema";
 
-export type DeclaredRelationshipState = "trial" | "paying";
+export type CounterpartyKind = "client" | "vendor" | "investor" | "partner" | "other";
+export type ClientStage = "prospect" | "pilot" | "active" | "dormant" | "ended";
+export type DeclaredRelationshipState = "trial" | "customer" | "vendor" | "investor" | "none";
 
 export type CompanyRelationshipDeclarationRow = Selectable<CompanyRelationshipDeclarationsTable>;
 
-export function isDeclaredRelationshipState(value: string): value is DeclaredRelationshipState {
-  return value === "trial" || value === "paying";
+const COUNTERPARTY_KINDS = new Set<CounterpartyKind>(["client", "vendor", "investor", "partner", "other"]);
+const CLIENT_STAGES = new Set<ClientStage>(["prospect", "pilot", "active", "dormant", "ended"]);
+/**
+ * Precedence when two shards of one duplicate group disagree: the kind that
+ * mints wins. `client` first, then `partner` — both carry a container and a
+ * stage, and a declaration that suppresses real work is the destructive
+ * direction. Ordering `partner` below `vendor` would resolve a
+ * partner/vendor disagreement to silence.
+ */
+const KIND_PRECEDENCE: Record<CounterpartyKind, number> = {
+  client: 0,
+  partner: 1,
+  vendor: 2,
+  investor: 3,
+  other: 4,
+};
+
+export function isCounterpartyKind(value: string): value is CounterpartyKind {
+  return COUNTERPARTY_KINDS.has(value as CounterpartyKind);
+}
+
+export function isClientStage(value: string): value is ClientStage {
+  return CLIENT_STAGES.has(value as ClientStage);
+}
+
+function kindCarriesStage(kind: CounterpartyKind): boolean {
+  return kind === "client" || kind === "partner";
+}
+
+function assertStageMatchesKind(kind: CounterpartyKind, stage: ClientStage | null): void {
+  if (kindCarriesStage(kind)) {
+    if (stage === null) throw new Error("client_stage is required for client and partner declarations");
+    return;
+  }
+  if (stage !== null) throw new Error("client_stage must be null unless counterparty_kind is client or partner");
 }
 
 export interface DeclareRelationshipInput {
-  companyEntityId: string;
-  declaredState: DeclaredRelationshipState;
+  subjectEntityId: string;
+  counterpartyKind: CounterpartyKind;
+  clientStage: ClientStage | null;
   note?: string;
+}
+
+export function resolveDeclaration(
+  rows: CompanyRelationshipDeclarationRow[],
+): CompanyRelationshipDeclarationRow | null {
+  let chosen: CompanyRelationshipDeclarationRow | null = null;
+  for (const row of rows) {
+    if (!isCounterpartyKind(row.counterparty_kind)) continue;
+    if (
+      !chosen ||
+      KIND_PRECEDENCE[row.counterparty_kind] < KIND_PRECEDENCE[chosen.counterparty_kind as CounterpartyKind]
+    ) {
+      chosen = row;
+    }
+  }
+  return chosen;
+}
+
+/**
+ * Temporary bridge for slices that still consume the old verdict relationship
+ * state. Delete this in the accept-gate slice instead of building on it.
+ */
+export function mapDeclarationToRelationshipState(row: CompanyRelationshipDeclarationRow): DeclaredRelationshipState {
+  if (row.counterparty_kind === "client" && row.client_stage === "active") return "customer";
+  if (row.counterparty_kind === "client" && row.client_stage === "pilot") return "trial";
+  if (row.counterparty_kind === "vendor") return "vendor";
+  if (row.counterparty_kind === "investor") return "investor";
+  return "none";
 }
 
 export function createCompanyRelationshipDeclarationRepository(db: Kysely<DB>) {
   return {
     async declare(input: DeclareRelationshipInput): Promise<void> {
+      assertStageMatchesKind(input.counterpartyKind, input.clientStage);
       const now = new Date().toISOString();
       await db
         .insertInto("company_relationship_declarations")
         .values({
-          company_entity_id: input.companyEntityId,
-          declared_state: input.declaredState,
+          subject_entity_id: input.subjectEntityId,
+          counterparty_kind: input.counterpartyKind,
+          client_stage: input.clientStage,
           note: input.note ?? null,
           created_at: now,
           updated_at: now,
         })
         .onConflict((oc) =>
-          oc.column("company_entity_id").doUpdateSet({
-            declared_state: input.declaredState,
+          oc.column("subject_entity_id").doUpdateSet({
+            counterparty_kind: input.counterpartyKind,
+            client_stage: input.clientStage,
             note: input.note ?? null,
             updated_at: now,
           }),
@@ -55,14 +121,14 @@ export function createCompanyRelationshipDeclarationRepository(db: Kysely<DB>) {
       return db
         .selectFrom("company_relationship_declarations")
         .selectAll()
-        .orderBy("company_entity_id", "asc")
+        .orderBy("subject_entity_id", "asc")
         .execute();
     },
 
-    async remove(companyEntityId: string): Promise<void> {
+    async remove(subjectEntityId: string): Promise<void> {
       await db
         .deleteFrom("company_relationship_declarations")
-        .where("company_entity_id", "=", companyEntityId)
+        .where("subject_entity_id", "=", subjectEntityId)
         .execute();
     },
   };

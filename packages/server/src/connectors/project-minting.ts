@@ -27,7 +27,8 @@ import type { Logger } from "pino";
 import {
   type DeclaredRelationshipState,
   createCompanyRelationshipDeclarationRepository,
-  isDeclaredRelationshipState,
+  mapDeclarationToRelationshipState,
+  resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { whereLiveEntity } from "../db/repositories/entities";
 import { normalizeEmailDomain } from "../db/repositories/entity-domains";
@@ -825,7 +826,7 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
   lines.push(`${dossier.fileCount} files · ${dossier.firstDate ?? "?"} → ${dossier.lastDate ?? "?"} · ${sources}`);
   lines.push("");
   if (dossier.declaredState) {
-    const statusText = dossier.declaredState === "paying" ? "paying customer" : "trial";
+    const statusText = dossier.declaredState === "customer" ? "paying customer" : "trial";
     lines.push(`DECLARED (from tenant registry): managed tenant of ours, status = ${statusText}.`);
     lines.push("");
   }
@@ -1262,18 +1263,19 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
   const clusters = await clusterClientFiles(input.db, { minFiles: input.minFiles });
   const verdictRepo = createProjectMintingVerdictRepository(input.db);
 
-  const declaredById = new Map<string, DeclaredRelationshipState>();
-  for (const row of await createCompanyRelationshipDeclarationRepository(input.db).list()) {
-    if (isDeclaredRelationshipState(row.declared_state)) declaredById.set(row.company_entity_id, row.declared_state);
-  }
+  const declaredById = new Map(
+    (await createCompanyRelationshipDeclarationRepository(input.db).list()).map((row) => [row.subject_entity_id, row]),
+  );
   const ownNames = await loadOwnOrgNames(input.db);
 
   const results: ClusterPassResult[] = [];
   for (const cluster of clusters) {
     if (onlyTriggered && !cluster.triggered) continue;
     if (input.companyFilter && !input.companyFilter(cluster.companyName)) continue;
-    const declaredState =
-      cluster.groupMembers.map((member) => declaredById.get(member.entityId)).find((state) => state != null) ?? null;
+    const declaration = resolveDeclaration(
+      cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
+    );
+    const declaredState = declaration ? mapDeclarationToRelationshipState(declaration) : null;
     const dossier = await buildClusterDossier(input.db, cluster, { declaredState });
     const base = {
       companyEntityId: cluster.companyEntityId,

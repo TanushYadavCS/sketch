@@ -12,7 +12,8 @@ import {
 } from "../connectors/project-minting-acceptance";
 import {
   createCompanyRelationshipDeclarationRepository,
-  isDeclaredRelationshipState,
+  isClientStage,
+  isCounterpartyKind,
 } from "../db/repositories/company-relationship-declarations";
 import {
   type ProjectMintingVerdictRow,
@@ -171,8 +172,9 @@ export function projectMintingRoutes(db: Kysely<DB>, logger: Logger) {
     const rows = await declarations.list();
     return c.json({
       declarations: rows.map((row) => ({
-        companyEntityId: row.company_entity_id,
-        declaredState: row.declared_state,
+        subjectEntityId: row.subject_entity_id,
+        counterpartyKind: row.counterparty_kind,
+        clientStage: row.client_stage,
         note: row.note,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -180,31 +182,60 @@ export function projectMintingRoutes(db: Kysely<DB>, logger: Logger) {
     });
   });
 
-  routes.put("/declarations/:companyEntityId", async (c) => {
+  routes.put("/declarations/:subjectEntityId", async (c) => {
     const forbidden = requireAdmin(c);
     if (forbidden) return c.json(forbidden, 403);
 
     const body = await readJsonObject(c);
-    const declaredState = body.declaredState;
-    if (typeof declaredState !== "string" || !isDeclaredRelationshipState(declaredState)) {
+    const counterpartyKind = body.counterpartyKind;
+    if (typeof counterpartyKind !== "string" || !isCounterpartyKind(counterpartyKind)) {
       return c.json(
-        { error: { code: "INVALID_DECLARED_STATE", message: "declaredState must be trial or paying" } },
+        {
+          error: {
+            code: "INVALID_COUNTERPARTY_KIND",
+            message: "counterpartyKind must be client, vendor, investor, partner or other",
+          },
+        },
         400,
       );
     }
-    await declarations.declare({
-      companyEntityId: c.req.param("companyEntityId"),
-      declaredState,
-      note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : undefined,
-    });
-    return c.body(null, 204);
+    const clientStage = body.clientStage;
+    if (
+      clientStage !== null &&
+      clientStage !== undefined &&
+      (typeof clientStage !== "string" || !isClientStage(clientStage))
+    ) {
+      return c.json(
+        {
+          error: {
+            code: "INVALID_CLIENT_STAGE",
+            message: "clientStage must be prospect, pilot, active, dormant, ended or null",
+          },
+        },
+        400,
+      );
+    }
+    try {
+      await declarations.declare({
+        subjectEntityId: c.req.param("subjectEntityId"),
+        counterpartyKind,
+        clientStage: clientStage ?? null,
+        note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : undefined,
+      });
+      return c.body(null, 204);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("client_stage")) {
+        return c.json({ error: { code: "INVALID_CLIENT_STAGE", message: err.message } }, 400);
+      }
+      throw err;
+    }
   });
 
-  routes.delete("/declarations/:companyEntityId", async (c) => {
+  routes.delete("/declarations/:subjectEntityId", async (c) => {
     const forbidden = requireAdmin(c);
     if (forbidden) return c.json(forbidden, 403);
 
-    await declarations.remove(c.req.param("companyEntityId"));
+    await declarations.remove(c.req.param("subjectEntityId"));
     return c.body(null, 204);
   });
 

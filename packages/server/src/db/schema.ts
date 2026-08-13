@@ -982,8 +982,9 @@ export interface ProjectMintingVerdictsTable {
 }
 
 export interface CompanyRelationshipDeclarationsTable {
-  company_entity_id: string;
-  declared_state: string;
+  subject_entity_id: string;
+  counterparty_kind: string;
+  client_stage: string | null;
   note: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
