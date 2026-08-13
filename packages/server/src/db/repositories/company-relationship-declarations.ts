@@ -15,7 +15,6 @@ import type { CompanyRelationshipDeclarationsTable, DB } from "../schema";
 
 export type CounterpartyKind = "client" | "vendor" | "investor" | "partner" | "other";
 export type ClientStage = "prospect" | "pilot" | "active" | "dormant" | "ended";
-export type DeclaredRelationshipState = "trial" | "customer" | "vendor" | "investor" | "none";
 
 export type CompanyRelationshipDeclarationRow = Selectable<CompanyRelationshipDeclarationsTable>;
 
@@ -44,11 +43,11 @@ export function isClientStage(value: string): value is ClientStage {
   return CLIENT_STAGES.has(value as ClientStage);
 }
 
-function kindCarriesStage(kind: CounterpartyKind): boolean {
+export function kindCarriesStage(kind: CounterpartyKind): boolean {
   return kind === "client" || kind === "partner";
 }
 
-function assertStageMatchesKind(kind: CounterpartyKind, stage: ClientStage | null): void {
+export function assertStageMatchesKind(kind: CounterpartyKind, stage: ClientStage | null): void {
   if (kindCarriesStage(kind)) {
     if (stage === null) throw new Error("client_stage is required for client and partner declarations");
     return;
@@ -77,18 +76,6 @@ export function resolveDeclaration(
     }
   }
   return chosen;
-}
-
-/**
- * Temporary bridge for slices that still consume the old verdict relationship
- * state. Delete this in the accept-gate slice instead of building on it.
- */
-export function mapDeclarationToRelationshipState(row: CompanyRelationshipDeclarationRow): DeclaredRelationshipState {
-  if (row.counterparty_kind === "client" && row.client_stage === "active") return "customer";
-  if (row.counterparty_kind === "client" && row.client_stage === "pilot") return "trial";
-  if (row.counterparty_kind === "vendor") return "vendor";
-  if (row.counterparty_kind === "investor") return "investor";
-  return "none";
 }
 
 export function createCompanyRelationshipDeclarationRepository(db: Kysely<DB>) {

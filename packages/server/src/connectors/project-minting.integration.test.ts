@@ -93,13 +93,15 @@ describe("project minting pass (e2e)", () => {
       .executeTakeFirstOrThrow();
     expect(row.counterparty_kind).toBe("partner");
     expect(row.client_stage).toBe("active");
-    expect(row.relationship_state).toBe("customer");
+    expect(row.declared_counterparty_kind).toBeNull();
+    expect(row.declared_client_stage).toBeNull();
     const storedJson = JSON.parse(row.verdict) as Record<string, unknown>;
     expect(storedJson.counterpartyKind).toBe("partner");
     expect(storedJson.clientStage).toBe("active");
     expect(storedJson.relationshipState).toBeUndefined();
     const storedVerdict = readClusterVerdict(storedJson);
-    expect(storedVerdict.relationshipState).toBe("customer");
+    expect(storedVerdict.counterpartyKind).toBe("partner");
+    expect(storedVerdict.clientStage).toBe("active");
   });
 
   it("renders declared axes exactly and omits the DECLARED line for undeclared counterparties", async () => {
@@ -400,7 +402,8 @@ describe("project minting pass (e2e)", () => {
       pending.map((row) => [row.company_entity_id, readClusterVerdict(JSON.parse(row.verdict))]),
     );
     const poz = byCompany.get(pozId);
-    expect(poz?.relationshipState).toBe("vendor");
+    expect(poz?.counterpartyKind).toBe("vendor");
+    expect(poz?.clientStage).toBeNull();
     expect(poz?.projects).toHaveLength(0);
     const praevorium = byCompany.get(praevoriumId);
     expect(praevorium?.projects).toHaveLength(1);
@@ -443,7 +446,8 @@ describe("project minting pass (e2e)", () => {
 
     expect(await snapshotEntities(db)).toEqual(before);
     const result = pass.results.find((r) => r.companyEntityId === acmeId);
-    expect(result?.verdict?.relationshipState).toBe("lead");
+    expect(result?.verdict?.counterpartyKind).toBe("client");
+    expect(result?.verdict?.clientStage).toBe("prospect");
     expect(result?.verdict?.projects).toHaveLength(0);
     expect(result?.tripwireFlags).toEqual([]);
     const row = await db
@@ -453,9 +457,10 @@ describe("project minting pass (e2e)", () => {
       .where("status", "=", "pending")
       .where("superseded_at", "is", null)
       .executeTakeFirstOrThrow();
-    expect(row.relationship_state).toBe("lead");
     expect(row.counterparty_kind).toBe("client");
     expect(row.client_stage).toBe("prospect");
+    expect(row.declared_counterparty_kind).toBeNull();
+    expect(row.declared_client_stage).toBeNull();
     expect(row.flags).toBeNull();
     const storedVerdict = readClusterVerdict(JSON.parse(row.verdict));
     expect(storedVerdict.counterpartyKind).toBe("client");
@@ -521,7 +526,8 @@ describe("project minting pass (e2e)", () => {
     const result = pass.results.find((r) => r.companyEntityId === habuildId);
     expect(result?.dossier.declaredRelationship?.counterparty_kind).toBe("client");
     expect(result?.dossier.declaredRelationship?.client_stage).toBe("pilot");
-    expect(result?.verdict?.relationshipState).toBe("trial");
+    expect(result?.verdict?.counterpartyKind).toBe("client");
+    expect(result?.verdict?.clientStage).toBe("pilot");
     expect(result?.verdict?.projects).toHaveLength(1);
     expect(result?.verdict?.projects[0].name).toBe("Habuild deployment");
     expect(result?.tripwireFlags).toEqual([]);
@@ -532,9 +538,10 @@ describe("project minting pass (e2e)", () => {
       .where("status", "=", "pending")
       .where("superseded_at", "is", null)
       .executeTakeFirstOrThrow();
-    expect(row.relationship_state).toBe("trial");
     expect(row.counterparty_kind).toBe("client");
     expect(row.client_stage).toBe("pilot");
+    expect(row.declared_counterparty_kind).toBe("client");
+    expect(row.declared_client_stage).toBe("pilot");
     expect(readClusterVerdict(JSON.parse(row.verdict)).projects).toHaveLength(1);
   });
 
@@ -587,7 +594,7 @@ describe("project minting pass (e2e)", () => {
     const response = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ confirmedCounterpartyKind: "client", confirmedClientStage: "active" }),
     });
 
     expect(response.status).toBe(200);

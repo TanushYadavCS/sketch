@@ -21,8 +21,8 @@ describe("194 counterparty axes migration", () => {
     expect(result.error).toBeUndefined();
   }
 
-  async function migrateToLatest(): Promise<void> {
-    const result = await createMigrator(db).migrateToLatest();
+  async function migrateTo188(): Promise<void> {
+    const result = await createMigrator(db).migrateTo("201-counterparty-axes");
     expect(result.error).toBeUndefined();
   }
 
@@ -36,7 +36,7 @@ describe("194 counterparty axes migration", () => {
         ('company-trial', 'trial', 'pilot note', '2026-08-03T12:00:00.000Z', '2026-08-04T13:00:00.000Z')
     `.execute(db);
 
-    await migrateToLatest();
+    await migrateTo188();
 
     const rows = await sql<{
       subject_entity_id: string;
@@ -195,7 +195,7 @@ describe("194 counterparty axes migration", () => {
       ORDER BY id ASC
     `.execute(db);
 
-    await migrateToLatest();
+    await migrateTo188();
 
     const pending = await sql<{ superseded_at: string | null }>`
       SELECT superseded_at FROM project_minting_verdicts WHERE id = 'pending-verdict'

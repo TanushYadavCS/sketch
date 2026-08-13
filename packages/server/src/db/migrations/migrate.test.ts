@@ -30,7 +30,7 @@ import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calend
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
-const EXPECTED_MIGRATION_COUNT = 198;
+const EXPECTED_MIGRATION_COUNT = 199;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -312,14 +312,10 @@ describe("runMigrations — full sequence", () => {
     expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
     expect(names[188]).toBe("193-automation-lock-sessions");
     expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
-<<<<<<< HEAD
-    expect(names[195]).toBe("200-project-minting-acceptance");
-    expect(names[196]).toBe("201-counterparty-axes");
-=======
     expect(names[195]).toBe("200-project-minting-acceptance");
     expect(names[196]).toBe("201-counterparty-axes");
     expect(names[197]).toBe("202-verdict-counterparty-axes");
->>>>>>> 4451c72b (feat(project-minting): nominate counterparty axes instead of inferring stage)
+    expect(names[198]).toBe("203-verdict-declaration-snapshot");
   });
 
   it("adds portable session fencing columns with safe legacy defaults", async () => {

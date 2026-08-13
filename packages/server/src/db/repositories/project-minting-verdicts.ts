@@ -22,7 +22,8 @@ export interface StorePendingVerdictInput {
   promptVersion: string;
   counterpartyKind?: string;
   clientStage?: string | null;
-  relationshipState?: string;
+  declaredCounterpartyKind?: string | null;
+  declaredClientStage?: string | null;
   flags?: string[];
   voteStats?: object;
 }
@@ -70,7 +71,8 @@ export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
           superseded_at: null,
           counterparty_kind: input.counterpartyKind ?? null,
           client_stage: input.clientStage ?? null,
-          relationship_state: input.relationshipState ?? null,
+          declared_counterparty_kind: input.declaredCounterpartyKind ?? null,
+          declared_client_stage: input.declaredClientStage ?? null,
           flags: input.flags && input.flags.length > 0 ? JSON.stringify(input.flags) : null,
           vote_stats: input.voteStats ? JSON.stringify(input.voteStats) : null,
           created_at: now,

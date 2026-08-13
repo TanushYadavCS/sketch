@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import {
-  type DeclaredRelationshipState,
+  type ClientStage,
+  type CounterpartyKind,
+  assertStageMatchesKind,
   createCompanyRelationshipDeclarationRepository,
-  mapDeclarationToRelationshipState,
+  kindCarriesStage,
   resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
@@ -19,7 +21,6 @@ import {
   type ClientCluster,
   type ClusterVerdict,
   type ProjectLifecycleStatus,
-  type RelationshipState,
   type VerdictConfidence,
   clusterClientFiles,
   normalizeTitleFamily,
@@ -34,6 +35,8 @@ const CONFIDENCE_RANK: Record<VerdictConfidence, number> = { high: 3, medium: 2,
 export interface AcceptProjectMintingVerdictInput {
   verdictId: string;
   actorUserId: string;
+  confirmedCounterpartyKind: CounterpartyKind;
+  confirmedClientStage: ClientStage | null;
   struckProjectNames?: string[];
   renameMap?: Record<string, string>;
   overrideTripwireFlags?: boolean;
@@ -56,6 +59,24 @@ export interface ProjectMintingAcceptResult {
   entities: AcceptedEntitySummary[];
   mergeIds: string[];
   struckProjects: string[];
+  droppedByGate: {
+    engagement: string | null;
+    projects: string[];
+    /**
+     * Merges the verdict asked for that had no survivor left to merge into,
+     * because the gate dropped their target. Reachable only through a
+     * correction: a fragment told to fold into the engagement is skipped when
+     * the confirmed stage is `prospect` or `pilot`, which carry no engagement.
+     * Reported rather than refused — there is no input for redirecting a merge,
+     * so refusing would leave the reviewer no path but rejection.
+     */
+    unmergedFragments: { entityId: string; intoName: string }[];
+  };
+  declaration: {
+    subjectEntityId: string;
+    counterpartyKind: CounterpartyKind;
+    clientStage: ClientStage | null;
+  };
   taskParentUpdates: number;
   drift: {
     stance: "live_recompute";
@@ -75,6 +96,7 @@ export class ProjectMintingAcceptanceError extends Error {
       | "ANCHOR_NOT_FOUND"
       | "STRIKE_CASCADE"
       | "CLUSTER_NOT_FOUND"
+      | "INVALID_ACCEPTANCE_SHAPE"
       | "INVALID_ACCEPTANCE",
     message: string,
     public readonly details?: Record<string, unknown>,
@@ -121,8 +143,9 @@ function renameFor(name: string, renameMap: Record<string, string>): string {
   return renamed || name;
 }
 
-function isNoWriteState(state: RelationshipState): boolean {
-  return state === "vendor" || state === "investor" || state === "none";
+function shouldWriteNoEntities(kind: CounterpartyKind, stage: ClientStage | null): boolean {
+  if (!kindCarriesStage(kind)) return true;
+  return stage === "dormant" || stage === "ended";
 }
 
 function projectSourceId(companyEntityId: string, originalName: string): string {
@@ -141,17 +164,95 @@ function updatedCount(result: { numUpdatedRows?: bigint | number | string } | un
   return Number(result?.numUpdatedRows ?? 0);
 }
 
-async function currentDeclaredStateForCluster(
+async function currentDeclarationForCluster(
   db: Kysely<DB>,
   cluster: ClientCluster,
-): Promise<DeclaredRelationshipState | null> {
+): Promise<{ counterpartyKind: CounterpartyKind; clientStage: ClientStage | null } | null> {
   const declaredById = new Map(
     (await createCompanyRelationshipDeclarationRepository(db).list()).map((row) => [row.subject_entity_id, row]),
   );
   const declaration = resolveDeclaration(
     cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
   );
-  return declaration ? mapDeclarationToRelationshipState(declaration) : null;
+  if (!declaration) return null;
+  return {
+    counterpartyKind: declaration.counterparty_kind as CounterpartyKind,
+    clientStage: declaration.client_stage as ClientStage | null,
+  };
+}
+
+function assertCurrentDeclarationMatchesSnapshot(
+  row: ProjectMintingVerdictRow,
+  current: { counterpartyKind: CounterpartyKind; clientStage: ClientStage | null } | null,
+): void {
+  const snapshotKind = row.declared_counterparty_kind;
+  const snapshotStage = row.declared_client_stage;
+  const currentKind = current?.counterpartyKind ?? null;
+  const currentStage = current?.clientStage ?? null;
+  if (currentKind !== snapshotKind || currentStage !== snapshotStage) {
+    throw new ProjectMintingAcceptanceError("STALE_VERDICT", "stale verdict — re-run the cluster", {
+      storedDeclaration: { counterpartyKind: snapshotKind, clientStage: snapshotStage },
+      currentDeclaration: { counterpartyKind: currentKind, clientStage: currentStage },
+    });
+  }
+}
+
+function acceptedProjectsForConfirmedAxes(
+  verdict: ClusterVerdict,
+  input: { confirmedCounterpartyKind: CounterpartyKind; confirmedClientStage: ClientStage | null },
+  struck: Set<string>,
+): {
+  acceptedProjects: ClusterVerdict["projects"];
+  shouldWriteNothing: boolean;
+  shouldWriteEngagement: boolean;
+  droppedByGate: ProjectMintingAcceptResult["droppedByGate"];
+} {
+  assertStageMatchesKind(input.confirmedCounterpartyKind, input.confirmedClientStage);
+  const projectsAfterStrike = verdict.projects.filter((project) => !struck.has(project.name));
+  const engagementName = verdict.engagement?.name ?? null;
+  if (shouldWriteNoEntities(input.confirmedCounterpartyKind, input.confirmedClientStage)) {
+    return {
+      acceptedProjects: [],
+      shouldWriteNothing: true,
+      shouldWriteEngagement: false,
+      droppedByGate: {
+        engagement: engagementName,
+        projects: projectsAfterStrike.map((project) => project.name).sort(),
+        unmergedFragments: [],
+      },
+    };
+  }
+  if (input.confirmedClientStage === "prospect") {
+    return {
+      acceptedProjects: projectsAfterStrike,
+      shouldWriteNothing: false,
+      shouldWriteEngagement: false,
+      droppedByGate: { engagement: engagementName, projects: [], unmergedFragments: [] },
+    };
+  }
+  if (input.confirmedClientStage === "pilot") {
+    if (projectsAfterStrike.length === 0) {
+      throw new ProjectMintingAcceptanceError(
+        "INVALID_ACCEPTANCE_SHAPE",
+        "pilot acceptance requires at least one project",
+      );
+    }
+    return {
+      acceptedProjects: projectsAfterStrike,
+      shouldWriteNothing: false,
+      shouldWriteEngagement: false,
+      droppedByGate: { engagement: engagementName, projects: [], unmergedFragments: [] },
+    };
+  }
+  if (!verdict.engagement) {
+    throw new ProjectMintingAcceptanceError("INVALID_ACCEPTANCE_SHAPE", "active acceptance requires an engagement");
+  }
+  return {
+    acceptedProjects: projectsAfterStrike,
+    shouldWriteNothing: false,
+    shouldWriteEngagement: true,
+    droppedByGate: { engagement: null, projects: [], unmergedFragments: [] },
+  };
 }
 
 async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerdictRow): Promise<ClientCluster> {
@@ -436,16 +537,8 @@ async function computeAcceptance(
   }
 
   const cluster = await findCurrentCluster(db, row);
-  const currentDeclared = await currentDeclaredStateForCluster(db, cluster);
-  if (currentDeclared) {
-    const currentState = currentDeclared;
-    if (currentState !== verdict.relationshipState) {
-      throw new ProjectMintingAcceptanceError("STALE_VERDICT", "stale verdict — re-run the cluster", {
-        storedRelationshipState: verdict.relationshipState,
-        currentRelationshipState: currentState,
-      });
-    }
-  }
+  const currentDeclared = await currentDeclarationForCluster(db, cluster);
+  assertCurrentDeclarationMatchesSnapshot(row, currentDeclared);
 
   const struckProjects = [...new Set(input.struckProjectNames ?? [])]
     .map((name) => name.trim())
@@ -463,8 +556,8 @@ async function computeAcceptance(
   }
 
   const renameMap = input.renameMap ?? {};
-  const shouldWriteNothing = isNoWriteState(verdict.relationshipState);
-  const acceptedProjects = shouldWriteNothing ? [] : verdict.projects.filter((project) => !struck.has(project.name));
+  const { acceptedProjects, shouldWriteNothing, shouldWriteEngagement, droppedByGate } =
+    acceptedProjectsForConfirmedAxes(verdict, input, struck);
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const anchorMaps = await buildAnchorMaps(db, cluster);
   const { projectFiles, errors } = resolveProjectAnchors(verdict, acceptedOriginalNames, anchorMaps);
@@ -484,7 +577,7 @@ async function computeAcceptance(
   let engagementId: string | null = null;
   const entities: AcceptedEntitySummary[] = [];
 
-  if (!shouldWriteNothing && verdict.relationshipState === "customer" && verdict.engagement) {
+  if (shouldWriteEngagement && verdict.engagement) {
     const originalName = verdict.engagement.name;
     const name = renameFor(originalName, renameMap);
     engagementId = await adoptOrCreateProjectEntity(db, {
@@ -530,7 +623,7 @@ async function computeAcceptance(
 
   const residualTargetId =
     engagementId ??
-    (projectIds.length === 1 ? projectIds[0] : verdict.relationshipState === "trial" ? projectIds[0] : null);
+    (projectIds.length === 1 ? projectIds[0] : input.confirmedClientStage === "pilot" ? projectIds[0] : null);
   if (residualTargetId) {
     const residual = filesByEntity.get(residualTargetId) ?? new Set<string>();
     for (const file of cluster.files) {
@@ -545,7 +638,10 @@ async function computeAcceptance(
     const survivorId =
       projectIdsByOriginalName.get(disposition.mergeInto) ??
       (engagementId && disposition.mergeInto === verdict.engagement?.name ? engagementId : null);
-    if (!survivorId) continue;
+    if (!survivorId) {
+      droppedByGate.unmergedFragments.push({ entityId: disposition.entityId, intoName: disposition.mergeInto });
+      continue;
+    }
     const mergeId = await mergeFragment(db, {
       survivorId,
       loserId: disposition.entityId,
@@ -577,6 +673,12 @@ async function computeAcceptance(
     entities: entities.sort((a, b) => a.name.localeCompare(b.name)),
     mergeIds: mergeIds.sort(),
     struckProjects,
+    droppedByGate,
+    declaration: {
+      subjectEntityId: cluster.companyEntityId,
+      counterpartyKind: input.confirmedCounterpartyKind,
+      clientStage: input.confirmedClientStage,
+    },
     taskParentUpdates,
     drift: {
       stance: "live_recompute",
@@ -597,12 +699,26 @@ export async function acceptProjectMintingVerdict(
     if (!row) throw new ProjectMintingAcceptanceError("NOT_FOUND", "Project minting verdict not found");
     const result = await computeAcceptance(db, row, input);
     if (row.status === "pending" && row.superseded_at === null) {
+      /**
+       * Keep this order: read the registry in `computeAcceptance`, check
+       * staleness, gate the confirmed shape, write the graph, win the verdict
+       * CAS, then declare. Declaring before staleness makes a verdict stale
+       * against its own row; declaring before the CAS lets a losing concurrent
+       * accept overwrite the winner's confirmed axes.
+       */
       const won = await repo.markAccepted({
         id: row.id,
         actorUserId: input.actorUserId,
         struckProjects: result.struckProjects,
         result,
       });
+      if (won) {
+        await createCompanyRelationshipDeclarationRepository(db).declare({
+          subjectEntityId: result.declaration.subjectEntityId,
+          counterpartyKind: result.declaration.counterpartyKind,
+          clientStage: result.declaration.clientStage,
+        });
+      }
       if (!won) {
         const current = await repo.findById(input.verdictId);
         if (current) {

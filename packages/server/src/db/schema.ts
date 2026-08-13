@@ -972,7 +972,8 @@ export interface ProjectMintingVerdictsTable {
   superseded_at: string | null;
   counterparty_kind: string | null;
   client_stage: string | null;
-  relationship_state: string | null;
+  declared_counterparty_kind: string | null;
+  declared_client_stage: string | null;
   flags: string | null;
   vote_stats: string | null;
   decided_at: string | null;

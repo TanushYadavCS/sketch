@@ -894,7 +894,6 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
   return lines.join("\n");
 }
 
-export type RelationshipState = "lead" | "trial" | "customer" | "vendor" | "investor" | "none";
 export type ProjectLifecycleStatus = "proposed" | "active" | "delivered" | "lost";
 export type VerdictConfidence = "high" | "medium" | "low";
 export type TrackerFit =
@@ -924,12 +923,6 @@ export interface VerdictEntityDisposition {
 export interface ClusterVerdict {
   counterpartyKind: CounterpartyKind;
   clientStage: ClientStage | null;
-  /**
-   * Temporary bridge for slice (c)'s accept gate, which still reads the old
-   * collapsed state. Derived from the two nominated axes and omitted from
-   * stored verdict JSON; slice (c) deletes it.
-   */
-  relationshipState: RelationshipState;
   engagement: { name: string; summary?: string } | null;
   projects: VerdictProject[];
   existingEntities: VerdictEntityDisposition[];
@@ -951,16 +944,6 @@ const TRACKER_FITS: ReadonlySet<string> = new Set([
 function readStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
-}
-
-export function relationshipStateFromAxes(kind: CounterpartyKind, stage: ClientStage | null): RelationshipState {
-  if (kind === "vendor") return "vendor";
-  if (kind === "investor") return "investor";
-  if (kind !== "client" && kind !== "partner") return "none";
-  if (stage === "active") return "customer";
-  if (stage === "pilot") return "trial";
-  if (stage === "prospect") return "lead";
-  return "none";
 }
 
 export function readClusterVerdict(value: unknown): ClusterVerdict {
@@ -1031,7 +1014,7 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
       ...(typeof raw.reasoning === "string" && raw.reasoning.trim() ? { reasoning: raw.reasoning.trim() } : {}),
     });
   }
-  const verdict = {
+  return {
     counterpartyKind: counterpartyKind as CounterpartyKind,
     clientStage,
     engagement,
@@ -1040,11 +1023,6 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
     trackerFit: trackerFit as TrackerFit,
     notes: readStringArray(record.notes),
   };
-  Object.defineProperty(verdict, "relationshipState", {
-    value: relationshipStateFromAxes(counterpartyKind as CounterpartyKind, clientStage),
-    enumerable: false,
-  });
-  return verdict as ClusterVerdict;
 }
 
 /**
@@ -1370,7 +1348,8 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
           promptVersion,
           counterpartyKind: verdict.counterpartyKind,
           clientStage: verdict.clientStage,
-          relationshipState: verdict.relationshipState,
+          declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
+          declaredClientStage: declaration?.client_stage ?? null,
           flags: tripwireFlags,
           ...(votes > 1 ? { voteStats } : {}),
         });

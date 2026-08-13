@@ -92,7 +92,7 @@ describe("project minting verdict acceptance", () => {
     const response = await app.request(`/api/project-minting/verdicts/${pass.results[0].verdictId}/acceptance`, {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(acceptanceBody("client", "active")),
     });
     const body = (await response.json()) as {
       acceptance: { entityIds: { engagementId: string; projectIds: string[] }; mergeIds: string[] };
@@ -229,10 +229,22 @@ describe("project minting verdict acceptance", () => {
 
     const vendorResponse = await app.request(
       `/api/project-minting/verdicts/${byCompany.get(seeded.vendorId)?.id}/acceptance`,
-      { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("vendor")),
+      },
     );
     expect(vendorResponse.status).toBe(200);
     expect(await countProjectMintingSourceRefs(db)).toBe(0);
+    const declaration = await createCompanyRelationshipDeclarationRepository(db).list();
+    expect(declaration).toEqual([
+      expect.objectContaining({
+        subject_entity_id: seeded.vendorId,
+        counterparty_kind: "vendor",
+        client_stage: null,
+      }),
+    ]);
     const vendorRow = await db
       .selectFrom("project_minting_verdicts")
       .select("status")
@@ -242,7 +254,11 @@ describe("project minting verdict acceptance", () => {
 
     const pursuitResponse = await app.request(
       `/api/project-minting/verdicts/${byCompany.get(seeded.praevoriumId)?.id}/acceptance`,
-      { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "prospect")),
+      },
     );
     expect(pursuitResponse.status).toBe(200);
     const projects = await db
@@ -298,7 +314,11 @@ describe("project minting verdict acceptance", () => {
 
     const acmeResponse = await app.request(
       `/api/project-minting/verdicts/${byCompany.get(seeded.acmeId)?.id}/acceptance`,
-      { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "prospect")),
+      },
     );
     expect(acmeResponse.status).toBe(200);
     expect(await countProjectMintingSourceRefs(db)).toBe(0);
@@ -311,12 +331,387 @@ describe("project minting verdict acceptance", () => {
 
     const controlResponse = await app.request(
       `/api/project-minting/verdicts/${byCompany.get(seeded.praevoriumId)?.id}/acceptance`,
-      { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "prospect")),
+      },
     );
     expect(controlResponse.status).toBe(200);
     expect(await countProjectMintingSourceRefs(db)).toBe(1);
   });
+
+  it("obeys confirmed axes instead of the nomination for vendor, active, and dormant accepts", async () => {
+    const connectorId = await seedConnector(db);
+    const vendorId = await seedClientCluster(db, connectorId, "Correctvendor", "correctvendor.example");
+    const activeId = await seedClientCluster(db, connectorId, "Correctactive", "correctactive.example");
+    const dormantId = await seedClientCluster(db, connectorId, "Correctdormant", "correctdormant.example");
+    const nominatedActiveVerdict = readClusterVerdict({
+      counterpartyKind: "client",
+      clientStage: "active",
+      engagement: { name: "Corrected account" },
+      projects: [
+        {
+          name: "Corrected deployment",
+          status: "active",
+          confidence: "high",
+          evidenceTitleFamilies: ["Correction deployment sync"],
+          evidenceRepos: [],
+          evidencePeople: ["Casey Lead"],
+        },
+      ],
+      existingEntities: [],
+      trackerFit: "no_containers",
+      notes: [],
+    });
+    const generator = generatorFor(() => nominatedActiveVerdict);
+
+    await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+    const rows = await db.selectFrom("project_minting_verdicts").selectAll().where("status", "=", "pending").execute();
+    const byCompany = new Map(rows.map((row) => [row.company_entity_id, row]));
+
+    const vendorResponse = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(vendorId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("vendor")),
+      },
+    );
+    const vendorBody = (await vendorResponse.json()) as {
+      acceptance: { entityIds: { engagementId: string | null; projectIds: string[] }; droppedByGate: unknown };
+    };
+    expect(vendorResponse.status).toBe(200);
+    expect(vendorBody.acceptance.entityIds).toEqual({ engagementId: null, projectIds: [] });
+    expect(vendorBody.acceptance.droppedByGate).toEqual({
+      engagement: "Corrected account",
+      projects: ["Corrected deployment"],
+      unmergedFragments: [],
+    });
+    expect(await countProjectMintingSourceRefs(db)).toBe(0);
+    await expectDeclaration(db, vendorId, "vendor", null);
+
+    const activeResponse = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(activeId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "active")),
+      },
+    );
+    const activeBody = (await activeResponse.json()) as {
+      acceptance: { entityIds: { engagementId: string | null; projectIds: string[] } };
+    };
+    expect(activeResponse.status).toBe(200);
+    expect(activeBody.acceptance.entityIds.engagementId).not.toBeNull();
+    expect(activeBody.acceptance.entityIds.projectIds).toHaveLength(1);
+    expect(await countProjectMintingSourceRefs(db)).toBe(2);
+
+    const dormantResponse = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(dormantId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "dormant")),
+      },
+    );
+    const dormantBody = (await dormantResponse.json()) as {
+      acceptance: { entityIds: { engagementId: string | null; projectIds: string[] }; droppedByGate: unknown };
+    };
+    expect(dormantResponse.status).toBe(200);
+    expect(dormantBody.acceptance.entityIds).toEqual({ engagementId: null, projectIds: [] });
+    expect(dormantBody.acceptance.droppedByGate).toEqual({
+      engagement: "Corrected account",
+      projects: ["Corrected deployment"],
+      unmergedFragments: [],
+    });
+    expect(await countProjectMintingSourceRefs(db)).toBe(2);
+    await expectDeclaration(db, dormantId, "client", "dormant");
+  });
+
+  it("accepts a stage-change nomination when the registry matches the generation snapshot", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedClientCluster(db, connectorId, "Dormantresume", "dormantresume.example");
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "dormant",
+    });
+    const generator = generatorFor(() =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: { name: "Dormantresume account" },
+        projects: [
+          {
+            name: "Dormantresume deployment",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Correction deployment sync"],
+            evidenceRepos: [],
+            evidencePeople: ["Casey Lead"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+    const row = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("id", "=", pass.results[0].verdictId ?? "")
+      .executeTakeFirstOrThrow();
+    expect(row.declared_counterparty_kind).toBe("client");
+    expect(row.declared_client_stage).toBe("dormant");
+
+    const response = await app.request(`/api/project-minting/verdicts/${pass.results[0].verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "active")),
+    });
+
+    expect(response.status).toBe(200);
+    await expectDeclaration(db, companyId, "client", "active");
+  });
+
+  it("refuses a verdict when the registry stage changed after generation", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedClientCluster(db, connectorId, "Stalestage", "stalestage.example");
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "active",
+    });
+    const generator = generatorFor(() =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: { name: "Stalestage account" },
+        projects: [
+          {
+            name: "Stalestage deployment",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Correction deployment sync"],
+            evidenceRepos: [],
+            evidencePeople: ["Casey Lead"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const pass = await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "dormant",
+    });
+    const response = await app.request(`/api/project-minting/verdicts/${pass.results[0].verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "active")),
+    });
+    const body = (await response.json()) as { error: { code: string } };
+
+    expect(response.status).toBe(409);
+    expect(body.error.code).toBe("STALE_VERDICT");
+    expect(await countProjectMintingSourceRefs(db)).toBe(0);
+  });
+
+  it("enforces stage container shape by dropping below-ceiling containers and refusing missing required shape", async () => {
+    const connectorId = await seedConnector(db);
+    const prospectId = await seedClientCluster(db, connectorId, "Shapeprospect", "shapeprospect.example");
+    const pilotId = await seedClientCluster(db, connectorId, "Shapepilot", "shapepilot.example");
+    const activeId = await seedClientCluster(db, connectorId, "Shapeactive", "shapeactive.example");
+    const fragmentId = await seedProjectFragment(db, "Shape account fragment");
+    const generator = generatorFor((prompt) =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: prompt.includes("Shapeactive") ? null : { name: "Shape account" },
+        projects: [
+          {
+            name: "Shape deployment",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Correction deployment sync"],
+            evidenceRepos: [],
+            evidencePeople: ["Casey Lead"],
+          },
+        ],
+        existingEntities: [
+          {
+            entityId: fragmentId,
+            name: "Shape account fragment",
+            disposition: "merge_into",
+            mergeInto: "Shape account",
+          },
+        ],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+    const rows = await db.selectFrom("project_minting_verdicts").selectAll().where("status", "=", "pending").execute();
+    const byCompany = new Map(rows.map((row) => [row.company_entity_id, row]));
+
+    const prospectResponse = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(prospectId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "prospect")),
+      },
+    );
+    const prospectBody = (await prospectResponse.json()) as {
+      acceptance: { entityIds: { engagementId: string | null; projectIds: string[] }; droppedByGate: unknown };
+    };
+    expect(prospectResponse.status).toBe(200);
+    expect(prospectBody.acceptance.entityIds.engagementId).toBeNull();
+    expect(prospectBody.acceptance.entityIds.projectIds).toHaveLength(1);
+    expect(prospectBody.acceptance.droppedByGate).toEqual({
+      engagement: "Shape account",
+      projects: [],
+      unmergedFragments: [{ entityId: fragmentId, intoName: "Shape account" }],
+    });
+    expect(await countEngagementEntities(db)).toBe(0);
+
+    const pilotResponse = await app.request(`/api/project-minting/verdicts/${byCompany.get(pilotId)?.id}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const pilotBody = (await pilotResponse.json()) as {
+      acceptance: { entityIds: { engagementId: string | null; projectIds: string[] }; droppedByGate: unknown };
+    };
+    expect(pilotResponse.status).toBe(200);
+    expect(pilotBody.acceptance.entityIds.engagementId).toBeNull();
+    expect(pilotBody.acceptance.entityIds.projectIds).toHaveLength(1);
+    expect(pilotBody.acceptance.droppedByGate).toEqual({
+      engagement: "Shape account",
+      projects: [],
+      unmergedFragments: [{ entityId: fragmentId, intoName: "Shape account" }],
+    });
+    expect(await countEngagementEntities(db)).toBe(0);
+
+    const activeResponse = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(activeId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(acceptanceBody("client", "active")),
+      },
+    );
+    const activeBody = (await activeResponse.json()) as { error: { code: string; message: string } };
+    expect(activeResponse.status).toBe(400);
+    expect(activeBody.error.code).toBe("INVALID_ACCEPTANCE_SHAPE");
+    expect(activeBody.error.message).toContain("engagement");
+  });
+
+  /**
+   * The two rules that make `pilot` something other than `prospect`: it must
+   * keep a container, and unanchored account files land on it. Without these
+   * both pilot branches can be deleted with every other test still green.
+   */
+  it("separates pilot from prospect: pilot refuses an empty container and absorbs unanchored files", async () => {
+    const connectorId = await seedConnector(db);
+    const titles = ["Alpha rollout", "Beta migration", "Quarterly account review"];
+    const pilotId = await seedMailCluster(db, connectorId, {
+      name: "Residualpilot",
+      domain: "residualpilot.example",
+      titles,
+    });
+    const prospectId = await seedMailCluster(db, connectorId, {
+      name: "Residualprospect",
+      domain: "residualprospect.example",
+      titles,
+    });
+    const generator = generatorFor(() =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Alpha rollout",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Alpha rollout"],
+            evidenceRepos: [],
+            evidencePeople: [],
+          },
+          {
+            name: "Beta migration",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Beta migration"],
+            evidenceRepos: [],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    await runProjectMintingPass({ db, logger, generator, model: "test/reasoning-model" });
+    const rows = await db.selectFrom("project_minting_verdicts").selectAll().where("status", "=", "pending").execute();
+    const byCompany = new Map(rows.map((row) => [row.company_entity_id, row]));
+
+    const emptyPilot = await app.request(`/api/project-minting/verdicts/${byCompany.get(pilotId)?.id}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...acceptanceBody("client", "pilot"),
+        struckProjectNames: ["Alpha rollout", "Beta migration"],
+      }),
+    });
+    const emptyPilotBody = (await emptyPilot.json()) as { error: { code: string } };
+    expect(emptyPilot.status).toBe(400);
+    expect(emptyPilotBody.error.code).toBe("INVALID_ACCEPTANCE_SHAPE");
+
+    const emptyProspect = await app.request(
+      `/api/project-minting/verdicts/${byCompany.get(prospectId)?.id}/acceptance`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...acceptanceBody("client", "prospect"),
+          struckProjectNames: ["Alpha rollout", "Beta migration"],
+        }),
+      },
+    );
+    expect(emptyProspect.status).toBe(200);
+
+    const pilotAccept = await app.request(`/api/project-minting/verdicts/${byCompany.get(pilotId)?.id}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const pilotBody = (await pilotAccept.json()) as {
+      acceptance: { entities: { name: string; fileIds: string[] }[] };
+    };
+    expect(pilotAccept.status).toBe(200);
+    const pilotFilesByName = new Map(pilotBody.acceptance.entities.map((entity) => [entity.name, entity.fileIds]));
+    expect(pilotFilesByName.get("Alpha rollout")).toHaveLength(4);
+    expect(pilotFilesByName.get("Beta migration")).toHaveLength(2);
+  });
 });
+
+function acceptanceBody(
+  kind: "client" | "partner" | "vendor" | "investor" | "other",
+  stage?: "prospect" | "pilot" | "active" | "dormant" | "ended",
+): { confirmedCounterpartyKind: string; confirmedClientStage?: string } {
+  return stage ? { confirmedCounterpartyKind: kind, confirmedClientStage: stage } : { confirmedCounterpartyKind: kind };
+}
 
 function generatorFor(resolve: (prompt: string) => ClusterVerdict): GeminiGenerator {
   return {
@@ -358,6 +753,31 @@ async function countProjectMintingSourceRefs(db: Kysely<DB>) {
   return Number(row.count);
 }
 
+async function countEngagementEntities(db: Kysely<DB>) {
+  const row = await db
+    .selectFrom("entities")
+    .select((eb) => eb.fn.countAll<number>().as("count"))
+    .where("source_type", "=", "project")
+    .where("subtype", "=", "engagement")
+    .where("deleted_at", "is", null)
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
+async function expectDeclaration(
+  db: Kysely<DB>,
+  subjectEntityId: string,
+  counterpartyKind: string,
+  clientStage: string | null,
+) {
+  const row = await db
+    .selectFrom("company_relationship_declarations")
+    .select(["counterparty_kind", "client_stage"])
+    .where("subject_entity_id", "=", subjectEntityId)
+    .executeTakeFirstOrThrow();
+  expect(row).toEqual({ counterparty_kind: counterpartyKind, client_stage: clientStage });
+}
+
 async function loadEntities(db: Kysely<DB>, ids: string[]) {
   return db
     .selectFrom("entities")
@@ -365,6 +785,20 @@ async function loadEntities(db: Kysely<DB>, ids: string[]) {
     .where("id", "in", ids)
     .orderBy("id", "asc")
     .execute();
+}
+
+async function seedClientCluster(db: Kysely<DB>, connectorId: string, name: string, domain: string): Promise<string> {
+  const companyId = await seedCompany(db, name, domain);
+  for (const date of ["2026-07-01", "2026-07-08", "2026-07-15"]) {
+    const fileId = await seedFile(db, connectorId, {
+      fileName: "Correction deployment sync",
+      source: "fireflies",
+      date: `${date}T09:00:00Z`,
+      content: "Deployment work with Casey Lead.",
+    });
+    await seedAttendee(db, connectorId, fileId, "Casey Lead", `casey@${domain}`);
+  }
+  return companyId;
 }
 
 async function seedConnector(db: Kysely<DB>): Promise<string> {
@@ -639,17 +1073,30 @@ async function seedLeadNoProjectAndPraevorium(db: Kysely<DB>) {
 }
 
 async function seedPraevorium(db: Kysely<DB>, connectorId: string, titles: string[]): Promise<string> {
-  const praevoriumId = await seedCompany(db, "Praevorium", "praevorium.com");
+  return seedMailCluster(db, connectorId, { name: "Praevorium", domain: "praevorium.com", titles });
+}
+
+/**
+ * One mail-only cluster, two files per title so each title forms a family. The
+ * caller chooses the titles so a verdict can anchor some families and leave
+ * others for the residual target.
+ */
+async function seedMailCluster(
+  db: Kysely<DB>,
+  connectorId: string,
+  opts: { name: string; domain: string; titles: string[] },
+): Promise<string> {
+  const companyId = await seedCompany(db, opts.name, opts.domain);
   let index = 0;
-  for (const title of titles.flatMap((title) => [title, `Re: ${title}`])) {
+  for (const title of opts.titles.flatMap((title) => [title, `Re: ${title}`])) {
     const fileId = await seedFile(db, connectorId, {
       fileName: title,
       source: "gmail",
       date: `2026-08-${String(index + 1).padStart(2, "0")}T10:00:00Z`,
       content: "Scope, phasing and commercials for the proposed deployment.",
     });
-    await seedAttendee(db, connectorId, fileId, "Sam Founder", "sam@praevorium.com");
+    await seedAttendee(db, connectorId, fileId, "Sam Founder", `sam@${opts.domain}`);
     index++;
   }
-  return praevoriumId;
+  return companyId;
 }

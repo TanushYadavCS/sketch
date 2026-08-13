@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   type ClusterVerdict,
-  type RelationshipState,
   channelMatchesCompany,
   chooseMajorityVerdict,
   clusterIsTriggered,
@@ -10,6 +9,8 @@ import {
   productNameTripwireFlags,
   readClusterVerdict,
 } from "./project-minting";
+
+type LegacyTestState = "lead" | "trial" | "customer" | "vendor" | "investor" | "none";
 
 describe("normalizeTitleFamily", () => {
   it("collapses reply, invite, and Meet prefixes and date or counter suffixes into one family", () => {
@@ -60,7 +61,7 @@ describe("channelMatchesCompany", () => {
   });
 });
 
-function axesForState(state: RelationshipState): Pick<ClusterVerdict, "counterpartyKind" | "clientStage"> {
+function axesForState(state: LegacyTestState): Pick<ClusterVerdict, "counterpartyKind" | "clientStage"> {
   if (state === "lead") return { counterpartyKind: "client", clientStage: "prospect" };
   if (state === "trial") return { counterpartyKind: "client", clientStage: "pilot" };
   if (state === "customer") return { counterpartyKind: "client", clientStage: "active" };
@@ -69,7 +70,7 @@ function axesForState(state: RelationshipState): Pick<ClusterVerdict, "counterpa
   return { counterpartyKind: "other", clientStage: null };
 }
 
-function verdict(state: RelationshipState, projectNames: string[]): ClusterVerdict {
+function verdict(state: LegacyTestState, projectNames: string[]): ClusterVerdict {
   return readClusterVerdict({
     ...axesForState(state),
     engagement: null,
@@ -116,7 +117,8 @@ describe("chooseMajorityVerdict", () => {
       verdict("none", []),
       verdict("trial", ["Acme deployment", "Acme MVP"]),
     ]);
-    expect(chosen.relationshipState).toBe("trial");
+    expect(chosen.counterpartyKind).toBe("client");
+    expect(chosen.clientStage).toBe("pilot");
     expect(chosen.projects.map((p) => p.name)).toEqual(["Acme deployment"]);
     expect(voteStats.axisAgreement).toBeCloseTo(2 / 3);
     expect(voteStats.projectSetAgreement).toBeCloseTo(1 / 3);
@@ -124,7 +126,8 @@ describe("chooseMajorityVerdict", () => {
     expect(voteStats.projectNameCounts["Acme deployment"]).toBe(2);
 
     const tie = chooseMajorityVerdict([verdict("lead", []), verdict("customer", [])]);
-    expect(tie.verdict.relationshipState).toBe("lead");
+    expect(tie.verdict.counterpartyKind).toBe("client");
+    expect(tie.verdict.clientStage).toBe("prospect");
     expect(tie.voteStats.axisAgreement).toBeCloseTo(0.5);
   });
 });

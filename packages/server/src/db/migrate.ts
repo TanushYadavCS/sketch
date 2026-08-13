@@ -202,6 +202,7 @@ import * as m199 from "./migrations/199-dev-search-trace-ms-bigint";
 import * as m200 from "./migrations/200-project-minting-acceptance";
 import * as m201 from "./migrations/201-counterparty-axes";
 import * as m202 from "./migrations/202-verdict-counterparty-axes";
+import * as m203 from "./migrations/203-verdict-declaration-snapshot";
 import type { DB } from "./schema";
 
 /**
@@ -413,6 +414,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "200-project-minting-acceptance": m200,
           "201-counterparty-axes": m201,
           "202-verdict-counterparty-axes": m202,
+          "203-verdict-declaration-snapshot": m203,
         };
       },
     },

@@ -11,9 +11,12 @@ import {
   rejectProjectMintingVerdict,
 } from "../connectors/project-minting-acceptance";
 import {
+  type ClientStage,
+  assertStageMatchesKind,
   createCompanyRelationshipDeclarationRepository,
   isClientStage,
   isCounterpartyKind,
+  kindCarriesStage,
 } from "../db/repositories/company-relationship-declarations";
 import {
   type ProjectMintingVerdictRow,
@@ -37,7 +40,8 @@ function serializeVerdict(row: ProjectMintingVerdictRow, includeDossier = false)
     fileCount: row.file_count,
     counterpartyKind: row.counterparty_kind,
     clientStage: row.client_stage,
-    relationshipState: row.relationship_state,
+    declaredCounterpartyKind: row.declared_counterparty_kind,
+    declaredClientStage: row.declared_client_stage,
     flags: parseJsonArray(row.flags),
     voteStats: row.vote_stats ? JSON.parse(row.vote_stats) : null,
     verdict,
@@ -113,6 +117,49 @@ function readRenameMap(value: unknown): Record<string, string> {
   return out;
 }
 
+function readConfirmedAxes(body: Record<string, unknown>) {
+  const kind = body.confirmedCounterpartyKind;
+  if (typeof kind !== "string" || !isCounterpartyKind(kind)) {
+    throw new ProjectMintingAcceptanceError(
+      "INVALID_ACCEPTANCE",
+      "confirmedCounterpartyKind must be client, vendor, investor, partner or other",
+    );
+  }
+  const hasStage = Object.hasOwn(body, "confirmedClientStage");
+  const rawStage = body.confirmedClientStage;
+  if (!kindCarriesStage(kind) && hasStage) {
+    throw new ProjectMintingAcceptanceError(
+      "INVALID_ACCEPTANCE",
+      "confirmedClientStage must be absent unless confirmedCounterpartyKind is client or partner",
+    );
+  }
+  let stage: ClientStage | null = null;
+  if (hasStage) {
+    if (typeof rawStage !== "string" || !isClientStage(rawStage)) {
+      throw new ProjectMintingAcceptanceError(
+        "INVALID_ACCEPTANCE",
+        "confirmedClientStage must be prospect, pilot, active, dormant or ended",
+      );
+    }
+    stage = rawStage;
+  }
+  if (kindCarriesStage(kind) && stage === null) {
+    throw new ProjectMintingAcceptanceError(
+      "INVALID_ACCEPTANCE",
+      "confirmedClientStage must be prospect, pilot, active, dormant or ended",
+    );
+  }
+  try {
+    assertStageMatchesKind(kind, stage);
+  } catch (err) {
+    throw new ProjectMintingAcceptanceError(
+      "INVALID_ACCEPTANCE",
+      err instanceof Error ? err.message : "confirmed axes are invalid",
+    );
+  }
+  return { confirmedCounterpartyKind: kind, confirmedClientStage: stage };
+}
+
 export function projectMintingRoutes(db: Kysely<DB>, logger: Logger) {
   const routes = new Hono();
   const verdicts = createProjectMintingVerdictRepository(db);
@@ -141,9 +188,11 @@ export function projectMintingRoutes(db: Kysely<DB>, logger: Logger) {
 
     try {
       const body = await readJsonObject(c);
+      const confirmedAxes = readConfirmedAxes(body);
       const result = await acceptProjectMintingVerdict(db, {
         verdictId: c.req.param("id"),
         actorUserId: c.get("sub"),
+        ...confirmedAxes,
         struckProjectNames: readStringArray(body.struckProjectNames),
         renameMap: readRenameMap(body.renameMap),
         overrideTripwireFlags: body.overrideTripwireFlags === true,
