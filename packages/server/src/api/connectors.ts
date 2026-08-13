@@ -31,11 +31,13 @@ import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/
 import type { EmailAddr } from "../connectors/email/normalized-email";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import {
+  buildEnrichmentProviderConfig,
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
   resolveOpenRouterEnrichmentConfig,
 } from "../connectors/enrichment-providers";
 import { buildCredentialHint } from "../connectors/fireflies";
+import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
 import { buildOtterCredentialHint } from "../connectors/otter";
@@ -419,6 +421,10 @@ export function connectorRoutes(
       | "SLACK_ENTITY_SYNC"
     >
   >,
+  deps?: {
+    /** Overrides the settings-derived model, so tests can drive the per-file enrich route. */
+    enrichmentGenerator?: GeminiGenerator;
+  },
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
@@ -2516,22 +2522,24 @@ export function connectorRoutes(
     if (denied) return denied;
 
     const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
-    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
-    const providerConfig = {
-      geminiApiKey: settings?.gemini_api_key,
-      embeddingProvider: settings?.embedding_provider,
-      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
-      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
-      logger,
-      ...openRouterConfig,
-    };
+    const providerConfig = buildEnrichmentProviderConfig(settings, appConfig, logger);
     const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
-    const generator = createEnrichmentGenerator(providerConfig);
+    const generator = deps?.enrichmentGenerator ?? createEnrichmentGenerator(providerConfig);
 
     // Enrich only this specific file.
     // This endpoint is the per-file "Enrich File" debug surface — always dump
     // LLM calls to disk for inspection. Each call gets its own dated subdir
     // under data/llm-dumps/ so runs don't clobber each other.
+    //
+    // Clear summary_status first. Smart enrichment — extraction, dedup and
+    // fact materialisation — is gated on it being unresolved
+    // (enrichment.ts `summaryAlreadyResolved`), so on an already-enriched file
+    // this endpoint would re-embed, report success, and silently skip the
+    // half a caller actually asked for. runEnrichment's fileIds path already
+    // treats an explicit rerun as a manual override for embedding_status;
+    // this makes summary_status agree.
+    await db.updateTable("indexed_files").set({ summary_status: "pending" }).where("id", "=", fileId).execute();
+
     const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
     const debugDumpDir = `data/llm-dumps/${fileId}__${dumpStamp}`;
     runEnrichment({

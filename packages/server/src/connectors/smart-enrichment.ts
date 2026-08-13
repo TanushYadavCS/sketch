@@ -62,6 +62,7 @@ import {
 } from "./embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { isGenericEngagementName } from "./engagement-name-filter";
+import type { MintContextBlock, StageOutcome, StageReporter } from "./enrichment-stage-report";
 import { isCodeShapedFeatureName } from "./feature-name-filter";
 import type { KnownEntityForPrompt } from "./file-scope-context";
 import type { GeminiGenerator } from "./gemini-generate";
@@ -216,6 +217,7 @@ interface SmartEnrichmentDeps {
    * "Enrich File" debug path; never set in bulk sync/reset/reenrich runs.
    */
   debugDumpDir?: string;
+  stageReport?: StageReporter;
   ensureFresh?: () => Promise<void>;
 }
 
@@ -319,6 +321,59 @@ function renderKnown(e: KnownEntityForPrompt, index: number): string {
   if (e.recentlyActive) tags.push("active in last 2 weeks");
   if (tags.length > 0) parts.push(` · ${tags.join(" · ")}`);
   return parts.join("");
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function extractionContextBlocks(
+  file: FileContext,
+  knownEntities: KnownEntityForPrompt[] | undefined,
+  participantBlock: string | undefined,
+): MintContextBlock[] {
+  const knownItems = (knownEntities ?? []).slice(0, 20).map(renderKnown);
+  const blocks: MintContextBlock[] = [
+    {
+      key: "knownEntities",
+      label: "Known entities",
+      selection:
+        "Known entities likely to appear in this file, selected by file anchors, adjacency, verbatim baseline matches, and pending proposals; display capped at 20.",
+      total: knownEntities?.length ?? 0,
+      items: knownItems,
+      truncated: (knownEntities?.length ?? 0) > knownItems.length,
+      via: "prompt",
+    },
+    {
+      key: "content",
+      label: "Content",
+      selection: `First ${MAX_CONTENT_CHARS} characters of file content sent to the extraction model.`,
+      total: file.content.length,
+      items: [`${Math.min(file.content.length, MAX_CONTENT_CHARS)} characters sent`],
+      truncated: file.content.length > MAX_CONTENT_CHARS,
+      via: "prompt",
+    },
+  ];
+  if (participantBlock) {
+    blocks.push({
+      key: "participants",
+      label: "Participant block",
+      selection: "Meeting or message participants resolved from connector facts for this file.",
+      total: participantBlock.split("\n").filter(Boolean).length,
+      items: participantBlock.split("\n").filter(Boolean).slice(0, 20),
+      truncated: participantBlock.split("\n").filter(Boolean).length > 20,
+      via: "prompt",
+    });
+  }
+  return blocks;
+}
+
+function outcomeForMention(
+  mention: Pick<ExtractedMention, "mention" | "type">,
+  result: StageOutcome["result"],
+  reason?: string,
+): StageOutcome {
+  return { subject: mention.mention, kind: mention.type, result, ...(reason ? { reason } : {}) };
 }
 
 // ── Entity Extraction ────────────────────────────────────────────────────
@@ -1273,9 +1328,25 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       validExtractionTypes,
     );
   } catch (err) {
+    deps.stageReport?.({
+      stage: "extractEntities",
+      label: "Extract entities",
+      kind: "model",
+      status: "failed",
+      context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock),
+      error: errorMessage(err),
+    });
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
     throw err;
   }
+  deps.stageReport?.({
+    stage: "extractEntities",
+    label: "Extract entities",
+    kind: "model",
+    status: "done",
+    context: extractionContextBlocks(file, deps.knownEntities, deps.participantBlock),
+    summary: { mentionCount: extraction.mentions.length, relationCount: extraction.relations.length },
+  });
   logger.info(
     {
       fileId: file.id,
@@ -1301,6 +1372,25 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     logger,
     rejectedKnownMatchPairs,
   });
+  deps.stageReport?.({
+    stage: "dedupAdjudicate",
+    label: "Adjudicate known matches",
+    kind: "model",
+    status: "done",
+    context: [
+      {
+        key: "knownCandidates",
+        label: "Known candidates",
+        selection:
+          "Known project and product candidates from the file-scoped list plus retrieved name-dedup candidates; display capped at 20.",
+        total: widenedKnown.length,
+        items: widenedKnown.slice(0, 20).map(renderKnown),
+        truncated: widenedKnown.length > 20,
+        via: "prompt",
+      },
+    ],
+    summary: { rewriteCount: canonicalRewriteMap.size },
+  });
   resolveKnownMatches(extraction.mentions, widenedKnown);
   applyCanonicalRewriteMap(extraction, canonicalRewriteMap);
 
@@ -1323,6 +1413,19 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 
   const matchableMentions = extraction.mentions.filter((mention) => !isFeatureMention(mention));
   const { matched, unmatched } = await matchEntities(db, matchableMentions);
+  deps.stageReport?.({
+    stage: "matchEntities",
+    label: "Match entities",
+    kind: "code",
+    status: "done",
+    outcomes: [
+      ...matched.map(({ mention, entity }) =>
+        outcomeForMention(mention, "linked", `matched existing ${entity.sourceType} entity ${entity.name}`),
+      ),
+      ...unmatched.map((mention) => outcomeForMention(mention, "deferred", "no existing entity matched")),
+    ],
+    summary: { matchedCount: matched.length, unmatchedCount: unmatched.length },
+  });
   const allMatched = matched.map((m) => m.entity);
   logger.debug(
     { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
@@ -1352,9 +1455,34 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const factsMap = factsResult.status === "fulfilled" ? factsResult.value.facts : new Map<string, LearnedFact[]>();
 
   if (summaryResult.status === "rejected") {
+    deps.stageReport?.({
+      stage: "generateSummary",
+      label: "Summary",
+      kind: "model",
+      status: "failed",
+      parallelGroup: "summaryAndFacts",
+      error: errorMessage(summaryResult.reason),
+    });
     logger.error({ ...fileMeta, stage: "generateSummary", err: summaryResult.reason }, "smartEnrichFile: stage failed");
+  } else {
+    deps.stageReport?.({
+      stage: "generateSummary",
+      label: "Summary",
+      kind: "model",
+      status: "done",
+      parallelGroup: "summaryAndFacts",
+      summary: { summaryLength: summaryResult.value.length },
+    });
   }
   if (factsResult.status === "rejected") {
+    deps.stageReport?.({
+      stage: "extractEntityFacts",
+      label: "Entity facts",
+      kind: "model",
+      status: "failed",
+      parallelGroup: "summaryAndFacts",
+      error: errorMessage(factsResult.reason),
+    });
     logger.warn(
       { ...fileMeta, stage: "extractEntityFacts", matchedEntityCount: allMatched.length, err: factsResult.reason },
       "smartEnrichFile: stage failed (continuing without entity facts)",
@@ -1363,10 +1491,25 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       await markConversationalFactsPending(db, file, fileVersion);
       throw factsResult.reason;
     }
+  } else {
+    deps.stageReport?.({
+      stage: "extractEntityFacts",
+      label: "Entity facts",
+      kind: "model",
+      status: "done",
+      parallelGroup: "summaryAndFacts",
+      summary: {
+        entityCount: factsMap.size,
+        factCount: [...factsMap.values()].reduce((sum, facts) => sum + facts.length, 0),
+      },
+    });
   }
 
   if (!summary) {
     throw summaryResult.status === "rejected" ? summaryResult.reason : new Error("smartEnrichFile: empty summary");
+  }
+  if (deps.stageReport && factsResult.status === "rejected") {
+    throw factsResult.reason;
   }
 
   logger.info(
@@ -1505,6 +1648,7 @@ async function reconcileLlmExtractionFacts(
   const emittedFeatureKeys: string[] = [];
   const writtenFactKeys: string[] = [];
   let materializeDeps: MaterializeDeps | null = null;
+  const outcomes: StageOutcome[] = [];
 
   try {
     for (const rawMention of extraction.mentions) {
@@ -1513,6 +1657,7 @@ async function reconcileLlmExtractionFacts(
         type: coerceMentionType(rawMention.mention, rawMention.type),
       };
       if (!allowedTypes.has(mention.type)) {
+        outcomes.push(outcomeForMention(mention, "dropped", "type not allowed for this file type"));
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, entityType: mention.type },
           "Dropped LLM mention with unsupported type",
@@ -1520,6 +1665,7 @@ async function reconcileLlmExtractionFacts(
         continue;
       }
       if (mention.type === "company" && isEmailProviderName(mention.mention)) {
+        outcomes.push(outcomeForMention(mention, "dropped", "email-provider company name"));
         deps.logger.info({ fileId: file.id, displayName: mention.mention }, "Dropped email-provider company mention");
         continue;
       }
@@ -1527,14 +1673,19 @@ async function reconcileLlmExtractionFacts(
         mention.type === "project" &&
         normalizeDocumentTitle(mention.mention) === normalizeDocumentTitle(file.fileName)
       ) {
+        outcomes.push(outcomeForMention(mention, "dropped", "project name matching the document title"));
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention },
           "Dropped project mention matching document title",
         );
         continue;
       }
-      if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+      if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) {
+        outcomes.push(outcomeForMention(mention, "dropped", `shorter than ${MIN_ENTITY_NAME_LENGTH} characters`));
+        continue;
+      }
       if ((mention.type === "project" || mention.type === "product") && isGenericEngagementName(mention.mention)) {
+        outcomes.push(outcomeForMention(mention, "dropped", "generic engagement name"));
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, reason: "generic_engagement_name" },
           "Dropped generic engagement-name mention",
@@ -1550,6 +1701,7 @@ async function reconcileLlmExtractionFacts(
         source: "llm_extraction",
       });
       if (!validation.ok) {
+        outcomes.push(outcomeForMention(mention, "dropped", validation.reason));
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, reason: validation.reason },
           "Dropped invalid LLM mention",
@@ -1634,6 +1786,7 @@ async function reconcileLlmExtractionFacts(
       emittedMentionKeys.push(factKey);
       await deps.ensureFresh?.();
       await factRepo.upsertFact(input);
+      outcomes.push(outcomeForMention(mention, "kept", "llm_extracted fact written"));
       writtenFactKeys.push(factKey);
       await yieldToEventLoop();
     }
@@ -1701,8 +1854,28 @@ async function reconcileLlmExtractionFacts(
       embeddingProvider: deps.embeddingProvider,
       factTypes: ["llm_extracted", "llm_relation", "feature"],
     });
+    deps.stageReport?.({
+      stage: "reconcileFacts",
+      label: "Reconcile facts",
+      kind: "code",
+      status: "done",
+      outcomes,
+      summary: {
+        mentionCount: extraction.mentions.length,
+        kept: outcomes.filter((outcome) => outcome.result === "kept").length,
+        dropped: outcomes.filter((outcome) => outcome.result === "dropped").length,
+      },
+    });
     return writtenFactKeys;
   } catch (err) {
+    deps.stageReport?.({
+      stage: "reconcileFacts",
+      label: "Reconcile facts",
+      kind: "code",
+      status: "failed",
+      outcomes,
+      error: errorMessage(err),
+    });
     if (isStaleEnrichmentError(err)) {
       await tombstoneWrittenLlmFacts(deps, writtenFactKeys);
     }

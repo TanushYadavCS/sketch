@@ -35,6 +35,32 @@ export function resolveOpenRouterEnrichmentConfig(
   };
 }
 
+/**
+ * Assembles the provider config an enrichment run needs from stored settings
+ * plus env. Shared by the per-file enrich endpoint and the dev trace endpoint
+ * so the two always run against the same model and embedding provider.
+ */
+export function buildEnrichmentProviderConfig(
+  settings: {
+    gemini_api_key?: string | null;
+    embedding_provider?: string | null;
+    llm_provider?: string | null;
+    anthropic_api_key?: string | null;
+    model_id?: string | null;
+  } | null,
+  appConfig: { GEMINI_MAX_RPM?: number; GEMINI_MAX_RETRIES?: number; OPENROUTER_API_KEY?: string } | undefined,
+  logger: Logger,
+): EnrichmentProviderConfig {
+  return {
+    geminiApiKey: settings?.gemini_api_key,
+    embeddingProvider: settings?.embedding_provider,
+    geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+    geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+    logger,
+    ...resolveOpenRouterEnrichmentConfig(settings ?? null, appConfig?.OPENROUTER_API_KEY),
+  };
+}
+
 export function resolveEmbeddingProviderName(provider?: string | null): EmbeddingProviderName | null {
   if (provider == null || provider.trim() === "") return "openrouter";
   if (provider === "openrouter" || provider === "gemini") return provider;

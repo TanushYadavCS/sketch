@@ -28,6 +28,7 @@ import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentR
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
+import type { StageReport, StageReporter } from "./enrichment-stage-report";
 import { type KnownEntityForPrompt, buildFileScopedKnownEntities } from "./file-scope-context";
 import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { buildParticipantBlock } from "./participant-block";
@@ -401,6 +402,12 @@ export interface EnrichmentDeps {
    * the per-file "Enrich File" debug endpoint; never set in bulk runs.
    */
   debugDumpDir?: string;
+  stageReport?: StageReporter;
+  /**
+   * Re-runs the LLM stages on a file that already has a summary. Set only by the
+   * dev trace route, where the caller named one file and expects work to happen.
+   */
+  forceSmartEnrichment?: boolean;
   maxFilesPerRun?: number;
   timeBudgetMs?: number;
   now?: () => number;
@@ -610,6 +617,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   knownEntities,
                   participantBlock,
                   debugDumpDir: deps.debugDumpDir,
+                  stageReport: deps.stageReport,
                   ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
                 },
                 {
@@ -637,16 +645,25 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   contentHash: file.content_hash,
                 },
               );
+              deps.stageReport?.({
+                stage: "engagementFloor",
+                label: "Engagement floor",
+                kind: "code",
+                status: "done",
+                summary: { ...floor },
+              });
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger, {
                   embeddingProvider: deps.embeddingProvider,
                   factTypes: ["llm_relation"],
+                  stageReport: deps.stageReport,
                 });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
               if (err instanceof StaleEnrichmentError) throw err;
+              reportPostSmartSkipped(deps.stageReport, err);
               logger.warn(
                 {
                   err,
@@ -870,7 +887,14 @@ async function enrichTextDocument(
   const wordCount = file.content.split(/\s+/).filter(Boolean).length;
   let usedSmartEnrichment = false;
   let smartEnrichmentFailed = false;
-  const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
+  /**
+   * A file that already has a summary normally skips every LLM stage, which is
+   * right for a sync but useless for a deliberate per-file re-run: the caller
+   * asked for this file by id and gets silence. `forceSmartEnrichment` is set
+   * only by the dev trace route.
+   */
+  const summaryAlreadyResolved =
+    !deps.forceSmartEnrichment && (file.summary_status === "done" || file.summary_status === "skipped");
   const minWordsForSummary = minWordsForSmartEnrichment(file.file_type, threadContext);
   const generator =
     deps.generator ??
@@ -903,6 +927,7 @@ async function enrichTextDocument(
           knownEntities,
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
+          stageReport: deps.stageReport,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
         },
         {
@@ -930,20 +955,38 @@ async function enrichTextDocument(
           contentHash: file.content_hash,
         },
       );
+      deps.stageReport?.({
+        stage: "engagementFloor",
+        label: "Engagement floor",
+        kind: "code",
+        status: "done",
+        summary: { ...floor },
+      });
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger, {
           embeddingProvider,
           factTypes: ["llm_relation"],
+          stageReport: deps.stageReport,
         });
       }
       await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;
     } catch (err) {
       if (err instanceof StaleEnrichmentError) throw err;
+      reportPostSmartSkipped(deps.stageReport, err);
       smartEnrichmentFailed = true;
       logger.warn({ err, fileId: file.id }, "Smart enrichment failed");
     }
+  }
+
+  if (!usedSmartEnrichment && !smartEnrichmentFailed) {
+    reportSmartEnrichmentSkipped(deps.stageReport, {
+      summaryAlreadyResolved,
+      hasGenerator: Boolean(generator),
+      wordCount,
+      minWordsForSummary,
+    });
   }
 
   if (!summaryAlreadyResolved && !usedSmartEnrichment) {
@@ -1009,6 +1052,55 @@ async function enrichTextDocument(
       logger.warn({ err, fileId: file.id }, "Embedding storage failed, entity linking still saved");
     }
   }
+}
+
+/**
+ * Says why no LLM stage ran. Without this a re-run of an already-summarised file
+ * reports "done" with eight untouched stages and no reason anywhere, which reads
+ * as a broken page rather than as a pipeline that decided to do nothing.
+ */
+function reportSmartEnrichmentSkipped(
+  stageReport: StageReporter | undefined,
+  facts: { summaryAlreadyResolved: boolean; hasGenerator: boolean; wordCount: number; minWordsForSummary: number },
+): void {
+  if (!stageReport) return;
+  const reason = facts.summaryAlreadyResolved
+    ? "The file already has a summary, so every LLM stage was skipped. Re-run with force to redo them."
+    : !facts.hasGenerator
+      ? "No enrichment model is configured, so no LLM stage could run."
+      : `The file has ${facts.wordCount} words and this file type needs at least ${facts.minWordsForSummary} before any LLM stage runs.`;
+
+  for (const stage of SMART_ENRICHMENT_STAGES) {
+    stageReport({ ...stage, status: "skipped", error: reason });
+  }
+}
+
+const SMART_ENRICHMENT_STAGES = [
+  { stage: "extractEntities", label: "Extract entities", kind: "model" },
+  { stage: "dedupAdjudicate", label: "Adjudicate known matches", kind: "model" },
+  { stage: "reconcileFacts", label: "Reconcile facts", kind: "code" },
+  { stage: "matchEntities", label: "Match entities", kind: "code" },
+  { stage: "generateSummary", label: "Summary", kind: "model" },
+  { stage: "extractEntityFacts", label: "Entity facts", kind: "model" },
+  { stage: "engagementFloor", label: "Engagement floor", kind: "code" },
+  { stage: "materialize", label: "Materialise", kind: "code" },
+] as const satisfies ReadonlyArray<Pick<StageReport, "stage" | "label" | "kind">>;
+
+function reportPostSmartSkipped(stageReport: StageReporter | undefined, err: unknown): void {
+  stageReport?.({
+    stage: "engagementFloor",
+    label: "Engagement floor",
+    kind: "code",
+    status: "skipped",
+    error: err instanceof Error ? err.message : String(err),
+  });
+  stageReport?.({
+    stage: "materialize",
+    label: "Materialise",
+    kind: "code",
+    status: "skipped",
+    error: err instanceof Error ? err.message : String(err),
+  });
 }
 
 /**
