@@ -75,8 +75,15 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
+import { handleStealResponse, renderStealResponseConfirmation } from "../whatsapp/lock-confirmations";
 import { slackApiCall } from "./api";
-import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import {
+  SlackBot,
+  type SlackFile,
+  type SlackMessage,
+  type SlackMessageHandler,
+  parseSlackLockStealAction,
+} from "./bot";
 import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
@@ -510,6 +517,33 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       });
     });
   }
+
+  slackBot.onLockStealAction(async (event) => {
+    const parsed = parseSlackLockStealAction(event.actionId);
+    if (!parsed) return;
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(event.slackUserId);
+    } catch (err) {
+      logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring lock steal action from unresolved Slack user");
+      return;
+    }
+    const outcome = await handleStealResponse({
+      db,
+      logger,
+      taskId: parsed.taskId,
+      responderUserId: user.id,
+      responderName: user.name,
+      approve: parsed.action === "approve",
+      senders: {
+        slack: {
+          postLockStealRequest: (params) => slackBot.postLockStealRequestMessage(params.channelId, params),
+          sendText: (channelId, text) => slackBot.postMessage(channelId, text),
+        },
+      },
+    });
+    await slackBot.postMessage(event.channelId, renderStealResponseConfirmation(outcome));
+  });
 
   const processSlackTextQuestionAnswer = async (
     message: SlackMessage,

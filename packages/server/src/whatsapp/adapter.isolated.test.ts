@@ -1,10 +1,13 @@
+import type { Kysely } from "kysely";
 import { describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createWhatsAppEventKey } from "../db/repositories/whatsapp-inbound-events";
+import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia } from "../files";
 import { QueueManager } from "../queue";
-import { createTestConfig, flush } from "../test-utils";
+import { createTestConfig, createTestDb, flush } from "../test-utils";
 import type { WhatsAppAdapterDeps } from "./adapter";
 import { wireWhatsAppHandlers } from "./adapter";
 import { encodeWhatsAppBackfillCheckpointKey } from "./backfill-checkpoint";
@@ -342,6 +345,36 @@ vi.mock("../agent/sessions", () => ({
   archiveRuntimeSessions: vi.fn().mockResolvedValue(undefined),
 }));
 
+async function seedStealFixture(db: Kysely<DB>, params: { holderUserId?: string } = {}): Promise<void> {
+  await db.insertInto("users").values({ id: "u1", name: "Alice", whatsapp_number: "+1234567890" }).execute();
+  await db.insertInto("users").values({ id: "u2", name: "Bob", whatsapp_number: "+919876543210" }).execute();
+  await db
+    .insertInto("scheduled_tasks")
+    .values({
+      id: "task-1",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "dm:+1234567890",
+      prompt: "Send the report",
+      schedule_type: "cron",
+      schedule_value: "0 * * * *",
+      status: "active",
+      title: "Monthly Report",
+    })
+    .execute();
+  const locks = createAutomationLocksRepository(db);
+  const now = new Date(Date.now() - 10_000).toISOString();
+  const holderUserId = params.holderUserId ?? "u1";
+  await locks.insertIfAbsent(
+    { userId: holderUserId, platform: "whatsapp", surface: "dm", conversationId: "dm:+1234567890" },
+    { taskId: "task-1", now, expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() },
+  );
+  await locks.requestSteal(
+    { userId: "u2", platform: "whatsapp", surface: "dm", conversationId: "dm:+919876543210" },
+    { taskId: "task-1", stealRequestedAt: now, stealExpiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() },
+  );
+}
+
 describe("whatsapp/adapter", () => {
   describe("DM handler", () => {
     it.each([
@@ -368,6 +401,113 @@ describe("whatsapp/adapter", () => {
       expect(followupReviewHandler).toHaveBeenCalledWith({ text, userId: "u1", surface: "whatsapp" });
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", reply);
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("approves a pending steal from CONFIRM-STEAL text and notifies the requester", async () => {
+      const db = await createTestDb();
+      try {
+        await seedStealFixture(db);
+        const deps = makeDeps({ db });
+        const { mock, getHandler } = createMockWhatsApp();
+        wireWhatsAppHandlers(mock as never, deps);
+        const handler = getHandler();
+
+        await handler({
+          type: "dm",
+          text: "CONFIRM-STEAL task-1",
+          jid: "1234567890@s.whatsapp.net",
+          messageId: "m1",
+          pushName: "Alice",
+          rawMessage: {},
+          phoneNumber: "+1234567890",
+        });
+        await flush();
+
+        const row = await createAutomationLocksRepository(db).getByTaskId("task-1");
+        expect(row?.holder_user_id).toBe("u2");
+        expect(row?.holder_conversation_id).toBe("dm:+919876543210");
+        expect(row?.steal_requester_user_id).toBeNull();
+        expect(row?.steal_expires_at).toBeNull();
+        expect(mock.sendText).toHaveBeenCalledWith(
+          "919876543210@s.whatsapp.net",
+          'Alice approved your request to take over editing "Monthly Report". You can now edit it.',
+        );
+        expect(mock.sendText).toHaveBeenCalledWith(
+          "1234567890@s.whatsapp.net",
+          "Steal request approved — the requester can now edit this automation.",
+        );
+        expect(deps.runAgent).not.toHaveBeenCalled();
+      } finally {
+        await db.destroy();
+      }
+    });
+
+    it("denies a pending steal from DENY-STEAL text and notifies the requester", async () => {
+      const db = await createTestDb();
+      try {
+        await seedStealFixture(db);
+        const deps = makeDeps({ db });
+        const { mock, getHandler } = createMockWhatsApp();
+        wireWhatsAppHandlers(mock as never, deps);
+        const handler = getHandler();
+
+        await handler({
+          type: "dm",
+          text: "DENY-STEAL task-1",
+          jid: "1234567890@s.whatsapp.net",
+          messageId: "m1",
+          pushName: "Alice",
+          rawMessage: {},
+          phoneNumber: "+1234567890",
+        });
+        await flush();
+
+        const row = await createAutomationLocksRepository(db).getByTaskId("task-1");
+        expect(row?.holder_user_id).toBe("u1");
+        expect(row?.steal_requester_user_id).toBeNull();
+        expect(mock.sendText).toHaveBeenCalledWith(
+          "919876543210@s.whatsapp.net",
+          'Alice denied your request to take over editing "Monthly Report".',
+        );
+        expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Steal request denied.");
+        expect(deps.runAgent).not.toHaveBeenCalled();
+      } finally {
+        await db.destroy();
+      }
+    });
+
+    it("tells a non-holder WhatsApp sender that only the current editor can respond", async () => {
+      const db = await createTestDb();
+      try {
+        await db.insertInto("users").values({ id: "u3", name: "Carol", whatsapp_number: "+15550001111" }).execute();
+        await seedStealFixture(db, { holderUserId: "u3" });
+        const deps = makeDeps({ db });
+        const { mock, getHandler } = createMockWhatsApp();
+        wireWhatsAppHandlers(mock as never, deps);
+        const handler = getHandler();
+
+        await handler({
+          type: "dm",
+          text: "CONFIRM-STEAL task-1",
+          jid: "1234567890@s.whatsapp.net",
+          messageId: "m1",
+          pushName: "Alice",
+          rawMessage: {},
+          phoneNumber: "+1234567890",
+        });
+        await flush();
+
+        const row = await createAutomationLocksRepository(db).getByTaskId("task-1");
+        expect(row?.holder_user_id).toBe("u3");
+        expect(row?.steal_requester_user_id).toBe("u2");
+        expect(mock.sendText).toHaveBeenCalledWith(
+          "1234567890@s.whatsapp.net",
+          "Only the current editor can respond to a take-over request.",
+        );
+        expect(deps.runAgent).not.toHaveBeenCalled();
+      } finally {
+        await db.destroy();
+      }
     });
 
     it("rejects unauthorized users", async () => {

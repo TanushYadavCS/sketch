@@ -57,6 +57,7 @@ import {
   oldestWhatsAppBackfillCheckpointKey,
 } from "./backfill-checkpoint";
 import { stableWhatsAppParticipantJidRef } from "./identity-resolution";
+import { handleStealResponse, parseWhatsAppStealCommand, renderStealResponseConfirmation } from "./lock-confirmations";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { maskPersonalNumberIdentifier } from "./privacy";
 import {
@@ -1076,6 +1077,25 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         }
 
         if (isWhatsAppProgressControlMessage(message.text, command)) {
+          return;
+        }
+
+        const stealCommand = parseWhatsAppStealCommand(message.text);
+        if (stealCommand.kind !== "unrecognized") {
+          const outcome = await handleStealResponse({
+            db,
+            logger,
+            taskId: stealCommand.taskId,
+            responderUserId: user.id,
+            responderName: user.name,
+            approve: stealCommand.kind === "confirm",
+            senders: {
+              whatsapp: {
+                sendText: (target, text) => whatsapp.sendText(target, text),
+              },
+            },
+          });
+          await whatsapp.sendText(replyTarget, renderStealResponseConfirmation(outcome));
           return;
         }
 

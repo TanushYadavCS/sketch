@@ -108,6 +108,21 @@ export interface SlackQuestionActionEvent {
 
 export type SlackQuestionActionHandler = (event: SlackQuestionActionEvent) => Promise<void>;
 
+export interface SlackLockStealActionEvent {
+  slackUserId: string;
+  channelId: string;
+  actionId: string;
+  eventId: string;
+}
+
+export type SlackLockStealActionHandler = (event: SlackLockStealActionEvent) => Promise<void>;
+
+export function parseSlackLockStealAction(actionId: string): { taskId: string; action: "approve" | "deny" } | null {
+  const match = /^automation_lock_steal:([^:]+):(approve|deny)$/u.exec(actionId);
+  if (!match) return null;
+  return { taskId: match[1], action: match[2] as "approve" | "deny" };
+}
+
 export interface SlackChannelMembershipEvent {
   channelId: string;
   slackUserId: string;
@@ -172,6 +187,7 @@ export class SlackBot {
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private questionActionHandler: SlackQuestionActionHandler | null = null;
+  private lockStealActionHandler: SlackLockStealActionHandler | null = null;
   private botUserId: string | null = null;
   private botId: string | null = null;
   private teamId: string | null = null;
@@ -271,6 +287,10 @@ export class SlackBot {
 
   onQuestionAction(handler: SlackQuestionActionHandler): void {
     this.questionActionHandler = handler;
+  }
+
+  onLockStealAction(handler: SlackLockStealActionHandler): void {
+    this.lockStealActionHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -590,6 +610,27 @@ export class SlackBot {
       }
     });
 
+    this.app.action(/^automation_lock_steal:/, async ({ body, action, ack }) => {
+      await ack();
+      if (!this.lockStealActionHandler) return;
+      const payload = body as { user?: { id?: string }; container?: { channel_id?: string; message_ts?: string } };
+      const slackUserId = payload.user?.id;
+      const channelId = payload.container?.channel_id;
+      const actionId = (action as { action_id?: string }).action_id;
+      const actionTs = (action as { action_ts?: string }).action_ts;
+      if (!slackUserId || !channelId || !actionId || !actionTs) return;
+      try {
+        await this.lockStealActionHandler({
+          slackUserId,
+          channelId,
+          actionId,
+          eventId: `slack-action:${actionTs}:${slackUserId}:${actionId}`,
+        });
+      } catch (err) {
+        this.logger.warn({ err, slackUserId, channelId, actionId }, "lock steal action handler failed");
+      }
+    });
+
     if (this.mode === "socket") {
       await this.app.start();
       this.logger.info("Slack bot connected (Socket Mode)");
@@ -680,6 +721,52 @@ export class SlackBot {
       channel: input.channelId,
       text: input.text,
       ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
+    });
+    return result.ts ?? "";
+  }
+
+  /**
+   * Holder-facing steal-request notification with Approve/Deny block buttons.
+   * Action ids follow the `automation_lock_steal:<taskId>:approve|deny`
+   * contract consumed by the bot's action dispatcher.
+   */
+  async postLockStealRequestMessage(
+    channelId: string,
+    params: { taskId: string; requesterName: string; taskTitle: string },
+  ): Promise<string> {
+    const approveActionId = `automation_lock_steal:${params.taskId}:approve`;
+    const denyActionId = `automation_lock_steal:${params.taskId}:deny`;
+    const result = await this.app.client.chat.postMessage({
+      channel: channelId,
+      text: `${params.requesterName} wants to take over editing "${params.taskTitle}"`,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*${params.requesterName}* wants to take over editing *"${params.taskTitle}"*.`,
+          },
+        },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Approve" },
+              style: "primary",
+              action_id: approveActionId,
+              value: params.taskId,
+            },
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Deny" },
+              style: "danger",
+              action_id: denyActionId,
+              value: params.taskId,
+            },
+          ],
+        },
+      ],
     });
     return result.ts ?? "";
   }
