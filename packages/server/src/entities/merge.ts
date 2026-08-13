@@ -50,6 +50,7 @@ export type EntityMergeMove =
       colChanges: Partial<{
         subtype: { before: string | null; after: string | null };
         name: { before: string | null; after: string | null };
+        name_status: { before: string | null; after: string | null };
       }>;
     }
   | { kind: "alias_added"; value: string; normalizedKey: string };
@@ -787,28 +788,47 @@ async function addAliasIfAbsent(
   return next;
 }
 
-async function renameSurvivorIfRequested(
+/**
+ * A WhatsApp-minted person is named after its own phone number or LID until a
+ * pushName confirms a real one, which makes the survivor's name a poor default
+ * when the other side already has a confirmed one: merging a Slack "Tanush"
+ * into `+919891688787` would otherwise keep the digits and demote the readable
+ * name to an alias. Survivor choice stays the caller's — only the name moves.
+ */
+function rescuedSurvivorName(survivor: Entity, loser: Entity | undefined): string | undefined {
+  if (!loser) return undefined;
+  if (survivor.name_status !== "placeholder" || loser.name_status === "placeholder") return undefined;
+  return loser.name;
+}
+
+async function renameSurvivor(
   db: Kysely<DB>,
   survivor: Entity,
-  input: MergeEntitiesInput,
+  requestedName: string | undefined,
   moves: EntityMergeMove[],
 ): Promise<Entity> {
-  const name = input.survivorName?.trim();
+  const name = requestedName?.trim();
   if (!name || name === survivor.name) return survivor;
   const aliases = await addAliasIfAbsent(db, survivor.id, survivor.aliases, survivor.name, moves);
+  const nameStatus = "confirmed";
   moves.push({
     table: "entities",
     rowId: survivor.id,
-    colChanges: { name: { before: survivor.name, after: name } },
+    colChanges: {
+      name: { before: survivor.name, after: name },
+      ...(survivor.name_status === nameStatus
+        ? {}
+        : { name_status: { before: survivor.name_status, after: nameStatus } }),
+    },
   });
   await db
     .updateTable("entities")
-    .set({ name, aliases, updated_at: new Date().toISOString() })
+    .set({ name, aliases, name_status: nameStatus, updated_at: new Date().toISOString() })
     .where("id", "=", survivor.id)
     .where("deleted_at", "is", null)
     .where("merged_into_entity_id", "is", null)
     .execute();
-  return { ...survivor, name, aliases };
+  return { ...survivor, name, aliases, name_status: nameStatus };
 }
 
 function emptyMergePreview(
@@ -1114,7 +1134,8 @@ export async function mergeEntitiesInTransaction(
   assertMergeable(survivor, loser, input);
 
   const moves: EntityMergeMove[] = [];
-  if (survivor) survivor = await renameSurvivorIfRequested(db, survivor, input, moves);
+  if (survivor)
+    survivor = await renameSurvivor(db, survivor, input.survivorName ?? rescuedSurvivorName(survivor, loser), moves);
   if (survivor?.source_type === "person" && loser?.source_type === "person") {
     const internalSubtype = survivor.subtype === "internal" || loser.subtype === "internal";
     if (internalSubtype && survivor.subtype !== "internal") {
