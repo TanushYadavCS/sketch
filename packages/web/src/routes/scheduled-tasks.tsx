@@ -580,6 +580,7 @@ export function ScheduledTasksPage() {
                     onDelete={() => setDeletingTask(task)}
                     onTrigger={() => triggerMutation.mutate(task.id)}
                     onShare={() => setSharingTask(task)}
+                    userId={auth.userId}
                     onOpenBuilder={() =>
                       navigate({ to: "/scheduled-tasks/$taskId/edit", params: { taskId: task.id }, search: {} })
                     }
@@ -610,7 +611,10 @@ export function ScheduledTasksPage() {
         taskId={sharingTask?.id ?? ""}
         taskName={sharingTask ? (sharingTask.title ?? sharingTask.prompt) : ""}
         ownerUserId={sharingTask?.createdBy ?? auth.userId}
-        canShare={sharingTask?.canShare === true}
+        canShare={
+          sharingTask?.canShare === true ||
+          (sharingTask != null && sharingTask.canShare == null && isOwnedTask(sharingTask, auth.userId))
+        }
         open={Boolean(sharingTask)}
         onOpenChange={(open) => {
           if (!open) setSharingTask(null);
@@ -919,9 +923,11 @@ function TaskRow({
   onTrigger,
   onShare,
   onOpenBuilder,
+  userId,
 }: {
   task: ScheduledTaskListItem;
   isAdmin: boolean;
+  userId: string | undefined;
   isExpanded: boolean;
   isLast: boolean;
   isMutating: boolean;
@@ -935,7 +941,7 @@ function TaskRow({
 }) {
   const workflow = isWorkflowTask(task);
   const displayName = task.title ?? task.prompt;
-  const canShare = task.canShare === true;
+  const canShare = task.canShare === true || (task.canShare == null && isOwnedTask(task, userId));
   const shareCount = task.shareCount ?? 0;
 
   return (

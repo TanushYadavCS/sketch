@@ -368,6 +368,32 @@ describe("ScheduledTasksPage", () => {
     expect(screen.getByLabelText("5 recent run signals")).toBeInTheDocument();
   });
 
+  it("shows the Share action for owned tasks when the backend omits the new capability fields (legacy fallback)", async () => {
+    setMockAuth({ role: "member", userId: "member-1" });
+    installTaskHandlers([
+      buildTask({
+        id: "task-legacy-owned",
+        title: "Legacy owned task",
+        createdBy: "member-1",
+        creatorName: "Member One",
+        isOwner: undefined,
+        sharedWithMe: undefined,
+        canShare: undefined,
+        canEdit: undefined,
+        shareCount: 0,
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Legacy owned task")).toBeInTheDocument();
+    });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Actions for Legacy owned task/i }));
+    expect(screen.getByText(/^Share$/)).toBeInTheDocument();
+  });
+
   it("groups tasks into Mine and Shared with me for everyone", async () => {
     setMockAuth({ role: "admin", userId: "admin-1" });
     installTaskHandlers([
