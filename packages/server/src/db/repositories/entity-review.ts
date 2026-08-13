@@ -104,7 +104,14 @@ export interface UpsertUserEntityLinkReviewInput {
   triggeredByUserId: string;
 }
 
-const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming", "dismissed"]);
+/**
+ * Statuses the queue treats as decided. `deferred` is deliberately absent: a
+ * terminal row stops accruing evidence, which would freeze the very signal the
+ * reconcile and structural passes re-read on every run.
+ */
+export const TERMINAL_STATUS_LIST = ["confirmed", "rejected", "confirming", "dismissed"] as const;
+
+const TERMINAL_STATUSES = new Set<string>(TERMINAL_STATUS_LIST);
 const SPINE_ENTITY_TYPES = new Set(["project", "product", "team"]);
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 
@@ -532,8 +539,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       offset?: number;
       search?: string;
       types?: string[];
+      status?: string;
     }) {
-      let q = db.selectFrom("entity_review_queue").selectAll().where("status", "=", "pending");
+      let q = db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("status", "=", opts.status ?? "pending");
       if (opts.types && opts.types.length > 0) {
         q = q.where("entity_type", "in", opts.types);
       }
@@ -577,11 +588,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       isAdmin: boolean;
       search?: string;
       types?: string[];
+      status?: string;
     }): Promise<number> {
       let q = db
         .selectFrom("entity_review_queue")
         .select(db.fn.countAll<number>().as("c"))
-        .where("status", "=", "pending");
+        .where("status", "=", opts.status ?? "pending");
       if (opts.types && opts.types.length > 0) {
         q = q.where("entity_type", "in", opts.types);
       }
@@ -682,7 +694,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return map;
     },
 
-    async pendingReviewIdsWithEvidenceInFiles(fileIds: string[]): Promise<string[]> {
+    /**
+     * Not-terminal rather than pending: a deferred row whose evidence a
+     * connector deletion removes would otherwise survive as an orphan — no
+     * evidence, no owner, invisible in the UI, never cleaned up.
+     */
+    async nonTerminalReviewIdsWithEvidenceInFiles(fileIds: string[]): Promise<string[]> {
       if (fileIds.length === 0) return [];
       const rows = await db
         .selectFrom("entity_review_evidence")
@@ -690,7 +707,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .select("entity_review_evidence.review_id")
         .distinct()
         .where("entity_review_evidence.indexed_file_id", "in", fileIds)
-        .where("entity_review_queue.status", "=", "pending")
+        .where("entity_review_queue.status", "not in", [...TERMINAL_STATUS_LIST])
         .execute();
       return rows.map((row) => row.review_id);
     },
@@ -704,12 +721,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return Number(result.numDeletedRows ?? 0);
     },
 
-    async deleteEmptyPendingReviewsByIds(ids: string[]): Promise<number> {
+    async deleteEmptyNonTerminalReviewsByIds(ids: string[]): Promise<number> {
       if (ids.length === 0) return 0;
       const result = await db
         .deleteFrom("entity_review_queue")
         .where("id", "in", ids)
-        .where("status", "=", "pending")
+        .where("status", "not in", [...TERMINAL_STATUS_LIST])
         .where((eb) =>
           eb.not(
             eb.exists(

@@ -2275,13 +2275,13 @@ export function connectorRoutes(
       const txEntityReviewRepo = createEntityReviewRepo(trx);
       const fileIds = await txConnectorRepo.getOwnedFileIdsForConnector(config.id);
       const relationshipIds = await txEntityDomainsRepo.relationshipIdsWithEvidenceInFiles(fileIds);
-      const reviewIds = await txEntityReviewRepo.pendingReviewIdsWithEvidenceInFiles(fileIds);
+      const reviewIds = await txEntityReviewRepo.nonTerminalReviewIdsWithEvidenceInFiles(fileIds);
       await txEntityRepo.deleteEntitiesForFiles(fileIds);
       await txConnectorRepo.deleteConfig(config.id);
       await txEntityDomainsRepo.deleteRelationshipEvidenceForFiles(fileIds);
       await txEntityReviewRepo.deleteReviewEvidenceForFiles(fileIds);
       await txEntityDomainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
-      await txEntityReviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+      await txEntityReviewRepo.deleteEmptyNonTerminalReviewsByIds(reviewIds);
     });
     return c.json({ success: true });
   });

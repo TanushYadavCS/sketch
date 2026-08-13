@@ -176,8 +176,11 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
     const offsetRaw = Number(c.req.query("offset"));
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
     const status = c.req.query("status") ?? "pending";
-    if (status !== "pending") {
-      return c.json({ error: { code: "BAD_REQUEST", message: "only status=pending supported in v1" } }, 400);
+    if (status !== "pending" && status !== "deferred") {
+      return c.json({ error: { code: "BAD_REQUEST", message: "status must be pending or deferred" } }, 400);
+    }
+    if (status === "deferred" && !isAdmin(c)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "deferred rows are admin-only" } }, 403);
     }
     const search = c.req.query("q")?.trim() || undefined;
     // Optional `types` CSV filter on entity_type — a generic allow-list each
@@ -206,6 +209,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
       isAdmin: callerIsAdmin,
       search,
       types: typesFilter,
+      status,
     });
 
     if (countOnly) {
@@ -219,6 +223,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
       offset,
       search,
       types: typesFilter,
+      status,
     });
 
     // Evidence summary per visible row.

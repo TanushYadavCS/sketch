@@ -192,11 +192,11 @@ describe("connector delete relationship and review cleanup", () => {
       const reviewRepo = createEntityReviewRepo(trx);
       const fileIds = await connectorRepo.getOwnedFileIdsForConnector("connector-delete");
       const relationshipIds = await domainsRepo.relationshipIdsWithEvidenceInFiles(fileIds);
-      const reviewIds = await reviewRepo.pendingReviewIdsWithEvidenceInFiles(fileIds);
+      const reviewIds = await reviewRepo.nonTerminalReviewIdsWithEvidenceInFiles(fileIds);
       await txEntityRepo.deleteEntitiesForFiles(fileIds);
       await connectorRepo.deleteConfig("connector-delete");
       await domainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
-      await reviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+      await reviewRepo.deleteEmptyNonTerminalReviewsByIds(reviewIds);
     });
 
     const relationships = await db.selectFrom("entity_relationships").select("id").orderBy("id").execute();
@@ -255,12 +255,12 @@ describe("connector delete relationship and review cleanup", () => {
     const domainsRepo = createEntityDomainsRepository(db);
     const reviewRepo = createEntityReviewRepo(db);
     const relationshipIds = await domainsRepo.relationshipIdsWithEvidenceInFiles(["file-archive"]);
-    const reviewIds = await reviewRepo.pendingReviewIdsWithEvidenceInFiles(["file-archive"]);
+    const reviewIds = await reviewRepo.nonTerminalReviewIdsWithEvidenceInFiles(["file-archive"]);
     await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", "file-archive").execute();
     await domainsRepo.deleteRelationshipEvidenceForFiles(["file-archive"]);
     await reviewRepo.deleteReviewEvidenceForFiles(["file-archive"]);
     await domainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
-    await reviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+    await reviewRepo.deleteEmptyNonTerminalReviewsByIds(reviewIds);
 
     await expect(db.selectFrom("entity_relationships").selectAll().execute()).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
