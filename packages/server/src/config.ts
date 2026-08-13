@@ -52,6 +52,10 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),
+  WHATSAPP_LLM_CHUNKING_ENABLED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
   VISION_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")
@@ -104,6 +108,26 @@ export const configSchema = z.object({
   MANAGED_WHATSAPP_PLATFORM_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   MANAGED_WHATSAPP_TENANT_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   WHATSAPP_HISTORY_LOOKBACK_DAYS: z.coerce.number().int().min(1).default(30),
+  WHATSAPP_CHUNK_WINDOW_MESSAGES: z.coerce.number().int().min(1).default(250),
+  WHATSAPP_CHUNK_WINDOW_TOKENS: z.coerce.number().int().min(1).default(7500),
+  WHATSAPP_CHUNK_MIN_MESSAGES: z.coerce.number().int().min(1).default(10),
+  WHATSAPP_CHUNK_TARGET_MESSAGES: z.coerce.number().int().min(1).default(40),
+  WHATSAPP_CHUNK_MAX_MESSAGES: z.coerce.number().int().min(1).default(80),
+  WHATSAPP_CHUNK_MAX_TOKENS: z.coerce.number().int().min(1).default(1500),
+  WHATSAPP_CHUNK_TICK_MINUTES: z.coerce.number().int().min(1).default(30),
+  WHATSAPP_CHUNK_IDLE_CLOSE_HOURS: z.coerce.number().int().min(1).default(96),
+  WHATSAPP_CHUNK_PROVISIONAL_REFRESH_MESSAGES: z.coerce.number().int().min(1).default(15),
+  WHATSAPP_CHUNK_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? null : value),
+    z.string().trim().nullable().default(null),
+  ),
+  WHATSAPP_CHUNK_REASONING_EFFORT: z.enum(["low", "medium", "high"]).default("high"),
+  WHATSAPP_CHUNK_BURST_THRESHOLD_MESSAGES: z.preprocess(
+    (value) => (value === "" ? null : value),
+    z.coerce.number().int().min(1).nullable().default(null),
+  ),
+  WHATSAPP_CHUNK_TOPIC_REGISTRY_CAP: z.coerce.number().int().min(1).default(30),
+  WHATSAPP_CHUNK_GROUP_WORKER_POOL: z.coerce.number().int().min(1).default(4),
   WHATSAPP_SLICE_GAP_MINUTES: z.coerce.number().int().min(1).default(25),
   WHATSAPP_SLICE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).default(120),
   WHATSAPP_SLICE_MAX_MESSAGES: z.coerce.number().int().min(1).default(50),

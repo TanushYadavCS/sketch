@@ -28,6 +28,18 @@ export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES = 1500;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX = 200;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX = 500;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX = 5000;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_WINDOW_MESSAGES = 250;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_WINDOW_TOKENS = 7500;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_MIN_MESSAGES = 10;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_TARGET_MESSAGES = 40;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_MAX_MESSAGES = 80;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_MAX_TOKENS = 1500;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_TICK_MINUTES = 30;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_IDLE_CLOSE_HOURS = 96;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_PROVISIONAL_REFRESH_MESSAGES = 15;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_REASONING_EFFORT = "high" as const;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_TOPIC_REGISTRY_CAP = 30;
+export const DEFAULT_WHATSAPP_LLM_CHUNK_GROUP_WORKER_POOL = 4;
 
 const MINUTE_MS = 60 * 1000;
 const DEFAULT_CLAIM_STALE_MS = 5 * MINUTE_MS;
@@ -39,6 +51,42 @@ export interface WhatsAppChunkerKnobs {
   gapMinutes: number;
   maxAgeMinutes: number;
   maxMessages: number;
+}
+
+export type WhatsAppLlmReasoningEffort = "low" | "medium" | "high";
+
+export interface WhatsAppLlmChunkerKnobs {
+  windowMessages: number;
+  windowTokens: number;
+  minMessages: number;
+  targetMessages: number;
+  maxMessages: number;
+  maxTokens: number;
+  tickMinutes: number;
+  idleCloseHours: number;
+  provisionalRefreshMessages: number;
+  model: string | null;
+  reasoningEffort: WhatsAppLlmReasoningEffort;
+  burstThresholdMessages: number | null;
+  topicRegistryCap: number;
+  groupWorkerPool: number;
+}
+
+export interface WhatsAppLlmChunkerGroupOverrides {
+  chunkWindowMessages: number | null;
+  chunkWindowTokens: number | null;
+  chunkMinMessages: number | null;
+  chunkTargetMessages: number | null;
+  chunkMaxMessages: number | null;
+  chunkMaxTokens: number | null;
+  chunkTickMinutes: number | null;
+  chunkIdleCloseHours: number | null;
+  chunkProvisionalRefreshMessages: number | null;
+  chunkModel: string | null;
+  chunkReasoningEffort: string | null;
+  chunkBurstThresholdMessages: number | null;
+  chunkTopicRegistryCap: number | null;
+  chunkGroupWorkerPool: number | null;
 }
 
 export interface WhatsAppBackfillGraphKnobs {
@@ -139,6 +187,94 @@ export function resolveWhatsAppChunkerKnobs(
     gapMinutes: group.sliceGapMinutes ?? defaults.gapMinutes ?? DEFAULT_WHATSAPP_SLICE_GAP_MINUTES,
     maxAgeMinutes: group.sliceMaxAgeMinutes ?? defaults.maxAgeMinutes ?? DEFAULT_WHATSAPP_SLICE_MAX_AGE_MINUTES,
     maxMessages: group.sliceMaxMessages ?? defaults.maxMessages ?? DEFAULT_WHATSAPP_SLICE_MAX_MESSAGES,
+  };
+}
+
+function positiveInteger(value: number | null | undefined): number | undefined {
+  return value != null && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function resolvePositiveInteger(
+  groupValue: number | null | undefined,
+  defaultValue: number | undefined,
+  builtInValue: number,
+): number {
+  return positiveInteger(groupValue) ?? positiveInteger(defaultValue) ?? builtInValue;
+}
+
+function resolveModel(groupValue: string | null | undefined, defaultValue: string | null | undefined): string | null {
+  const model = groupValue?.trim() || defaultValue?.trim();
+  return model || null;
+}
+
+function resolveReasoningEffort(
+  groupValue: string | null | undefined,
+  defaultValue: WhatsAppLlmReasoningEffort | undefined,
+): WhatsAppLlmReasoningEffort {
+  if (groupValue === "low" || groupValue === "medium" || groupValue === "high") return groupValue;
+  return defaultValue ?? DEFAULT_WHATSAPP_LLM_CHUNK_REASONING_EFFORT;
+}
+
+export function resolveWhatsAppLlmChunkerKnobs(
+  group: WhatsAppGroupIndexingConfig & Partial<WhatsAppLlmChunkerGroupOverrides>,
+  defaults: Partial<WhatsAppLlmChunkerKnobs> = {},
+): WhatsAppLlmChunkerKnobs {
+  return {
+    windowMessages: resolvePositiveInteger(
+      group.chunkWindowMessages,
+      defaults.windowMessages,
+      DEFAULT_WHATSAPP_LLM_CHUNK_WINDOW_MESSAGES,
+    ),
+    windowTokens: resolvePositiveInteger(
+      group.chunkWindowTokens,
+      defaults.windowTokens,
+      DEFAULT_WHATSAPP_LLM_CHUNK_WINDOW_TOKENS,
+    ),
+    minMessages: resolvePositiveInteger(
+      group.chunkMinMessages,
+      defaults.minMessages,
+      DEFAULT_WHATSAPP_LLM_CHUNK_MIN_MESSAGES,
+    ),
+    targetMessages: resolvePositiveInteger(
+      group.chunkTargetMessages,
+      defaults.targetMessages,
+      DEFAULT_WHATSAPP_LLM_CHUNK_TARGET_MESSAGES,
+    ),
+    maxMessages: resolvePositiveInteger(
+      group.chunkMaxMessages,
+      defaults.maxMessages,
+      DEFAULT_WHATSAPP_LLM_CHUNK_MAX_MESSAGES,
+    ),
+    maxTokens: resolvePositiveInteger(group.chunkMaxTokens, defaults.maxTokens, DEFAULT_WHATSAPP_LLM_CHUNK_MAX_TOKENS),
+    tickMinutes: resolvePositiveInteger(
+      group.chunkTickMinutes,
+      defaults.tickMinutes,
+      DEFAULT_WHATSAPP_LLM_CHUNK_TICK_MINUTES,
+    ),
+    idleCloseHours: resolvePositiveInteger(
+      group.chunkIdleCloseHours,
+      defaults.idleCloseHours,
+      DEFAULT_WHATSAPP_LLM_CHUNK_IDLE_CLOSE_HOURS,
+    ),
+    provisionalRefreshMessages: resolvePositiveInteger(
+      group.chunkProvisionalRefreshMessages,
+      defaults.provisionalRefreshMessages,
+      DEFAULT_WHATSAPP_LLM_CHUNK_PROVISIONAL_REFRESH_MESSAGES,
+    ),
+    model: resolveModel(group.chunkModel, defaults.model),
+    reasoningEffort: resolveReasoningEffort(group.chunkReasoningEffort, defaults.reasoningEffort),
+    burstThresholdMessages:
+      positiveInteger(group.chunkBurstThresholdMessages) ?? positiveInteger(defaults.burstThresholdMessages) ?? null,
+    topicRegistryCap: resolvePositiveInteger(
+      group.chunkTopicRegistryCap,
+      defaults.topicRegistryCap,
+      DEFAULT_WHATSAPP_LLM_CHUNK_TOPIC_REGISTRY_CAP,
+    ),
+    groupWorkerPool: resolvePositiveInteger(
+      group.chunkGroupWorkerPool,
+      defaults.groupWorkerPool,
+      DEFAULT_WHATSAPP_LLM_CHUNK_GROUP_WORKER_POOL,
+    ),
   };
 }
 
