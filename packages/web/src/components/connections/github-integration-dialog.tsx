@@ -18,16 +18,6 @@ import {
   WhatsappLogoIcon,
 } from "@phosphor-icons/react";
 import type { AgentEnvironmentShareTargetInput, CliIntegrationConnection } from "@sketch/shared";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -271,7 +261,6 @@ export function GithubIntegrationDialog({
   const [targets, setTargets] = useState<AgentEnvironmentShareTargetInput[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   useEffect(() => {
     if (open) return;
@@ -282,7 +271,6 @@ export function GithubIntegrationDialog({
     setTargets([]);
     setSaving(false);
     setError(null);
-    setConfirmDiscard(false);
   }, [open]);
 
   const verify = async () => {
@@ -320,18 +308,17 @@ export function GithubIntegrationDialog({
   };
 
   const close = () => {
-    if (saving) return;
-    if (token.trim() || verifiedIdentity || targets.length > 0) {
-      setConfirmDiscard(true);
-      return;
-    }
-    onOpenChange(false);
+    if (!saving) onOpenChange(false);
   };
 
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
-        <DialogContent className="max-h-[min(90vh,720px)] sm:max-w-2xl">
+        <DialogContent
+          className="flex max-h-[min(90vh,720px)] flex-col overflow-hidden sm:max-w-2xl"
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <div className="flex items-start gap-3 pr-8">
               <GithubAppIcon className="size-10" />
@@ -345,85 +332,87 @@ export function GithubIntegrationDialog({
           </DialogHeader>
           <SetupProgress step={step} />
 
-          {step === "understand" && (
-            <div className="space-y-4 py-2 text-sm">
-              <p>
-                Your personal access token stays encrypted in Sketch. GitHub actions run as the token&apos;s GitHub
-                account, and repository access follows the permissions GitHub grants that account.
-              </p>
-              <p className="text-muted-foreground">
-                We recommend a fine-grained token with the least privilege needed. Token verification proves identity;
-                it does not prove access to every repository.
-              </p>
-              <a
-                className="text-sm underline underline-offset-4"
-                href={GITHUB_TOKEN_URL}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Create a GitHub personal access token
-              </a>
-            </div>
-          )}
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {step === "understand" && (
+              <div className="space-y-4 py-2 text-sm">
+                <p>
+                  Your personal access token stays encrypted in Sketch. GitHub actions run as the token&apos;s GitHub
+                  account, and repository access follows the permissions GitHub grants that account.
+                </p>
+                <p className="text-muted-foreground">
+                  We recommend a fine-grained token with the least privilege needed. Token verification proves identity;
+                  it does not prove access to every repository.
+                </p>
+                <a
+                  className="text-sm underline underline-offset-4"
+                  href={GITHUB_TOKEN_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Create a GitHub personal access token
+                </a>
+              </div>
+            )}
 
-          {step === "token" && (
-            <div className="space-y-4 py-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="github-pat">Personal access token</Label>
-                <Input
-                  id="github-pat"
-                  type="password"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="Paste your GitHub token"
+            {step === "token" && (
+              <div className="space-y-4 py-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="github-pat">Personal access token</Label>
+                  <Input
+                    id="github-pat"
+                    type="password"
+                    value={token}
+                    onChange={(event) => setToken(event.target.value)}
+                    autoComplete="new-password"
+                    placeholder="Paste your GitHub token"
+                    disabled={saving}
+                    aria-describedby="github-token-help"
+                  />
+                  <p id="github-token-help" className="text-xs text-muted-foreground">
+                    The token stays in this form until saved and is never stored in browser storage.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {step === "access" && verifiedIdentity && (
+              <div className="space-y-4 py-2">
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-sm">
+                  Verified as <span className="font-medium">@{verifiedIdentity.login}</span>. Choose who can use this
+                  connection.
+                </div>
+                <GithubAccessPicker
+                  users={users}
+                  slackChannels={slackChannels}
+                  whatsappGroups={whatsappGroups}
+                  currentUserId={currentUserId}
+                  isAdmin={isAdmin}
+                  targets={targets}
+                  onTargetsChange={setTargets}
                   disabled={saving}
-                  aria-describedby="github-token-help"
                 />
-                <p id="github-token-help" className="text-xs text-muted-foreground">
-                  The token stays in this form until saved and is never stored in browser storage.
+              </div>
+            )}
+
+            {step === "success" && connection && (
+              <div className="space-y-4 py-4 text-sm">
+                <p>
+                  GitHub is connected as <span className="font-medium">@{connection.accountLogin}</span>.
                 </p>
               </div>
-            </div>
-          )}
+            )}
 
-          {step === "access" && verifiedIdentity && (
-            <div className="space-y-4 py-2">
-              <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-sm">
-                Verified as <span className="font-medium">@{verifiedIdentity.login}</span>. Choose who can use this
-                connection.
-              </div>
-              <GithubAccessPicker
-                users={users}
-                slackChannels={slackChannels}
-                whatsappGroups={whatsappGroups}
-                currentUserId={currentUserId}
-                isAdmin={isAdmin}
-                targets={targets}
-                onTargetsChange={setTargets}
-                disabled={saving}
-              />
-            </div>
-          )}
-
-          {step === "success" && connection && (
-            <div className="space-y-4 py-4 text-sm">
-              <p>
-                GitHub is connected as <span className="font-medium">@{connection.accountLogin}</span>.
+            {error && (
+              <p
+                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+                role="alert"
+              >
+                {error}
               </p>
-            </div>
-          )}
+            )}
+          </div>
 
-          {error && (
-            <p
-              className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-              role="alert"
-            >
-              {error}
-            </p>
-          )}
-
-          <DialogFooter className="sticky bottom-0 -mx-6 -mb-6 border-t bg-background/95 px-6 py-4 backdrop-blur">
+          <DialogFooter className="shrink-0 border-t bg-background/95 px-6 py-4 backdrop-blur">
             {step === "understand" && (
               <>
                 <Button variant="outline" onClick={close} disabled={saving}>
@@ -458,16 +447,6 @@ export function GithubIntegrationDialog({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <UnsavedChangesAlert
-        open={confirmDiscard}
-        onOpenChange={setConfirmDiscard}
-        onDiscard={() => {
-          setConfirmDiscard(false);
-          onOpenChange(false);
-        }}
-        title="Discard GitHub setup?"
-        description="Your verified token and access choices have not been saved. Keep editing or discard them."
-      />
     </>
   );
 }
@@ -498,7 +477,6 @@ function GithubConnectionManageDialog({
   const [savedTargets, setSavedTargets] = useState<AgentEnvironmentShareTargetInput[]>(connection.shares);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -506,7 +484,6 @@ function GithubConnectionManageDialog({
       setTargets(connection.shares);
       setSavedTargets(connection.shares);
       setError(null);
-      setConfirmDiscard(false);
     }
   }, [open, connection]);
 
@@ -525,18 +502,17 @@ function GithubConnectionManageDialog({
   };
 
   const close = () => {
-    if (saving) return;
-    if (token.trim() || !sameTargets(targets, savedTargets)) {
-      setConfirmDiscard(true);
-      return;
-    }
-    onOpenChange(false);
+    if (!saving) onOpenChange(false);
   };
 
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
-        <DialogContent className="max-h-[min(90vh,760px)] overflow-hidden sm:max-w-2xl">
+        <DialogContent
+          className="flex max-h-[min(90vh,760px)] flex-col overflow-hidden sm:max-w-2xl"
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>Manage GitHub</DialogTitle>
             <DialogDescription>
@@ -544,7 +520,7 @@ function GithubConnectionManageDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="min-h-0 space-y-4 overflow-y-auto py-2 pr-1">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
             <section className="rounded-lg border border-border bg-muted/10 p-4">
               <div className="flex items-start gap-3">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -653,7 +629,7 @@ function GithubConnectionManageDialog({
             </p>
           )}
 
-          <DialogFooter className="sticky bottom-0 -mx-6 -mb-6 justify-between border-t bg-background/95 px-6 py-4 backdrop-blur sm:justify-between">
+          <DialogFooter className="shrink-0 justify-between border-t bg-background/95 px-6 py-4 backdrop-blur sm:justify-between">
             <Button
               variant="ghost"
               className="text-destructive hover:text-destructive"
@@ -675,16 +651,6 @@ function GithubConnectionManageDialog({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <UnsavedChangesAlert
-        open={confirmDiscard}
-        onOpenChange={setConfirmDiscard}
-        onDiscard={() => {
-          setConfirmDiscard(false);
-          onOpenChange(false);
-        }}
-        title="Discard GitHub changes?"
-        description="Your access selection or replacement token has not been saved. Keep editing or discard these changes."
-      />
     </>
   );
 }
@@ -1015,37 +981,6 @@ function TargetOption({
         {checked ? <CheckCircleIcon size={14} weight="fill" aria-hidden /> : null}
       </span>
     </button>
-  );
-}
-
-function UnsavedChangesAlert({
-  open,
-  onOpenChange,
-  onDiscard,
-  title,
-  description,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onDiscard: () => void;
-  title: string;
-  description: string;
-}) {
-  return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent className="sm:max-w-md">
-        <AlertDialogHeader>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
-          <AlertDialogDescription>{description}</AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Keep editing</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={onDiscard}>
-            Discard changes
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
   );
 }
 

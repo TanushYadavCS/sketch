@@ -405,7 +405,7 @@ describe("ConnectionsPage direct connect", () => {
     expect(connectBodies).toEqual([{ token: "ghp_test_token", targets: [] }]);
   });
 
-  it("groups GitHub access targets, filters them, summarizes selection, and protects unsaved setup", async () => {
+  it("groups GitHub access targets, filters them, and ignores outside clicks", async () => {
     const user = userEvent.setup();
     setupCommonHandlers();
     server.use(
@@ -500,9 +500,7 @@ describe("ConnectionsPage direct connect", () => {
     expect(overlay).toBeInTheDocument();
     fireEvent.pointerDown(overlay as HTMLElement);
     fireEvent.pointerUp(overlay as HTMLElement);
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Discard GitHub setup?");
-    expect(screen.getByRole("button", { name: "Keep editing" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(screen.getByText("3 selected")).toBeInTheDocument();
   });
 
