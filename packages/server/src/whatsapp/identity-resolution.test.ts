@@ -6,7 +6,7 @@ import {
   assertNoRawWhatsAppIdentifiers,
   renderWhatsAppRosterBlock,
   renderWhatsAppTranscript,
-} from "../connectors/whatsapp-salience";
+} from "../connectors/whatsapp-emission";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";

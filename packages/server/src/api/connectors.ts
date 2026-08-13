@@ -433,6 +433,15 @@ export function connectorRoutes(
     enrichmentGenerator?: GeminiGenerator;
     taskMintingGenerator?: GeminiGenerator;
     whatsapp?: Pick<WhatsAppSocketFacade, "groupMetadata">;
+    /**
+     * Wakes the WhatsApp backfill worker after groups are newly enabled.
+     * Without it the worker only notices on its 5-minute reconcile sweep, so a
+     * user who pairs and then enables a group — the normal order — watches an
+     * empty Files page until the sweep happens to run. "Sync now" does not help
+     * either: sync drives the chunker, and the chunker has nothing to chunk
+     * until the worker adopts the captured history into a range.
+     */
+    wakeWhatsAppBackfill?: () => Promise<void> | void;
   },
 ) {
   const routes = new Hono();
@@ -2409,6 +2418,14 @@ export function connectorRoutes(
       }
     }
 
+    if (newlyEnabledWhatsAppGroups.length > 0) {
+      try {
+        await deps?.wakeWhatsAppBackfill?.();
+      } catch (err) {
+        logger.warn({ err }, "Failed to wake the WhatsApp backfill worker after enabling groups");
+      }
+    }
+
     if (config.connector_type === "google_calendar" || config.connector_type === "outlook_calendar") {
       await pruneCalendarFilesOutsideScope({
         db,
@@ -2451,6 +2468,21 @@ export function connectorRoutes(
       // Reset stale "syncing" status — the previous sync likely crashed
       await connectorRepo.updateConfig(config.id, { syncStatus: "active", errorMessage: null });
       logger.warn({ connectorId: config.id }, "Reset stale syncing status via manual trigger");
+    }
+
+    /**
+     * Adopt any captured-but-unowned WhatsApp history before the sync runs.
+     * Sync drives the chunker, and the chunker can only see messages that a
+     * backfill range already owns — so without this a manual "Sync now" on a
+     * group whose history has not been adopted yet completes with every counter
+     * at zero and looks like the button did nothing.
+     */
+    if (config.connector_type === "whatsapp") {
+      try {
+        await deps?.wakeWhatsAppBackfill?.();
+      } catch (err) {
+        logger.warn({ err }, "Failed to wake the WhatsApp backfill worker before a manual sync");
+      }
     }
 
     // Run sync then enrichment in background

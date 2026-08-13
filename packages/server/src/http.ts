@@ -110,6 +110,8 @@ import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 interface AppDeps {
   whatsapp?: WhatsAppSocketFacade;
+  /** Adopts captured-but-unowned WhatsApp history: on group enable and before a manual sync. */
+  wakeWhatsAppBackfill?: () => Promise<void> | void;
   whatsappRuntime?: WhatsAppRuntime;
   watiWebhook?: WatiWhatsAppProvider;
   managedWhatsapp?: ManagedWhatsAppProvider;
@@ -649,6 +651,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         taskMintingGenerator: deps.taskMintingGenerator,
         enrichmentGenerator: deps.enrichmentGenerator,
         whatsapp: deps.whatsapp,
+        wakeWhatsAppBackfill: deps.wakeWhatsAppBackfill,
       }),
     );
   }

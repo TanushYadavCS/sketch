@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-salience";
+import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-emission";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
 import { createConversationRepository } from "../../db/repositories/conversations";

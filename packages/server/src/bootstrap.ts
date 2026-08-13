@@ -420,6 +420,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
   let whatsappBot: WhatsAppBot | null = null;
   let whatsapp: WhatsAppSocketFacade;
+  /**
+   * The worker is constructed further down, after the facade exists, but the
+   * in-process socket callback below is defined before that point and has to
+   * reach it on connect. Same indirection the inbound consumer already uses.
+   */
+  const whatsappBackfillWorkerRef: { current: WhatsAppBackfillWorker | null } = { current: null };
   const observeInProcessBaileysSocketState = async (
     socketState: "connected" | "disconnected" | "logged-out",
     socketGeneration: number,
@@ -434,6 +440,29 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ...(statusCode === undefined ? {} : { statusCode }),
       reason: `inprocess_${socketState}`,
     });
+    /**
+     * Gateway mode reaches `handleConnected` through the supervisor's socket
+     * state hook. In-process has no supervisor, so without this the worker
+     * never sees a connection: ranges are never rearmed and captured history
+     * stays orphaned, which is why enabling a group indexed nothing.
+     *
+     * Deliberately not awaited. This runs inside the Baileys connection-open
+     * path, which is already writing (credentials, group metadata); awaiting a
+     * further write here contends for SQLite's single writer and raised
+     * SQLITE_BUSY, and because nothing upstream catches it the whole process
+     * died on connect. The worker's own 5-minute reconcile sweep repeats this
+     * work, so a failure here costs promptness, never correctness.
+     */
+    if (socketState === "connected") {
+      void whatsappBackfillWorkerRef.current
+        ?.handleConnected({ leaseGeneration: identity.generation, socketGeneration })
+        .catch((error) => {
+          logger.warn(
+            { ...safeWhatsAppErrorFields(error), socketGeneration },
+            "WhatsApp backfill connect handling failed; reconcile sweep will retry",
+          );
+        });
+    }
   };
   if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
     whatsappSupervisor = new WhatsAppGatewaySupervisor({
@@ -1033,18 +1062,26 @@ export async function createServer(config: Config, options?: CreateServerOptions
   };
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, whatsappAdapterDeps);
   const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
-  const whatsappBackfillWorker =
-    whatsapp instanceof GatewayClientFacade
-      ? new WhatsAppBackfillWorker({
-          db,
-          config,
-          logger,
-          facade: whatsapp,
-          handlers: whatsappHandlers,
-          shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
-          onRequestAccepted: () => whatsappInboundConsumerRef.current?.wake(),
-        })
-      : null;
+  /**
+   * Gated on the provider, not on the facade class. The worker only ever needs
+   * `WhatsAppSocketFacade.fetchMessageHistory`, which the in-process facade
+   * implements just as the gateway client does; narrowing to
+   * `GatewayClientFacade` meant every deployment on the default
+   * `WHATSAPP_RUNTIME_MODE=inprocess` silently built no worker, so group
+   * history was captured but never adopted into a backfill range — never
+   * sliced, chunked, or minted.
+   */
+  const whatsappBackfillWorker = usesBaileys
+    ? new WhatsAppBackfillWorker({
+        db,
+        config,
+        logger,
+        facade: whatsapp,
+        handlers: whatsappHandlers,
+        shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
+        onRequestAccepted: () => whatsappInboundConsumerRef.current?.wake(),
+      })
+    : null;
   const whatsappInboundConsumer = new WhatsAppInboundConsumer({
     db,
     logger,
@@ -1055,6 +1092,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     backfillWorker: whatsappBackfillWorker ?? undefined,
   });
   whatsappInboundConsumerRef.current = whatsappInboundConsumer;
+  whatsappBackfillWorkerRef.current = whatsappBackfillWorker;
   if (backgroundWork) {
     await createWhatsAppInboundEventsRepository(db).resetDispatched();
     whatsappInboundConsumer.start();
@@ -1108,6 +1146,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const app = createApp(db, config, {
     whatsapp,
     whatsappRuntime,
+    /**
+     * `forceSweep` bypasses the 5-minute interval so a group enabled seconds
+     * after the socket connected does not wait for the next scheduled sweep to
+     * have its captured history adopted.
+     */
+    wakeWhatsAppBackfill: () => whatsappBackfillWorker?.reconcile(true),
     captureWhatsAppLid: (userId, phoneE164) => {
       void whatsappUserLidRefresh.capture(userId, phoneE164).catch((error) => {
         logger.warn(
