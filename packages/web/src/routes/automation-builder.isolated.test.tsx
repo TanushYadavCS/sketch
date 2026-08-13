@@ -103,6 +103,7 @@ vi.mock("@tanstack/react-router", async () => {
 
 vi.mock("./dashboard", () => ({
   dashboardRoute: { id: "__root__/dashboard" },
+  useDashboardAuth: () => ({ userId: "user-1", role: "member", displayName: "Owner Member", displayIdentifier: "owner@example.com" }),
 }));
 
 vi.mock("sonner", () => ({

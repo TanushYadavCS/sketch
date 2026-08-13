@@ -134,7 +134,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { dashboardRoute } from "./dashboard";
+import { dashboardRoute, useDashboardAuth } from "./dashboard";
 
 interface BuilderSearch {
   conversationId?: string;
@@ -556,6 +556,7 @@ function AutomationSetupCard({
 
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
+  const auth = useDashboardAuth();
   const builderSearch = useSearch({ from: automationBuilderRoute.id }) as BuilderSearch;
   const requestedConversationId = builderSearch.conversationId;
   const requestedRunId =
@@ -852,6 +853,9 @@ export function AutomationBuilderPage() {
   }
 
   const automation = automationQuery.data;
+  const canShareAutomation =
+    automation?.canShare === true ||
+    (automation != null && automation.canShare == null && Boolean(auth.userId) && automation.createdBy === auth.userId);
   const placeholderSetup = isPlaceholderDraft(automation);
   const builderDraft = displayDraft ?? draft;
   const exactRunCandidate = exactRunQuery.data?.run;
@@ -974,7 +978,7 @@ export function AutomationBuilderPage() {
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
             <BuilderOwnership automation={automation} />
-            {automation.canShare === true ? (
+            {canShareAutomation ? (
               <Button
                 size="sm"
                 variant="outline"
@@ -1096,7 +1100,7 @@ export function AutomationBuilderPage() {
         taskId={taskId}
         taskName={automationTitle}
         ownerUserId={automation.createdBy}
-        canShare={automation.canShare === true}
+        canShare={canShareAutomation}
         open={shareDialogOpen}
         onOpenChange={setShareDialogOpen}
       />

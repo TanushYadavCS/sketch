@@ -95,6 +95,7 @@ vi.mock("@tanstack/react-router", async () => {
 
 vi.mock("./dashboard", () => ({
   dashboardRoute: { id: "__root__/dashboard" },
+  useDashboardAuth: () => ({ userId: "user-1", role: "member", displayName: "Owner Member", displayIdentifier: "owner@example.com" }),
 }));
 
 vi.mock("sonner", () => ({
@@ -356,7 +357,21 @@ describe("AutomationBuilderPage sharing", () => {
     expect(screen.queryByRole("button", { name: /Share/i })).not.toBeInTheDocument();
   });
 
-  it("shows neither the Share button nor the hint when sharing fields are absent", async () => {
+  it("shows the Share button for an owned task when sharing fields are absent (legacy fallback)", async () => {
+    renderBuilder();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: /Share/i })).toBeInTheDocument();
+    expect(screen.queryByTestId("automation-shared-hint")).not.toBeInTheDocument();
+  });
+
+  it("shows neither the Share button nor the hint when sharing fields are absent and the viewer is not the owner", async () => {
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      createdBy: "user-2",
+    });
     renderBuilder();
 
     await waitFor(() => {
