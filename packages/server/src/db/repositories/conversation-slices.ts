@@ -8,7 +8,7 @@ import type {
   WhatsAppBackfillCheckpointsTable,
 } from "../schema";
 
-export type ConversationSliceFlushReason = "gap" | "max_age" | "max_size";
+export type ConversationSliceFlushReason = "gap" | "max_age" | "max_size" | "llm_boundary";
 export type ConversationSliceSalienceVerdict = "kept" | "dropped";
 export type WhatsAppBackfillCheckpointStatus = "in_progress" | "complete" | "failed";
 
