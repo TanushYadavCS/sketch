@@ -6,6 +6,57 @@ import type { DB } from "../schema";
 
 const MAX_ALIAS_MERGE_ATTEMPTS = 8;
 
+/**
+ * The best pending name proposal per entity, for entities still carrying a
+ * placeholder name. A WhatsApp-minted person is named after its own phone number
+ * until a pushName confirms a real one, so this is what lets a surface render
+ * "Tanush Yadav (+919891688787)" instead of the bare digits.
+ *
+ * Ranking happens in memory rather than via DISTINCT ON or a window function so
+ * the query stays portable across SQLite and Postgres. Callers pass at most a
+ * page of entity ids, so the row count is bounded by the page size.
+ *
+ * The empty-input guard is load-bearing, not defensive: an empty list renders as
+ * `IN ()`, which SQLite accepts and Postgres rejects as a syntax error.
+ */
+export async function listPendingNameProposalsByEntity(
+  db: Kysely<DB>,
+  entityIds: string[],
+): Promise<Map<string, string>> {
+  const best = new Map<string, string>();
+  if (entityIds.length === 0) return best;
+  const rows = await db
+    .selectFrom("entity_name_proposals")
+    .innerJoin("entities", "entities.id", "entity_name_proposals.entity_id")
+    .select([
+      "entity_name_proposals.entity_id",
+      "entity_name_proposals.value",
+      "entity_name_proposals.observed_count",
+      "entity_name_proposals.last_seen_at",
+    ])
+    .where("entity_name_proposals.entity_id", "in", entityIds)
+    .where("entity_name_proposals.status", "=", "pending")
+    .where("entities.name_status", "=", "placeholder")
+    .execute();
+
+  const ranked = new Map<string, { value: string; observedCount: number; lastSeenAt: string }>();
+  for (const row of rows) {
+    const value = row.value.trim();
+    if (!value) continue;
+    const current = ranked.get(row.entity_id);
+    const candidate = { value, observedCount: row.observed_count, lastSeenAt: row.last_seen_at };
+    if (
+      !current ||
+      candidate.observedCount > current.observedCount ||
+      (candidate.observedCount === current.observedCount && candidate.lastSeenAt > current.lastSeenAt)
+    ) {
+      ranked.set(row.entity_id, candidate);
+    }
+  }
+  for (const [entityId, candidate] of ranked) best.set(entityId, candidate.value);
+  return best;
+}
+
 export async function upsertEntityNameProposal(
   db: Kysely<DB>,
   entityId: string,

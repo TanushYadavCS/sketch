@@ -19,6 +19,21 @@ export interface EntityIdentity {
   entityType?: DrawerEntityType;
 }
 
+/**
+ * Label for an entity still named after its own phone number or LID. A
+ * WhatsApp-minted person keeps that identifier as its name until a pushName is
+ * confirmed, so rendering "Tanush Yadav (+919891688787)" surfaces the name we
+ * already know while keeping it visibly unconfirmed beside the identifier it
+ * came from.
+ *
+ * The raw `name` stays the label wherever a user acts on it rather than reads
+ * it — renaming and picking a merge survivor both need the stored value.
+ */
+export function entityDisplayLabel(entity: { name: string; proposedName?: string | null }): string {
+  const proposed = entity.proposedName?.trim();
+  return proposed ? `${proposed} (${entity.name})` : entity.name;
+}
+
 type DrawerMode = "drawer" | "popover";
 
 interface EntityUiContextValue {

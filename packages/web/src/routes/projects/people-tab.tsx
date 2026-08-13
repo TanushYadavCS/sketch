@@ -14,7 +14,7 @@
  */
 import type { EntityListItem } from "@/lib/api";
 import { api } from "@/lib/api";
-import { EntityAvatar, useEntityUi } from "@/lib/entity-ui";
+import { EntityAvatar, entityDisplayLabel, useEntityUi } from "@/lib/entity-ui";
 import { formatRelativeTime } from "@/routes/files/file-list";
 import { CaretDownIcon, MagnifyingGlassIcon, SparkleIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
@@ -275,7 +275,7 @@ function PersonRow({ person }: { person: EntityListItem }) {
       testId={`org-person-${person.id}`}
       onOpen={() => openEntity(person.id)}
       avatar={<EntityAvatar entity={{ id: person.id, name: person.name, sourceType: "person" }} size="sm" />}
-      primary={person.name}
+      primary={entityDisplayLabel(person)}
       primaryChips={
         isAi ? (
           <Badge

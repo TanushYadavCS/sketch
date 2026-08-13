@@ -10,6 +10,7 @@ import {
   normalizeContactPointValue,
   whereLiveEntity,
 } from "../../db/repositories/entities";
+import { listPendingNameProposalsByEntity } from "../../db/repositories/entity-aliases";
 import {
   type RelationListEntry,
   createEntityRelationshipsRepository,
@@ -109,15 +110,18 @@ async function loadEntityFactsForId(
   const relRepo = createEntityRelationshipsRepository(db);
   const entity = await repo.getEntity(entityId, viewer);
   if (!entity) return null;
-  const [aggregates, relations] = await Promise.all([
+  const [aggregates, relations, proposals] = await Promise.all([
     repo.getEntityProfileAggregates(entity.id, viewer),
     relRepo.listRelationsForEntity(entity.id, { limit: 50 }),
+    listPendingNameProposalsByEntity(db, [entity.id]),
   ]);
   const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
   const topRelationships = [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10);
   return {
     entityId: entity.id,
     name: entity.name,
+    nameStatus: entity.name_status,
+    proposedName: proposals.get(entity.id) ?? null,
     sourceType: entity.source_type,
     entityType: mapSourceTypeToEntityType(entity.source_type),
     metadata: parsedMetadata,
@@ -507,11 +511,17 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       countQuery = countQuery.where(entityVisibilityPredicate(viewer));
     }
     const countResult = await countQuery.executeTakeFirst();
+    const proposalsByEntity = await listPendingNameProposalsByEntity(
+      db,
+      entities.map((e) => e.id),
+    );
 
     return c.json({
       entities: entities.map((e) => ({
         id: e.id,
         name: e.name,
+        nameStatus: e.name_status,
+        proposedName: proposalsByEntity.get(e.id) ?? null,
         sourceType: e.source_type,
         subtype: e.subtype,
         aliases: e.aliases ? JSON.parse(e.aliases) : [],
@@ -682,11 +692,14 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
     const activity = await loadActivityStats(db, entity.id, viewer);
     const summary = buildSummary(facts, activity);
+    const proposals = await listPendingNameProposalsByEntity(db, [entity.id]);
 
     return c.json({
       entity: {
         id: entity.id,
         name: entity.name,
+        nameStatus: entity.name_status,
+        proposedName: proposals.get(entity.id) ?? null,
         sourceType: entity.source_type,
         subtype: entity.subtype,
         aliases: parsedAliases,

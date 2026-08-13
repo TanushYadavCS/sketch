@@ -547,6 +547,9 @@ export function isEntityReviewErrorCode(code: string | undefined): code is Entit
 export interface EntityListItem {
   id: string;
   name: string;
+  nameStatus: string;
+  /** Best pending name proposal; set only while `nameStatus` is "placeholder". */
+  proposedName: string | null;
   sourceType: string;
   subtype: string | null;
   aliases: string[];

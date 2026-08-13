@@ -10,7 +10,7 @@
  * Mounted globally by EntityUiProvider; opened via openEntity(id, { mode: "popover" }).
  */
 import { type EntityRelationView, api } from "@/lib/api";
-import { EntityAvatar, entityAccent, useEntityUi } from "@/lib/entity-ui";
+import { EntityAvatar, entityAccent, entityDisplayLabel, useEntityUi } from "@/lib/entity-ui";
 import { Badge } from "@sketch/ui/components/badge";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@sketch/ui/components/dialog";
 import { Skeleton } from "@sketch/ui/components/skeleton";
@@ -99,7 +99,7 @@ function PopoverBody({ entityId }: { entityId: string }) {
       <div className="flex items-center gap-2">
         <EntityAvatar entity={entity} size="md" />
         <div className="min-w-0 flex-1">
-          <p className="truncate font-serif text-base">{entity.name}</p>
+          <p className="truncate font-serif text-base">{entityDisplayLabel(entity)}</p>
           <Badge variant="outline" className="mt-0.5 text-[10px] uppercase tracking-wider">
             {entity.profile.entityType}
           </Badge>

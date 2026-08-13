@@ -39,6 +39,13 @@ export interface CompanyDomainFact {
 export interface EntityProfileFacts {
   entityId: string;
   name: string;
+  nameStatus: string;
+  /**
+   * Best pending name proposal, populated only while `nameStatus` is
+   * "placeholder" so a surface can render the real name beside the identifier
+   * the entity is currently named after.
+   */
+  proposedName: string | null;
   sourceType: string;
   entityType: DrawerEntityType;
   metadata: Record<string, unknown> | null;
