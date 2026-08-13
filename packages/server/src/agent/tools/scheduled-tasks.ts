@@ -25,6 +25,7 @@ import {
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createWebhookEndpointRepository } from "../../db/repositories/webhook-endpoints";
@@ -528,6 +529,16 @@ async function resolveTaskOwnerName(task: ScheduledTask, userRepo: SearchableUse
   );
 }
 
+/**
+ * Owner-or-grantee access for agent-managed automations. The grant set lives
+ * in automation_task_shares; without a db handle the check fails closed so
+ * non-owners are never granted access by omission.
+ */
+async function taskIsSharedWith(deps: ManageScheduledTasksDeps, taskId: string, userId: string): Promise<boolean> {
+  if (!deps.db) return false;
+  return createAutomationSharesRepository(deps.db).hasGrant(taskId, userId);
+}
+
 async function taskPermissionError(
   task: ScheduledTask,
   action: ManageScheduledTasksParams["action"],
@@ -956,13 +967,21 @@ export async function handleManageScheduledTasks(
     "share",
     "updateStepContent",
   ];
+  // Sharing and deletion are owner-only; every other guarded action is
+  // owner-or-grantee. Admins have no automatic access.
+  const OWNER_ONLY_ACTIONS = new Set<ManageScheduledTasksParams["action"]>(["remove", "share"]);
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
     if (!ctx.createdBy || !task) {
       return text("Error: task not found.");
     }
-    if (!ctx.canManageAnyTask && task.createdBy !== ctx.createdBy) {
+    const isOwner = task.createdBy === ctx.createdBy;
+    const isGrantee = !isOwner && (await taskIsSharedWith(deps, task.id, ctx.createdBy));
+    if (!isOwner && !isGrantee) {
+      return text(await taskPermissionError(task, action, deps.userRepo));
+    }
+    if (OWNER_ONLY_ACTIONS.has(action) && !isOwner) {
       return text(await taskPermissionError(task, action, deps.userRepo));
     }
     guardedTask = task;
@@ -977,15 +996,11 @@ export async function handleManageScheduledTasks(
       if (!ctx.createdBy) {
         return text("Error: scheduled task creator is not available in this context.");
       }
-      if (ctx.contextType === "dm" && ctx.canManageAnyTask) {
-        const tasks = await deps.scheduler.listTasks({ includeInactive: true });
-        return text(JSON.stringify(tasks, null, 2));
-      }
       if (ctx.contextType !== "dm") {
         const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
         return text(JSON.stringify(tasks, null, 2));
       }
-      const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
+      const tasks = await deps.scheduler.listTasksForUser(ctx.createdBy);
       return text(JSON.stringify(tasks, null, 2));
     }
 
@@ -1414,7 +1429,10 @@ export async function handleManageScheduledTasks(
           return text(`Automation ${task_id} manual run queued and will post back here shortly.`);
         }
 
-        const result = await deps.scheduler.executeTaskById(task_id, { runMode: "manual" });
+        const result = await deps.scheduler.executeTaskById(task_id, {
+          runMode: "manual",
+          triggeredByUserId: ctx.createdBy,
+        });
         if (!result) {
           const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
           return text(

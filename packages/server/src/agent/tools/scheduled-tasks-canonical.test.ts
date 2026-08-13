@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationDefinition, getAutomationDefinition } from "../../automation/persistence";
 import { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
@@ -1368,7 +1369,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         taskContext: { ...taskContextFor("ownership-task", "admin-1"), canManageAnyTask: true },
       },
     );
-    expect(adminResult.content[0].text).toContain("Error: you do not have permission to update task ownership-task.");
+    expect(adminResult.content[0].text).toContain("created by");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
       created_by: "owner-1",
       revision: 0,
@@ -1810,5 +1811,266 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(result.content[0].text).toContain("Runtime state is inconsistent");
     await expect(createScheduledTaskRepository(db).getById("remove-runtime-failure")).resolves.toBeUndefined();
     expect(removeTaskRuntime).toHaveBeenCalledWith("remove-runtime-failure");
+  });
+});
+
+describe("ManageScheduledTasks grant-aware access", () => {
+  let db: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function grant(taskId: string, userId: string, grantedByUserId = "owner-1") {
+    await db
+      .insertInto("users")
+      .values({ id: userId, name: userId })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("users")
+      .values({ id: grantedByUserId, name: grantedByUserId })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await createAutomationSharesRepository(db).grant({ taskId, userId, grantedByUserId });
+  }
+
+  it("lets a granted member edit a shared automation while preserving owner metadata", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-edit-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-edit-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "granted-edit-task", prompt: "Member edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("granted-edit-task"),
+        taskContext: taskContextFor("granted-edit-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("granted-edit-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+      last_edited_by: "member-1",
+      revision: 1,
+    });
+  });
+
+  it("lets a granted member update step content on a shared automation", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-content-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-content-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "granted-content-task",
+        step_id: "agent",
+        step_content: "Member wording.",
+        expected_revision: 0,
+      },
+      {
+        db,
+        scheduler: schedulerFor("granted-content-task"),
+        taskContext: taskContextFor("granted-content-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("content updated at revision 1");
+    await expect(createAutomationStepContentRepository(db).getByTask("granted-content-task")).resolves.toEqual([
+      expect.objectContaining({ content: "Member wording." }),
+    ]);
+  });
+
+  it("lets a granted member inspect a shared automation definition", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-get-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-get-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "get", task_id: "granted-get-task" },
+      { db, scheduler: schedulerFor("granted-get-task"), taskContext: taskContextFor("granted-get-task", "member-1") },
+    );
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      id: "granted-get-task",
+      prompt: definition().prompt,
+    });
+  });
+
+  it("lets a granted member run a shared automation with manual-run attribution", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-run-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-run-task", "member-1");
+    const scheduler = schedulerFor("granted-run-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "granted-run-task" },
+      { db, scheduler, taskContext: taskContextFor("granted-run-task", "member-1") },
+    );
+
+    expect(result.content[0].text).toContain("Automation granted-run-task completed:");
+    expect((scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById).toHaveBeenCalledWith(
+      "granted-run-task",
+      { runMode: "manual", triggeredByUserId: "member-1" },
+    );
+  });
+
+  it("lists shared automations for a member through the grant-aware list", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-list-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-list-task", "member-1");
+    const sharedTask = taskFor("granted-list-task", "owner-1");
+    const scheduler = {
+      listTasks: vi.fn().mockResolvedValue([]),
+      listTasksForUser: vi.fn().mockResolvedValue([sharedTask]),
+    } as never;
+
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      { db, scheduler, taskContext: taskContextFor("granted-list-task", "member-1") },
+    );
+
+    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).toHaveBeenCalledWith(
+      "member-1",
+    );
+    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toEqual([expect.objectContaining({ id: "granted-list-task" })]);
+  });
+
+  it("does not expand DM listings for an admin without grants", async () => {
+    const scheduler = {
+      listTasks: vi.fn().mockResolvedValue([]),
+      listTasksForUser: vi.fn().mockResolvedValue([]),
+    } as never;
+
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      {
+        db,
+        scheduler,
+        taskContext: { ...taskContextFor("admin-list-task", "admin-1"), canManageAnyTask: true },
+      },
+    );
+
+    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).toHaveBeenCalledWith(
+      "admin-1",
+    );
+    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toEqual([]);
+  });
+
+  it("keeps deletion owner-only even for a granted member", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-remove-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-remove-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "remove", task_id: "granted-remove-task" },
+      {
+        db,
+        scheduler: schedulerFor("granted-remove-task"),
+        taskContext: taskContextFor("granted-remove-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("You can't delete");
+    await expect(createScheduledTaskRepository(db).getById("granted-remove-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+    });
+  });
+
+  it("keeps share owner-only even for a granted member", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-share-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-share-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "share", task_id: "granted-share-task" },
+      {
+        db,
+        scheduler: schedulerFor("granted-share-task"),
+        taskContext: taskContextFor("granted-share-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("You can't share");
+  });
+
+  it("denies a granted member another user's task that was not shared with them", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-own-task"),
+      brokerCapable: true,
+    });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("foreign-task", "owner-2"),
+      brokerCapable: true,
+    });
+    await grant("granted-own-task", "member-1");
+
+    const foreign = await handleManageScheduledTasks(
+      { action: "update", task_id: "foreign-task", prompt: "Foreign edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("foreign-task", "owner-2"),
+        taskContext: taskContextFor("foreign-task", "member-1"),
+      },
+    );
+    expect(foreign.content[0].text).toContain("created by");
+    await expect(createScheduledTaskRepository(db).getById("foreign-task")).resolves.toMatchObject({
+      created_by: "owner-2",
+      revision: 0,
+    });
+
+    const shared = await handleManageScheduledTasks(
+      { action: "update", task_id: "granted-own-task", prompt: "Shared edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("granted-own-task", "owner-1"),
+        taskContext: taskContextFor("granted-own-task", "member-1"),
+      },
+    );
+    expect(shared.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("granted-own-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+      revision: 1,
+    });
   });
 });

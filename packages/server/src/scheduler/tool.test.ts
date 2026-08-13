@@ -79,6 +79,7 @@ function makeCurrentAutomation(
 function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskScheduler {
   return {
     listTasks: vi.fn().mockResolvedValue([]),
+    listTasksForUser: vi.fn().mockResolvedValue([]),
     // Default ownership check returns a task owned by the standard test creator "U123".
     // Tests that exercise the not-yours branch override this with their own mock.
     getTaskById: vi.fn().mockResolvedValue(makeTask()),
@@ -452,10 +453,11 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
 });
 
 describe("handleManageScheduledTasks — list", () => {
-  it("scopes by createdBy for DM context", async () => {
+  it("scopes DM listings through the grant-aware user list", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: dmContext });
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("scopes by deliveryTarget for channel context", async () => {
@@ -485,13 +487,14 @@ describe("handleManageScheduledTasks — list", () => {
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: taskContext.deliveryTarget });
   });
 
-  it("lists every automation for an admin context", async () => {
+  it("keeps DM listings grant-aware for an admin without grants", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
     );
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ includeInactive: true });
+    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("keeps explicit list behavior when ambient builder context exists", async () => {
@@ -505,7 +508,8 @@ describe("handleManageScheduledTasks — list", () => {
         currentAutomation: makeCurrentAutomation(),
       },
     );
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("fails closed when listing without an authenticated creator", async () => {
@@ -520,7 +524,7 @@ describe("handleManageScheduledTasks — list", () => {
 
   it("returns JSON of tasks", async () => {
     const task = makeTask();
-    const scheduler = makeMockScheduler({ listTasks: vi.fn().mockResolvedValue([task]) });
+    const scheduler = makeMockScheduler({ listTasksForUser: vi.fn().mockResolvedValue([task]) });
     const result = await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: dmContext },
@@ -804,7 +808,7 @@ describe("handleManageScheduledTasks — run", () => {
       { scheduler, stepContentRepo, taskContext: dmContext },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual", triggeredByUserId: "U123" });
     expect(result.content[0].text).toContain("Automation task-1 completed");
     expect(result.content[0].text).toContain('"runId": "run-1"');
     expect(result.content[0].text).toContain('"ok": true');
@@ -841,7 +845,7 @@ describe("handleManageScheduledTasks — run", () => {
       },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual", triggeredByUserId: "U123" });
     expect(scheduler.enqueueTaskById).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("Automation task-1 completed");
   });
@@ -997,7 +1001,7 @@ describe("handleManageScheduledTasks — ownership", () => {
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
-  it("returns the canonical URL for another user's automation to an admin", async () => {
+  it("denies share of another user's automation even to an admin", async () => {
     const scheduler = makeMockScheduler({
       getTaskById: vi.fn().mockResolvedValue(makeTask({ createdBy: "U_OTHER" })),
     });
@@ -1007,12 +1011,16 @@ describe("handleManageScheduledTasks — ownership", () => {
       {
         scheduler,
         stepContentRepo,
+        userRepo: makeMockUserRepo(),
         taskContext: { ...dmContext, canManageAnyTask: true },
         config: { BASE_URL: "https://sketch.test", PORT: 3000 },
       },
     );
 
-    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
+    expect(result.content[0].text).toBe('Error: You can\'t share "Do a thing" because it was created by Roopak.');
+    expect(scheduler.getTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
   it("falls back when the task owner cannot be resolved", async () => {
