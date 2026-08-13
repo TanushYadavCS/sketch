@@ -149,6 +149,45 @@ describe("proposeEntity", () => {
     expect(queue).toHaveLength(0);
   });
 
+  it("links through a hand-added contact point when metadata has no email", async () => {
+    const entityRepo = createEntityRepository(db);
+    const entity = await entityRepo.createPersonEntity({
+      name: "Manual Identity",
+      subtype: "external",
+      source: "manual",
+      sourceId: "manual:identity",
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: entity.id,
+      kind: "email",
+      value: "shared@example.com",
+      source: "manual",
+      makePrimary: true,
+    });
+    const existing = await fetchPersonEntities(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo: createEntityReviewRepo(db),
+        lookup: makeLookup(() => existing),
+        readEmail,
+      },
+      {
+        name: "Different Incoming Name",
+        email: "shared@example.com",
+        entityType: "person",
+        subtype: "external",
+        source: "test",
+        sourceId: "test:manual-contact",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result).toMatchObject({ kind: "linked", entity: { id: entity.id } });
+  });
+
   it("promotes an email-matched existing person for an internal seed", async () => {
     const entityRepo = createEntityRepository(db);
     await entityRepo.upsertPersonEntity({

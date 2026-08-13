@@ -1,9 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod";
 import { type FileViewer, fileVisibilityPredicate } from "../../db/repositories/connectors";
-import { createEntityRepository, entityVisibilityPredicate, whereLiveEntity } from "../../db/repositories/entities";
+import {
+  createEntityRepository,
+  entityVisibilityPredicate,
+  normalizeContactPointValue,
+  whereLiveEntity,
+} from "../../db/repositories/entities";
 import {
   type RelationListEntry,
   createEntityRelationshipsRepository,
@@ -20,6 +26,67 @@ import {
 } from "../../entities/profile-facts";
 import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
+
+const contactPointKindSchema = z.enum(["email", "phone"]);
+const createContactPointSchema = z.object({
+  kind: contactPointKindSchema,
+  value: z.string().trim().min(1),
+  label: z.string().trim().min(1).nullable().optional(),
+  makePrimary: z.boolean().optional(),
+});
+const updateContactPointSchema = z
+  .object({
+    kind: contactPointKindSchema.optional(),
+    value: z.string().trim().min(1).optional(),
+    label: z.string().trim().min(1).nullable().optional(),
+    isPrimary: z.boolean().optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0);
+
+type ContactPointRow = Awaited<
+  ReturnType<ReturnType<typeof createEntityRepository>["getContactPointsForEntity"]>
+>[number];
+
+function serializeContactPoint(row: ContactPointRow) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    value: row.value,
+    label: row.label,
+    isPrimary: row.is_primary === 1,
+    provenance: row.source === "manual" ? "declared" : "inferred",
+    source: row.source,
+    verifiedAt: row.verified_at,
+  };
+}
+
+function contactPointError(c: Parameters<typeof denyIfNotAdmin>[0], message: string, status: 400 | 409 = 400) {
+  return c.json({ error: { code: status === 409 ? "CONTACT_POINT_EXISTS" : "BAD_REQUEST", message } }, status);
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return error instanceof Error && /unique constraint|duplicate key/i.test(error.message);
+}
+
+function reconcileLegacyEmailMetadata(
+  metadata: string | null,
+  currentValue: string,
+  nextValue?: string,
+): string | undefined {
+  if (!metadata) return undefined;
+  try {
+    const parsed = JSON.parse(metadata) as Record<string, unknown>;
+    if (typeof parsed.email !== "string" || parsed.email.trim().toLowerCase() !== currentValue) return undefined;
+    if (!nextValue) {
+      const { email: _email, ...withoutEmail } = parsed;
+      return JSON.stringify(withoutEmail);
+    }
+    parsed.email = nextValue;
+    return JSON.stringify(parsed);
+  } catch {
+    return undefined;
+  }
+}
 
 function countByType(rows: RelationListEntry[]): Record<string, number> {
   const out: Record<string, number> = {};
@@ -396,6 +463,29 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     query = query.limit(limit).offset(offset);
 
     const entities = await query.execute();
+    const contactPointRows =
+      entities.length === 0
+        ? []
+        : await db
+            .selectFrom("entity_contact_points")
+            .selectAll()
+            .where(
+              "entity_id",
+              "in",
+              entities.map((entity) => entity.id),
+            )
+            .orderBy("kind", "asc")
+            .orderBy("is_primary", "desc")
+            .orderBy(sql`CASE WHEN source = 'manual' THEN 0 ELSE 1 END`, "asc")
+            .orderBy("created_at", "asc")
+            .orderBy("id", "asc")
+            .execute();
+    const contactPointsByEntity = new Map<string, ContactPointRow[]>();
+    for (const point of contactPointRows) {
+      const points = contactPointsByEntity.get(point.entity_id) ?? [];
+      points.push(point);
+      contactPointsByEntity.set(point.entity_id, points);
+    }
 
     let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total")).where(whereLiveEntity());
     if (typeFilter && typeFilter.length > 0) {
@@ -425,6 +515,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
         sourceType: e.source_type,
         subtype: e.subtype,
         aliases: e.aliases ? JSON.parse(e.aliases) : [],
+        contactPoints: (contactPointsByEntity.get(e.id) ?? []).map(serializeContactPoint),
         metadata: e.metadata ? JSON.parse(e.metadata) : null,
         status: e.status,
         hotness: e.hotness,
@@ -573,7 +664,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    const [sourceRefs, facts, manualShares] = await Promise.all([
+    const [sourceRefs, facts, manualShares, contactPoints] = await Promise.all([
       db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", entity.id).execute(),
       loadEntityFactsForId(db, entity.id, viewer),
       db
@@ -582,6 +673,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
         .where("entity_id", "=", entity.id)
         .orderBy("granted_at", "desc")
         .execute(),
+      repo.getContactPointsForEntity(entity.id),
     ]);
     if (!facts) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
@@ -598,6 +690,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
         sourceType: entity.source_type,
         subtype: entity.subtype,
         aliases: parsedAliases,
+        contactPoints: contactPoints.map(serializeContactPoint),
         metadata: facts.metadata,
         status: entity.status,
         hotness: entity.hotness,
@@ -624,6 +717,257 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
         lastSeenAt: r.last_seen_at,
       })),
     });
+  });
+
+  routes.post("/:id/contact-points", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entity = await repo.getEntity(c.req.param("id"), getFileViewer(c));
+    if (!entity) return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    if (entity.source_type !== "person") {
+      return c.json(
+        { error: { code: "UNPROCESSABLE_ENTITY", message: "Contact points are only editable for people" } },
+        422,
+      );
+    }
+    const parsed = createContactPointSchema.safeParse(await c.req.json());
+    if (!parsed.success) return contactPointError(c, parsed.error.issues[0]?.message ?? "Invalid contact point");
+    let value: string;
+    try {
+      value = normalizeContactPointValue(parsed.data.kind, parsed.data.value);
+    } catch (error) {
+      return contactPointError(c, error instanceof Error ? error.message : "Invalid contact point");
+    }
+    const duplicate = await db
+      .selectFrom("entity_contact_points")
+      .select("id")
+      .where("entity_id", "=", entity.id)
+      .where("kind", "=", parsed.data.kind)
+      .where("value", "=", value)
+      .executeTakeFirst();
+    if (duplicate) return contactPointError(c, "This contact point already exists on this person", 409);
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    try {
+      await db.transaction().execute(async (trx) => {
+        const existing = await trx
+          .selectFrom("entity_contact_points")
+          .select("id")
+          .where("entity_id", "=", entity.id)
+          .where("kind", "=", parsed.data.kind)
+          .executeTakeFirst();
+        const isPrimary = parsed.data.makePrimary === true || !existing;
+        if (isPrimary) {
+          await trx
+            .updateTable("entity_contact_points")
+            .set({ is_primary: 0, updated_at: now })
+            .where("entity_id", "=", entity.id)
+            .where("kind", "=", parsed.data.kind)
+            .execute();
+        }
+        await trx
+          .insertInto("entity_contact_points")
+          .values({
+            id,
+            entity_id: entity.id,
+            kind: parsed.data.kind,
+            value,
+            display_value: parsed.data.value,
+            label: parsed.data.label ?? null,
+            is_primary: isPrimary ? 1 : 0,
+            source: "manual",
+            connector_config_id: null,
+            created_by_user_id: c.get("sub") ?? null,
+            verified_at: null,
+            last_contacted_at: null,
+            created_at: now,
+            updated_at: now,
+          })
+          .execute();
+        await trx
+          .updateTable("entities")
+          .set({ provenance_tier: "declared", updated_at: now })
+          .where("id", "=", entity.id)
+          .execute();
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        const racedDuplicate = await db
+          .selectFrom("entity_contact_points")
+          .select("id")
+          .where("entity_id", "=", entity.id)
+          .where("kind", "=", parsed.data.kind)
+          .where("value", "=", value)
+          .executeTakeFirst();
+        if (racedDuplicate) return contactPointError(c, "This contact point already exists on this person", 409);
+        await db
+          .insertInto("entity_contact_points")
+          .values({
+            id,
+            entity_id: entity.id,
+            kind: parsed.data.kind,
+            value,
+            display_value: parsed.data.value,
+            label: parsed.data.label ?? null,
+            is_primary: 0,
+            source: "manual",
+            connector_config_id: null,
+            created_by_user_id: c.get("sub") ?? null,
+            verified_at: null,
+            last_contacted_at: null,
+            created_at: now,
+            updated_at: now,
+          })
+          .execute();
+        await db
+          .updateTable("entities")
+          .set({ provenance_tier: "declared", updated_at: now })
+          .where("id", "=", entity.id)
+          .execute();
+      } else {
+        throw error;
+      }
+    }
+    const created = await db
+      .selectFrom("entity_contact_points")
+      .selectAll()
+      .where("id", "=", id)
+      .executeTakeFirstOrThrow();
+    return c.json({ contactPoint: serializeContactPoint(created) }, 201);
+  });
+
+  routes.patch("/:id/contact-points/:contactPointId", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entity = await repo.getEntity(c.req.param("id"), getFileViewer(c));
+    if (!entity) return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    if (entity.source_type !== "person") {
+      return c.json(
+        { error: { code: "UNPROCESSABLE_ENTITY", message: "Contact points are only editable for people" } },
+        422,
+      );
+    }
+    const current = await db
+      .selectFrom("entity_contact_points")
+      .selectAll()
+      .where("id", "=", c.req.param("contactPointId"))
+      .where("entity_id", "=", entity.id)
+      .executeTakeFirst();
+    if (!current) return c.json({ error: { code: "NOT_FOUND", message: "Contact point not found" } }, 404);
+    if (current.kind !== "email" && current.kind !== "phone") {
+      return c.json({ error: { code: "UNPROCESSABLE_ENTITY", message: "This contact point is system-managed" } }, 422);
+    }
+    const parsed = updateContactPointSchema.safeParse(await c.req.json());
+    if (!parsed.success) return contactPointError(c, parsed.error.issues[0]?.message ?? "Invalid contact point");
+    const kind = parsed.data.kind ?? (current.kind as z.infer<typeof contactPointKindSchema>);
+    let value: string;
+    try {
+      value = normalizeContactPointValue(kind, parsed.data.value ?? current.value);
+    } catch (error) {
+      return contactPointError(c, error instanceof Error ? error.message : "Invalid contact point");
+    }
+    const duplicate = await db
+      .selectFrom("entity_contact_points")
+      .select("id")
+      .where("entity_id", "=", entity.id)
+      .where("kind", "=", kind)
+      .where("value", "=", value)
+      .where("id", "!=", current.id)
+      .executeTakeFirst();
+    if (duplicate) return contactPointError(c, "This contact point already exists on this person", 409);
+    const now = new Date().toISOString();
+    try {
+      await db.transaction().execute(async (trx) => {
+        const nextIsPrimary = parsed.data.isPrimary === undefined ? current.is_primary === 1 : parsed.data.isPrimary;
+        if (nextIsPrimary) {
+          await trx
+            .updateTable("entity_contact_points")
+            .set({ is_primary: 0, updated_at: now })
+            .where("entity_id", "=", entity.id)
+            .where("kind", "=", kind)
+            .where("id", "!=", current.id)
+            .execute();
+        }
+        await trx
+          .updateTable("entity_contact_points")
+          .set({
+            kind,
+            value,
+            display_value: parsed.data.value ?? current.display_value,
+            label: parsed.data.label === undefined ? current.label : parsed.data.label,
+            is_primary: nextIsPrimary ? 1 : 0,
+            source: "manual",
+            created_by_user_id: c.get("sub") ?? current.created_by_user_id,
+            updated_at: now,
+          })
+          .where("id", "=", current.id)
+          .execute();
+        if (current.kind === "email") {
+          const metadata = reconcileLegacyEmailMetadata(
+            entity.metadata,
+            current.value,
+            kind === "email" ? value : undefined,
+          );
+          if (metadata !== undefined) {
+            await trx.updateTable("entities").set({ metadata }).where("id", "=", entity.id).execute();
+          }
+        }
+        await trx
+          .updateTable("entities")
+          .set({ provenance_tier: "declared", updated_at: now })
+          .where("id", "=", entity.id)
+          .execute();
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        return contactPointError(c, "This contact point already exists on this person", 409);
+      }
+      throw error;
+    }
+    const updated = await db
+      .selectFrom("entity_contact_points")
+      .selectAll()
+      .where("id", "=", current.id)
+      .executeTakeFirstOrThrow();
+    return c.json({ contactPoint: serializeContactPoint(updated) });
+  });
+
+  routes.delete("/:id/contact-points/:contactPointId", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entity = await repo.getEntity(c.req.param("id"), getFileViewer(c));
+    if (!entity) return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    if (entity.source_type !== "person") {
+      return c.json(
+        { error: { code: "UNPROCESSABLE_ENTITY", message: "Contact points are only editable for people" } },
+        422,
+      );
+    }
+    const current = await db
+      .selectFrom("entity_contact_points")
+      .select(["id", "kind", "value"])
+      .where("id", "=", c.req.param("contactPointId"))
+      .where("entity_id", "=", entity.id)
+      .executeTakeFirst();
+    if (!current) return c.json({ error: { code: "NOT_FOUND", message: "Contact point not found" } }, 404);
+    if (current.kind !== "email" && current.kind !== "phone") {
+      return c.json({ error: { code: "UNPROCESSABLE_ENTITY", message: "This contact point is system-managed" } }, 422);
+    }
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .deleteFrom("entity_contact_points")
+        .where("id", "=", current.id)
+        .where("entity_id", "=", entity.id)
+        .execute();
+      if (current.kind === "email") {
+        const metadata = reconcileLegacyEmailMetadata(entity.metadata, current.value);
+        if (metadata !== undefined) {
+          await trx.updateTable("entities").set({ metadata }).where("id", "=", entity.id).execute();
+        }
+      }
+    });
+    return c.body(null, 204);
   });
 
   /**

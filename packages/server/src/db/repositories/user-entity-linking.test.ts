@@ -198,6 +198,12 @@ describe("ensureUserEntityLinkForEntity", () => {
       .where("user_id", "=", "phone-lifecycle")
       .executeTakeFirstOrThrow();
     await db
+      .updateTable("entity_contact_points")
+      .set({ is_primary: 0 })
+      .where("entity_id", "=", link.entity_id)
+      .where("kind", "=", "phone")
+      .execute();
+    await db
       .insertInto("entity_contact_points")
       .values({
         id: "foreign-phone",

@@ -601,13 +601,15 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     const [person] = await entityRepo.getPersonEntitiesByEmail("nisha@example.com");
     expect(person).toMatchObject({ source_type: "person", name: "Nisha Rao" });
     const rows = await entityRepo.getContactPointsForEntity(person.id);
-    expect(rows).toEqual([
-      expect.objectContaining({
-        kind: "linkedin",
-        value: "nisha-rao",
-        source: "fireflies",
-      }),
-    ]);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "linkedin",
+          value: "nisha-rao",
+          source: "fireflies",
+        }),
+      ]),
+    );
     const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
     expect(facts.every((fact) => fact.materialized_at !== null)).toBe(true);
   });

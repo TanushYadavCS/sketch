@@ -755,6 +755,7 @@ describe("createEntityRepository contact points", () => {
     expect(normalizeContactPointValue("whatsapp", "+1 415 555 1234")).toBe("+14155551234");
     expect(normalizeContactPointValue("linkedin", "https://www.linkedin.com/in/Simran-Suri/")).toBe("simran-suri");
     expect(normalizeContactPointValue("linkedin", "@Simran-Suri")).toBe("simran-suri");
+    expect(() => normalizeContactPointValue("email", "a@")).toThrow();
   });
 
   it("deduplicates and preserves contact point provenance", async () => {
@@ -802,6 +803,18 @@ describe("createEntityRepository contact points", () => {
       last_contacted_at: "2026-01-02T00:00:00.000Z",
       is_primary: 1,
     });
+
+    await repo.upsertContactPoint({
+      entityId: entity.id,
+      kind: "email",
+      value: "simran@acme.com",
+      label: "inferred label",
+      source: "gmail",
+      makePrimary: true,
+    });
+    await expect(repo.getContactPointsForEntity(entity.id)).resolves.toEqual([
+      expect.objectContaining({ label: "work", source: "manual", is_primary: 1 }),
+    ]);
   });
 
   it("finds people by either contact point email or metadata email", async () => {

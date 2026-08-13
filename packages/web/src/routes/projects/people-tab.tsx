@@ -23,7 +23,7 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ContactLine, contactPointsFromMetadata } from "./contact-line";
+import { ContactLine } from "./contact-line";
 import { ReviewBandCapped } from "./org-review";
 import { OrgRow } from "./org-row";
 
@@ -262,7 +262,13 @@ function PersonRow({ person }: { person: EntityListItem }) {
   const role = (meta.role ?? meta.title ?? null) as string | null;
   const subtype = person.subtype === "internal" ? "Internal" : "External";
   const subtitle = [role, subtype].filter(Boolean).join(" · ") || null;
-  const contacts = contactPointsFromMetadata(person.metadata);
+  const contacts = person.contactPoints
+    .filter((point) => point.kind === "email" || point.kind === "phone" || point.kind === "whatsapp")
+    .map((point) => ({
+      kind: point.kind as "email" | "phone" | "whatsapp",
+      value: point.value,
+      source: point.source === "manual" ? ("manual" as const) : ("connector" as const),
+    }));
 
   return (
     <OrgRow

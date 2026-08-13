@@ -183,6 +183,7 @@ import * as m180 from "./migrations/180-whatsapp-chunk-conversion-state";
 import * as m181 from "./migrations/181-project-minting-verdicts";
 import * as m182 from "./migrations/182-project-minting-states";
 import * as m183 from "./migrations/183-graph-pass-runs";
+import * as m184 from "./migrations/184-person-contact-point-cutover";
 import type { DB } from "./schema";
 
 /**
@@ -375,6 +376,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "181-project-minting-verdicts": m181,
           "182-project-minting-states": m182,
           "183-graph-pass-runs": m183,
+          "184-person-contact-point-cutover": m184,
         };
       },
     },

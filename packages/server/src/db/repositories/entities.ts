@@ -296,7 +296,7 @@ function toDeclaredProductListEntry(entity: Selectable<EntitiesTable>): Declared
 export function normalizeContactPointValue(kind: EntityContactPointKind, value: string): string {
   if (kind === "email") {
     const normalized = value.trim().toLowerCase();
-    if (!normalized || !normalized.includes("@")) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
       throw new Error("Email contact point must be a valid email-like value");
     }
     return normalized;
@@ -357,6 +357,38 @@ async function loadCrmActivityBrief(db: Kysely<DB>, entityId: string): Promise<E
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
+  async function ensurePersonEmailContactPoint(entityId: string, rawEmail: string | undefined, source: string) {
+    if (!rawEmail) return;
+    const value = normalizeContactPointValue("email", rawEmail);
+    const existing = await db
+      .selectFrom("entity_contact_points")
+      .select("id")
+      .where("entity_id", "=", entityId)
+      .where("kind", "=", "email")
+      .executeTakeFirst();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: randomUUID(),
+        entity_id: entityId,
+        kind: "email",
+        value,
+        display_value: null,
+        label: null,
+        is_primary: existing ? 0 : 1,
+        source,
+        connector_config_id: null,
+        created_by_user_id: null,
+        verified_at: null,
+        last_contacted_at: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict((conflict) => conflict.columns(["entity_id", "kind", "value"]).doNothing())
+      .execute();
+  }
+
   async function createEntityRow(data: UpsertEntityData) {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -699,8 +731,7 @@ export function createEntityRepository(db: Kysely<DB>) {
      */
     async attachEmailIfAbsent(entityId: string, email: string) {
       const targetEntityId = await resolveLiveEntityId(db, entityId);
-      const trimmed = email.trim();
-      if (!trimmed) return;
+      const normalized = normalizeContactPointValue("email", email);
       const row = await db
         .selectFrom("entities")
         .select(["metadata"])
@@ -709,13 +740,15 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirst();
       if (!row) return;
       const meta: Record<string, unknown> = row.metadata ? JSON.parse(row.metadata) : {};
-      if (typeof meta.email === "string" && meta.email.length > 0) return;
-      meta.email = trimmed;
-      await db
-        .updateTable("entities")
-        .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
-        .where("id", "=", targetEntityId)
-        .execute();
+      if (!(typeof meta.email === "string" && meta.email.length > 0)) {
+        meta.email = normalized;
+        await db
+          .updateTable("entities")
+          .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
+          .where("id", "=", targetEntityId)
+          .execute();
+      }
+      await ensurePersonEmailContactPoint(targetEntityId, normalized, "manual");
     },
 
     // ── Source Refs ──
@@ -865,7 +898,19 @@ export function createEntityRepository(db: Kysely<DB>) {
       const now = new Date().toISOString();
 
       await db.transaction().execute(async (trx) => {
-        if (data.makePrimary) {
+        const manualPrimary =
+          data.source === "manual"
+            ? undefined
+            : await trx
+                .selectFrom("entity_contact_points")
+                .select(["id", "value"])
+                .where("entity_id", "=", entityId)
+                .where("kind", "=", data.kind)
+                .where("is_primary", "=", 1)
+                .where("source", "=", "manual")
+                .executeTakeFirst();
+        const makePrimary = data.makePrimary === true && !manualPrimary;
+        if (makePrimary) {
           await trx
             .updateTable("entity_contact_points")
             .set({ is_primary: 0, updated_at: now })
@@ -883,7 +928,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             value,
             display_value: data.displayValue ?? null,
             label: data.label ?? null,
-            is_primary: data.makePrimary ? 1 : 0,
+            is_primary: makePrimary ? 1 : 0,
             source: data.source,
             connector_config_id: data.connectorConfigId ?? null,
             created_by_user_id: data.createdByUserId ?? null,
@@ -895,9 +940,9 @@ export function createEntityRepository(db: Kysely<DB>) {
           .onConflict((oc) =>
             oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
               display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
-              label: sql`COALESCE(excluded.label, entity_contact_points.label)`,
-              is_primary: data.makePrimary ? 1 : sql`entity_contact_points.is_primary`,
-              source: data.source,
+              label: sql`CASE WHEN entity_contact_points.source = 'manual' THEN entity_contact_points.label ELSE COALESCE(excluded.label, entity_contact_points.label) END`,
+              is_primary: makePrimary ? 1 : sql`entity_contact_points.is_primary`,
+              source: sql`CASE WHEN entity_contact_points.source = 'manual' THEN entity_contact_points.source ELSE excluded.source END`,
               connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
               created_by_user_id: sql`COALESCE(excluded.created_by_user_id, entity_contact_points.created_by_user_id)`,
               verified_at: sql`CASE
@@ -934,7 +979,8 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where("entity_id", "=", entityId)
         .orderBy("kind", "asc")
         .orderBy("is_primary", "desc")
-        .orderBy(sql`COALESCE(last_contacted_at, '')`, "desc")
+        .orderBy(sql`CASE WHEN source = 'manual' THEN 0 ELSE 1 END`, "asc")
+        .orderBy("created_at", "asc")
         .orderBy("id", "asc")
         .execute();
     },
@@ -1007,7 +1053,6 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "=", email)
         .execute();
-
       const byId = new Map<string, Selectable<EntitiesTable>>();
       for (const entity of [...byContactPoint, ...byMetadata]) byId.set(entity.id, entity);
       return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
@@ -1040,7 +1085,6 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "in", emails)
         .execute();
-
       const byEmailAndId = new Map<string, Map<string, Selectable<EntitiesTable>>>();
       for (const row of [...byContactPoint, ...byMetadata]) {
         const matchedEmail = row.matched_email;
@@ -1538,23 +1582,36 @@ export function createEntityRepository(db: Kysely<DB>) {
             .where("source", "=", data.source)
             .where("source_id", "=", data.sourceId)
             .execute();
+          await ensurePersonEmailContactPoint(bySourceRef.id, data.email, data.source);
           return reconcilePersonSubtypeForEntity(bySourceRef.id, data.subtype, data.provenanceTier);
         }
       }
 
       // Match by email first (most reliable dedup for people)
       if (data.email) {
-        const byEmail = await db
+        const normalizedEmail = normalizeContactPointValue("email", data.email);
+        const contactMatches = await db
+          .selectFrom("entity_contact_points")
+          .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+          .selectAll("entities")
+          .where("entity_contact_points.kind", "=", "email")
+          .where("entity_contact_points.value", "=", normalizedEmail)
+          .where("entities.source_type", "=", "person")
+          .where(whereLiveEntity())
+          .execute();
+        const metadataMatches = await db
           .selectFrom("entities")
           .selectAll()
           .where("source_type", "=", "person")
           .where(
             isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`,
             "=",
-            data.email,
+            normalizedEmail,
           )
           .where(whereLiveEntity())
-          .executeTakeFirst();
+          .execute();
+        const matches = new Map([...contactMatches, ...metadataMatches].map((entity) => [entity.id, entity]));
+        const byEmail = matches.size === 1 ? [...matches.values()][0] : undefined;
 
         if (byEmail) {
           const aliases: string[] = JSON.parse(byEmail.aliases || "[]");
@@ -1626,6 +1683,7 @@ export function createEntityRepository(db: Kysely<DB>) {
               .execute();
           }
 
+          await ensurePersonEmailContactPoint(byEmail.id, data.email, data.source);
           return reconcilePersonSubtypeForEntity(byEmail.id, data.subtype, data.provenanceTier);
         }
       }
@@ -1700,6 +1758,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             .execute();
         }
 
+        await ensurePersonEmailContactPoint(byName.id, data.email, data.source);
         return reconcilePersonSubtypeForEntity(byName.id, data.subtype, data.provenanceTier);
       }
 
@@ -1738,6 +1797,8 @@ export function createEntityRepository(db: Kysely<DB>) {
           last_seen_at: now,
         })
         .execute();
+
+      await ensurePersonEmailContactPoint(id, data.email, data.source);
 
       return await db
         .selectFrom("entities")
@@ -1782,6 +1843,8 @@ export function createEntityRepository(db: Kysely<DB>) {
           last_seen_at: now,
         })
         .execute();
+
+      await ensurePersonEmailContactPoint(id, data.email, data.source);
 
       return await db
         .selectFrom("entities")
