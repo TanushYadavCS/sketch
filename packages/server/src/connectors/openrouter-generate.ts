@@ -108,7 +108,8 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
     const requiresParameters = opts?.responseMimeType === "application/json";
 
     async function postChat(withTemperature: boolean) {
-      const effort = opts?.reasoningEffort ?? options.reasoningEffort ?? (withTemperature ? undefined : FALLBACK_REASONING_EFFORT);
+      const effort =
+        opts?.reasoningEffort ?? options.reasoningEffort ?? (withTemperature ? undefined : FALLBACK_REASONING_EFFORT);
       const response = await fetch(OPENROUTER_CHAT_URL, {
         method: "POST",
         signal: controller.signal,
