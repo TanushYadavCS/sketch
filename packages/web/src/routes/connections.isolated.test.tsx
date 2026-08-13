@@ -390,7 +390,8 @@ describe("ConnectionsPage direct connect", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Add integration" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Add integration" }));
     await user.click(await screen.findByRole("button", { name: /GitHub/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Create a GitHub personal access token" })).toBeInTheDocument();
 
     const tokenInput = await screen.findByLabelText("Personal access token");
     await user.type(tokenInput, "ghp_test_token");
@@ -463,7 +464,6 @@ describe("ConnectionsPage direct connect", () => {
     renderWithProviders(<ConnectionsPage />);
     await user.click(await screen.findByRole("button", { name: "Add integration" }));
     await user.click(await screen.findByRole("button", { name: /GitHub/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.type(await screen.findByLabelText("Personal access token"), "ghp_test_token");
     await user.click(screen.getByRole("button", { name: "Verify and continue" }));
 

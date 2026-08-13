@@ -36,7 +36,7 @@ import { toast } from "sonner";
 
 const GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens";
 
-type SetupStep = "understand" | "token" | "access" | "success";
+type SetupStep = "token" | "access" | "success";
 type GithubVerificationIdentity = {
   externalId: string;
   login: string;
@@ -254,7 +254,7 @@ export function GithubIntegrationDialog({
   isAdmin: boolean;
   onSuccess: (connection: CliIntegrationConnection) => void;
 }) {
-  const [step, setStep] = useState<SetupStep>("understand");
+  const [step, setStep] = useState<SetupStep>("token");
   const [token, setToken] = useState("");
   const [connection, setConnection] = useState<CliIntegrationConnection | null>(null);
   const [verifiedIdentity, setVerifiedIdentity] = useState<GithubVerificationIdentity | null>(null);
@@ -264,7 +264,7 @@ export function GithubIntegrationDialog({
 
   useEffect(() => {
     if (open) return;
-    setStep("understand");
+    setStep("token");
     setToken("");
     setConnection(null);
     setVerifiedIdentity(null);
@@ -330,32 +330,27 @@ export function GithubIntegrationDialog({
               </div>
             </div>
           </DialogHeader>
-          <SetupProgress step={step} />
-
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {step === "understand" && (
-              <div className="space-y-4 py-2 text-sm">
-                <p>
-                  Your personal access token stays encrypted in Sketch. GitHub actions run as the token&apos;s GitHub
-                  account, and repository access follows the permissions GitHub grants that account.
-                </p>
-                <p className="text-muted-foreground">
-                  We recommend a fine-grained token with the least privilege needed. Token verification proves identity;
-                  it does not prove access to every repository.
-                </p>
-                <a
-                  className="text-sm underline underline-offset-4"
-                  href={GITHUB_TOKEN_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Create a GitHub personal access token
-                </a>
-              </div>
-            )}
-
+          <div className="min-h-0 flex-1 overflow-y-auto px-1">
             {step === "token" && (
-              <div className="space-y-4 py-2">
+              <div className="space-y-5 py-2">
+                <div className="space-y-3 text-sm">
+                  <p>
+                    Your personal access token stays encrypted in Sketch. GitHub actions run as the token&apos;s GitHub
+                    account, and repository access follows the permissions GitHub grants that account.
+                  </p>
+                  <p className="text-muted-foreground">
+                    We recommend a fine-grained token with the least privilege needed. Verification proves identity; it
+                    does not prove access to every repository.
+                  </p>
+                  <a
+                    className="inline-block underline underline-offset-4"
+                    href={GITHUB_TOKEN_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Create a GitHub personal access token
+                  </a>
+                </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="github-pat">Personal access token</Label>
                   <Input
@@ -413,18 +408,10 @@ export function GithubIntegrationDialog({
           </div>
 
           <DialogFooter className="shrink-0 border-t bg-background/95 px-6 py-4 backdrop-blur">
-            {step === "understand" && (
+            {step === "token" && (
               <>
                 <Button variant="outline" onClick={close} disabled={saving}>
                   Cancel
-                </Button>
-                <Button onClick={() => setStep("token")}>Continue</Button>
-              </>
-            )}
-            {step === "token" && (
-              <>
-                <Button variant="outline" onClick={() => setStep("understand")} disabled={saving}>
-                  Back
                 </Button>
                 <Button onClick={verify} disabled={!token.trim() || saving}>
                   {saving ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
@@ -520,7 +507,7 @@ function GithubConnectionManageDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-1 py-2">
             <section className="rounded-lg border border-border bg-muted/10 p-4">
               <div className="flex items-start gap-3">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -652,28 +639,6 @@ function GithubConnectionManageDialog({
         </DialogContent>
       </Dialog>
     </>
-  );
-}
-
-function SetupProgress({ step }: { step: SetupStep }) {
-  const current = step === "understand" ? 1 : step === "token" ? 2 : step === "access" ? 3 : 4;
-  const labels = ["Intro", "Token", "Access", "Done"];
-  return (
-    <div aria-label={`GitHub setup step ${current} of 4`} className="grid grid-cols-4 gap-2 py-1">
-      {labels.map((label, index) => {
-        const number = index + 1;
-        const complete = number < current;
-        const active = number === current;
-        return (
-          <div key={label} className="space-y-1.5">
-            <div className={`h-1 rounded-full ${complete || active ? "bg-primary" : "bg-muted"}`} />
-            <p className={`text-[10px] ${active ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
-              {number}. {label}
-            </p>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
