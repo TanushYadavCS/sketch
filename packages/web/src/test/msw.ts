@@ -193,6 +193,42 @@ export const handlers = [
           is_whatsapp_fallback: false,
           created_at: "2026-01-02T00:00:00Z",
         },
+        {
+          id: "u3",
+          name: "Carol Davis",
+          email: "carol@example.com",
+          email_verified_at: "2026-01-03T00:00:00Z",
+          auth_role: "member",
+          slack_user_id: null,
+          whatsapp_number: "+14155550103",
+          description: null,
+          type: "human",
+          role: null,
+          reports_to: null,
+          allowed_tools: null,
+          slack_channel_ids: [],
+          whatsapp_group_jids: [],
+          is_whatsapp_fallback: false,
+          created_at: "2026-01-03T00:00:00Z",
+        },
+        {
+          id: "u4",
+          name: "Dave Evans",
+          email: "dave@example.com",
+          email_verified_at: "2026-01-04T00:00:00Z",
+          auth_role: "member",
+          slack_user_id: null,
+          whatsapp_number: "+14155550104",
+          description: null,
+          type: "human",
+          role: null,
+          reports_to: null,
+          allowed_tools: null,
+          slack_channel_ids: [],
+          whatsapp_group_jids: [],
+          is_whatsapp_fallback: false,
+          created_at: "2026-01-04T00:00:00Z",
+        },
       ],
     });
   }),
@@ -460,6 +496,74 @@ export const handlers = [
 
   http.get("/api/web-chat/conversations", () => {
     return HttpResponse.json({ conversations: [] });
+  }),
+
+  http.get("/api/scheduled-tasks/:id/shares", () => {
+    return HttpResponse.json({ shares: [] });
+  }),
+
+  http.put("/api/scheduled-tasks/:id/shares/:userId", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.delete("/api/scheduled-tasks/:id/shares/:userId", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.get("/api/scheduled-tasks", () => {
+    return HttpResponse.json({
+      tasks: [
+        {
+          id: "task-1",
+          platform: "slack",
+          contextType: "channel",
+          deliveryTarget: "C123",
+          threadTs: null,
+          prompt: "Post the Monday revenue summary",
+          scheduleType: "cron",
+          scheduleValue: "0 9 * * 1",
+          timezone: "Asia/Kolkata",
+          sessionMode: "fresh",
+          nextRunAt: "2026-03-20T03:30:00.000Z",
+          lastRunAt: "2026-03-13T03:30:00.000Z",
+          status: "active",
+          createdBy: "u1",
+          createdAt: "2026-03-10T09:15:00.000Z",
+          targetLabel: "#ops",
+          targetKindLabel: "Slack channel",
+          creatorName: "Alice Smith",
+          scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
+          canPause: true,
+          canResume: false,
+          canDelete: true,
+          title: null,
+          description: null,
+          originChat: null,
+          steps: null,
+          stepCount: 0,
+          triggerConfig: null,
+          outputTarget: null,
+          outputPlatform: null,
+          outputThreadTs: null,
+          outputMode: "deliver",
+          delivery: {
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C123",
+            threadTs: null,
+            mode: "deliver",
+            label: "#ops",
+          },
+          lastRunStatus: null,
+          runCount: 0,
+          shareCount: 0,
+          sharedWithMe: false,
+          canShare: true,
+          canEdit: true,
+          isOwner: true,
+        },
+      ],
+    });
   }),
 
   http.post("/api/scheduled-tasks/:taskId/runs", ({ params }) => {

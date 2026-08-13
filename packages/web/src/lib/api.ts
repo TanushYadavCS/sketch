@@ -12,6 +12,7 @@ import type {
   AutomationDefinition,
   AutomationDraftHandoff,
   AutomationRun,
+  AutomationShare,
   AutomationStepContent,
   CanvasWebhookEndpoint,
   FileMetadata,
@@ -38,6 +39,7 @@ export type {
   AutomationBuilderSaveRequest,
   AutomationDefinition,
   AutomationRun,
+  AutomationShare,
   AutomationStepContent,
   CanvasWebhookEndpoint,
   StepOutput,
@@ -160,6 +162,11 @@ export interface ScheduledTaskListItem {
   };
   lastRunStatus: string | null;
   runCount: number;
+  shareCount?: number;
+  sharedWithMe?: boolean;
+  canShare?: boolean;
+  canEdit?: boolean;
+  isOwner?: boolean;
 }
 
 export interface ScheduledTaskOriginChatMessage {
@@ -232,6 +239,7 @@ export interface AutomationRunItem {
   error_message: string | null;
   started_at: string;
   completed_at: string | null;
+  triggered_by_user_id?: string | null;
 }
 
 export type AutomationRunStatus =
@@ -2568,6 +2576,21 @@ export const api = {
     async listRuns(taskId: string) {
       const res = await request<{ runs: AutomationRunItem[] }>(`/api/scheduled-tasks/${taskId}/runs`);
       return res.runs;
+    },
+    listShares(taskId: string) {
+      return request<{ shares: AutomationShare[] }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares`);
+    },
+    grantShare(taskId: string, userId: string) {
+      return request<{ success: boolean }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
+        { method: "PUT" },
+      );
+    },
+    revokeShare(taskId: string, userId: string) {
+      return request<{ success: boolean }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
+        { method: "DELETE" },
+      );
     },
     async getRun(taskId: string, runId: string) {
       const res = await request<{ run: unknown }>(

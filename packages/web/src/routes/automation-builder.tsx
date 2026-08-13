@@ -1,3 +1,4 @@
+import { AutomationShareDialog } from "@/components/automations/share-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { SketchMessage, UserMessage } from "@/components/sketch/chat-message";
 import {
@@ -64,6 +65,7 @@ import {
   PlayIcon,
   PlusIcon,
   RobotIcon,
+  ShareNetworkIcon,
   SlackLogoIcon,
   SpinnerGapIcon,
   TableIcon,
@@ -571,6 +573,7 @@ export function AutomationBuilderPage() {
   const [discardingSetup, setDiscardingSetup] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [builderChatBusy, setBuilderChatBusy] = useState(false);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
@@ -608,6 +611,24 @@ export function AutomationBuilderPage() {
         : AUTOMATION_REFRESH_INTERVAL_MS,
     refetchOnWindowFocus: true,
   });
+
+  const hasAttributedRuns = Boolean(
+    automationQuery.data?.recentRuns.some((run) => Boolean(run.triggeredByUserId)) ||
+      automationQuery.data?.latestRun?.triggeredByUserId,
+  );
+  const attributionUsersQuery = useQuery({
+    queryKey: ["automation-run-attribution-users"],
+    queryFn: () => api.users.list(),
+    enabled: hasAttributedRuns,
+    staleTime: 60_000,
+  });
+  const memberNameById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const user of attributionUsersQuery.data?.users ?? []) {
+      names.set(user.id, user.name);
+    }
+    return names;
+  }, [attributionUsersQuery.data]);
 
   useEffect(() => {
     if (!automationQuery.data || pendingSaveCountRef.current > 0) return;
@@ -928,6 +949,7 @@ export function AutomationBuilderPage() {
             <RunsMenu
               runs={automation.recentRuns}
               activeRunId={selectedRun?.id ?? null}
+              memberNameById={memberNameById}
               onSelectRun={(runId) => {
                 setTriggeredRunId(null);
                 setRunRequestError(null);
@@ -952,6 +974,25 @@ export function AutomationBuilderPage() {
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
             <BuilderOwnership automation={automation} />
+            {automation.canShare === true ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className={cn(canvasToolbarButtonClass, "gap-1.5")}
+                onClick={() => setShareDialogOpen(true)}
+              >
+                <ShareNetworkIcon size={14} />
+                Share{automation.shares && automation.shares.length > 0 ? ` · ${automation.shares.length}` : ""}
+              </Button>
+            ) : null}
+            {automation.isOwner === false ? (
+              <span
+                data-testid="automation-shared-hint"
+                className="inline-flex min-h-8 items-center rounded-[7px] border border-border/70 bg-card/90 px-2.5 text-[11px] font-medium text-muted-foreground backdrop-blur"
+              >
+                Shared with you · runs execute with the owner's integrations
+              </span>
+            ) : null}
             {runStateMessage || exactRunUnavailable || exactRunLoading || runRequestError ? (
               <AutomationRunStatusNotice
                 state={runRequestError ? "failure" : selectedRunLifecycle}
@@ -1049,6 +1090,15 @@ export function AutomationBuilderPage() {
         testingStepId={testingStepId}
         onUpdateAgentPrompt={updateAgentPrompt}
         savingPromptStepId={savingPromptStepId}
+      />
+
+      <AutomationShareDialog
+        taskId={taskId}
+        taskName={automationTitle}
+        ownerUserId={automation.createdBy}
+        canShare={automation.canShare === true}
+        open={shareDialogOpen}
+        onOpenChange={setShareDialogOpen}
       />
     </div>
   );
@@ -3109,10 +3159,12 @@ const nodeTypes = {
 function RunsMenu({
   runs,
   activeRunId,
+  memberNameById,
   onSelectRun,
 }: {
   runs: AutomationDefinition["recentRuns"];
   activeRunId: string | null;
+  memberNameById: ReadonlyMap<string, string>;
   onSelectRun: (runId: string) => void;
 }) {
   const active = activeRunId ? runs.find((run) => run.id === activeRunId) : runs[0];
@@ -3143,6 +3195,11 @@ function RunsMenu({
               <DropdownMenuItem key={run.id} onSelect={() => onSelectRun(run.id)} className="gap-3">
                 <RunIcon status={run.status} />
                 <span className="min-w-0 flex-1 truncate text-xs">{formatRunDate(run.startedAt)}</span>
+                {run.triggeredByUserId ? (
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    · by {memberNameById.get(run.triggeredByUserId) ?? "a member"}
+                  </span>
+                ) : null}
                 <span className="text-xs capitalize text-muted-foreground">
                   {lifecycle ? runStatusLabel(lifecycle) : run.status}
                 </span>

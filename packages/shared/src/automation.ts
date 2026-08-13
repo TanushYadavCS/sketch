@@ -225,9 +225,22 @@ export const automationRunSchema = z.object({
   errorMessage: z.string().nullable(),
   startedAt: z.string(),
   completedAt: z.string().nullable(),
+  triggeredByUserId: z.string().nullable().optional(),
 });
 
 export type AutomationRun = z.infer<typeof automationRunSchema>;
+
+export const automationShareSchema = z
+  .object({
+    userId: z.string(),
+    name: z.string().nullable(),
+    email: z.string().nullable(),
+    grantedByUserId: z.string().nullable(),
+    grantedAt: z.string(),
+  })
+  .strict();
+
+export type AutomationShare = z.infer<typeof automationShareSchema>;
 
 export const automationDefinitionSchema = z.object({
   id: z.string(),
@@ -265,6 +278,10 @@ export const automationDefinitionSchema = z.object({
   stepContent: z.record(z.string(), automationStepContentSchema),
   latestRun: automationRunSchema.nullable(),
   recentRuns: z.array(automationRunSchema),
+  shares: z.array(automationShareSchema).optional(),
+  canShare: z.boolean().optional(),
+  canEdit: z.boolean().optional(),
+  isOwner: z.boolean().optional(),
 });
 
 export type AutomationDefinition = z.infer<typeof automationDefinitionSchema>;
