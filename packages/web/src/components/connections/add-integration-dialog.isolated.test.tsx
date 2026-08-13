@@ -73,13 +73,13 @@ describe("AddIntegrationDialog", () => {
     server.use(
       http.get("/api/mcp-servers/provider-1/apps", () =>
         HttpResponse.json({
-          apps: [{ id: "github", name: "GitHub", description: "Code hosting" }],
+          apps: [{ id: "notion", name: "Notion", description: "Workspace notes" }],
           pageInfo: { endCursor: null, hasMore: false },
         }),
       ),
       http.post("/api/mcp-servers/provider-1/connections/intents", () =>
         HttpResponse.json({
-          app: { id: "github", name: "GitHub", description: "Code hosting" },
+          app: { id: "notion", name: "Notion", description: "Workspace notes" },
           redirectUrl: "https://example.com/oauth",
         }),
       ),
@@ -87,11 +87,11 @@ describe("AddIntegrationDialog", () => {
         HttpResponse.json({
           connections: [
             {
-              id: "secrets:owner-1:github:github",
+              id: "secrets:owner-1:notion:notion",
               providerId: "provider-1",
               source: "canvas_user_secrets",
-              appId: "github",
-              appName: "GitHub",
+              appId: "notion",
+              appName: "Notion",
               status: "active",
               accessLevel: "organization",
               ownerName: "Tara",
@@ -113,7 +113,7 @@ describe("AddIntegrationDialog", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: /GitHub/ }));
+    await user.click(await screen.findByRole("button", { name: /Notion/ }));
     expect(await screen.findByText("Waiting for authorization...")).toBeInTheDocument();
 
     popup.closed = true;

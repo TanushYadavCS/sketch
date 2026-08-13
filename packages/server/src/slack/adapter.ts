@@ -197,6 +197,13 @@ export interface SlackAdapterDeps {
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
+  listAgentEnvForRuntime?: (context: {
+    currentUserId?: string | null;
+    contextType?: "dm" | "channel_mention" | "scheduled_task";
+    allowOrgSharedEnv?: boolean;
+    taskContext?: RunAgentParams["taskContext"];
+  }) => Promise<Record<string, string>>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -768,6 +775,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       botName: settingsRow?.bot_name,
       integrationMcpServers: await buildMcpServers(requester.email),
       loadIntegrationProvider,
+      cliIntegrations: deps.cliIntegrations,
+      agentEnv: await (deps.listAgentEnvForRuntime?.({
+        currentUserId: requester.id,
+        contextType: isDm ? "dm" : "channel_mention",
+        allowOrgSharedEnv: true,
+        taskContext: {
+          platform: "slack",
+          contextType: isDm ? "dm" : "channel",
+          deliveryTarget: resumeWork.context.conversationId,
+          createdBy: requester.id,
+        },
+      }) ?? Promise.resolve(undefined)),
       contextType: isDm ? "dm" : "channel_mention",
       currentUserId: requester.id,
       ...(boundAgent?.description ? { agentInstructions: boundAgent.description } : {}),
@@ -1272,6 +1291,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               attachments: attachments.length > 0 ? attachments : undefined,
               integrationMcpServers,
               loadIntegrationProvider,
+              cliIntegrations: deps.cliIntegrations,
+              agentEnv: await (deps.listAgentEnvForRuntime?.({
+                currentUserId: user.id,
+                contextType: "dm",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "slack",
+                  contextType: "dm",
+                  deliveryTarget: message.channelId,
+                  createdBy: user.id,
+                },
+              }) ?? Promise.resolve(undefined)),
               contextType: "dm",
               taskContext: {
                 platform: "slack" as const,
@@ -1784,6 +1815,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               attachments: attachments.length > 0 ? attachments : undefined,
               integrationMcpServers,
               loadIntegrationProvider,
+              cliIntegrations: deps.cliIntegrations,
+              agentEnv: await (deps.listAgentEnvForRuntime?.({
+                currentUserId: activeUser.id,
+                contextType: "channel_mention",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "slack",
+                  contextType: "channel",
+                  deliveryTarget: message.channelId,
+                  createdBy: activeUser.id,
+                },
+              }) ?? Promise.resolve(undefined)),
               contextType: "channel_mention",
               currentUserId: activeUser.id,
               taskContext: {

@@ -168,6 +168,13 @@ export interface WhatsAppAdapterDeps {
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
+  listAgentEnvForRuntime?: (context: {
+    currentUserId?: string | null;
+    contextType?: "dm" | "channel_mention" | "scheduled_task";
+    allowOrgSharedEnv?: boolean;
+    taskContext?: RunAgentParams["taskContext"];
+  }) => Promise<Record<string, string>>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -1273,6 +1280,18 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             attachments: agentAttachments.length > 0 ? agentAttachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
             loadIntegrationProvider,
+            cliIntegrations: deps.cliIntegrations,
+            agentEnv: await (deps.listAgentEnvForRuntime?.({
+              currentUserId: user.id,
+              contextType: "dm",
+              allowOrgSharedEnv: true,
+              taskContext: {
+                platform: "whatsapp",
+                contextType: "dm",
+                deliveryTarget: deliveryTargetId,
+                createdBy: user.id,
+              },
+            }) ?? Promise.resolve(undefined)),
             contextType: "dm",
             taskContext: waTaskContext,
             scheduler,
@@ -1604,6 +1623,20 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           attachments: agentAttachments.length > 0 ? agentAttachments : undefined,
           integrationMcpServers,
           loadIntegrationProvider,
+          cliIntegrations: deps.cliIntegrations,
+          agentEnv: await (user && deps.listAgentEnvForRuntime
+            ? deps.listAgentEnvForRuntime({
+                currentUserId: user.id,
+                contextType: "channel_mention",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "whatsapp",
+                  contextType: "group",
+                  deliveryTarget: groupJid,
+                  createdBy: user.id,
+                },
+              })
+            : Promise.resolve(undefined)),
           contextType: "channel_mention",
           currentUserId: user?.id ?? null,
           taskContext: {

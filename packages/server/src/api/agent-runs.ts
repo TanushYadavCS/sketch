@@ -77,6 +77,13 @@ interface AgentRunRouteDeps {
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
+  listAgentEnvForRuntime?: (context: {
+    currentUserId?: string | null;
+    contextType?: "dm" | "channel_mention" | "scheduled_task";
+    allowOrgSharedEnv?: boolean;
+    taskContext?: RunAgentParams["taskContext"];
+  }) => Promise<Record<string, string>>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -184,6 +191,8 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
         botName: settingsRow?.bot_name,
         integrationMcpServers,
         loadIntegrationProvider: deps.loadIntegrationProvider,
+        cliIntegrations: deps.cliIntegrations,
+        agentEnv: undefined,
         scheduler: deps.scheduler,
         stepContentRepo: deps.stepContentRepo,
         automationRunsRepo: deps.automationRunsRepo,
@@ -259,6 +268,19 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
           const result = await deps.runAgent({
             ...baseRunParams,
+            agentEnv: deps.listAgentEnvForRuntime
+              ? await deps.listAgentEnvForRuntime({
+                  currentUserId: requester.id,
+                  contextType: "dm",
+                  allowOrgSharedEnv: true,
+                  taskContext: {
+                    platform: parsed.data.target.platform,
+                    contextType: "dm",
+                    deliveryTarget: deliveryTarget ?? target.id,
+                    createdBy: requester.id,
+                  },
+                })
+              : undefined,
             workspaceKey: target.id,
             userMessage,
             workspaceDir,
@@ -371,6 +393,19 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
           const result = await deps.runAgent({
             ...baseRunParams,
+            agentEnv: deps.listAgentEnvForRuntime
+              ? await deps.listAgentEnvForRuntime({
+                  currentUserId: requester.id,
+                  contextType: "channel_mention",
+                  allowOrgSharedEnv: true,
+                  taskContext: {
+                    platform: "slack",
+                    contextType: "channel",
+                    deliveryTarget: parsed.data.target.channelId,
+                    createdBy: requester.id,
+                  },
+                })
+              : undefined,
             workspaceKey: channelWorkspaceKey,
             userMessage,
             workspaceDir,
@@ -461,6 +496,19 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
         const result = await deps.runAgent({
           ...baseRunParams,
+          agentEnv: deps.listAgentEnvForRuntime
+            ? await deps.listAgentEnvForRuntime({
+                currentUserId: requester.id,
+                contextType: "channel_mention",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "whatsapp",
+                  contextType: "group",
+                  deliveryTarget: groupJid,
+                  createdBy: requester.id,
+                },
+              })
+            : undefined,
           workspaceKey: `wa-group-${groupJid}`,
           userMessage,
           workspaceDir,

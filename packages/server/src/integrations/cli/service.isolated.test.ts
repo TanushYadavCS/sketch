@@ -99,6 +99,44 @@ describe("CLI integration service", () => {
     expect(await db.selectFrom("agent_environment_variable_shares").selectAll().execute()).toEqual([]);
   });
 
+  it("does not list shared connections to external viewers", async () => {
+    const connection = await service.connectGitHub("owner", "ghp_org", [{ type: "org", id: "default" }]);
+
+    await expect(service.listConnections("external")).resolves.toEqual([]);
+    await service.disconnect("owner", connection.id);
+  });
+
+  it("resolves channel and group shares in their runtime contexts", async () => {
+    const connection = await service.connectGitHub("owner", "ghp_shared", [
+      { type: "slack_channel", id: "C123" },
+      { type: "whatsapp_group", id: "group@g.us" },
+    ]);
+
+    await expect(
+      service.listConnections("recipient", { platform: "slack", deliveryTarget: "C123" }),
+    ).resolves.toHaveLength(1);
+    await expect(
+      service.listConnections("recipient", { platform: "whatsapp", deliveryTarget: "group@g.us" }),
+    ).resolves.toHaveLength(1);
+    await expect(
+      service.filterRuntimeEnvironment(
+        {
+          currentUserId: "recipient",
+          contextType: "channel_mention",
+          allowOrgSharedEnv: true,
+          taskContext: {
+            platform: "slack",
+            contextType: "channel",
+            deliveryTarget: "C123",
+            createdBy: "recipient",
+          },
+        },
+        { GH_TOKEN: "stale" },
+      ),
+    ).resolves.toEqual({ GH_TOKEN: "ghp_shared" });
+    await service.disconnect("owner", connection.id);
+  });
+
   it("keeps an org-shared GitHub token available to internal recipients", async () => {
     const connection = await service.connectGitHub("owner", "ghp_org", [{ type: "org", id: "default" }]);
 

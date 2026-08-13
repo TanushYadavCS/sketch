@@ -96,6 +96,12 @@ interface WebChatRouteDeps {
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   cliIntegrations?: CliIntegrationCardResolver;
+  listAgentEnvForRuntime?: (context: {
+    currentUserId?: string | null;
+    contextType?: "dm" | "channel_mention" | "scheduled_task";
+    allowOrgSharedEnv?: boolean;
+    taskContext?: RunAgentParams["taskContext"];
+  }) => Promise<Record<string, string>>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -2739,8 +2745,18 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         const runKey = activeBuilderTaskId
           ? builderWebChatRunKey(activeBuilderTaskId)
           : webChatRunKey(currentUser.id, conversationId);
-        const runAgent = () =>
-          deps.runAgent({
+        const runAgent = async () => {
+          const runtimeContextType =
+            taskContext && taskContext.contextType !== "dm" ? ("channel_mention" as const) : ("dm" as const);
+          const agentEnv = deps.listAgentEnvForRuntime
+            ? await deps.listAgentEnvForRuntime({
+                currentUserId: currentUser.id,
+                contextType: runtimeContextType,
+                allowOrgSharedEnv: true,
+                ...(taskContext ? { taskContext } : {}),
+              })
+            : undefined;
+          return deps.runAgent({
             db: deps.db,
             workspaceKey: currentUser.id,
             threadTs: conversationId,
@@ -2754,7 +2770,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             getSlack: deps.getSlack,
             platform: deliveryPlatform,
             responseSurface: "web",
-            contextType: "dm",
+            contextType: runtimeContextType,
             stopAfterCreateAutomationSkill: true,
             automationBuilderChat: Boolean(automationBuilderContext),
             onProgressEvent: async (event) => {
@@ -2799,6 +2815,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             botName: settingsRow?.bot_name,
             integrationMcpServers,
             loadIntegrationProvider: deps.loadIntegrationProvider,
+            cliIntegrations: deps.cliIntegrations,
+            agentEnv,
             scheduler: deps.scheduler,
             stepContentRepo: deps.stepContentRepo,
             automationRunsRepo: deps.automationRunsRepo,
@@ -2812,6 +2830,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             ...(taskContext ? { taskContext } : {}),
             ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),
           });
+        };
         let leaseRenewalTimer: ReturnType<typeof setInterval> | undefined;
         if (activeBuilderTaskId) {
           leaseRenewalTimer = setInterval(() => {

@@ -366,7 +366,7 @@ describe("ChatThread", () => {
     expect(screen.getByRole("button", { name: "Connected" })).toBeDisabled();
   });
 
-  it("renders integration connection cards while icons are still loading", () => {
+  it("renders GitHub connection cards with the white GitHub mark", () => {
     const iconUrl = "https://cdn.example.com/github.png";
 
     render(
@@ -391,9 +391,10 @@ describe("ChatThread", () => {
     );
 
     expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
-    const icon = document.querySelector("[data-integration-connection-card] img");
-    expect(icon).toHaveAttribute("src", iconUrl);
-    expect(icon?.parentElement).toHaveClass("bg-transparent");
+    const icon = document.querySelector("[data-integration-connection-card] svg");
+    expect(icon).toBeInTheDocument();
+    expect(icon?.parentElement).toHaveClass("bg-[#24292f]", "text-white");
+    expect(document.querySelector("[data-integration-connection-card] img")).not.toBeInTheDocument();
   });
 
   it("renders connected integration account cards without a connect action", () => {

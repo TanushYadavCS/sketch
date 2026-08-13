@@ -345,6 +345,9 @@ describe("ConnectionsPage direct connect", () => {
         }),
       ),
       http.get("/api/integration-apps/connections", () => HttpResponse.json({ connections: [] })),
+      http.get("/api/mcp-servers/provider-1/apps", () =>
+        HttpResponse.json({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
+      ),
       http.post("/api/integration-apps/github/verification", async ({ request }) => {
         verificationBodies.push(await request.json());
         return HttpResponse.json({
@@ -383,8 +386,10 @@ describe("ConnectionsPage direct connect", () => {
 
     renderWithProviders(<ConnectionsPage />);
 
-    expect(await screen.findByText("GitHub CLI")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(screen.queryByText("GitHub CLI")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add integration" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Add integration" }));
+    await user.click(await screen.findByRole("button", { name: /GitHub/ }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     const tokenInput = await screen.findByLabelText("Personal access token");

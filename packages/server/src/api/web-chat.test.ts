@@ -1651,6 +1651,86 @@ describe("web chat API", () => {
     ]);
   });
 
+  it("passes builder channel context to CLI environment resolution", async () => {
+    const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-cli-context",
+      conversationId: "builder-cli-context",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "ghp_shared" });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-cli-context",
+        platform: "slack",
+        contextType: "channel",
+        deliveryTarget: "C123",
+        threadTs: "1700.1",
+        prompt: "Post design wins",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: admin.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 0,
+        title: "Post design wins",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: {
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C123",
+          threadTs: "1700.1",
+          mode: "deliver",
+        },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      listAgentEnvForRuntime,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=builder-cli-context", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Use GitHub", automationTaskId: "task-cli-context" }),
+    });
+    await res.text();
+
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentUserId: admin.id,
+        contextType: "channel_mention",
+        taskContext: expect.objectContaining({
+          platform: "slack",
+          contextType: "channel",
+          deliveryTarget: "C123",
+        }),
+      }),
+    );
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ agentEnv: { GH_TOKEN: "ghp_shared" } }));
+  });
+
   it("starts builder replies without originating Slack conversation context", async () => {
     const admin = await seedAdmin(db);
     await createScheduledTaskConversationRepository(db).upsert({

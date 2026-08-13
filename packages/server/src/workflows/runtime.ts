@@ -1555,6 +1555,14 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
       getSlack: params.getSlack,
       loadIntegrationProvider: params.loadIntegrationProvider,
       cliIntegrations: params.cliIntegrations,
+      agentEnv: params.listAgentEnvForRuntime
+        ? await params.listAgentEnvForRuntime({
+            currentUserId: task.created_by,
+            contextType: "scheduled_task",
+            allowOrgSharedEnv: true,
+            taskContext: buildRunAgentTaskContext(task),
+          })
+        : undefined,
       sessionMode: "fresh",
       contextType: "scheduled_task",
       currentUserId: task.created_by,

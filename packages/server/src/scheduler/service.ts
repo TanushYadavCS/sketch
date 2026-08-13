@@ -22,7 +22,7 @@ import { workflowTriggerConfigSchema } from "@sketch/shared";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import { getActiveRunContext } from "../agent/active-runs";
-import type { McpServerConfig, runAgent } from "../agent/runner";
+import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { AutomationCapabilityCallEvent, AutomationCapabilityRegistry } from "../automation/capabilities";
 import type { Config } from "../config";
@@ -225,6 +225,7 @@ export interface TaskSchedulerDeps {
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
   automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo: ReturnType<typeof createUserRepository>;
@@ -412,6 +413,7 @@ export class TaskScheduler {
       stepContentRepo: this.deps.stepContentRepo,
       loadIntegrationProvider,
       listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
+      cliIntegrations: this.deps.cliIntegrations,
       userRepo: this.deps.userRepo,
       runAgent: executionQueue === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent,
       propagateParentAbort: executionQueue === "interactive" && parentAbortSignal !== undefined,
@@ -1149,6 +1151,7 @@ export class TaskScheduler {
       stepContentRepo: this.deps.stepContentRepo,
       loadIntegrationProvider: this.deps.loadIntegrationProvider,
       listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
+      cliIntegrations: this.deps.cliIntegrations,
       userRepo: this.deps.userRepo,
       runAgent: this.deps.runAgent,
       buildMcpServers: this.deps.buildMcpServers,

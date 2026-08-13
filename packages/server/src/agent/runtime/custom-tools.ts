@@ -147,6 +147,12 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
         loadIntegrationProvider: params.loadIntegrationProvider,
         cliIntegrations: params.cliIntegrations,
         currentUserId: params.currentUserId,
+        runtimeContext:
+          params.taskContext?.contextType === "channel" && params.platform === "slack"
+            ? { platform: "slack", deliveryTarget: params.taskContext.deliveryTarget }
+            : params.taskContext?.contextType === "group" && params.platform === "whatsapp"
+              ? { platform: "whatsapp", deliveryTarget: params.taskContext.deliveryTarget }
+              : undefined,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
         userName: params.userName,

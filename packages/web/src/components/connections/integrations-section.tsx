@@ -1,7 +1,9 @@
+import { GithubAppIcon } from "@/components/connections/app-icon";
+import { GithubIntegrationRow } from "@/components/connections/github-integration-dialog";
 import { QuietAddButton } from "@/components/quiet-add-button";
-import { api } from "@/lib/api";
+import { type SlackChannelInfo, type User, type WhatsAppGroupInfo, api } from "@/lib/api";
 import { GearSixIcon, PlugIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
-import type { IntegrationConnection } from "@sketch/shared";
+import type { CliIntegrationConnection, IntegrationConnection } from "@sketch/shared";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -25,6 +27,12 @@ export function IntegrationsSection({
   orgName,
   onAdd,
   onDisconnect,
+  githubConnection,
+  githubUsers = [],
+  githubSlackChannels = [],
+  githubWhatsappGroups = [],
+  githubCurrentUserId = "",
+  githubIsAdmin = false,
 }: {
   connections: IntegrationConnection[];
   isLoadingConnections: boolean;
@@ -32,6 +40,12 @@ export function IntegrationsSection({
   orgName?: string;
   onAdd: () => void;
   onDisconnect: () => void;
+  githubConnection?: CliIntegrationConnection | null;
+  githubUsers?: User[];
+  githubSlackChannels?: SlackChannelInfo[];
+  githubWhatsappGroups?: WhatsAppGroupInfo[];
+  githubCurrentUserId?: string;
+  githubIsAdmin?: boolean;
 }) {
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [settingsConnection, setSettingsConnection] = useState<IntegrationConnection | null>(null);
@@ -64,7 +78,7 @@ export function IntegrationsSection({
             </div>
           ))}
         </div>
-      ) : connections.length === 0 ? (
+      ) : connections.length === 0 && !githubConnection ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
           <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
             <PlugIcon size={24} className="text-[#8B7A00]" />
@@ -77,6 +91,18 @@ export function IntegrationsSection({
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">
+          {githubConnection && (
+            <GithubIntegrationRow
+              connection={githubConnection}
+              isLast={connections.length === 0}
+              users={githubUsers}
+              slackChannels={githubSlackChannels}
+              whatsappGroups={githubWhatsappGroups}
+              currentUserId={githubCurrentUserId}
+              isAdmin={githubIsAdmin}
+              onChanged={onDisconnect}
+            />
+          )}
           {connections.map((connection, i) => (
             <ConnectionRow
               key={connection.id}
@@ -129,7 +155,9 @@ function ConnectionRow({
 
   return (
     <div className={`flex items-center gap-4 px-4 py-4 ${isLast ? "" : "border-b border-border"}`}>
-      {connection.icon ? (
+      {connection.appId.trim().toLowerCase() === "github" ? (
+        <GithubAppIcon className="size-9" />
+      ) : connection.icon ? (
         <img
           src={connection.icon}
           alt={connection.appName}
@@ -340,6 +368,9 @@ function ConnectionIcon({
   size?: "default" | "lg";
 }) {
   const classes = size === "lg" ? "size-10 rounded-lg" : "size-9 rounded-lg";
+  if (connection.appId.trim().toLowerCase() === "github") {
+    return <GithubAppIcon className={classes} />;
+  }
   if (connection.icon) {
     const dimensions = size === "lg" ? 40 : 36;
     return (

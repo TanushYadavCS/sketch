@@ -213,7 +213,7 @@ export function createCliIntegrationService(params: {
 
   async function isExternalRuntimeUser(context: AgentEnvironmentRuntimeContext): Promise<boolean> {
     const userId = context.taskContext?.createdBy ?? context.currentUserId ?? null;
-    if (!userId) return false;
+    if (!userId || userId === "unknown") return true;
     const user = await params.db.selectFrom("users").select("type").where("id", "=", userId).executeTakeFirst();
     return user?.type === "external";
   }
@@ -223,13 +223,15 @@ export function createCliIntegrationService(params: {
   ): Promise<CliIntegrationConnectionRow[]> {
     if (await isExternalRuntimeUser(context)) return [];
     const task = context.taskContext;
-    const ownerUserId = task?.createdBy ?? context.currentUserId ?? null;
+    const isDmContext = context.contextType === "dm" || task?.contextType === "dm";
+    const isScheduledTask = context.contextType === "scheduled_task";
+    const ownerUserId = isDmContext || isScheduledTask ? (task?.createdBy ?? context.currentUserId ?? null) : null;
     const targets: AgentEnvironmentShareTargetInput[] = [];
     if (task?.contextType === "channel" && task.platform === "slack") {
       targets.push({ type: "slack_channel", id: task.deliveryTarget });
     } else if (task?.contextType === "group" && task.platform === "whatsapp") {
       targets.push({ type: "whatsapp_group", id: task.deliveryTarget });
-    } else if (ownerUserId) {
+    } else if (isDmContext && ownerUserId) {
       targets.push({ type: "user", id: ownerUserId });
     }
     if (context.allowOrgSharedEnv !== false) {
@@ -341,8 +343,27 @@ export function createCliIntegrationService(params: {
       return name ? `${name} integration` : null;
     },
 
-    async listConnections(viewerUserId: string): Promise<CliIntegrationConnection[]> {
-      const rows = await connections.listForViewer(viewerUserId);
+    async listConnections(
+      viewerUserId: string,
+      context?: { platform?: "slack" | "whatsapp"; deliveryTarget?: string },
+    ): Promise<CliIntegrationConnection[]> {
+      const targetContext = context
+        ? {
+            ...(context.platform === "slack" && context.deliveryTarget
+              ? { slackChannelId: context.deliveryTarget }
+              : {}),
+            ...(context.platform === "whatsapp" && context.deliveryTarget
+              ? { whatsappGroupJid: context.deliveryTarget }
+              : {}),
+          }
+        : undefined;
+      const viewer = await params.db
+        .selectFrom("users")
+        .select("type")
+        .where("id", "=", viewerUserId)
+        .executeTakeFirst();
+      if (viewer?.type === "external") return [];
+      const rows = await connections.listForViewer(viewerUserId, targetContext);
       const result = await Promise.all(rows.map((row) => serialize(row, viewerUserId)));
       return result.sort((left, right) => Number(right.isOwnedByViewer) - Number(left.isOwnedByViewer));
     },
@@ -548,7 +569,13 @@ export function createCliIntegrationService(params: {
         if (!definition) continue;
         for (const field of definition.credentialFields) delete filtered[field.envName];
         if (!item.available) continue;
-        const row = matching.find((candidate) => candidate.app_id === item.appId && candidate.status === "active");
+        const row = matching
+          .filter((candidate) => candidate.app_id === item.appId && candidate.status === "active")
+          .sort(
+            (left, right) =>
+              Number(left.owner_user_id !== context.currentUserId) -
+              Number(right.owner_user_id !== context.currentUserId),
+          )[0];
         if (!row) continue;
         const credential = await params.db
           .selectFrom("agent_environment_variables")

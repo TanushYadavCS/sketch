@@ -25,7 +25,7 @@ import {
   EnvironmentVariablesSection,
   ShareEnvironmentVariableDialog,
 } from "@/components/connections/environment-variables-section";
-import { GithubIntegrationCard } from "@/components/connections/github-integration-dialog";
+import { GithubIntegrationDialog } from "@/components/connections/github-integration-dialog";
 import { IntegrationsSection } from "@/components/connections/integrations-section";
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
@@ -44,7 +44,7 @@ import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 import { useDashboardAuth } from "./dashboard";
@@ -354,6 +354,13 @@ export function ConnectionsPage() {
 
   const connections = connectionsQuery.data ?? [];
   const cliConnections = cliConnectionsQuery.data?.connections ?? [];
+  const cliCatalog = useMemo(
+    () =>
+      (cliCatalogQuery.data?.apps ?? []).filter(
+        (app): app is import("@sketch/shared").CliIntegrationCatalogApp => app.executionMode === "cli",
+      ),
+    [cliCatalogQuery.data?.apps],
+  );
   const githubConnection: CliIntegrationConnection | null =
     cliConnections.find((connection) => connection.appId === "github") ?? null;
 
@@ -662,19 +669,6 @@ export function ConnectionsPage() {
           <LoadingSkeleton />
         ) : activeTab === "applications" ? (
           <>
-            {cliCatalogQuery.data?.apps.some((app) => app.id === "github") && (
-              <GithubIntegrationCard
-                connection={githubConnection}
-                users={usersQuery.data?.users ?? []}
-                slackChannels={slackChannelsQuery.data?.channels ?? []}
-                whatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
-                currentUserId={auth.userId ?? ""}
-                isAdmin={auth.role === "admin"}
-                setupOpen={showGithubSetup}
-                onSetupOpenChange={setShowGithubSetup}
-                onChanged={invalidateAll}
-              />
-            )}
             <DirectConnectPanel
               state={directConnectState}
               onSearch={(appId) => {
@@ -690,7 +684,7 @@ export function ConnectionsPage() {
               <ConnectionsBanner onConnect={() => setShowProviderSelector(true)} />
             ) : (
               <>
-                {connections.length > 0 && (
+                {(connections.length > 0 || githubConnection) && (
                   <div className="flex items-center justify-between">
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#FEED01]/10 px-2.5 py-1 text-xs text-muted-foreground">
                       <span className="inline-block size-1.5 rounded-full bg-[#FEED01]" />
@@ -709,7 +703,13 @@ export function ConnectionsPage() {
                 )}
                 <IntegrationsSection
                   connections={connections}
-                  isLoadingConnections={connectionsQuery.isLoading}
+                  isLoadingConnections={connectionsQuery.isLoading || cliConnectionsQuery.isLoading}
+                  githubConnection={githubConnection}
+                  githubUsers={usersQuery.data?.users ?? []}
+                  githubSlackChannels={slackChannelsQuery.data?.channels ?? []}
+                  githubWhatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+                  githubCurrentUserId={auth.userId ?? ""}
+                  githubIsAdmin={auth.role === "admin"}
                   onAdd={() => {
                     setRequestedAppConnect(null);
                     setRequestedAppSearch(null);
@@ -835,12 +835,31 @@ export function ConnectionsPage() {
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
           initialAppId={null}
           initialSearch={requestedAppSearch}
+          cliCatalog={cliCatalog}
+          cliConnections={cliConnections}
+          onOpenGithubSetup={() => {
+            setShowAddIntegrationDialog(false);
+            setRequestedAppConnect(null);
+            setRequestedAppSearch(null);
+            setShowGithubSetup(true);
+          }}
           onSuccess={(_app, connection) => {
             invalidateAll();
             if (connection) void maybeShowConnectorNudge(connection);
           }}
         />
       )}
+
+      <GithubIntegrationDialog
+        open={showGithubSetup}
+        onOpenChange={setShowGithubSetup}
+        users={usersQuery.data?.users ?? []}
+        slackChannels={slackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={auth.userId ?? ""}
+        isAdmin={auth.role === "admin"}
+        onSuccess={invalidateAll}
+      />
 
       <ConnectorNudgeDialog
         suggestion={connectorNudge}

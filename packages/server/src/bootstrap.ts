@@ -37,7 +37,10 @@ import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
 import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
-import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
+import {
+  type AgentEnvironmentRuntimeContext,
+  createAgentEnvironmentVariableRepository,
+} from "./db/repositories/agent-environment-variables";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
@@ -822,8 +825,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
-    listAgentEnvForRuntime: async (context) =>
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
       cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
+    cliIntegrations,
     automationRunsRepo,
     stepContentRepo,
     userRepo: users,
@@ -980,6 +984,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
+    cliIntegrations,
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -1074,6 +1081,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
+    cliIntegrations,
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -1187,7 +1197,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
-    listAgentEnvForRuntime: async (context) =>
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
       cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
     cliIntegrations,
     stepContentRepo,

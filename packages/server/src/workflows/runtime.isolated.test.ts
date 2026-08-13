@@ -469,6 +469,26 @@ describe("executeAutomation agent steps", () => {
     expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
   });
 
+  it("passes the resolved CLI environment to sketch-mode agent steps", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "managed-token" });
+    const params = makeParams({ runAgent, listAgentEnvForRuntime });
+
+    await executeAutomation(params as never);
+
+    expect(runAgent.mock.calls[0]?.[0].agentEnv).toEqual({ GH_TOKEN: "managed-token" });
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith({
+      currentUserId: "user-1",
+      contextType: "scheduled_task",
+      allowOrgSharedEnv: true,
+      taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
+    });
+  });
+
   it("keeps channel task context for creator-less sketch-mode agent steps", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
