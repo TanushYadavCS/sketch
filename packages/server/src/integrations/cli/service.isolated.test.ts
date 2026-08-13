@@ -167,6 +167,25 @@ describe("CLI integration service", () => {
     await service.disconnect("owner", connection.id);
   });
 
+  it("explains that an existing GH_TOKEN must be removed before connecting", async () => {
+    await db
+      .insertInto("agent_environment_variables")
+      .values({
+        id: "existing-gh-token",
+        user_id: "owner",
+        name: "GH_TOKEN",
+        value: "existing-token",
+        is_secret: 1,
+      })
+      .execute();
+
+    await expect(service.connectGitHub("owner", "ghp_new")).rejects.toMatchObject({
+      code: "MANAGED_ENVIRONMENT_VARIABLE",
+      status: 409,
+      message: "You already have an environment variable named GH_TOKEN. Remove it before connecting GitHub.",
+    });
+  });
+
   it("rejects duplicates and preserves the old token when replacement verification fails", async () => {
     const connection = await service.connectGitHub("owner", "ghp_old");
     await expect(service.connectGitHub("owner", "ghp_second")).rejects.toMatchObject({

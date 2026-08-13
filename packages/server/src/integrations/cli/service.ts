@@ -184,7 +184,7 @@ export function createCliIntegrationService(params: {
     if (existing) {
       throw new CliIntegrationServiceError(
         "MANAGED_ENVIRONMENT_VARIABLE",
-        "GH_TOKEN already exists as an environment variable. Rename or remove it before connecting GitHub.",
+        "You already have an environment variable named GH_TOKEN. Remove it before connecting GitHub.",
         409,
       );
     }
