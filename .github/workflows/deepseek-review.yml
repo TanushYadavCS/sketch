@@ -159,6 +159,7 @@ jobs:
                   max_tokens: 32_000,
                   thinking: { type: "enabled" },
                   reasoning_effort: "max",
+                  stream: true,
                   messages: [
                     {
                       role: "system",
@@ -182,8 +183,7 @@ jobs:
               if (!response.ok) {
                 throw new Error(`OpenCode returned HTTP ${response.status}.`);
               }
-              const responseBody = await response.json();
-              const content = extractContent(responseBody);
+              const content = await readStreamContent(response);
               const review = parseReview(content);
               const inlineComments = normalizeComments(review.comments, changedLinesByPath);
               const reviewBody = [
@@ -269,13 +269,45 @@ jobs:
               return lines;
             }
 
-            function extractContent(responseBody) {
-              const raw = responseBody?.choices?.[0]?.message?.content;
-              if (typeof raw === "string") return raw;
-              if (Array.isArray(raw)) {
-                return raw.map((part) => typeof part === "string" ? part : part?.text || "").join("");
+            async function readStreamContent(response) {
+              if (!response.body) throw new Error("OpenCode returned no response body.");
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = "";
+              let raw = "";
+              let content = "";
+              let sawEvent = false;
+
+              const consumeLine = (line) => {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) return;
+                const data = trimmed.slice(5).trim();
+                if (!data || data === "[DONE]") return;
+                raw += data;
+                try {
+                  const payload = JSON.parse(data);
+                  const delta = payload?.choices?.[0]?.delta;
+                  if (delta && typeof delta === "object") {
+                    sawEvent = true;
+                    if (typeof delta.content === "string") content += delta.content;
+                  }
+                } catch {
+                  raw = "";
+                }
+              };
+
+              while (true) {
+                const { done, value } = await reader.read();
+                buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+                const lines = buffer.split(/\r?\n/);
+                buffer = lines.pop() || "";
+                for (const line of lines) consumeLine(line);
+                if (done) break;
               }
-              throw new Error("OpenCode returned no review content.");
+              if (buffer) consumeLine(buffer);
+
+              if (sawEvent && content.trim()) return content;
+              throw new Error("OpenCode returned no review content in its stream.");
             }
 
             function parseReview(content) {
