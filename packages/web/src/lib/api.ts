@@ -2625,6 +2625,12 @@ export const api = {
         `/api/scheduled-tasks/${taskId}/origin-chat/messages`,
       );
     },
+    conversationMessages(taskId: string, conversationId: string, options?: { signal?: AbortSignal }) {
+      return request<WebChatMessagesResponse>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
+        options,
+      );
+    },
     conversations(taskId: string, options?: { includeArchived?: boolean }) {
       const query = options?.includeArchived ? "?includeArchived=true" : "";
       return request<ScheduledTaskConversationsResponse>(

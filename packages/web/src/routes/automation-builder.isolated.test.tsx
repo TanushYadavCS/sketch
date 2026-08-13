@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   listConversations: vi.fn(),
   webChatConversations: vi.fn(),
   loadMessages: vi.fn(),
+  conversationMessages: vi.fn(),
+  releaseLock: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
   createConversation: vi.fn(),
@@ -62,6 +64,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         selectConversation: mocks.selectConversation,
         archiveConversation: mocks.archiveConversation,
         originChatMessages: mocks.originChatMessages,
+        conversationMessages: mocks.conversationMessages,
+        releaseLock: mocks.releaseLock,
         run: mocks.runTask,
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
@@ -387,6 +391,10 @@ describe("AutomationBuilderPage", () => {
     });
     mocks.loadMessages.mockClear();
     mocks.loadMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.conversationMessages.mockClear();
+    mocks.conversationMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.releaseLock.mockClear();
+    mocks.releaseLock.mockResolvedValue({ success: true });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
     mocks.createConversation.mockClear();
     mocks.createConversation.mockResolvedValue({
@@ -1024,7 +1032,7 @@ describe("AutomationBuilderPage", () => {
 
     const input = await screen.findByLabelText("Message Sketch");
     await waitFor(() => expect(input).not.toBeDisabled());
-    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha");
 
     await user.type(input, "Make it daily");
     await user.click(screen.getByLabelText("Send message"));
@@ -1049,12 +1057,14 @@ describe("AutomationBuilderPage", () => {
     const input = await screen.findByLabelText("Message Sketch");
     expect(input).toBeDisabled();
     expect(input).toHaveAttribute("placeholder", "");
-    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha"));
-    mocks.loadMessages.mockClear();
+    await waitFor(() => expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha"));
+    mocks.conversationMessages.mockClear();
 
     document.dispatchEvent(new Event("visibilitychange"));
 
-    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(Object)));
+    await waitFor(() =>
+      expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha", expect.any(Object)),
+    );
   });
 
   it("refreshes the graph and latest run after an external automation update", async () => {
@@ -1333,8 +1343,11 @@ describe("AutomationBuilderPage", () => {
     await screen.findByLabelText("Message Sketch");
     expect(screen.getByText("Create an automation")).toBeInTheDocument();
     expect(screen.queryByText("chat-alpha")).not.toBeInTheDocument();
-    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
-    expect(mocks.loadMessages).not.toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
+    expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha");
+    expect(mocks.conversationMessages).not.toHaveBeenCalledWith(
+      "task-123",
+      expect.stringMatching(/^builder-task-123-/),
+    );
   });
 
   it("hydrates batched builder questions and preserves the ordered outgoing answer", () => {
@@ -1446,7 +1459,7 @@ describe("AutomationBuilderPage", () => {
 
     expect(await screen.findByText("Chats")).toBeInTheDocument();
     expect(screen.queryByLabelText("Message Sketch")).not.toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "New chat" }));
@@ -1671,7 +1684,7 @@ describe("AutomationBuilderPage", () => {
 
     await waitFor(() => expect(mocks.selectConversation).toHaveBeenCalledWith("task-123", "chat-beta", "builder"));
     expect(mocks.navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { conversationId: "chat-beta" } }));
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
   });
 
   it("archives the current chat from the sidechat and returns to history", async () => {
@@ -1708,7 +1721,7 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByTestId("automation-builder-chat-archived")).toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Restore chat" }));
     await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-archived", false));
 
@@ -1720,7 +1733,7 @@ describe("AutomationBuilderPage", () => {
     });
     renderBuilder();
     expect(await screen.findByTestId("automation-builder-chat-unavailable")).toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalledWith("not-associated");
+    expect(mocks.conversationMessages).not.toHaveBeenCalledWith("task-123", "not-associated");
   });
 
   it("can stop a stuck builder chat run", async () => {

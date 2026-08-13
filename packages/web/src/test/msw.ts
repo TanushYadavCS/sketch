@@ -22,7 +22,7 @@ interface MockAutomationLockState {
 const AUTOMATION_LOCK_FIXTURE_VIEWER_ID = "u-current";
 const AUTOMATION_LOCK_FIXTURE_VIEWER_NAME = "Test Viewer";
 const AUTOMATION_LOCK_FIXTURE_TTL_MS = 15 * 60 * 1000;
-const AUTOMATION_LOCK_FIXTURE_STEAL_TTL_MS = 60 * 1000;
+const AUTOMATION_LOCK_FIXTURE_STEAL_TTL_MS = 5 * 60 * 1000;
 
 const automationLockFixtureState = new Map<string, MockAutomationLockState>();
 
@@ -625,6 +625,26 @@ export const handlers = [
         isOwner: true,
         lock: automationLockFixtureView(taskId),
       },
+    });
+  }),
+
+  http.get("/api/scheduled-tasks/:taskId/conversations/:conversationId/messages", () => {
+    return HttpResponse.json({
+      messages: [
+        {
+          id: "fixture-message-1",
+          role: "user",
+          parts: [{ type: "text", text: "Build the weekly digest" }],
+          createdAt: "2026-06-02T09:00:00.000Z",
+        },
+        {
+          id: "fixture-message-2",
+          role: "assistant",
+          parts: [{ type: "text", text: "Done — it runs Mondays at 9." }],
+          createdAt: "2026-06-02T09:00:05.000Z",
+        },
+      ],
+      updatedAt: "2026-06-03T00:00:00.000Z",
     });
   }),
 

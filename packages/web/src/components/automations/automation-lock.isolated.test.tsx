@@ -576,6 +576,36 @@ describe("AutomationBuilderPage edit lock", () => {
     expect(mocks.acquireLock).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /Take over editing/ })).not.toBeInTheDocument();
   });
+
+  it("releases the edit lock after a successful save", async () => {
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    await screen.findByTestId("automation-lock-banner");
+    await user.click(screen.getByRole("button", { name: "Check rating" }));
+    const prompt = await screen.findByDisplayValue("Summarize accounts");
+    await user.clear(prompt);
+    await user.type(prompt, "Summarize enterprise accounts only");
+    await user.click(screen.getByRole("button", { name: "Save prompt" }));
+
+    await waitFor(() => expect(mocks.saveAutomation).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.releaseLock).toHaveBeenCalledWith("task-123"));
+  });
+
+  it("releases the edit lock on unmount while the viewer holds it", async () => {
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+
+    const { unmount } = renderBuilder();
+
+    await screen.findByTestId("automation-lock-banner");
+    expect(mocks.releaseLock).not.toHaveBeenCalled();
+
+    unmount();
+
+    await waitFor(() => expect(mocks.releaseLock).toHaveBeenCalledWith("task-123"));
+  });
 });
 
 describe("edit lock label helpers", () => {

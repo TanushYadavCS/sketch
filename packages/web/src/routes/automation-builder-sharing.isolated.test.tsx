@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   listConversations: vi.fn(),
   webChatConversations: vi.fn(),
   loadMessages: vi.fn(),
+  conversationMessages: vi.fn(),
+  releaseLock: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
   createConversation: vi.fn(),
@@ -48,6 +50,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         selectConversation: mocks.selectConversation,
         archiveConversation: mocks.archiveConversation,
         originChatMessages: mocks.originChatMessages,
+        conversationMessages: mocks.conversationMessages,
+        releaseLock: mocks.releaseLock,
         run: mocks.runTask,
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
@@ -95,7 +99,12 @@ vi.mock("@tanstack/react-router", async () => {
 
 vi.mock("./dashboard", () => ({
   dashboardRoute: { id: "__root__/dashboard" },
-  useDashboardAuth: () => ({ userId: "user-1", role: "member", displayName: "Owner Member", displayIdentifier: "owner@example.com" }),
+  useDashboardAuth: () => ({
+    userId: "user-1",
+    role: "member",
+    displayName: "Owner Member",
+    displayIdentifier: "owner@example.com",
+  }),
 }));
 
 vi.mock("sonner", () => ({
@@ -287,6 +296,10 @@ describe("AutomationBuilderPage sharing", () => {
     mocks.webChatConversations.mockResolvedValue({ conversations: [] });
     mocks.loadMessages.mockReset();
     mocks.loadMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.conversationMessages.mockReset();
+    mocks.conversationMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.releaseLock.mockReset();
+    mocks.releaseLock.mockResolvedValue({ success: true });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
     mocks.createConversation.mockResolvedValue({ created: false, conversation: null, builderLock: null });
     mocks.selectConversation.mockResolvedValue({ created: false, conversation: null, builderLock: null });
@@ -421,5 +434,67 @@ describe("AutomationBuilderPage sharing", () => {
     });
     await user.click(screen.getByRole("button", { name: /Viewing/ }));
     expect(screen.getByRole("menuitem", { name: /by Grantee Member/ })).toBeInTheDocument();
+  });
+
+  it("loads another member's transcript through the task-scoped endpoint in owner/admin views", async () => {
+    mocks.search = { conversationId: "chat-maya" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-maya",
+          kinds: ["builder"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-03T00:00:00.000Z",
+          lastActiveAt: "2026-06-03T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Maya Chen",
+        },
+      ],
+      builderLock: { state: "available", conversationId: null, owner: null, expiresAt: null },
+      transcriptAccess: "owner",
+    });
+    mocks.selectConversation.mockResolvedValue({
+      created: false,
+      conversation: {
+        conversationId: "chat-maya",
+        kinds: ["builder"],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-03T00:00:00.000Z",
+        lastActiveAt: "2026-06-03T00:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+      },
+    });
+    mocks.conversationMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "maya-1",
+          role: "user",
+          parts: [{ type: "text", text: "Build the weekly digest" }],
+          createdAt: "2026-06-02T09:00:00.000Z",
+        },
+        {
+          id: "sketch-1",
+          role: "assistant",
+          parts: [{ type: "text", text: "Done — it runs Mondays at 9." }],
+          createdAt: "2026-06-02T09:00:05.000Z",
+        },
+      ],
+      updatedAt: "2026-06-03T00:00:00.000Z",
+    });
+    mocks.chatMessages = [
+      { id: "maya-1", role: "user", parts: [{ type: "text", text: "Build the weekly digest" }] },
+      { id: "sketch-1", role: "assistant", parts: [{ type: "text", text: "Done — it runs Mondays at 9." }] },
+    ];
+
+    renderBuilder();
+
+    expect(await screen.findByText("Build the weekly digest")).toBeInTheDocument();
+    expect(screen.getByText("Done — it runs Mondays at 9.")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-maya"));
+    expect(mocks.setMessages).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: "maya-1" })]));
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
   });
 });

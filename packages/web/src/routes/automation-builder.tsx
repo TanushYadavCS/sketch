@@ -642,6 +642,17 @@ export function AutomationBuilderPage() {
   const lockHeldByOther = Boolean(lockView?.heldByUserId && !lockView.isHeldByMe);
   const builderReadOnly = canEditAutomation && lockHeldByOther;
   const isLockHolder = Boolean(lockView?.isHeldByMe);
+  const lockHolderRef = useRef(isLockHolder);
+  useEffect(() => {
+    lockHolderRef.current = isLockHolder;
+  }, [isLockHolder]);
+
+  useEffect(() => {
+    return () => {
+      if (!lockHolderRef.current) return;
+      void api.scheduledTasks.releaseLock(taskId).catch(() => undefined);
+    };
+  }, [taskId]);
 
   const hasAttributedRuns = Boolean(
     automationQuery.data?.recentRuns.some((run) => Boolean(run.triggeredByUserId)) ||
@@ -765,6 +776,7 @@ export function AutomationBuilderPage() {
             await invalidateAutomationQueries(queryClient, [taskId]);
             if (options.message) toast.success(options.message);
             options.onSaved?.();
+            void api.scheduledTasks.releaseLock(taskId).catch(() => undefined);
           } catch (error) {
             toast.error(error instanceof Error ? error.message : "Failed to save automation");
             try {
@@ -2262,10 +2274,13 @@ function BuilderChatTranscript({
     [chat.sendMessage, taskId],
   );
 
-  const loadMessagesForReconciliation = useCallback(async (targetConversationId: string, signal: AbortSignal) => {
-    const response = await api.webChat.messages(targetConversationId, { signal });
-    return { ...response, messages: response.messages as BuilderWebChatMessage[] };
-  }, []);
+  const loadMessagesForReconciliation = useCallback(
+    async (targetConversationId: string, signal: AbortSignal) => {
+      const response = await api.scheduledTasks.conversationMessages(taskId, targetConversationId, { signal });
+      return { ...response, messages: response.messages as BuilderWebChatMessage[] };
+    },
+    [taskId],
+  );
   useWebChatReconciliation({
     conversationId,
     historyReady,
@@ -2291,8 +2306,8 @@ function BuilderChatTranscript({
     setLoadedHistoryKey(null);
     setHistoryLoadError(null);
     chat.setMessages([]);
-    void api.webChat
-      .messages(conversationId)
+    void api.scheduledTasks
+      .conversationMessages(taskId, conversationId)
       .then(({ messages }) => {
         if (!cancelled) chat.setMessages(messages as BuilderWebChatMessage[]);
       })
@@ -2305,7 +2320,7 @@ function BuilderChatTranscript({
     return () => {
       cancelled = true;
     };
-  }, [chat.setMessages, conversationId, historyKey, lockReady]);
+  }, [chat.setMessages, conversationId, historyKey, lockReady, taskId]);
 
   useEffect(() => {
     if (!lockReady) return;
