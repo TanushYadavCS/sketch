@@ -118,6 +118,41 @@ describe("entity contact point routes", () => {
     expect(removed.status).toBe(204);
   });
 
+  it("keeps the legacy email fallback aligned with edits and deletion", async () => {
+    await db
+      .updateTable("entities")
+      .set({ metadata: JSON.stringify({ email: "old@example.com", title: "CTO" }) })
+      .where("id", "=", "person-a")
+      .execute();
+    const created = await app.request("/api/entities/person-a/contact-points", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "email", value: "old@example.com" }),
+    });
+    const id = ((await created.json()) as { contactPoint: { id: string } }).contactPoint.id;
+
+    await app.request(`/api/entities/person-a/contact-points/${id}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: "new@example.com" }),
+    });
+    await expect(
+      db.selectFrom("entities").select("metadata").where("id", "=", "person-a").executeTakeFirst(),
+    ).resolves.toMatchObject({
+      metadata: JSON.stringify({ email: "new@example.com", title: "CTO" }),
+    });
+
+    await app.request(`/api/entities/person-a/contact-points/${id}`, {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    await expect(
+      db.selectFrom("entities").select("metadata").where("id", "=", "person-a").executeTakeFirst(),
+    ).resolves.toMatchObject({
+      metadata: JSON.stringify({ title: "CTO" }),
+    });
+  });
+
   it("keeps mutations admin-only", async () => {
     const response = await app.request("/api/entities/person-a/contact-points", {
       method: "POST",
@@ -125,5 +160,41 @@ describe("entity contact point routes", () => {
       body: JSON.stringify({ kind: "email", value: "member@example.com" }),
     });
     expect(response.status).toBe(403);
+  });
+
+  it("rejects edits and deletion of system-managed contact kinds", async () => {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "system-point",
+        entity_id: "person-a",
+        kind: "whatsapp_lid",
+        value: "system@lid",
+        display_value: "system@lid",
+        label: null,
+        is_primary: 1,
+        source: "whatsapp_identity",
+        connector_config_id: null,
+        created_by_user_id: null,
+        verified_at: null,
+        last_contacted_at: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+
+    const edited = await app.request("/api/entities/person-a/contact-points/system-point", {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: "changed@example.com", kind: "email" }),
+    });
+    const removed = await app.request("/api/entities/person-a/contact-points/system-point", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+
+    expect(edited.status).toBe(422);
+    expect(removed.status).toBe(422);
   });
 });

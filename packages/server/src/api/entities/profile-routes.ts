@@ -68,6 +68,26 @@ function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Error && /unique constraint|duplicate key/i.test(error.message);
 }
 
+function reconcileLegacyEmailMetadata(
+  metadata: string | null,
+  currentValue: string,
+  nextValue?: string,
+): string | undefined {
+  if (!metadata) return undefined;
+  try {
+    const parsed = JSON.parse(metadata) as Record<string, unknown>;
+    if (typeof parsed.email !== "string" || parsed.email.trim().toLowerCase() !== currentValue) return undefined;
+    if (!nextValue) {
+      const { email: _email, ...withoutEmail } = parsed;
+      return JSON.stringify(withoutEmail);
+    }
+    parsed.email = nextValue;
+    return JSON.stringify(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
 function countByType(rows: RelationListEntry[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const r of rows) {
@@ -835,6 +855,9 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       .where("entity_id", "=", entity.id)
       .executeTakeFirst();
     if (!current) return c.json({ error: { code: "NOT_FOUND", message: "Contact point not found" } }, 404);
+    if (current.kind !== "email" && current.kind !== "phone") {
+      return c.json({ error: { code: "UNPROCESSABLE_ENTITY", message: "This contact point is system-managed" } }, 422);
+    }
     const parsed = updateContactPointSchema.safeParse(await c.req.json());
     if (!parsed.success) return contactPointError(c, parsed.error.issues[0]?.message ?? "Invalid contact point");
     const kind = parsed.data.kind ?? (current.kind as z.infer<typeof contactPointKindSchema>);
@@ -880,6 +903,16 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
           })
           .where("id", "=", current.id)
           .execute();
+        if (current.kind === "email") {
+          const metadata = reconcileLegacyEmailMetadata(
+            entity.metadata,
+            current.value,
+            kind === "email" ? value : undefined,
+          );
+          if (metadata !== undefined) {
+            await trx.updateTable("entities").set({ metadata }).where("id", "=", entity.id).execute();
+          }
+        }
         await trx
           .updateTable("entities")
           .set({ provenance_tier: "declared", updated_at: now })
@@ -911,13 +944,29 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
         422,
       );
     }
-    const deleted = await db
-      .deleteFrom("entity_contact_points")
+    const current = await db
+      .selectFrom("entity_contact_points")
+      .select(["id", "kind", "value"])
       .where("id", "=", c.req.param("contactPointId"))
       .where("entity_id", "=", entity.id)
-      .returning("id")
       .executeTakeFirst();
-    if (!deleted) return c.json({ error: { code: "NOT_FOUND", message: "Contact point not found" } }, 404);
+    if (!current) return c.json({ error: { code: "NOT_FOUND", message: "Contact point not found" } }, 404);
+    if (current.kind !== "email" && current.kind !== "phone") {
+      return c.json({ error: { code: "UNPROCESSABLE_ENTITY", message: "This contact point is system-managed" } }, 422);
+    }
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .deleteFrom("entity_contact_points")
+        .where("id", "=", current.id)
+        .where("entity_id", "=", entity.id)
+        .execute();
+      if (current.kind === "email") {
+        const metadata = reconcileLegacyEmailMetadata(entity.metadata, current.value);
+        if (metadata !== undefined) {
+          await trx.updateTable("entities").set({ metadata }).where("id", "=", entity.id).execute();
+        }
+      }
+    });
     return c.body(null, 204);
   });
 

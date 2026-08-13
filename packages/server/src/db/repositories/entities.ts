@@ -296,7 +296,7 @@ function toDeclaredProductListEntry(entity: Selectable<EntitiesTable>): Declared
 export function normalizeContactPointValue(kind: EntityContactPointKind, value: string): string {
   if (kind === "email") {
     const normalized = value.trim().toLowerCase();
-    if (!normalized || !normalized.includes("@")) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
       throw new Error("Email contact point must be a valid email-like value");
     }
     return normalized;
@@ -731,8 +731,7 @@ export function createEntityRepository(db: Kysely<DB>) {
      */
     async attachEmailIfAbsent(entityId: string, email: string) {
       const targetEntityId = await resolveLiveEntityId(db, entityId);
-      const trimmed = email.trim();
-      if (!trimmed) return;
+      const normalized = normalizeContactPointValue("email", email);
       const row = await db
         .selectFrom("entities")
         .select(["metadata"])
@@ -741,13 +740,15 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirst();
       if (!row) return;
       const meta: Record<string, unknown> = row.metadata ? JSON.parse(row.metadata) : {};
-      if (typeof meta.email === "string" && meta.email.length > 0) return;
-      meta.email = trimmed;
-      await db
-        .updateTable("entities")
-        .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
-        .where("id", "=", targetEntityId)
-        .execute();
+      if (!(typeof meta.email === "string" && meta.email.length > 0)) {
+        meta.email = normalized;
+        await db
+          .updateTable("entities")
+          .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
+          .where("id", "=", targetEntityId)
+          .execute();
+      }
+      await ensurePersonEmailContactPoint(targetEntityId, normalized, "manual");
     },
 
     // ── Source Refs ──
@@ -897,7 +898,19 @@ export function createEntityRepository(db: Kysely<DB>) {
       const now = new Date().toISOString();
 
       await db.transaction().execute(async (trx) => {
-        if (data.makePrimary) {
+        const manualPrimary =
+          data.source === "manual"
+            ? undefined
+            : await trx
+                .selectFrom("entity_contact_points")
+                .select(["id", "value"])
+                .where("entity_id", "=", entityId)
+                .where("kind", "=", data.kind)
+                .where("is_primary", "=", 1)
+                .where("source", "=", "manual")
+                .executeTakeFirst();
+        const makePrimary = data.makePrimary === true && !manualPrimary;
+        if (makePrimary) {
           await trx
             .updateTable("entity_contact_points")
             .set({ is_primary: 0, updated_at: now })
@@ -915,7 +928,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             value,
             display_value: data.displayValue ?? null,
             label: data.label ?? null,
-            is_primary: data.makePrimary ? 1 : 0,
+            is_primary: makePrimary ? 1 : 0,
             source: data.source,
             connector_config_id: data.connectorConfigId ?? null,
             created_by_user_id: data.createdByUserId ?? null,
@@ -927,9 +940,9 @@ export function createEntityRepository(db: Kysely<DB>) {
           .onConflict((oc) =>
             oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
               display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
-              label: sql`COALESCE(excluded.label, entity_contact_points.label)`,
-              is_primary: data.makePrimary ? 1 : sql`entity_contact_points.is_primary`,
-              source: data.source,
+              label: sql`CASE WHEN entity_contact_points.source = 'manual' THEN entity_contact_points.label ELSE COALESCE(excluded.label, entity_contact_points.label) END`,
+              is_primary: makePrimary ? 1 : sql`entity_contact_points.is_primary`,
+              source: sql`CASE WHEN entity_contact_points.source = 'manual' THEN entity_contact_points.source ELSE excluded.source END`,
               connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
               created_by_user_id: sql`COALESCE(excluded.created_by_user_id, entity_contact_points.created_by_user_id)`,
               verified_at: sql`CASE
@@ -1040,7 +1053,6 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "=", email)
         .execute();
-
       const byId = new Map<string, Selectable<EntitiesTable>>();
       for (const entity of [...byContactPoint, ...byMetadata]) byId.set(entity.id, entity);
       return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
@@ -1073,7 +1085,6 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "in", emails)
         .execute();
-
       const byEmailAndId = new Map<string, Map<string, Selectable<EntitiesTable>>>();
       for (const row of [...byContactPoint, ...byMetadata]) {
         const matchedEmail = row.matched_email;

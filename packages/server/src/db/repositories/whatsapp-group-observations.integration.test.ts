@@ -177,6 +177,72 @@ function observationSuite(label: string, createDb: DbFactory) {
       expect(people).toEqual([{ name: phone, subtype: "external", kind: "phone", value: phone }]);
     }, 30_000);
 
+    it("promotes an observed existing phone without overriding a manual primary", async () => {
+      const entities = createEntityRepository(db);
+      const person = await entities.upsertEntity({ name: "Primary Person", sourceType: "person" });
+      await entities.upsertContactPoint({
+        entityId: person.id,
+        kind: "phone",
+        value: "+14155550801",
+        source: "test",
+        makePrimary: true,
+      });
+      await entities.upsertContactPoint({
+        entityId: person.id,
+        kind: "phone",
+        value: "+14155550802",
+        source: "test",
+      });
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `primary-${randomUUID()}@g.us`;
+      await repo.upsert({ jid: groupJid, name: "Primary", description: null, updated_at: "2026-08-10T00:00:00Z" });
+      await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", groupJid).execute();
+
+      await repo.refreshParticipants(groupJid, [
+        { participantJid: "14155550802@s.whatsapp.net", phoneE164: "+14155550802" },
+      ]);
+      await expect(
+        db
+          .selectFrom("entity_contact_points")
+          .select(["value", "is_primary"])
+          .where("entity_id", "=", person.id)
+          .where("kind", "=", "phone")
+          .orderBy("value")
+          .execute(),
+      ).resolves.toEqual([
+        { value: "+14155550801", is_primary: 0 },
+        { value: "+14155550802", is_primary: 1 },
+      ]);
+
+      await db
+        .updateTable("entity_contact_points")
+        .set({ is_primary: 0 })
+        .where("entity_id", "=", person.id)
+        .where("value", "=", "+14155550802")
+        .execute();
+      await db
+        .updateTable("entity_contact_points")
+        .set({ source: "manual", is_primary: 1 })
+        .where("entity_id", "=", person.id)
+        .where("value", "=", "+14155550801")
+        .execute();
+      await repo.refreshParticipants(groupJid, [
+        { participantJid: "14155550802@s.whatsapp.net", phoneE164: "+14155550802" },
+      ]);
+      await expect(
+        db
+          .selectFrom("entity_contact_points")
+          .select(["value", "is_primary", "source"])
+          .where("entity_id", "=", person.id)
+          .where("kind", "=", "phone")
+          .orderBy("value")
+          .execute(),
+      ).resolves.toEqual([
+        { value: "+14155550801", is_primary: 1, source: "manual" },
+        { value: "+14155550802", is_primary: 0, source: "whatsapp_identity" },
+      ]);
+    }, 30_000);
+
     it("creates a Person for a LID-only participant in an enabled group", async () => {
       const lid = `lid-only-${randomUUID()}@lid`;
       const repo = createWhatsAppGroupRepository(db);

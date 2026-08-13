@@ -64,13 +64,24 @@ async function upsertIdentityContactPoint(
   observedAt: string,
 ): Promise<void> {
   const now = new Date().toISOString();
-  await db
-    .updateTable("entity_contact_points")
-    .set({ is_primary: 0, updated_at: now })
+  const manualPrimary = await db
+    .selectFrom("entity_contact_points")
+    .select("value")
     .where("entity_id", "=", entityId)
     .where("kind", "=", kind)
-    .where("value", "!=", value)
-    .execute();
+    .where("is_primary", "=", 1)
+    .where("source", "=", "manual")
+    .executeTakeFirst();
+  const makePrimary = !manualPrimary || manualPrimary.value === value;
+  if (makePrimary) {
+    await db
+      .updateTable("entity_contact_points")
+      .set({ is_primary: 0, updated_at: now })
+      .where("entity_id", "=", entityId)
+      .where("kind", "=", kind)
+      .where("value", "!=", value)
+      .execute();
+  }
   await db
     .insertInto("entity_contact_points")
     .values({
@@ -80,7 +91,7 @@ async function upsertIdentityContactPoint(
       value,
       display_value: value,
       label: null,
-      is_primary: 1,
+      is_primary: makePrimary ? 1 : 0,
       source: "whatsapp_identity",
       connector_config_id: null,
       created_by_user_id: null,
@@ -92,7 +103,8 @@ async function upsertIdentityContactPoint(
     .onConflict((oc) =>
       oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
         display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
-        source: "whatsapp_identity",
+        is_primary: makePrimary ? 1 : sql`entity_contact_points.is_primary`,
+        source: sql`CASE WHEN entity_contact_points.source = 'manual' THEN entity_contact_points.source ELSE excluded.source END`,
         last_contacted_at: sql`CASE
           WHEN entity_contact_points.last_contacted_at IS NULL OR excluded.last_contacted_at > entity_contact_points.last_contacted_at
           THEN excluded.last_contacted_at
