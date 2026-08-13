@@ -9,7 +9,7 @@
  *
  * When Gemini is unavailable, callers skip AI extraction and mark summaries accordingly.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
