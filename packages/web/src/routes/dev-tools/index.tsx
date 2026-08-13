@@ -3,9 +3,15 @@
  * mounted unless the server ran with DEV_TOOLS_ENABLED, so a tenant never
  * reaches it.
  *
- * The surface is one file's journey through enrichment as eight stages: what
- * was sent to each model call, what came back, and what the code then did with
- * it — including the drops that leave no trace in the database.
+ * Two surfaces behind a tab split. **Trace** is one file's journey through
+ * enrichment as eight stages: what was sent to each model call, what came back,
+ * and what the code then did with it — including the drops that leave no trace
+ * in the database. **Project minting** is the review queue for what the minting
+ * pass proposed, which otherwise has to be read as markdown off disk.
+ *
+ * The minting API is admin-gated but mounted unconditionally, so that tab would
+ * work with dev tools off. It sits inside the same gate anyway: a debug surface
+ * should appear and disappear as one thing.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import { type DevTraceRunHeader, type DevTraceRunKind, type UnifiedFile, api } from "@/lib/api";
@@ -19,6 +25,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { RunStatusBadge } from "./enrichment-trace";
+import { MintingQueue } from "./minting-queue";
 import { SearchTraces } from "./search-traces";
 import { TraceDialog } from "./trace-dialog";
 
@@ -33,7 +40,7 @@ function DevToolsPage() {
   const [traceFile, setTraceFile] = useState<{ id: string; name: string } | null>(null);
   const [traceKind, setTraceKind] = useState<DevTraceRunKind>("enrichment");
   const [openRun, setOpenRun] = useState<{ id: string; kind: DevTraceRunKind } | null>(null);
-  const [tab, setTab] = useState<"enrichment" | "search">("enrichment");
+  const [tab, setTab] = useState<"enrichment" | "search" | "minting">("enrichment");
   const isAdmin = auth.role === "admin";
 
   /**
@@ -84,10 +91,13 @@ function DevToolsPage() {
           <div className="mt-5 flex gap-1 border-b border-border">
             <TabButton active={tab === "enrichment"} onClick={() => setTab("enrichment")} label="Enrichment" />
             <TabButton active={tab === "search"} onClick={() => setTab("search")} label="Search" />
+            <TabButton active={tab === "minting"} onClick={() => setTab("minting")} label="Project minting" />
           </div>
 
           {tab === "search" ? (
             <SearchTraces />
+          ) : tab === "minting" ? (
+            <MintingQueue />
           ) : (
             <EnrichmentTab
               runs={runsQuery.data?.runs ?? []}
