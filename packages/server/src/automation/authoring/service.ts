@@ -22,7 +22,7 @@ import type {
   AutomationAuthoringValidationOutcome,
 } from "./telemetry";
 
-const MAX_GENERATION_ATTEMPTS = 2;
+const MAX_GENERATION_ATTEMPTS = 3;
 const GENERATION_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_TOKENS = 8192;
 

@@ -832,7 +832,9 @@ async function handleConfiguredChatAuthoring(
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {
-      return text("Error: automation authoring could not produce a valid definition. No changes were saved.");
+      return text(
+        "Error: automation authoring could not produce a valid definition after three attempts. No invalid automation was saved. Please correct your request and try again.",
+      );
     }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
   }
@@ -854,8 +856,7 @@ async function handleConfiguredChatAuthoring(
   const triggerConfig = result.artifact.steps.find((step) => step.type === "trigger")?.triggerConfig;
   const webhookMetadata = await webhookResponseMetadata(deps, result.task.id, triggerConfig);
   const response = { ...result.task, ...(webhookMetadata ?? {}) };
-  const testRun = await automaticAutomationTestRun(deps.scheduler, result.task.id);
-  return text([`Automation ${verb}:`, JSON.stringify(response, null, 2), testRun].join("\n"));
+  return text([`Automation ${verb}:`, JSON.stringify(response, null, 2)].join("\n"));
 }
 
 export async function handleManageScheduledTasks(

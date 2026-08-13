@@ -185,15 +185,7 @@ describe("ManageScheduledTasks tool contract", () => {
 
 describe("handleManageScheduledTasks — configured chat authoring", () => {
   it("routes natural-language creation through the authorer and collects the saved artifact", async () => {
-    const automaticTestRun = {
-      runId: "automatic-run-1",
-      status: "completed",
-      finalOutput: "Daily brief sent",
-      stepOutputs: {},
-    };
-    const scheduler = makeMockScheduler({
-      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
-    });
+    const scheduler = makeMockScheduler();
     const savedTask = makeTask({ id: "authored-task", title: "Daily brief", prompt: "Daily brief" });
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
@@ -246,12 +238,8 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
     });
     expect(scheduler.addTask).not.toHaveBeenCalled();
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("authored-task", {
-      preserveTaskState: true,
-      runMode: "test",
-    });
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("Automation created:");
-    expect(result.content[0].text).toContain('"runId": "automatic-run-1"');
     expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: "authored-task", title: "Daily brief", requiresBuilder: true }),
     );
@@ -343,7 +331,7 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
     );
 
     expect(result.content[0].text).toBe(
-      "Error: automation authoring could not produce a valid definition. No changes were saved.",
+      "Error: automation authoring could not produce a valid definition after three attempts. No invalid automation was saved. Please correct your request and try again.",
     );
   });
 
@@ -680,19 +668,8 @@ describe("handleManageScheduledTasks — update", () => {
     expect(scheduler.updateTask).not.toHaveBeenCalled();
   });
 
-  it("automatically verifies every script after a natural-language automation edit", async () => {
-    const automaticTestRun = {
-      runId: "automatic-edit-run-1",
-      status: "completed",
-      finalOutput: "Verified",
-      stepOutputs: {
-        action_one: { status: "completed" },
-        action_two: { status: "completed" },
-      },
-    };
-    const scheduler = makeMockScheduler({
-      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
-    });
+  it("does not automatically execute a natural-language automation edit", async () => {
+    const scheduler = makeMockScheduler();
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
         kind: "saved",
@@ -715,13 +692,9 @@ describe("handleManageScheduledTasks — update", () => {
       { scheduler, taskContext: dmContext, chatAuthoring },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("edited-task", {
-      preserveTaskState: true,
-      runMode: "test",
-    });
-    expect(result.content[0].text).toContain("Automatic test run completed for automation edited-task");
-    expect(result.content[0].text).toContain('"action_one"');
-    expect(result.content[0].text).toContain('"action_two"');
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Automation updated:");
+    expect(result.content[0].text).not.toContain("Automatic test run");
   });
 });
 
