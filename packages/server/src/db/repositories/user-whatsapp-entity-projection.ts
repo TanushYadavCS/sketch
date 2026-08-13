@@ -19,6 +19,15 @@ async function upsertWhatsAppEntityPoint(
   point: WhatsAppEntityPoint,
 ): Promise<void> {
   const now = new Date().toISOString();
+  if (point.primary) {
+    await db
+      .updateTable("entity_contact_points")
+      .set({ is_primary: 0, updated_at: now })
+      .where("entity_id", "=", entityId)
+      .where("kind", "=", point.kind)
+      .where("value", "!=", point.value)
+      .execute();
+  }
   await db
     .insertInto("entity_contact_points")
     .values({

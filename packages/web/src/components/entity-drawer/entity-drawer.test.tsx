@@ -1,6 +1,6 @@
 /**
  * EntityDrawer contract:
- *  - header carries identity flags (role/email/domains/aliases) inline, plus last-seen.
+ *  - person drawers carry an identity strip sourced from contact points.
  *  - Summary block lazy-loads the Gemini narrative; renders the WHAT line as a fallback
  *    when no cached brief exists.
  *  - Timeline and Relationships are tabs; Timeline is the default; switching surfaces
@@ -24,7 +24,39 @@ const SARAH = {
   sourceType: "person",
   subtype: null,
   aliases: ["S. Chen"],
-  metadata: { role: "Engineer", email: "sarah@stripe.com" },
+  contactPoints: [
+    {
+      id: "email-primary",
+      kind: "email",
+      value: "sarah@stripe.com",
+      label: null,
+      isPrimary: true,
+      provenance: "declared",
+      source: "manual",
+      verifiedAt: null,
+    },
+    {
+      id: "email-other",
+      kind: "email",
+      value: "sarah.chen@example.com",
+      label: "Personal",
+      isPrimary: false,
+      provenance: "inferred",
+      source: "google_calendar",
+      verifiedAt: null,
+    },
+    {
+      id: "phone-primary",
+      kind: "phone",
+      value: "+14155550123",
+      label: null,
+      isPrimary: true,
+      provenance: "declared",
+      source: "manual",
+      verifiedAt: null,
+    },
+  ],
+  metadata: { role: "Engineer", email: "legacy-wrong@example.com" },
   status: "confirmed",
   hotness: 0,
   mentionCount: 5,
@@ -187,9 +219,12 @@ describe("EntityDrawer", () => {
 
     await screen.findByRole("heading", { name: /Sarah Chen/ });
 
-    // Identity flags appear inline in the header.
+    // Role remains in the header; contact points live in the identity strip.
     expect(screen.getByText("Engineer")).toBeInTheDocument();
     expect(screen.getByText("sarah@stripe.com")).toBeInTheDocument();
+    expect(screen.queryByText("legacy-wrong@example.com")).not.toBeInTheDocument();
+    expect(screen.getByText("+14155550123")).toBeInTheDocument();
+    expect(screen.getByText("+1")).toBeInTheDocument();
     expect(screen.getByText(/Also: S\. Chen/)).toBeInTheDocument();
 
     // Summary renders identity + activity sentences directly (no LLM, no shimmer).
@@ -203,11 +238,47 @@ describe("EntityDrawer", () => {
     await waitFor(() => expect(screen.getByText(/No file mentions yet/i)).toBeInTheDocument());
 
     // Removed surfaces.
-    expect(screen.queryByText("Identity")).not.toBeInTheDocument();
+    expect(screen.getByText("Identity")).toBeInTheDocument();
     expect(screen.queryByText("Source IDs")).not.toBeInTheDocument();
     expect(screen.queryByText("Signal")).not.toBeInTheDocument();
     expect(screen.queryByText("So what")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Refresh summary/)).not.toBeInTheDocument();
+  });
+
+  it("lets an admin add another email without doing a cross-entity duplicate lookup", async () => {
+    const user = userEvent.setup();
+    let created: { kind: string; value: string } | null = null;
+    server.use(
+      http.get("/api/auth/session", () =>
+        HttpResponse.json({ authenticated: true, email: "admin@test.com", role: "admin" }),
+      ),
+      http.post("/api/entities/e-sarah/contact-points", async ({ request }) => {
+        created = (await request.json()) as { kind: string; value: string };
+        return HttpResponse.json(
+          {
+            contactPoint: {
+              id: "new-email",
+              ...created,
+              label: null,
+              isPrimary: false,
+              provenance: "declared",
+              source: "manual",
+              verifiedAt: null,
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
+    await user.click(screen.getByRole("button", { name: /Identity/ }));
+    await user.click(await screen.findByRole("button", { name: "Add email" }));
+    await user.type(screen.getByPlaceholderText("name@example.com"), "shared@example.com");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(created).toEqual({ kind: "email", value: "shared@example.com", makePrimary: false }));
   });
 
   it("switches to the Relationships tab and pins AMBIGUOUS to the top", async () => {

@@ -31,7 +31,12 @@ type ProjectBinding = Selectable<EntityProjectBindingsTable>;
 type MemberOverride = Selectable<EntityProjectMemberOverridesTable>;
 
 export type EntityMergeMove =
-  | { table: string; rowId: string; repoint: Record<string, { from: string | null; to: string | null }> }
+  | {
+      table: string;
+      rowId: string;
+      repoint: Record<string, { from: string | null; to: string | null }>;
+      isPrimary?: { from: number; to: number };
+    }
   | { table: string; collided: true; payload: Record<string, unknown> }
   | { table: "entity_relationships"; rowId: string; selfLoopDropped: true; payload: Record<string, unknown> }
   | {
@@ -327,14 +332,36 @@ async function repointContactPoints(
 ): Promise<void> {
   const rows = await db.selectFrom("entity_contact_points").selectAll().where("entity_id", "=", loserId).execute();
   const movedIds = new Set(rows.map((row) => row.id));
-  await repointEntityScopedRows<ContactPoint>(db, {
-    table: "entity_contact_points",
-    loserId,
-    survivorId,
-    rows,
-    moves,
-    findCollision: (row) => findContactPointCollision(db, survivorId, row),
-  });
+  for (const row of rows) {
+    const collision = await findContactPointCollision(db, survivorId, row);
+    if (collision) {
+      moves.push({ table: "entity_contact_points", collided: true, payload: rowPayload(row) });
+      await db.deleteFrom("entity_contact_points").where("id", "=", row.id).execute();
+      continue;
+    }
+    const survivorPrimary =
+      row.is_primary === 1
+        ? await db
+            .selectFrom("entity_contact_points")
+            .select("id")
+            .where("entity_id", "=", survivorId)
+            .where("kind", "=", row.kind)
+            .where("is_primary", "=", 1)
+            .executeTakeFirst()
+        : undefined;
+    const nextPrimary = survivorPrimary ? 0 : row.is_primary;
+    await db
+      .updateTable("entity_contact_points")
+      .set({ entity_id: survivorId, is_primary: nextPrimary })
+      .where("id", "=", row.id)
+      .execute();
+    moves.push({
+      table: "entity_contact_points",
+      rowId: row.id,
+      repoint: { entity_id: { from: loserId, to: survivorId } },
+      ...(nextPrimary !== row.is_primary ? { isPrimary: { from: row.is_primary, to: nextPrimary } } : {}),
+    });
+  }
   await rebalancePrimaryContactPoints(db, survivorId, movedIds);
 }
 
@@ -928,7 +955,7 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
   if (move.table === "entity_contact_points" && updates.entity_id) {
     await db
       .updateTable("entity_contact_points")
-      .set({ entity_id: updates.entity_id })
+      .set({ entity_id: updates.entity_id, ...(move.isPrimary ? { is_primary: move.isPrimary.from } : {}) })
       .where("id", "=", move.rowId)
       .execute();
     return;

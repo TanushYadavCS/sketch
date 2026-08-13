@@ -550,6 +550,7 @@ export interface EntityListItem {
   sourceType: string;
   subtype: string | null;
   aliases: string[];
+  contactPoints: EntityContactPoint[];
   metadata: Record<string, unknown> | null;
   status: string;
   hotness: number;
@@ -557,6 +558,19 @@ export interface EntityListItem {
   lastMentionAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp" | "whatsapp_lid";
+
+export interface EntityContactPoint {
+  id: string;
+  kind: EntityContactPointKind;
+  value: string;
+  label: string | null;
+  isPrimary: boolean;
+  provenance: "declared" | "inferred";
+  source: string;
+  verifiedAt: string | null;
 }
 
 export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "tool" | "system" | "other";
@@ -2698,6 +2712,28 @@ export const api = {
         entity: EntityDetail;
         sourceRefs: EntitySourceRef[];
       }>(`/api/entities/${id}`);
+    },
+    createContactPoint(
+      id: string,
+      body: { kind: "email" | "phone"; value: string; label?: string | null; makePrimary?: boolean },
+    ) {
+      return request<{ contactPoint: EntityContactPoint }>(`/api/entities/${id}/contact-points`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    updateContactPoint(
+      id: string,
+      contactPointId: string,
+      body: { kind?: EntityContactPointKind; value?: string; label?: string | null; isPrimary?: boolean },
+    ) {
+      return request<{ contactPoint: EntityContactPoint }>(`/api/entities/${id}/contact-points/${contactPointId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+    },
+    deleteContactPoint(id: string, contactPointId: string) {
+      return request<void>(`/api/entities/${id}/contact-points/${contactPointId}`, { method: "DELETE" });
     },
     relations(id: string) {
       return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);

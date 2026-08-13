@@ -15,6 +15,8 @@
 import { EntityMergeDialog } from "@/components/entity-merge-dialog";
 import { EntityShareDialog } from "@/components/entity-share-dialog";
 import type {
+  EntityContactPoint,
+  EntityContactPointKind,
   EntityDetail,
   EntityRelationEvidenceRow,
   EntityRelationView,
@@ -30,6 +32,8 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   GlobeIcon,
+  PencilSimpleIcon,
+  PlusIcon,
   ShareNetworkIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -47,6 +51,7 @@ import {
 } from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
+import { Input } from "@sketch/ui/components/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
@@ -140,6 +145,11 @@ interface EntityDrawerBodyProps {
 }
 
 function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEntity }: EntityDrawerBodyProps) {
+  const sessionQuery = useQuery({
+    queryKey: ["auth-session"],
+    queryFn: () => api.auth.session(),
+    staleTime: 60_000,
+  });
   const profileQuery = useQuery({
     queryKey: ["entity-drawer", "profile", entityId],
     queryFn: () => api.entities.get(entityId),
@@ -164,6 +174,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
   }
 
   const { entity } = profileQuery.data;
+  const isAdmin = sessionQuery.data?.role === "admin";
   const accent = entityAccent({ id: entity.id, name: entity.name, sourceType: entity.sourceType });
 
   return (
@@ -175,8 +186,10 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
         onBack={onBack}
         accent={accent}
         onOpenEntity={onOpenEntity}
+        isAdmin={isAdmin}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+        {entity.sourceType === "person" ? <IdentityStrip entity={entity} isAdmin={isAdmin} /> : null}
         <SummaryBlock entity={entity} accent={accent} />
         <DrawerTabs
           entityId={entity.id}
@@ -196,18 +209,11 @@ interface DrawerHeaderProps {
   onBack: () => void;
   accent: string;
   onOpenEntity: (id: string) => void;
+  isAdmin: boolean;
 }
 
-function DrawerHeader({ entity, stackDepth, previousName, onBack, accent, onOpenEntity }: DrawerHeaderProps) {
+function DrawerHeader({ entity, stackDepth, previousName, onBack, accent, onOpenEntity, isAdmin }: DrawerHeaderProps) {
   const lastSeen = entity.profile.lastSeenAt;
-  // EntityDrawer mounts at root (outside the dashboard route context), so the
-  // route-context auth hook is not available here — query the session directly.
-  const sessionQuery = useQuery({
-    queryKey: ["auth-session"],
-    queryFn: () => api.auth.session(),
-    staleTime: 60_000,
-  });
-  const isAdmin = sessionQuery.data?.role === "admin";
   const [shareOpen, setShareOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -401,7 +407,6 @@ function DeleteEntityDialog({
  */
 function IdentityChips({ entity }: { entity: EntityDetail }) {
   const meta = entity.metadata ?? {};
-  const email = typeof meta.email === "string" ? meta.email : null;
   const role = typeof meta.role === "string" ? meta.role : null;
   const domains = entity.profile.domainsForCompany;
   const aliases = entity.aliases;
@@ -411,11 +416,6 @@ function IdentityChips({ entity }: { entity: EntityDetail }) {
       {role ? (
         <Badge variant="outline" className="text-[10px]">
           {role}
-        </Badge>
-      ) : null}
-      {email ? (
-        <Badge variant="secondary" className="font-mono text-[10px] normal-case tracking-normal">
-          {email}
         </Badge>
       ) : null}
       {domains.map((d) => (
@@ -432,6 +432,223 @@ function IdentityChips({ entity }: { entity: EntityDetail }) {
         <span className="text-[11px] text-muted-foreground">Also: {aliases.join(", ")}</span>
       ) : null}
     </>
+  );
+}
+
+const EDITABLE_CONTACT_KINDS: Array<{ kind: EntityContactPointKind; label: string }> = [
+  { kind: "email", label: "Email" },
+  { kind: "phone", label: "Phone" },
+];
+
+function localContactValue(kind: EntityContactPointKind, value: string): string {
+  const trimmed = value.trim();
+  return kind === "email" ? trimmed.toLowerCase() : trimmed.replace(/[\s()-]/g, "");
+}
+
+function IdentityStrip({ entity, isAdmin }: { entity: EntityDetail; isAdmin: boolean }) {
+  const queryClient = useQueryClient();
+  const points = (entity.contactPoints ?? []).filter((point) => point.kind === "email" || point.kind === "phone");
+  const [expanded, setExpanded] = useState(points.length === 0);
+  const [editing, setEditing] = useState<EntityContactPoint | null>(null);
+  const [addingKind, setAddingKind] = useState<EntityContactPointKind | null>(null);
+  const [value, setValue] = useState("");
+  const [isPrimary, setIsPrimary] = useState(false);
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile", entity.id] });
+    void queryClient.invalidateQueries({ queryKey: ["entities"] });
+    setEditing(null);
+    setAddingKind(null);
+    setValue("");
+    setIsPrimary(false);
+  };
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const kind = editing?.kind ?? addingKind;
+      if (!kind) throw new Error("Choose a contact type");
+      const normalized = localContactValue(kind, value);
+      const duplicate = points.some(
+        (point) =>
+          point.id !== editing?.id && point.kind === kind && localContactValue(kind, point.value) === normalized,
+      );
+      if (duplicate) throw new Error("This contact point already exists on this person");
+      return editing
+        ? api.entities.updateContactPoint(entity.id, editing.id, { value, isPrimary })
+        : api.entities.createContactPoint(entity.id, {
+            kind: kind as "email" | "phone",
+            value,
+            makePrimary: isPrimary,
+          });
+    },
+    onSuccess: refresh,
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (contactPointId: string) => api.entities.deleteContactPoint(entity.id, contactPointId),
+    onSuccess: refresh,
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const primaryEmail =
+    points.find((point) => point.kind === "email" && point.isPrimary) ?? points.find((point) => point.kind === "email");
+  const primaryPhone =
+    points.find((point) => point.kind === "phone" && point.isPrimary) ?? points.find((point) => point.kind === "phone");
+  const primaryIds = new Set([primaryEmail?.id, primaryPhone?.id]);
+  const additional = points.filter((point) => !primaryIds.has(point.id)).length;
+
+  return (
+    <div className="mb-4 rounded-lg border bg-muted/20">
+      <div className="flex items-center gap-2 px-4 py-3">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+        >
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Identity</div>
+            {!expanded ? (
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs">
+                {primaryEmail ? <span>{primaryEmail.value}</span> : null}
+                {primaryPhone ? <span>{primaryPhone.value}</span> : null}
+                {!primaryEmail && !primaryPhone ? (
+                  <span className="text-muted-foreground">No email or phone</span>
+                ) : null}
+                {additional > 0 ? <span className="text-muted-foreground">+{additional}</span> : null}
+              </div>
+            ) : null}
+          </div>
+          {expanded ? <CaretDownIcon size={14} /> : <CaretRightIcon size={14} />}
+        </button>
+        {isAdmin && !expanded ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 text-[11px]"
+            onClick={() => {
+              setExpanded(true);
+              setAddingKind("email");
+              setValue("");
+              setIsPrimary(!points.some((point) => point.kind === "email"));
+            }}
+          >
+            <PlusIcon size={12} /> Add
+          </Button>
+        ) : null}
+      </div>
+
+      {expanded ? (
+        <div className="space-y-2 border-t px-4 py-3">
+          {points.map((point) => (
+            <div key={point.id} className="flex items-center gap-2 rounded-md bg-background px-3 py-2">
+              <span className="w-12 shrink-0 text-[10px] font-semibold uppercase text-muted-foreground">
+                {point.kind}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">{point.value}</span>
+              <span className="text-[9px] uppercase tracking-wide text-muted-foreground">{point.provenance}</span>
+              {point.isPrimary ? (
+                <Badge variant="secondary" className="text-[9px]">
+                  Primary
+                </Badge>
+              ) : null}
+              {isAdmin ? (
+                <>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    aria-label={`Edit ${point.value}`}
+                    onClick={() => {
+                      setEditing(point);
+                      setAddingKind(null);
+                      setValue(point.value);
+                      setIsPrimary(point.isPrimary);
+                    }}
+                  >
+                    <PencilSimpleIcon size={13} />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 text-destructive hover:text-destructive"
+                    aria-label={`Delete ${point.value}`}
+                    disabled={deleteMutation.isPending}
+                    onClick={() => deleteMutation.mutate(point.id)}
+                  >
+                    <TrashIcon size={13} />
+                  </Button>
+                </>
+              ) : null}
+            </div>
+          ))}
+
+          {isAdmin && (editing || addingKind) ? (
+            <form
+              className="flex flex-wrap items-center gap-2 rounded-md border bg-background p-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveMutation.mutate();
+              }}
+            >
+              <span className="w-12 text-[10px] font-semibold uppercase text-muted-foreground">
+                {editing?.kind ?? addingKind}
+              </span>
+              <Input
+                autoFocus
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
+                className="h-8 min-w-48 flex-1 font-mono text-xs"
+                placeholder={addingKind === "phone" ? "+14155550123" : "name@example.com"}
+                required
+              />
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input type="checkbox" checked={isPrimary} onChange={(event) => setIsPrimary(event.target.checked)} />
+                Primary
+              </label>
+              <Button type="submit" size="sm" className="h-8" disabled={saveMutation.isPending}>
+                Save
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8"
+                onClick={() => {
+                  setEditing(null);
+                  setAddingKind(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </form>
+          ) : null}
+
+          {isAdmin && !editing && !addingKind ? (
+            <div className="flex gap-2 pt-1">
+              {EDITABLE_CONTACT_KINDS.map(({ kind, label }) => (
+                <Button
+                  key={kind}
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1 text-[11px]"
+                  onClick={() => {
+                    setAddingKind(kind);
+                    setValue("");
+                    setIsPrimary(!points.some((point) => point.kind === kind));
+                  }}
+                >
+                  <PlusIcon size={12} /> Add {label.toLowerCase()}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -672,25 +672,30 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     }
   }
 
-  // 1) Email fast-path — exact match against existing entity's stored email.
+  // 1) Email fast-path — exact, ambiguity-aware match against contact points.
   if (input.entityType === "person" && input.email) {
-    const lowered = input.email.toLowerCase();
-    const candidates = deps.lookup.listByType(input.entityType);
-    for (const c of candidates) {
-      const stored = deps.readEmail(c);
-      if (stored && stored.toLowerCase() === lowered) {
-        const existingSourceRef = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
-        if (!existingSourceRef || existingSourceRef.id === c.id) {
-          await deps.entityRepo.upsertSourceRef({ entityId: c.id, source: input.source, sourceId: input.sourceId });
-        }
-        const reconciled = await deps.entityRepo.reconcilePersonSubtype(c.id, input.subtype, input.provenanceTier);
-        if (c.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
-          await deps.entityRepo.appendAlias(reconciled.id, input.name);
-        }
-        const entity = (await deps.entityRepo.getEntity(reconciled.id)) ?? reconciled;
-        await deps.onEntityResolved?.(entity);
-        return { kind: "linked", entity };
+    const emailMatches = await deps.entityRepo.getPersonEntitiesByEmail(input.email);
+    if (emailMatches.length === 1) {
+      const candidate = emailMatches[0];
+      const existingSourceRef = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+      if (!existingSourceRef || existingSourceRef.id === candidate.id) {
+        await deps.entityRepo.upsertSourceRef({
+          entityId: candidate.id,
+          source: input.source,
+          sourceId: input.sourceId,
+        });
       }
+      const reconciled = await deps.entityRepo.reconcilePersonSubtype(
+        candidate.id,
+        input.subtype,
+        input.provenanceTier,
+      );
+      if (candidate.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(reconciled.id, input.name);
+      }
+      const entity = (await deps.entityRepo.getEntity(reconciled.id)) ?? reconciled;
+      await deps.onEntityResolved?.(entity);
+      return { kind: "linked", entity };
     }
   }
 

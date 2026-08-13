@@ -65,6 +65,13 @@ async function upsertIdentityContactPoint(
 ): Promise<void> {
   const now = new Date().toISOString();
   await db
+    .updateTable("entity_contact_points")
+    .set({ is_primary: 0, updated_at: now })
+    .where("entity_id", "=", entityId)
+    .where("kind", "=", kind)
+    .where("value", "!=", value)
+    .execute();
+  await db
     .insertInto("entity_contact_points")
     .values({
       id: randomUUID(),

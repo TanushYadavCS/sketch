@@ -14,6 +14,7 @@ function entity(
   return {
     subtype: null,
     aliases: [],
+    contactPoints: [],
     metadata: null,
     status: "confirmed",
     hotness: 1,
@@ -31,6 +32,18 @@ const PERSON = entity({
   sourceType: "person",
   subtype: "internal",
   metadata: { email: "mira@example.com", role: "Engineer" },
+  contactPoints: [
+    {
+      id: "mira-email",
+      kind: "email",
+      value: "mira@example.com",
+      label: null,
+      isPrimary: true,
+      provenance: "inferred",
+      source: "google_calendar",
+      verifiedAt: null,
+    },
+  ],
   mentionCount: 12,
 });
 const COMPANY = entity({ id: "company-1", name: "Acme", sourceType: "company", subtype: "internal" });
