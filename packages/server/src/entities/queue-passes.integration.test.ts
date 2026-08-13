@@ -7,8 +7,10 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger, createTestPgDb } from "../test-utils";
+import { duplicateDrainStateRowId } from "./duplicate-drain";
 import { applyProjection } from "./queue-projection";
 import { liveEntitiesForNames, loadQueueRows } from "./queue-reconcile";
+import { startQueueDrainSequence } from "./queue-run";
 import { structuralPass, withAttendeeFactChunkSizeForTest } from "./queue-structural";
 
 const ADMIN_EMAIL = "admin@test.com";
@@ -226,6 +228,14 @@ async function queueState(db: Kysely<DB>, ids: string[]) {
     .execute();
 }
 
+async function mergeCount(db: Kysely<DB>): Promise<number> {
+  const row = await db
+    .selectFrom("entity_merges")
+    .select((eb) => eb.fn.countAll<number>().as("count"))
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
 /**
  * Aliases are not a table — they live in `entities.aliases`, so `selectAll` on
  * entities already carries them.
@@ -318,7 +328,7 @@ describe("queue graph passes", () => {
 
     const row = await readRow(h.db, rowId);
     expect(row?.status).toBe("deferred");
-    expect(row?.pass_reason).toBe("superseded_by_entity");
+    expect(row?.pass_reason).toBe("name_already_resolved");
     expect(row?.candidate_entity_id).toBe(supersedes);
     expect(row?.candidate_entity_ids).toBeNull();
     expect(row?.candidate_score).toBeNull();
@@ -329,7 +339,38 @@ describe("queue graph passes", () => {
 
     const processed = await readRow(h.db, nullSourceRow);
     expect(processed?.candidate_entity_id).toBe(nullSourceLive);
-    expect(processed?.pass_reason).toBe("superseded_by_entity");
+    expect(processed?.pass_reason).toBe("name_already_resolved");
+  });
+
+  it("keeps a re-pointed row verdict stable across queue runs", async () => {
+    const candidate = await seedEntity(h.db, { name: "N. Rahman" });
+    const resolved = await seedEntity(h.db, { name: "Nadia Rahman" });
+    const rowId = await seedQueueRow(h.db, h.ownerId, {
+      name: "Nadia Rahman",
+      candidateEntityId: candidate,
+      candidateEntityIds: [candidate],
+      candidateScore: 0.8,
+    });
+
+    await runPasses(h);
+    const run1 = await readRow(h.db, rowId);
+    await runPasses(h);
+    const run2 = await readRow(h.db, rowId);
+
+    expect(run1).toMatchObject({
+      status: "deferred",
+      pass_reason: "name_already_resolved",
+      candidate_entity_id: resolved,
+    });
+    expect({
+      status: run2?.status,
+      pass_reason: run2?.pass_reason,
+      candidate_entity_id: run2?.candidate_entity_id,
+    }).toEqual({
+      status: run1?.status,
+      pass_reason: run1?.pass_reason,
+      candidate_entity_id: run1?.candidate_entity_id,
+    });
   });
 
   it("T3 leaves no stale candidate fields after the merge and delete repairs", async () => {
@@ -354,7 +395,7 @@ describe("queue graph passes", () => {
 
     const repointed = await readRow(h.db, mergedRow);
     expect(repointed?.candidate_entity_id).toBe(survivor);
-    expect(repointed?.pass_reason).toBe("candidate_merged_away");
+    expect(repointed?.pass_reason).toBe("no_shared_file");
     expect(repointed?.candidate_score).toBeNull();
     expect(repointed?.candidate_entity_ids).toBeNull();
     expect(repointed?.candidate_generated_at).not.toBe("2020-01-01T00:00:00.000Z");
@@ -364,6 +405,51 @@ describe("queue graph passes", () => {
     expect(cleared?.candidate_score).toBeNull();
     expect(cleared?.candidate_entity_ids).toBeNull();
     expect(cleared?.candidate_generated_at).not.toBe("2020-01-01T00:00:00.000Z");
+  });
+
+  it("keeps a repaired merged-away row stable and does not auto-merge it", async () => {
+    const survivor = await seedEntity(h.db, { name: "Survivor Entity" });
+    const merged = await seedEntity(h.db, { name: "Merged Entity", mergedInto: survivor });
+    const rowId = await seedQueueRow(h.db, h.ownerId, {
+      name: "Merged Proposal",
+      candidateEntityId: merged,
+      candidateEntityIds: [merged, survivor],
+      candidateScore: 0.9,
+    });
+    const [fileId] = await seedIndexedFiles(h.db, h.ownerId, "merged-stability", 1);
+    await seedReviewEvidence(h.db, rowId, [fileId]);
+    await seedMention(h.db, survivor, fileId);
+
+    await runPasses(h);
+    const run1 = await readRow(h.db, rowId);
+    await runPasses(h);
+    const run2 = await readRow(h.db, rowId);
+
+    expect({
+      status: run2?.status,
+      pass_reason: run2?.pass_reason,
+      candidate_entity_id: run2?.candidate_entity_id,
+    }).toEqual({
+      status: run1?.status,
+      pass_reason: run1?.pass_reason,
+      candidate_entity_id: run1?.candidate_entity_id,
+    });
+    expect(run1).toMatchObject({
+      status: "pending",
+      pass_reason: null,
+      candidate_entity_id: survivor,
+    });
+
+    const mergesBeforeDrain = await mergeCount(h.db);
+    const drain = await h.app.request("/api/graph-passes/duplicate-drain-runs", {
+      method: "POST",
+      headers: { Cookie: h.cookie },
+    });
+    expect(drain.status).toBe(201);
+    expect(await mergeCount(h.db)).toBe(mergesBeforeDrain);
+    const afterDrain = await readRow(h.db, rowId);
+    expect(afterDrain?.status).toBe("pending");
+    expect(afterDrain?.resolved_entity_id).toBeNull();
   });
 
   /**
@@ -534,7 +620,7 @@ describe("queue graph passes", () => {
     expect((await readRow(h.db, vetoRow))?.pass_reason).toBe("different_emails");
   });
 
-  it("F1 the veto fires when the proposal's name resolves to the candidate", async () => {
+  it("F1 the register wins when the proposal's name resolves to the candidate", async () => {
     const candidate = await seedEntity(h.db, { name: "Admin", metadata: { email: "admin@one.test" } });
     const rowId = await seedQueueRow(h.db, h.ownerId, {
       name: "Admin",
@@ -546,7 +632,7 @@ describe("queue graph passes", () => {
 
     const row = await readRow(h.db, rowId);
     expect(row?.status).toBe("deferred");
-    expect(row?.pass_reason).toBe("different_emails");
+    expect(row?.pass_reason).toBe("name_already_resolved");
   });
 
   /**
@@ -938,5 +1024,26 @@ describe("queue graph passes", () => {
     expect(snapshot.kind).toBe("queue");
     expect(snapshot.scannedRows).toBe(1);
     expect((snapshot.set as Record<string, number>).name_already_resolved).toBe(1);
+  });
+
+  it("runs queue passes before the boot duplicate drain", async () => {
+    const candidate = await seedEntity(h.db, { name: "Alpha Tool", type: "tool" });
+    await seedQueueRow(h.db, h.ownerId, {
+      name: "Tool Alpha",
+      type: "tool",
+      candidateEntityId: candidate,
+      candidateScore: 1,
+    });
+
+    const handle = startQueueDrainSequence(h.db, createTestLogger());
+    await handle.done;
+
+    const state = await h.db
+      .selectFrom("graph_pass_runs")
+      .select(["input_snapshot_json"])
+      .where("id", "=", duplicateDrainStateRowId)
+      .executeTakeFirstOrThrow();
+    const snapshot = JSON.parse(state.input_snapshot_json) as { m5SkippedPassReason?: number };
+    expect(snapshot.m5SkippedPassReason).toBeGreaterThan(0);
   });
 });
