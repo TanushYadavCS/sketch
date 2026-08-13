@@ -19,6 +19,7 @@ import {
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
+  PlusIcon,
   RobotIcon,
   SlackLogoIcon,
   SpinnerGapIcon,
@@ -487,6 +488,21 @@ export function ScheduledTasksPage() {
     },
   });
 
+  const createMutation = useMutation({
+    mutationFn: () => api.scheduledTasks.create(),
+    onSuccess: ({ automationId, conversationId }) => {
+      void queryClient.invalidateQueries({ queryKey: TASKS_QUERY_KEY });
+      void navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: automationId },
+        search: { conversationId },
+      });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Could not create automation");
+    },
+  });
+
   const tasks = tasksQuery.data ?? [];
   const isAdmin = auth.role === "admin";
   const normalizedQuery = query.trim().toLowerCase();
@@ -546,10 +562,33 @@ export function ScheduledTasksPage() {
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
-      <div>
-        <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+        </div>
+        {isAdmin ? (
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
+            onClick={() => createMutation.mutate()}
+            disabled={createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <SpinnerGapIcon size={14} className="animate-spin" />
+            ) : (
+              <PlusIcon size={14} weight="bold" />
+            )}
+            {createMutation.isPending ? "Creating…" : "Create automation"}
+          </Button>
+        ) : null}
       </div>
+      {isAdmin && createMutation.isError ? (
+        <p role="alert" className="mt-3 text-sm text-destructive">
+          {createMutation.error instanceof Error ? createMutation.error.message : "Could not create automation"}
+        </p>
+      ) : null}
 
       <div className="mt-6">
         {tasksQuery.isLoading ? (
@@ -557,7 +596,11 @@ export function ScheduledTasksPage() {
         ) : tasksQuery.isError ? (
           <ErrorState />
         ) : tasks.length === 0 ? (
-          <EmptyState />
+          <EmptyState
+            isAdmin={isAdmin}
+            isCreating={createMutation.isPending}
+            onCreate={() => createMutation.mutate()}
+          />
         ) : (
           <>
             <AutomationToolbar
@@ -1504,7 +1547,15 @@ function DeleteTaskDialog({
   );
 }
 
-function EmptyState() {
+function EmptyState({
+  isAdmin,
+  isCreating,
+  onCreate,
+}: {
+  isAdmin: boolean;
+  isCreating: boolean;
+  onCreate: () => void;
+}) {
   return (
     <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
       <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
@@ -1514,6 +1565,19 @@ function EmptyState() {
       <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
+      {isAdmin ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-4 gap-1.5"
+          onClick={onCreate}
+          disabled={isCreating}
+        >
+          {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
+          {isCreating ? "Creating…" : "Create automation"}
+        </Button>
+      ) : null}
     </div>
   );
 }

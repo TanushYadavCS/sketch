@@ -2543,6 +2543,11 @@ export const api = {
       const res = await request<{ tasks: ScheduledTaskListItem[] }>("/api/scheduled-tasks");
       return res.tasks;
     },
+    create() {
+      return request<{ automationId: string; conversationId: string }>("/api/scheduled-tasks", {
+        method: "POST",
+      });
+    },
     async pause(id: string) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/pause`, {
         method: "POST",

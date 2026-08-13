@@ -1,5 +1,6 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { Hono } from "hono";
+import { sql } from "kysely";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
@@ -122,6 +123,93 @@ describe("Scheduled Tasks API", () => {
     } catch {
       // already destroyed
     }
+  });
+
+  it("creates an admin placeholder draft and a fresh builder conversation atomically", async () => {
+    const admin = await seedAdmin(db);
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await loginAdmin(app) },
+    });
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toEqual({ automationId: expect.any(String), conversationId: expect.stringMatching(/^builder-/) });
+    await expect(createScheduledTaskRepository(db).getById(body.automationId)).resolves.toMatchObject({
+      id: body.automationId,
+      status: "paused",
+      title: "New automation",
+      prompt: "Describe the automation.",
+      created_by: admin.id,
+      origin_platform: "web",
+      origin_conversation_id: body.conversationId,
+      revision: 0,
+    });
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversationForTranscriptUser(
+        body.automationId,
+        body.conversationId,
+        admin.id,
+      ),
+    ).resolves.toEqual([expect.objectContaining({ kind: "builder", archived_at: null })]);
+  });
+
+  it("requires an admin to create a placeholder draft", async () => {
+    await seedAdmin(db);
+    const member = await createUserRepository(db).create({ name: "Member", email: "member-create@test.com" });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await getMemberCookie(db, member.id) },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "FORBIDDEN", message: "Admin role required" },
+    });
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
+  it("rolls back the placeholder when the builder conversation association fails", async () => {
+    await seedAdmin(db);
+    await sql`
+      CREATE TRIGGER reject_admin_builder_association
+      BEFORE INSERT ON scheduled_task_conversations
+      BEGIN
+        SELECT RAISE(FAIL, 'builder association rejected');
+      END
+    `.execute(db);
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await loginAdmin(app) },
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "CREATION_FAILED", message: "Automation could not be created" },
+    });
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
   });
 
   it("reserves a manual run before enqueueing and preserves its failure identity", async () => {
