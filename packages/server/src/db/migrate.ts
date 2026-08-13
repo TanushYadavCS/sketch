@@ -199,6 +199,7 @@ import * as m196 from "./migrations/196-search-vector-summary-weights";
 import * as m197 from "./migrations/197-file-field-embeddings";
 import * as m198 from "./migrations/198-dev-search-trace-results";
 import * as m199 from "./migrations/199-dev-search-trace-ms-bigint";
+import * as m200 from "./migrations/200-project-minting-acceptance";
 import type { DB } from "./schema";
 
 /**
@@ -407,6 +408,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "197-file-field-embeddings": m197,
           "198-dev-search-trace-results": m198,
           "199-dev-search-trace-ms-bigint": m199,
+          "200-project-minting-acceptance": m200,
         };
       },
     },

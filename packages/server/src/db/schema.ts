@@ -973,6 +973,10 @@ export interface ProjectMintingVerdictsTable {
   relationship_state: string | null;
   flags: string | null;
   vote_stats: string | null;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  struck_projects: string | null;
+  accepted_result: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1111,6 +1115,7 @@ export interface EntitiesTable {
   metadata: string | null;
   source_ref_id: string | null;
   status: string;
+  project_lifecycle_status: string | null;
   provenance_tier: Generated<string>;
   hotness: number;
   created_at: string;

@@ -25,6 +25,22 @@ export interface StorePendingVerdictInput {
   voteStats?: object;
 }
 
+export interface AcceptVerdictInput {
+  id: string;
+  actorUserId: string;
+  struckProjects: string[];
+  result: object;
+}
+
+export interface RejectVerdictInput {
+  id: string;
+  actorUserId: string;
+}
+
+function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
+  return Number(result?.numUpdatedRows ?? 0);
+}
+
 export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
   return {
     async storePending(input: StorePendingVerdictInput): Promise<{ id: string }> {
@@ -74,6 +90,42 @@ export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
     async findById(id: string): Promise<ProjectMintingVerdictRow | null> {
       const row = await db.selectFrom("project_minting_verdicts").selectAll().where("id", "=", id).executeTakeFirst();
       return row ?? null;
+    },
+
+    async markAccepted(input: AcceptVerdictInput): Promise<boolean> {
+      const now = new Date().toISOString();
+      const result = await db
+        .updateTable("project_minting_verdicts")
+        .set({
+          status: "accepted",
+          decided_at: now,
+          decided_by_user_id: input.actorUserId,
+          struck_projects: JSON.stringify(input.struckProjects),
+          accepted_result: JSON.stringify(input.result),
+          updated_at: now,
+        })
+        .where("id", "=", input.id)
+        .where("status", "=", "pending")
+        .where("superseded_at", "is", null)
+        .executeTakeFirst();
+      return updatedCount(result) === 1;
+    },
+
+    async markRejected(input: RejectVerdictInput): Promise<boolean> {
+      const now = new Date().toISOString();
+      const result = await db
+        .updateTable("project_minting_verdicts")
+        .set({
+          status: "rejected",
+          decided_at: now,
+          decided_by_user_id: input.actorUserId,
+          updated_at: now,
+        })
+        .where("id", "=", input.id)
+        .where("status", "=", "pending")
+        .where("superseded_at", "is", null)
+        .executeTakeFirst();
+      return updatedCount(result) === 1;
     },
   };
 }
