@@ -41,9 +41,6 @@ import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
 import { denyIfNotAdmin } from "./auth-helpers";
-import type { SlackBot } from "../slack/bot";
-import type { WhatsAppRuntime } from "../whatsapp/runtime";
-import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
