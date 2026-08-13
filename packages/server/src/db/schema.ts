@@ -923,6 +923,23 @@ export interface ScheduledTaskBuilderLocksTable {
   expires_at: number;
 }
 
+export interface AutomationTaskLocksTable {
+  task_id: string;
+  holder_user_id: string;
+  holder_platform: string;
+  holder_surface: string;
+  holder_conversation_id: string | null;
+  acquired_at: Generated<string>;
+  updated_at: Generated<string>;
+  expires_at: string;
+  steal_requester_user_id: string | null;
+  steal_requester_platform: string | null;
+  steal_requester_surface: string | null;
+  steal_requester_conversation_id: string | null;
+  steal_requested_at: string | null;
+  steal_expires_at: string | null;
+}
+
 export interface GraphPassRunsTable {
   id: string;
   status: string;
@@ -1789,6 +1806,7 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_task_shares: AutomationTaskSharesTable;
+  automation_task_locks: AutomationTaskLocksTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;

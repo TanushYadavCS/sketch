@@ -10,6 +10,8 @@ import type {
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
+import type { AutomationTaskLockRow } from "../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -31,6 +33,7 @@ import {
   scheduledTaskFieldsFromSaveRequest,
   validateAutomationBuilderSaveRequest,
 } from "./definition";
+import { assertEditableBy } from "./lock-service";
 import {
   type AutomationTaskConversationAssociation,
   upsertAutomationTaskConversationAssociation,
@@ -52,10 +55,12 @@ export interface AutomationCreateContext {
 /**
  * Actor for automation mutations. Rights are owner-or-explicit-grant, re-checked
  * inside each mutation's transaction against the shares table — there is no
- * admin bypass.
+ * admin bypass. `role` is reserved for a later lane and currently carries no
+ * semantics.
  */
 export interface AutomationEditActor {
   userId: string | null;
+  role?: "admin";
 }
 
 export type AutomationCreateResult = {
@@ -67,6 +72,7 @@ export type AutomationCreateResult = {
 export type AutomationReplaceResult =
   | { kind: "saved"; row: ScheduledTaskRow }
   | { kind: "not_found" }
+  | { kind: "locked"; lock: AutomationTaskLockRow }
   | { kind: "revision_conflict"; currentRevision: number };
 
 export interface AutomationStepContentPatch {
@@ -95,11 +101,13 @@ export type AutomationMutationResult =
   | { kind: "saved"; row: ScheduledTaskRow; request: AutomationBuilderSaveRequest }
   | { kind: "not_found" }
   | { kind: "access_denied" }
+  | { kind: "locked"; lock: AutomationTaskLockRow }
   | { kind: "revision_conflict"; currentRevision: number };
 
 export type AutomationSetupModeSelectionResult =
   | { kind: "saved"; row: ScheduledTaskRow }
   | { kind: "not_found" }
+  | { kind: "locked"; lock: AutomationTaskLockRow }
   | { kind: "not_placeholder" };
 
 export interface AutomationDeletionScheduler {
@@ -428,6 +436,7 @@ export async function deleteAutomation(params: {
       await createWebhookDeliveryRepository(trx).deleteByTaskId(params.taskId);
       await trx.deleteFrom("webhook_endpoints").where("task_id", "=", params.taskId).execute();
       await createAutomationSharesRepository(trx).deleteByTaskId(params.taskId);
+      await createAutomationLocksRepository(trx).deleteByTaskId(params.taskId);
 
       const deleted = await trx.deleteFrom("scheduled_tasks").where("id", "=", params.taskId).executeTakeFirst();
       if (Number(deleted.numDeletedRows ?? 0) === 0) throw new AutomationDeletionRaceError();
@@ -473,6 +482,8 @@ export async function updateAutomationDefinition(params: {
     if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
       return { kind: "access_denied" as const };
     }
+    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
+    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
 
     const currentDefinition = buildAutomationDefinition({
       row: current,
@@ -694,6 +705,8 @@ export async function selectAutomationSetupExecutionMode(params: {
     const row = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", params.taskId).executeTakeFirst();
     if (!row || !params.actor.userId) return { kind: "not_found" as const };
     if (!(await isTaskEditor(trx, row.id, row.created_by, params.actor.userId))) return { kind: "not_found" as const };
+    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
+    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
     const [stepContentRows, runRows] = await Promise.all([
       createAutomationStepContentRepository(trx).getByTask(params.taskId),
       createAutomationRunsRepository(trx).list(params.taskId),
@@ -744,6 +757,8 @@ export async function replaceAutomationDefinition(params: {
     if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
       return { kind: "not_found" as const };
     }
+    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
+    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
     const expectedRevision = request.expectedRevision ?? current.revision;
     if (current.revision !== expectedRevision) {
       return { kind: "revision_conflict" as const, currentRevision: current.revision };

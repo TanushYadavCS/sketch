@@ -217,7 +217,12 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[176]).toBe("181-project-minting-verdicts");
     expect(names[177]).toBe("182-project-minting-states");
     expect(names[178]).toBe("183-graph-pass-runs");
+<<<<<<< HEAD
     expect(names[179]).toBe("184-person-contact-point-cutover");
+=======
+    expect(names[179]).toBe("184-automation-shares");
+    expect(names[180]).toBe("185-automation-locks");
+>>>>>>> 921888c8 (feat(db): automation edit locks with expiry and steal [subagent:lifecycle-worker/lock-data-core])
   });
 
   it("upgrades existing email access rows on Postgres", async () => {

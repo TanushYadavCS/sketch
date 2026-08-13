@@ -330,6 +330,15 @@ export interface ManageScheduledTasksDeps {
   db?: Kysely<DB>;
 }
 
+async function lockedAutomationMessage(
+  deps: Pick<ManageScheduledTasksDeps, "userRepo">,
+  lock: { holder_user_id: string },
+): Promise<string> {
+  const holderName = (await deps.userRepo?.findById(lock.holder_user_id))?.name ?? null;
+  const holder = holderName ?? lock.holder_user_id;
+  return `Error: ${holder} is editing this automation right now. Reply "take over" to request the edit lock.`;
+}
+
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
 }
@@ -1306,6 +1315,9 @@ export async function handleManageScheduledTasks(
           `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
         );
       }
+      if (saved.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
+      }
 
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
@@ -1523,6 +1535,9 @@ export async function handleManageScheduledTasks(
         return text(
           `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
         );
+      }
+      if (saved.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
       }
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)

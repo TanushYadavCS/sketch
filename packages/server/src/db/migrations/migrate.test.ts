@@ -304,6 +304,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[180]).toBe("185-queue-pass-reason");
     expect(names[181]).toBe("186-entity-merge-groups");
     expect(names[182]).toBe("181-automation-shares");
+    expect(names[183]).toBe("185-automation-locks");
   });
 
   it("backfills only exact web origin task conversations", async () => {

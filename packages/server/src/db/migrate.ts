@@ -188,6 +188,7 @@ import * as m185 from "./migrations/185-queue-pass-reason";
 import * as m186 from "./migrations/186-entity-merge-groups";
 import * as m187 from "./migrations/187-entity-name-proposals";
 import * as m181Shares from "./migrations/181-automation-shares";
+import * as m185Locks from "./migrations/185-automation-locks";
 import type { DB } from "./schema";
 
 /**
@@ -385,6 +386,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "186-entity-merge-groups": m186,
           "187-entity-name-proposals": m187,
           "181-automation-shares": m181Shares,
+          "185-automation-locks": m185Locks,
         };
       },
     },

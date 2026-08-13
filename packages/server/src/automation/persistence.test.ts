@@ -1,17 +1,21 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestDb } from "../test-utils";
+import { acquireOrRenewLock } from "./lock-service";
 import {
   createAutomationDefinition,
+  createAutomationDraft,
   deleteAutomation,
   getAutomationDefinition,
   replaceAutomationDefinition,
+  selectAutomationSetupExecutionMode,
   updateAutomationDefinition,
 } from "./persistence";
 
@@ -900,5 +904,96 @@ describe("automation persistence", () => {
     releaseCleanup();
     await expect(firstDelete).resolves.toEqual({ kind: "deleted" });
     expect(secondCleanup).not.toHaveBeenCalled();
+  });
+
+  it("blocks updates, replacements, and setup-mode selection while another editor holds the lock", async () => {
+    await addUser("user-2");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-locked"),
+      brokerCapable: true,
+    });
+    await createAutomationDraft({
+      db,
+      context: { ...createContext("automation-locked-draft"), createdBy: "user-1" },
+      timezone: "UTC",
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-locked", userId: "user-2", grantedByUserId: "user-1" });
+    const holder = { userId: "user-2", platform: "web", surface: "builder", conversationId: null } as const;
+    await acquireOrRenewLock(db, { taskId: "automation-locked", holder });
+    await acquireOrRenewLock(db, { taskId: "automation-locked-draft", holder });
+
+    const updated = await updateAutomationDefinition({
+      db,
+      taskId: "automation-locked",
+      patch: { expectedRevision: 0, title: "Locked out" },
+      actor: { userId: "user-1" },
+      brokerCapable: true,
+    });
+    expect(updated.kind).toBe("locked");
+    if (updated.kind === "locked") expect(updated.lock.holder_user_id).toBe("user-2");
+
+    const replaced = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-locked",
+      request: makeDefinition({ expectedRevision: 0, title: "Locked out replacement" }),
+      actor: { userId: "user-1" },
+      brokerCapable: true,
+    });
+    expect(replaced.kind).toBe("locked");
+
+    const mode = await selectAutomationSetupExecutionMode({
+      db,
+      taskId: "automation-locked-draft",
+      executionMode: "hybrid",
+      actor: { userId: "user-1" },
+    });
+    expect(mode.kind).toBe("locked");
+
+    // The definition and draft are untouched by locked-out writes.
+    await expect(createScheduledTaskRepository(db).getById("automation-locked")).resolves.toMatchObject({
+      title: "Daily account brief",
+      revision: 0,
+    });
+    await expect(createScheduledTaskRepository(db).getById("automation-locked-draft")).resolves.toMatchObject({
+      execution_mode: "hybrid",
+      revision: 0,
+    });
+
+    // The lock holder (with edit access) can still edit.
+    const holderEdit = await updateAutomationDefinition({
+      db,
+      taskId: "automation-locked",
+      patch: { expectedRevision: 0, title: "Holder edit" },
+      actor: { userId: "user-2" },
+      brokerCapable: true,
+    });
+    expect(holderEdit).toMatchObject({ kind: "saved", row: { title: "Holder edit", revision: 1 } });
+  });
+
+  it("removes lock rows for the task inside the delete transaction", async () => {
+    await addUser("user-2");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-lock"),
+      brokerCapable: true,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "automation-delete-lock",
+      holder: { userId: "user-2", platform: "web", surface: "builder", conversationId: null },
+    });
+
+    const result = await deleteAutomation({
+      db,
+      taskId: "automation-delete-lock",
+      actor: { userId: "user-1" },
+      scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeUndefined();
   });
 });

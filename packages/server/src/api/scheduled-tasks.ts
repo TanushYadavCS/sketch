@@ -11,6 +11,7 @@ import {
   isStrictAutomationPlaceholderRow,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
+import { acquireOrRenewLock, approveSteal, denySteal, releaseLock, requestSteal } from "../automation/lock-service";
 import {
   createAutomationDraft,
   deleteAutomation,
@@ -18,7 +19,9 @@ import {
   selectAutomationSetupExecutionMode,
 } from "../automation/persistence";
 import { parseAutomationTriggerConfig } from "../automation/webhook";
+import type { AutomationTaskLockRow } from "../db/repositories/automation-locks";
 
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -131,6 +134,16 @@ interface ScheduledTaskOriginChatMessage {
   senderName: string;
   text: string;
   createdAt: string;
+}
+
+interface AutomationLockView {
+  heldByUserId: string;
+  heldByName: string | null;
+  heldByPlatform: string;
+  heldBySurface: string;
+  expiresAt: string;
+  isHeldByMe: boolean;
+  stealPending: { requesterName: string | null; expiresAt: string } | null;
 }
 
 function compareNewestFirst(a: ScheduledTaskRow, b: ScheduledTaskRow): number {
@@ -443,6 +456,36 @@ async function listSharesWithNames(db: Kysely<DB>, taskId: string): Promise<Auto
   }));
 }
 
+/**
+ * Lock view for the web builder contract. An expired pending steal is hidden
+ * (stealPending null) so the UI never renders a stale request.
+ */
+async function toLockView(
+  row: AutomationTaskLockRow,
+  viewerUserId: string | null,
+  usersRepo: ReturnType<typeof createUserRepository>,
+): Promise<AutomationLockView> {
+  const [holder, requester] = await Promise.all([
+    usersRepo.findById(row.holder_user_id),
+    row.steal_requester_user_id ? usersRepo.findById(row.steal_requester_user_id) : Promise.resolve(undefined),
+  ]);
+  const stealPending =
+    row.steal_requester_user_id !== null &&
+    row.steal_expires_at !== null &&
+    row.steal_expires_at > new Date().toISOString()
+      ? { requesterName: requester?.name ?? null, expiresAt: row.steal_expires_at }
+      : null;
+  return {
+    heldByUserId: row.holder_user_id,
+    heldByName: holder?.name ?? null,
+    heldByPlatform: row.holder_platform,
+    heldBySurface: row.holder_surface,
+    expiresAt: row.expires_at,
+    isHeldByMe: viewerUserId !== null && row.holder_user_id === viewerUserId,
+    stealPending,
+  };
+}
+
 export function scheduledTaskRoutes(
   db: Kysely<DB>,
   scheduler: ScheduledTaskMutationDeps,
@@ -586,12 +629,13 @@ export function scheduledTaskRoutes(
   ) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
-    const [stepContentRows, runRows, owner, editor, webhookEndpoint] = await Promise.all([
+    const [stepContentRows, runRows, owner, editor, webhookEndpoint, lockRow] = await Promise.all([
       stepContentRepo.getByTask(row.id),
       runsRepo.list(row.id),
       row.created_by ? users.findById(row.created_by) : Promise.resolve(undefined),
       row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
       createWebhookEndpointRepository(db, options.encryptionKey).getByTaskId(row.id),
+      createAutomationLocksRepository(db).getByTaskId(row.id),
     ]);
     const definition = await buildAutomationDefinition({
       row,
@@ -610,6 +654,10 @@ export function scheduledTaskRoutes(
       canShare: isOwner,
       canEdit: isOwner || viewer.grantedTaskIds.has(row.id),
       shares: isOwner ? await listSharesWithNames(db, row.id) : [],
+      // Lazy expiry on access: an expired lock is not a lock — hide it from the view.
+      ...(lockRow && lockRow.expires_at > new Date().toISOString()
+        ? { lock: await toLockView(lockRow, viewer.userId, users) }
+        : {}),
     };
   }
 
@@ -733,6 +781,86 @@ export function scheduledTaskRoutes(
     });
   });
 
+  // --- Edit-lock endpoints (pessimistic whole-automation locks) ---
+  // Locks are held from the web builder surface; channel surfaces are a later lane.
+
+  routes.post("/:id/lock", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const acquired = await acquireOrRenewLock(db, {
+      taskId: id,
+      holder: { userId: result.userId, platform: "web", surface: "builder", conversationId: null },
+    });
+    const lock = await toLockView(acquired.lock, result.userId, users);
+    if (acquired.kind === "locked") {
+      return c.json({ error: { code: "LOCKED", message: "Automation is locked by another editor", lock } }, 409);
+    }
+    return c.json({ lock });
+  });
+
+  routes.delete("/:id/lock", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    await releaseLock(db, { taskId: id, userId: result.userId });
+    return c.json({ success: true });
+  });
+
+  routes.post("/:id/lock/steal", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const stolen = await requestSteal(db, {
+      taskId: id,
+      requester: { userId: result.userId, platform: "web", surface: "builder", conversationId: null },
+    });
+    if (stolen.kind === "not_locked") {
+      return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);
+    }
+    const lock = await toLockView(stolen.lock, result.userId, users);
+    if (stolen.kind === "locked") {
+      return c.json({ error: { code: "LOCKED", message: "A steal request is already pending", lock } }, 409);
+    }
+    return c.json({ status: "pending", lock });
+  });
+
+  routes.post("/:id/lock/steal/response", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const body = await c.req.json().catch(() => null);
+    const approve =
+      body && typeof body === "object" && typeof (body as { approve?: unknown }).approve === "boolean"
+        ? (body as { approve: boolean }).approve
+        : null;
+    if (approve === null) {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "approve must be a boolean" } }, 400);
+    }
+    const responded = approve
+      ? await approveSteal(db, { taskId: id, approverUserId: result.userId })
+      : await denySteal(db, { taskId: id, holderUserId: result.userId });
+    if (responded.kind === "not_found" || responded.kind === "not_holder") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (responded.kind === "no_pending_steal") {
+      return c.json({ error: { code: "NO_PENDING_STEAL", message: "There is no pending steal request" } }, 409);
+    }
+    return c.json({ status: responded.kind, lock: await toLockView(responded.lock, result.userId, users) });
+  });
+
   routes.get("/:id/shares", async (c) => {
     const id = c.req.param("id");
     const result = await loadOwnedTask(c, id);
@@ -785,6 +913,18 @@ export function scheduledTaskRoutes(
     });
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (saveResult.kind === "locked") {
+      return c.json(
+        {
+          error: {
+            code: "LOCKED",
+            message: "Automation is locked by another editor",
+            lock: await toLockView(saveResult.lock, accessible.userId, users),
+          },
+        },
+        409,
+      );
     }
     if (saveResult.kind === "not_placeholder") {
       return c.json(
@@ -851,6 +991,18 @@ export function scheduledTaskRoutes(
 
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (saveResult.kind === "locked") {
+      return c.json(
+        {
+          error: {
+            code: "LOCKED",
+            message: "Automation is locked by another editor",
+            lock: await toLockView(saveResult.lock, result.userId, users),
+          },
+        },
+        409,
+      );
     }
     if (saveResult.kind === "revision_conflict") {
       return c.json(

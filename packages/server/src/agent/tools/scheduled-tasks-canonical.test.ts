@@ -1,6 +1,7 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { acquireOrRenewLock } from "../../automation/lock-service";
 import { createAutomationDefinition, getAutomationDefinition } from "../../automation/persistence";
 import { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
@@ -1322,6 +1323,43 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     await expect(createAutomationStepContentRepository(db).getByTask("race-task")).resolves.toEqual([
       expect.objectContaining({ content: definition().stepContent.agent.content }),
     ]);
+  });
+
+  it("surfaces the lock holder instead of saving when another editor holds the edit lock", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("locked-tool-task"),
+      brokerCapable: true,
+    });
+    await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
+    await acquireOrRenewLock(db, {
+      taskId: "locked-tool-task",
+      holder: { userId: "holder-1", platform: "web", surface: "builder", conversationId: null },
+    });
+    const scheduler = schedulerFor("locked-tool-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "locked-tool-task", prompt: "Locked edit", expected_revision: 0 },
+      {
+        db,
+        scheduler,
+        taskContext: taskContextFor("locked-tool-task"),
+        userRepo: {
+          list: async () => [],
+          getAllEmailsForUser: async () => [],
+          findById: async (id: string) =>
+            id === "holder-1" ? ({ id: "holder-1", name: "Holder Person" } as never) : undefined,
+        },
+      },
+    );
+
+    expect(result.content[0].text).toContain("Holder Person is editing this automation right now");
+    expect(result.content[0].text).toContain('Reply "take over" to request the edit lock.');
+    await expect(createScheduledTaskRepository(db).getById("locked-tool-task")).resolves.toMatchObject({
+      prompt: "Summarize account activity.",
+      revision: 0,
+    });
   });
 
   it("leaves both tables unchanged when the merged definition fails validation", async () => {

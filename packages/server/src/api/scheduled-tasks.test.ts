@@ -802,6 +802,10 @@ describe("Scheduled Tasks API", () => {
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs/some-run-id" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/step-content" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock" },
+      { method: "DELETE", path: "/api/scheduled-tasks/task-bob/lock" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock/steal" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock/steal/response" },
     ];
     for (const { method, path } of routes) {
       const res = await app.request(path, { method, headers: { Cookie: cookie } });
@@ -2045,5 +2049,297 @@ describe("Scheduled Tasks API", () => {
       error: { code: "SCHEDULER_INCONSISTENT" },
     });
     await expect(tasks.getById("task-delete-throw")).resolves.toBeUndefined();
+  });
+
+  it("acquires, renews, conflicts, steals, and hands over edit locks", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+    const charlie = await users.create({ name: "Charlie", email: "charlie@test.com" });
+    await tasks.add({
+      id: "task-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "task-lock", userId: bob.id, grantedByUserId: alice.id });
+    await shares.grant({ taskId: "task-lock", userId: charlie.id, grantedByUserId: alice.id });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+    const charlieCookie = await getMemberCookie(db, charlie.id);
+
+    // No lock before anyone acquires.
+    const emptyDetail = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: aliceCookie } });
+    const emptyBody = await emptyDetail.json();
+    expect(emptyBody).toMatchObject({ automation: { id: "task-lock" } });
+    expect(emptyBody.automation).not.toHaveProperty("lock");
+
+    // Acquire + renew by the same user.
+    const firstAcquire = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(firstAcquire.status).toBe(200);
+    const firstLock = (await firstAcquire.json()).lock;
+    expect(firstLock).toMatchObject({
+      heldByUserId: alice.id,
+      heldByName: "Alice",
+      heldByPlatform: "web",
+      heldBySurface: "builder",
+      isHeldByMe: true,
+      stealPending: null,
+    });
+    expect(firstLock.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const renew = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(renew.status).toBe(200);
+    const renewedLock = (await renew.json()).lock;
+    expect(renewedLock.expiresAt >= firstLock.expiresAt).toBe(true);
+
+    // A second editor sees the lock and cannot acquire.
+    const conflict = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      error: { code: "LOCKED", lock: { heldByUserId: alice.id, isHeldByMe: false } },
+    });
+
+    // Bob requests a steal; repeats are idempotent; a second requester is blocked.
+    const steal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(steal.status).toBe(200);
+    await expect(steal.json()).resolves.toMatchObject({
+      status: "pending",
+      lock: {
+        heldByUserId: alice.id,
+        stealPending: { requesterName: "Bob", expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+      },
+    });
+
+    const repeatSteal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(repeatSteal.status).toBe(200);
+    await expect(repeatSteal.json()).resolves.toMatchObject({ status: "pending" });
+
+    const secondSteal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: charlieCookie },
+    });
+    expect(secondSteal.status).toBe(409);
+    await expect(secondSteal.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    // The detail view exposes the lock and the pending steal to all editors.
+    const detail = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: bobCookie } });
+    await expect(detail.json()).resolves.toMatchObject({
+      automation: {
+        lock: {
+          heldByUserId: alice.id,
+          heldByName: "Alice",
+          isHeldByMe: false,
+          stealPending: { requesterName: "Bob", expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+        },
+      },
+    });
+
+    // Deny first, then approve.
+    const deny = await app.request("/api/scheduled-tasks/task-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: false }),
+    });
+    expect(deny.status).toBe(200);
+    await expect(deny.json()).resolves.toMatchObject({ status: "denied", lock: { stealPending: null } });
+
+    await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    const approve = await app.request("/api/scheduled-tasks/task-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: true }),
+    });
+    expect(approve.status).toBe(200);
+    await expect(approve.json()).resolves.toMatchObject({
+      status: "approved",
+      lock: { heldByUserId: bob.id, isHeldByMe: false, stealPending: null },
+    });
+
+    // Bob (now holder) can save; then releases.
+    const save = await app.request("/api/scheduled-tasks/task-lock", {
+      method: "PUT",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Bob's edit" })),
+    });
+    expect(save.status).toBe(200);
+    await expect(save.json()).resolves.toMatchObject({ automation: { id: "task-lock", revision: 1 } });
+
+    const release = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "DELETE",
+      headers: { Cookie: bobCookie },
+    });
+    expect(release.status).toBe(200);
+    await expect(release.json()).resolves.toEqual({ success: true });
+    const afterRelease = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: aliceCookie } });
+    const afterReleaseBody = await afterRelease.json();
+    expect(afterReleaseBody).toMatchObject({ automation: { id: "task-lock" } });
+    expect(afterReleaseBody.automation).not.toHaveProperty("lock");
+  });
+
+  it("returns 409 LOCKED on PUT and steal edge cases without a valid holder", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-put@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob-put@test.com" });
+    await tasks.add({
+      id: "task-lock-put",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Locked save target",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+      title: "Locked save target",
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "task-lock-put", userId: bob.id, grantedByUserId: alice.id });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    // Steal on an unlocked task.
+    const notLocked = await app.request("/api/scheduled-tasks/task-lock-put/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(notLocked.status).toBe(409);
+    await expect(notLocked.json()).resolves.toMatchObject({ error: { code: "NOT_LOCKED" } });
+
+    // Steal response from a non-holder is opaque.
+    await app.request("/api/scheduled-tasks/task-lock-put/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    const nonHolderResponse = await app.request("/api/scheduled-tasks/task-lock-put/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: true }),
+    });
+    expect(nonHolderResponse.status).toBe(404);
+
+    // PUT by a non-holder returns the LOCKED envelope with the lock view.
+    const put = await app.request("/api/scheduled-tasks/task-lock-put", {
+      method: "PUT",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Should be locked" })),
+    });
+    expect(put.status).toBe(409);
+    await expect(put.json()).resolves.toMatchObject({
+      error: { code: "LOCKED", lock: { heldByUserId: alice.id, isHeldByMe: false } },
+    });
+    expect(scheduler.refreshTaskSchedule).not.toHaveBeenCalled();
+    await expect(tasks.getById("task-lock-put")).resolves.toMatchObject({ title: "Locked save target", revision: 0 });
+
+    // Releasing a lock held by someone else is an idempotent no-op.
+    const foreignRelease = await app.request("/api/scheduled-tasks/task-lock-put/lock", {
+      method: "DELETE",
+      headers: { Cookie: bobCookie },
+    });
+    expect(foreignRelease.status).toBe(200);
+    const stillHeld = await app.request("/api/scheduled-tasks/task-lock-put", { headers: { Cookie: bobCookie } });
+    await expect(stillHeld.json()).resolves.toMatchObject({
+      automation: { lock: { heldByUserId: alice.id } },
+    });
+  });
+
+  it("hides an expired lock from the detail view (lazy expiry)", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-expired@test.com" });
+    await tasks.add({
+      id: "task-lock-expired",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Expired lock",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+
+    await app.request("/api/scheduled-tasks/task-lock-expired/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    await db
+      .updateTable("automation_task_locks")
+      .set({ expires_at: "2020-01-01T00:00:00.000Z" })
+      .where("task_id", "=", "task-lock-expired")
+      .execute();
+
+    const detail = await app.request("/api/scheduled-tasks/task-lock-expired", { headers: { Cookie: aliceCookie } });
+    const body = await detail.json();
+    expect(body.automation).not.toHaveProperty("lock");
   });
 });
