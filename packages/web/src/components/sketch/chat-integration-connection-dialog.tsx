@@ -49,7 +49,7 @@ export function ChatIntegrationConnectionFrame({
       return;
     }
 
-    if (connection.executionMode === "cli") {
+    if (connection.executionMode !== undefined && connection.executionMode !== "canvas") {
       onOpenChange(false);
       return;
     }

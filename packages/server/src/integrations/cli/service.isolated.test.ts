@@ -5,16 +5,29 @@ import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
 import { createCliIntegrationService } from "./service";
 
-const { assertGithubCliAvailableMock, validateGithubTokenInputMock, verifyGithubTokenMock } = vi.hoisted(() => ({
+const {
+  assertGithubCliAvailableMock,
+  validateGithubTokenInputMock,
+  verifyGithubTokenMock,
+  validateLinearApiKeyInputMock,
+  verifyLinearApiKeyMock,
+} = vi.hoisted(() => ({
   assertGithubCliAvailableMock: vi.fn(),
   validateGithubTokenInputMock: vi.fn(),
   verifyGithubTokenMock: vi.fn(),
+  validateLinearApiKeyInputMock: vi.fn(),
+  verifyLinearApiKeyMock: vi.fn(),
 }));
 
 vi.mock("./github", () => ({
   assertGithubCliAvailable: assertGithubCliAvailableMock,
   validateGithubTokenInput: validateGithubTokenInputMock,
   verifyGithubToken: verifyGithubTokenMock,
+}));
+
+vi.mock("./linear", () => ({
+  validateLinearApiKeyInput: validateLinearApiKeyInputMock,
+  verifyLinearApiKey: verifyLinearApiKeyMock,
 }));
 
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -39,6 +52,14 @@ describe("CLI integration service", () => {
       externalId: "123",
       login: "octocat",
       avatarUrl: "https://github.com/octocat.png",
+      accountType: "User",
+    });
+    verifyLinearApiKeyMock.mockResolvedValue({
+      externalId: "usr_123",
+      login: "Ada Lovelace",
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      avatarUrl: "https://linear.app/avatar.png",
       accountType: "User",
     });
     service = createCliIntegrationService({
@@ -99,6 +120,38 @@ describe("CLI integration service", () => {
     expect(await db.selectFrom("agent_environment_variable_shares").selectAll().execute()).toEqual([]);
   });
 
+  it("creates and replaces a managed Linear API connection", async () => {
+    const connection = await service.connectLinear("owner", "  lin_old  ", [{ type: "user", id: "recipient" }]);
+
+    expect(connection).toMatchObject({
+      appId: "linear",
+      executionMode: "api",
+      accountLogin: "Ada Lovelace",
+      status: "active",
+      shares: [{ type: "user", id: "recipient" }],
+    });
+    const variable = await db
+      .selectFrom("agent_environment_variables")
+      .select("value")
+      .where("name", "=", "LINEAR_API_KEY")
+      .where("user_id", "=", "owner")
+      .executeTakeFirstOrThrow();
+    expect(variable.value.startsWith("enc:")).toBe(true);
+
+    const runtimeEnv = await service.filterRuntimeEnvironment(
+      { currentUserId: "recipient", contextType: "dm", allowOrgSharedEnv: true },
+      { LINEAR_API_KEY: "stale" },
+    );
+    expect(runtimeEnv).toEqual({ LINEAR_API_KEY: "lin_old" });
+
+    await service.updateLinearApiKey("owner", connection.id, "lin_new");
+    expect(verifyLinearApiKeyMock).toHaveBeenLastCalledWith("lin_new");
+    expect(
+      await service.resolveAvailability({ currentUserId: "recipient", contextType: "dm", allowOrgSharedEnv: true }),
+    ).toContainEqual({ appId: "linear", skillId: "linear", available: true, status: "active", reason: null });
+    await service.disconnect("owner", connection.id);
+  });
+
   it("does not list shared connections to external viewers", async () => {
     const connection = await service.connectGitHub("owner", "ghp_org", [{ type: "org", id: "default" }]);
 
@@ -146,9 +199,13 @@ describe("CLI integration service", () => {
     );
 
     expect(runtimeEnv).toEqual({ GH_TOKEN: "ghp_org" });
-    expect(await service.resolveAvailability({ currentUserId: "recipient", contextType: "dm" })).toMatchObject([
-      { appId: "github", available: true, status: "active" },
-    ]);
+    expect(await service.resolveAvailability({ currentUserId: "recipient", contextType: "dm" })).toContainEqual({
+      appId: "github",
+      skillId: "github",
+      available: true,
+      status: "active",
+      reason: null,
+    });
     await service.disconnect("owner", connection.id);
   });
 
@@ -161,9 +218,13 @@ describe("CLI integration service", () => {
     );
 
     expect(runtimeEnv).toEqual({});
-    expect(await service.resolveAvailability({ currentUserId: "external", contextType: "dm" })).toMatchObject([
-      { appId: "github", available: false, status: "missing" },
-    ]);
+    expect(await service.resolveAvailability({ currentUserId: "external", contextType: "dm" })).toContainEqual({
+      appId: "github",
+      skillId: "github",
+      available: false,
+      status: "missing",
+      reason: "Connect GitHub to use this skill.",
+    });
     await service.disconnect("owner", connection.id);
   });
 

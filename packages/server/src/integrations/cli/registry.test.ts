@@ -31,17 +31,21 @@ describe("CLI integration registry", () => {
     });
   });
 
-  it("blocks GitHub aliases and component keys from Canvas", () => {
+  it("blocks managed GitHub and Linear apps and component keys from Canvas", () => {
     expect(isCanvasBlockedCliAppId("github-oauth")).toBe(true);
-    expect(isCanvasBlockedCliAppId("linear")).toBe(false);
+    expect(isCanvasBlockedCliAppId("linear")).toBe(true);
+    expect(isCanvasBlockedCliAppId("linear-oauth")).toBe(true);
+    expect(isCanvasBlockedCliAppId("linear_app")).toBe(true);
     expect(isCanvasBlockedCliComponentKey("github-create-issue")).toBe(true);
     expect(isCanvasBlockedCliComponentKey("github")).toBe(true);
-    expect(isCanvasBlockedCliComponentKey("linear-create-issue")).toBe(false);
+    expect(isCanvasBlockedCliComponentKey("linear-create-issue")).toBe(true);
+    expect(isCanvasBlockedCliComponentKey("linear")).toBe(true);
   });
 
-  it("recognizes GitHub aliases embedded in Canvas connection IDs", () => {
+  it("recognizes managed aliases embedded in Canvas connection IDs", () => {
     expect(isCanvasBlockedConnectionId("secrets:owner-1:github:github")).toBe(true);
     expect(isCanvasBlockedConnectionId("apn_github_1")).toBe(true);
-    expect(isCanvasBlockedConnectionId("secrets:owner-1:linear:linear")).toBe(false);
+    expect(isCanvasBlockedConnectionId("secrets:owner-1:linear:linear")).toBe(true);
+    expect(isCanvasBlockedConnectionId("apn_linear_1")).toBe(true);
   });
 });

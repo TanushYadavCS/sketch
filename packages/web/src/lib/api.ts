@@ -2769,12 +2769,7 @@ export const api = {
     },
     verifyGitHubToken(token: string) {
       return request<{
-        identity: {
-          externalId: string;
-          login: string;
-          avatarUrl: string | null;
-          accountType: string | null;
-        };
+        identity: { externalId: string; login: string; avatarUrl: string | null; accountType: string | null };
       }>("/api/integration-apps/github/verification", {
         method: "POST",
         body: JSON.stringify({ token }),
@@ -2798,15 +2793,74 @@ export const api = {
         { method: "POST" },
       );
     },
-    replaceShares(connectionId: string, targets: AgentEnvironmentShareTargetInput[]) {
+    connectLinear(apiKey: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>("/api/integration-apps/linear/connections", {
+        method: "POST",
+        body: JSON.stringify({ token: apiKey, targets }),
+      });
+    },
+    verifyLinearApiKey(apiKey: string) {
+      return request<{
+        identity: {
+          externalId: string;
+          login: string;
+          name?: string | null;
+          email?: string | null;
+          avatarUrl: string | null;
+          accountType: string | null;
+        };
+      }>("/api/integration-apps/linear/verification", {
+        method: "POST",
+        body: JSON.stringify({ token: apiKey }),
+      });
+    },
+    updateLinearApiKey(connectionId: string, apiKey: string) {
       return request<{ connection: CliIntegrationConnection }>(
-        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/shares`,
+        `/api/integration-apps/linear/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token: apiKey }) },
+      );
+    },
+    reverifyLinear(connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/linear/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    verify(appId: string, token: string) {
+      return request<{
+        identity: { externalId: string; login: string; avatarUrl: string | null; accountType: string | null };
+      }>(`/api/integration-apps/${encodeURIComponent(appId)}/verification`, {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    connect(appId: string, token: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections`,
+        { method: "POST", body: JSON.stringify({ token, targets }) },
+      );
+    },
+    updateCredential(appId: string, connectionId: string, token: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token }) },
+      );
+    },
+    reverify(appId: string, connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    replaceShares(appId: string, connectionId: string, targets: AgentEnvironmentShareTargetInput[]) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/shares`,
         { method: "PUT", body: JSON.stringify({ targets }) },
       );
     },
-    disconnect(connectionId: string) {
+    disconnect(appId: string, connectionId: string) {
       return request<{ success: true }>(
-        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}`,
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}`,
         { method: "DELETE" },
       );
     },

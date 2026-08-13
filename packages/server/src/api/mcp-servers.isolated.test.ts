@@ -624,6 +624,38 @@ describe("MCP Servers API", () => {
       expect(mockProvider.listApps).not.toHaveBeenCalled();
     });
 
+    it("routes Canvas Linear intents to managed setup without calling Canvas", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ appId: "linear" }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        error: { code: "CLI_INTEGRATION", setupUrl: "/integrations?connect=linear" },
+      });
+      expect(mockProvider.initiateConnection).not.toHaveBeenCalled();
+      expect(mockProvider.listApps).not.toHaveBeenCalled();
+    });
+
     it("uses the requested safe app slug directly before catalog lookup", async () => {
       await seedAdmin(db);
       const server = await createCanvasProviderServer(db);
@@ -1391,11 +1423,11 @@ describe("MCP Servers API", () => {
         initiateConnection: vi.fn(),
         listConnections: vi.fn().mockResolvedValue([
           {
-            id: "secrets:owner-1:linear:linear",
+            id: "secrets:owner-1:notion:notion",
             providerId: server.id,
             source: "canvas_user_secrets",
-            appId: "linear",
-            appName: "Linear",
+            appId: "notion",
+            appName: "Notion",
             status: "active",
             accessLevel: "organization",
             isOwnedByViewer: false,
@@ -1413,7 +1445,7 @@ describe("MCP Servers API", () => {
       const app = createApp(db, config);
       const memberCookie = await getMemberCookie(db);
 
-      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Alinear%3Alinear`, {
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Anotion%3Anotion`, {
         method: "DELETE",
         headers: { Cookie: memberCookie },
       });
@@ -1488,7 +1520,7 @@ describe("MCP Servers API", () => {
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
-        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Alinear%3Alinear/access`,
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Anotion%3Anotion/access`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -1499,7 +1531,7 @@ describe("MCP Servers API", () => {
       expect(res.status).toBe(200);
       expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
         "member@test.com",
-        "secrets:owner:linear:linear",
+        "secrets:owner:notion:notion",
         "organization",
         "Test Member",
       );
@@ -1534,7 +1566,7 @@ describe("MCP Servers API", () => {
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
-        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Alinear%3Alinear/access`,
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Anotion%3Anotion/access`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -1547,7 +1579,7 @@ describe("MCP Servers API", () => {
       expect(body.success).toBe(true);
       expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
         "member@test.com",
-        "secrets:owner:linear:linear",
+        "secrets:owner:notion:notion",
         "organization",
         "Test Member",
       );

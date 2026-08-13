@@ -81,7 +81,7 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
     });
 
     const canvasApps: IntegrationApp[] = [];
-    const shouldQueryCanvas = !query.toLowerCase().includes("github");
+    const shouldQueryCanvas = !query.toLowerCase().includes("github") && !query.toLowerCase().includes("linear");
     const viewer = shouldQueryCanvas ? await deps.users.findById(viewerId) : null;
     if (shouldQueryCanvas && deps.loadIntegrationProvider && viewer?.email) {
       try {
@@ -125,8 +125,8 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.post("/:appId/verification", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success || appId.data !== "github") {
-      return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
     }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
@@ -138,7 +138,10 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
       );
     }
     try {
-      const identity = await deps.service.verifyGitHubToken(body.data.token);
+      const identity =
+        appId.data === "linear"
+          ? await deps.service.verifyLinearApiKey(body.data.token)
+          : await deps.service.verifyGitHubToken(body.data.token);
       return c.json({ identity });
     } catch (error) {
       return errorResponse(c, error);
@@ -147,7 +150,9 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.post("/:appId/connections", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success) return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
+    }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
     const body = tokenSchema.safeParse(await c.req.json().catch(() => ({})));
@@ -163,8 +168,9 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
     try {
       const connection =
-        appId.data === "github" ? await deps.service.connectGitHub(c.get("sub"), body.data.token, targets) : null;
-      if (!connection) return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+        appId.data === "linear"
+          ? await deps.service.connectLinear(c.get("sub"), body.data.token, targets)
+          : await deps.service.connectGitHub(c.get("sub"), body.data.token, targets);
       return c.json({ connection }, 201);
     } catch (error) {
       return errorResponse(c, error);
@@ -173,8 +179,8 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.patch("/:appId/connections/:id/credential", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success || appId.data !== "github") {
-      return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
     }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
@@ -186,7 +192,10 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
       );
     }
     try {
-      const connection = await deps.service.updateGitHubToken(c.get("sub"), c.req.param("id"), body.data.token);
+      const connection =
+        appId.data === "linear"
+          ? await deps.service.updateLinearApiKey(c.get("sub"), c.req.param("id"), body.data.token)
+          : await deps.service.updateGitHubToken(c.get("sub"), c.req.param("id"), body.data.token);
       return c.json({ connection });
     } catch (error) {
       return errorResponse(c, error);
@@ -195,13 +204,13 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.post("/:appId/connections/:id/verification", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success || appId.data !== "github") {
-      return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
     }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
     try {
-      const connection = await deps.service.reverify(c.get("sub"), c.req.param("id"));
+      const connection = await deps.service.reverify(c.get("sub"), c.req.param("id"), appId.data);
       return c.json({ connection });
     } catch (error) {
       return errorResponse(c, error);
@@ -210,13 +219,13 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.put("/:appId/connections/:id/shares", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success || appId.data !== "github") {
-      return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
     }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
-    if (!(await deps.service.canManage(c.get("sub"), c.req.param("id")))) {
-      return c.json({ error: { code: "NOT_FOUND", message: "GitHub connection not found." } }, 404);
+    if (!(await deps.service.canManage(c.get("sub"), c.req.param("id"), appId.data))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration connection not found." } }, 404);
     }
     const body = sharesSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!body.success) {
@@ -229,7 +238,7 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
     const targetError = await validateTargets(c, targets, deps);
     if (targetError) return targetError;
     try {
-      const connection = await deps.service.replaceShares(c.get("sub"), c.req.param("id"), targets);
+      const connection = await deps.service.replaceShares(c.get("sub"), c.req.param("id"), targets, appId.data);
       return c.json({ connection });
     } catch (error) {
       return errorResponse(c, error);
@@ -238,13 +247,13 @@ export function cliIntegrationRoutes(deps: CliIntegrationRouteDeps) {
 
   routes.delete("/:appId/connections/:id", async (c) => {
     const appId = cliIntegrationAppIdSchema.safeParse(c.req.param("appId").trim().toLowerCase());
-    if (!appId.success || appId.data !== "github") {
-      return c.json({ error: { code: "NOT_FOUND", message: "CLI integration not found." } }, 404);
+    if (!appId.success) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Managed integration not found." } }, 404);
     }
     const denied = await validateOwner(c, deps);
     if (denied) return denied;
     try {
-      await deps.service.disconnect(c.get("sub"), c.req.param("id"));
+      await deps.service.disconnect(c.get("sub"), c.req.param("id"), appId.data);
       return c.json({ success: true });
     } catch (error) {
       return errorResponse(c, error);

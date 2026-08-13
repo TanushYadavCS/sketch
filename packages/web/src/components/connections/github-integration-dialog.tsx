@@ -163,7 +163,7 @@ export function GithubIntegrationRow({
     if (!canManage || disconnecting || !window.confirm("Disconnect GitHub from Sketch?")) return;
     setDisconnecting(true);
     try {
-      await api.cliIntegrations.disconnect(connection.id);
+      await api.cliIntegrations.disconnect(connection.appId, connection.id);
       toast.success("GitHub disconnected");
       onChanged();
     } catch (err) {
@@ -376,7 +376,7 @@ export function GithubIntegrationDialog({
                   Verified as <span className="font-medium">@{verifiedIdentity.login}</span>. Choose who can use this
                   connection.
                 </div>
-                <GithubAccessPicker
+                <AccessPicker
                   users={users}
                   slackChannels={slackChannels}
                   whatsappGroups={whatsappGroups}
@@ -520,7 +520,7 @@ function GithubConnectionManageDialog({
                   </p>
                 </div>
               </div>
-              <GithubAccessPicker
+              <AccessPicker
                 users={users}
                 slackChannels={slackChannels}
                 whatsappGroups={whatsappGroups}
@@ -538,7 +538,7 @@ function GithubConnectionManageDialog({
                 disabled={saving || sameTargets(targets, savedTargets)}
                 onClick={() =>
                   void run(async () => {
-                    await api.cliIntegrations.replaceShares(connection.id, targets);
+                    await api.cliIntegrations.replaceShares(connection.appId, connection.id, targets);
                     setSavedTargets(targets);
                     toast.success("GitHub access updated");
                   })
@@ -624,7 +624,7 @@ function GithubConnectionManageDialog({
               onClick={() => {
                 if (!window.confirm("Disconnect GitHub from Sketch?")) return;
                 void run(async () => {
-                  await api.cliIntegrations.disconnect(connection.id);
+                  await api.cliIntegrations.disconnect(connection.appId, connection.id);
                   toast.success("GitHub disconnected");
                   onOpenChange(false);
                 });
@@ -642,7 +642,7 @@ function GithubConnectionManageDialog({
   );
 }
 
-type GithubAccessPickerProps = {
+export type AccessPickerProps = {
   users: User[];
   slackChannels: SlackChannelInfo[];
   whatsappGroups: WhatsAppGroupInfo[];
@@ -654,7 +654,7 @@ type GithubAccessPickerProps = {
   className?: string;
 };
 
-function GithubAccessPicker({
+export function AccessPicker({
   users,
   slackChannels,
   whatsappGroups,
@@ -664,7 +664,7 @@ function GithubAccessPicker({
   onTargetsChange,
   disabled = false,
   className,
-}: GithubAccessPickerProps) {
+}: AccessPickerProps) {
   const pickerId = useId();
   const [search, setSearch] = useState("");
   const query = search.trim().toLowerCase();

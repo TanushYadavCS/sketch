@@ -12,14 +12,14 @@ describe("CanvasProvider", () => {
         JSON.stringify({
           accounts: [
             {
-              id: "secrets:owner-1:linear:linear",
+              id: "secrets:owner-1:notion:notion",
               source: "canvas_user_secrets",
-              name: "Linear",
-              accountName: "Engineering Linear",
+              name: "Notion",
+              accountName: "Engineering Notion",
               authType: "oauth",
               healthy: true,
               status: "active",
-              app: { name: "Linear", nameSlug: "linear", imgSrc: "https://img.test/linear.png" },
+              app: { name: "Notion", nameSlug: "notion", imgSrc: "https://img.test/notion.png" },
               accessLevel: "organization",
               ownerUserId: "owner-1",
               ownerName: "Tara",
@@ -48,12 +48,12 @@ describe("CanvasProvider", () => {
       signal: expect.any(AbortSignal),
     });
     expect(connections[0]).toMatchObject({
-      id: "secrets:owner-1:linear:linear",
+      id: "secrets:owner-1:notion:notion",
       providerId: "provider-1",
       source: "canvas_user_secrets",
-      appId: "linear",
-      appName: "Linear",
-      accountName: "Engineering Linear",
+      appId: "notion",
+      appName: "Notion",
+      accountName: "Engineering Notion",
       authType: "oauth",
       accessLevel: "organization",
       ownerUserId: "owner-1",
@@ -84,7 +84,7 @@ describe("CanvasProvider", () => {
     });
   });
 
-  it("rejects Canvas GitHub connection mutations before network access", async () => {
+  it("rejects managed GitHub and Linear connection mutations before network access", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
@@ -97,6 +97,12 @@ describe("CanvasProvider", () => {
     );
     await expect(
       provider.updateConnectionAccess("priya@example.com", "secrets:owner-1:github:github", "organization"),
+    ).rejects.toMatchObject({ status: 409, code: "CLI_INTEGRATION" });
+    await expect(provider.removeConnection("priya@example.com", "secrets:owner-1:linear:linear")).rejects.toMatchObject(
+      { status: 409, code: "CLI_INTEGRATION" },
+    );
+    await expect(
+      provider.updateConnectionAccess("priya@example.com", "secrets:owner-1:linear:linear", "organization"),
     ).rejects.toMatchObject({ status: 409, code: "CLI_INTEGRATION" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -129,10 +135,10 @@ describe("CanvasProvider", () => {
           JSON.stringify({
             accounts: [
               {
-                id: "secrets:owner-1:linear:linear",
-                name: "Linear",
+                id: "secrets:owner-1:notion:notion",
+                name: "Notion",
                 healthy: true,
-                app: { name: "Linear", nameSlug: "linear" },
+                app: { name: "Notion", nameSlug: "notion" },
                 accessLevel: "personal",
                 isOwnedByViewer: true,
                 canManageAccess: true,
@@ -150,7 +156,7 @@ describe("CanvasProvider", () => {
     const connections = await provider.listConnections("priya@example.com");
 
     expect(connections[0]).toMatchObject({
-      id: "secrets:owner-1:linear:linear",
+      id: "secrets:owner-1:notion:notion",
       source: "canvas_user_secrets",
       accessLevel: "personal",
       canManageAccess: true,
@@ -245,7 +251,7 @@ describe("CanvasProvider", () => {
     await expect(provider.listConnections("priya@example.com")).resolves.toEqual([]);
   });
 
-  it("hides legacy Canvas GitHub rows identified only by their display name", async () => {
+  it("hides legacy Canvas GitHub and Linear rows identified only by their display name", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -259,6 +265,16 @@ describe("CanvasProvider", () => {
     );
 
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    await expect(provider.listConnections("priya@example.com")).resolves.toEqual([]);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ accounts: [{ id: "apn_linear_1", name: "Linear", healthy: true }] }), {
+          status: 200,
+        }),
+      ),
+    );
     await expect(provider.listConnections("priya@example.com")).resolves.toEqual([]);
   });
 
@@ -290,10 +306,10 @@ describe("CanvasProvider", () => {
                 canUse: true,
               },
               {
-                id: "secrets:viewer-1:linear:linear",
+                id: "secrets:viewer-1:notion:notion",
                 source: "canvas_user_secrets",
-                name: "Linear",
-                app: { name: "Linear", nameSlug: "linear" },
+                name: "Notion",
+                app: { name: "Notion", nameSlug: "notion" },
                 healthy: true,
                 accessLevel: "personal",
                 isOwnedByViewer: true,
@@ -309,7 +325,7 @@ describe("CanvasProvider", () => {
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
     const connections = await provider.listConnections("priya@example.com");
 
-    expect(connections.map((connection) => connection.appId)).toEqual(["slack", "linear"]);
+    expect(connections.map((connection) => connection.appId)).toEqual(["slack", "notion"]);
   });
 
   it("does not infer Canvas ownership solely from canonical secret account IDs", async () => {
@@ -350,10 +366,10 @@ describe("CanvasProvider", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
-    await provider.updateConnectionAccess("priya@example.com", "secrets:owner-1:linear:linear", "organization");
+    await provider.updateConnectionAccess("priya@example.com", "secrets:owner-1:notion:notion", "organization");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://canvas.example.com/api/canvas-accounts/secrets%3Aowner-1%3Alinear%3Alinear/access",
+      "https://canvas.example.com/api/canvas-accounts/secrets%3Aowner-1%3Anotion%3Anotion/access",
       {
         method: "PATCH",
         headers: {

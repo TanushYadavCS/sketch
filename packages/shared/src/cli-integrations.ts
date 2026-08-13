@@ -164,12 +164,31 @@ export function normalizeCliIntegrationAppId(value: string): string {
   return value.trim().toLowerCase();
 }
 
-export function isCanvasBlockedCliAppId(value: string): boolean {
+export function managedCliIntegrationAppId(value: string): CliIntegrationAppId | null {
   const normalized = normalizeCliIntegrationAppId(value);
-  return normalized === "github" || normalized === "github-oauth";
+  if (normalized === "github" || normalized === "github-oauth") return "github";
+  if (
+    normalized === "linear" ||
+    normalized === "linear-oauth" ||
+    normalized === "linear-app" ||
+    normalized === "linear_app"
+  )
+    return "linear";
+  return null;
+}
+
+export function isCanvasBlockedCliAppId(value: string): boolean {
+  return managedCliIntegrationAppId(value) !== null;
 }
 
 export function isCanvasBlockedCliComponentKey(value: string): boolean {
   const normalized = value.trim().toLowerCase();
-  return normalized === "github" || normalized.startsWith("github-") || normalized.startsWith("github_");
+  return (
+    normalized === "github" ||
+    normalized.startsWith("github-") ||
+    normalized.startsWith("github_") ||
+    normalized === "linear" ||
+    normalized.startsWith("linear-") ||
+    normalized.startsWith("linear_")
+  );
 }

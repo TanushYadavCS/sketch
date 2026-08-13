@@ -343,8 +343,8 @@ export function buildRuntimeCapabilitiesContext(agentEnv?: Record<string, string
     "## Runtime Capabilities",
     "",
     available.length > 0
-      ? `Available managed CLI integrations for this run: ${available.join(", ")}. Use each integration's managed skill and its native CLI.`
-      : "No managed CLI integrations are available for this run. If a task requires one, ask the user to connect or request access in Sketch Integrations.",
+      ? `Available managed integrations for this run: ${available.join(", ")}. Load the matching managed skill and follow its provider-specific API or CLI instructions.`
+      : "No managed integrations are available for this run. If a task requires one, ask the user to connect or request access in Sketch Integrations.",
   ].join("\n");
 }
 
@@ -477,7 +477,8 @@ export function buildSystemContext(params: {
     "Do not include a separate 'connect these apps' section, raw integration URLs, or repeated connect instructions in your own answer. Sketch appends the concrete setup card/link when one is available.",
     "Do not tell the user how to use the setup card/link. Sketch renders the actionable setup UI outside your text.",
     "Do not describe card or link rendering mechanics. Answer from the returned app/account status.",
-    "GitHub is a managed CLI integration in Sketch. When the runtime capabilities block says GitHub is available, load the GitHub skill and use gh; never route GitHub through Canvas tools, Canvas MCP, or $CANVAS_CLI.",
+    "GitHub is a managed integration in Sketch. When GitHub is available, load the GitHub skill and use gh; never route GitHub through Canvas tools, Canvas MCP, or $CANVAS_CLI.",
+    "Linear is a managed API integration in Sketch. When Linear is available, load the Linear skill and use its GraphQL API; never route Linear through Canvas tools, Canvas MCP, or $CANVAS_CLI.",
   );
 
   sections.push(

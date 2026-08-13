@@ -20,10 +20,13 @@ import {
 } from "../../db/repositories/cli-integration-connections";
 import type { DB } from "../../db/schema";
 import { type GithubIdentity, assertGithubCliAvailable, validateGithubTokenInput, verifyGithubToken } from "./github";
+import { type LinearIdentity, validateLinearApiKeyInput, verifyLinearApiKey } from "./linear";
 import { listCliIntegrationDefinitions } from "./registry";
 
 const GITHUB_APP_ID: CliIntegrationAppId = "github";
 const GITHUB_ENV_NAME = "GH_TOKEN";
+const LINEAR_APP_ID: CliIntegrationAppId = "linear";
+const LINEAR_ENV_NAME = "LINEAR_API_KEY";
 
 export type CliIntegrationRuntimeAvailability = {
   appId: CliIntegrationAppId;
@@ -53,26 +56,28 @@ export class CliIntegrationServiceError extends Error {
   }
 }
 
-function mapVerificationError(error: unknown): CliIntegrationServiceError {
+function mapVerificationError(error: unknown, appId: CliIntegrationAppId): CliIntegrationServiceError {
   if (error instanceof CliIntegrationServiceError) return error;
   const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
   const upstreamStatus = typeof error === "object" && error !== null && "status" in error ? error.status : null;
+  const appName = appId === LINEAR_APP_ID ? "Linear" : "GitHub";
+  const credentialName = appId === LINEAR_APP_ID ? "personal API key" : "personal access token";
   if (code === "INVALID_TOKEN")
     return new CliIntegrationServiceError(
       "INVALID_TOKEN",
-      upstreamStatus === 400 ? "Enter a GitHub personal access token." : "GitHub rejected this token.",
+      upstreamStatus === 400 ? `Enter a ${appName} ${credentialName}.` : `${appName} rejected this credential.`,
       upstreamStatus === 400 ? 400 : 401,
     );
   if (code === "RATE_LIMITED")
-    return new CliIntegrationServiceError("RATE_LIMITED", "GitHub rate limit reached. Try again later.", 429);
+    return new CliIntegrationServiceError("RATE_LIMITED", `${appName} rate limit reached. Try again later.`, 429);
   if (code === "CLI_INTEGRATION_UNAVAILABLE") {
     return new CliIntegrationServiceError(
       "CLI_INTEGRATION_UNAVAILABLE",
-      "GitHub CLI is unavailable on this Sketch deployment.",
+      `${appName} integration is unavailable on this Sketch deployment.`,
       503,
     );
   }
-  return new CliIntegrationServiceError("UPSTREAM_UNAVAILABLE", "GitHub is unavailable. Try again later.", 502);
+  return new CliIntegrationServiceError("UPSTREAM_UNAVAILABLE", `${appName} is unavailable. Try again later.`, 502);
 }
 
 function encodeValue(value: string, encryptionKey?: string): string {
@@ -95,9 +100,17 @@ function normalizeTargets(targets: AgentEnvironmentShareTargetInput[]): AgentEnv
   return [...new Map(targets.map((target) => [targetKey(target), target])).values()];
 }
 
-function safeErrorMessage(error: unknown): string {
+function safeErrorMessage(error: unknown, appId: CliIntegrationAppId): string {
   if (error instanceof CliIntegrationServiceError) return error.message;
-  return "GitHub verification failed.";
+  return `${appId === LINEAR_APP_ID ? "Linear" : "GitHub"} verification failed.`;
+}
+
+function appLabel(appId: CliIntegrationAppId): string {
+  return appId === LINEAR_APP_ID ? "Linear" : "GitHub";
+}
+
+function appCredentialName(appId: CliIntegrationAppId): string {
+  return appId === LINEAR_APP_ID ? LINEAR_ENV_NAME : GITHUB_ENV_NAME;
 }
 
 export function createCliIntegrationService(params: {
@@ -135,7 +148,7 @@ export function createCliIntegrationService(params: {
       id: row.id,
       appId: definition.id,
       appName: definition.name,
-      executionMode: "cli",
+      executionMode: definition.executionMode,
       ownerUserId: row.owner_user_id,
       ownerName: owner?.name ?? null,
       accountExternalId: row.account_external_id,
@@ -158,33 +171,45 @@ export function createCliIntegrationService(params: {
     if (!params.encryptionKey) {
       throw new CliIntegrationServiceError(
         "ENCRYPTION_UNAVAILABLE",
-        "GitHub integration requires ENCRYPTION_KEY to encrypt credentials at rest.",
+        "Managed integrations require ENCRYPTION_KEY to encrypt credentials at rest.",
         503,
       );
     }
   }
 
-  async function verify(token: string): Promise<GithubIdentity> {
+  async function verifyCredential(
+    appId: CliIntegrationAppId,
+    credential: string,
+  ): Promise<GithubIdentity | LinearIdentity> {
     try {
-      validateGithubTokenInput(token);
+      if (appId === LINEAR_APP_ID) {
+        validateLinearApiKeyInput(credential);
+        return await verifyLinearApiKey(credential);
+      }
+      validateGithubTokenInput(credential);
       await assertGithubCliAvailable();
-      return await verifyGithubToken(token);
+      return await verifyGithubToken(credential);
     } catch (error) {
-      throw mapVerificationError(error);
+      throw mapVerificationError(error, appId);
     }
   }
 
-  async function assertOwnerVariableAvailable(ownerUserId: string, executor: Kysely<DB> = params.db): Promise<void> {
+  async function assertOwnerVariableAvailable(
+    ownerUserId: string,
+    appId: CliIntegrationAppId,
+    executor: Kysely<DB> = params.db,
+  ): Promise<void> {
+    const envName = appCredentialName(appId);
     const existing = await executor
       .selectFrom("agent_environment_variables")
       .select(["id"])
       .where("user_id", "=", ownerUserId)
-      .where("name", "=", GITHUB_ENV_NAME)
+      .where("name", "=", envName)
       .executeTakeFirst();
     if (existing) {
       throw new CliIntegrationServiceError(
         "MANAGED_ENVIRONMENT_VARIABLE",
-        "You already have an environment variable named GH_TOKEN. Remove it before connecting GitHub.",
+        `You already have an environment variable named ${envName}. Remove it before connecting ${appLabel(appId)}.`,
         409,
       );
     }
@@ -194,6 +219,7 @@ export function createCliIntegrationService(params: {
     executor: Kysely<DB>,
     variableId: string,
     createdBy: string,
+    appId: CliIntegrationAppId,
     targets: AgentEnvironmentShareTargetInput[],
   ): Promise<void> {
     for (const target of normalizeTargets(targets)) {
@@ -202,7 +228,7 @@ export function createCliIntegrationService(params: {
         .values({
           id: randomUUID(),
           variable_id: variableId,
-          variable_name: GITHUB_ENV_NAME,
+          variable_name: appCredentialName(appId),
           target_type: target.type,
           target_id: target.id,
           created_by: createdBy,
@@ -251,7 +277,9 @@ export function createCliIntegrationService(params: {
     return params.db
       .selectFrom("cli_integration_connections as c")
       .selectAll("c")
-      .where("c.app_id", "=", GITHUB_APP_ID)
+      .where((eb) =>
+        eb.or(Object.values(cliIntegrationAppDefinitions).map((definition) => eb("c.app_id", "=", definition.id))),
+      )
       .where((eb) => eb.or([...(ownerUserId ? [eb("c.owner_user_id", "=", ownerUserId)] : []), ...shareConditions]))
       .execute();
   }
@@ -260,6 +288,7 @@ export function createCliIntegrationService(params: {
     variableId: string,
     ownerUserId: string,
     token: string,
+    appId: CliIntegrationAppId,
     executor: Kysely<DB>,
   ): Promise<void> {
     const result = await executor
@@ -269,7 +298,7 @@ export function createCliIntegrationService(params: {
       .where("user_id", "=", ownerUserId)
       .executeTakeFirst();
     if (Number(result.numUpdatedRows) === 0)
-      throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
   }
 
   return {
@@ -279,7 +308,7 @@ export function createCliIntegrationService(params: {
         name: definition.name,
         description: definition.description,
         icon: definition.icon,
-        executionMode: "cli",
+        executionMode: definition.executionMode,
         connected: false,
         connectionId: null,
       }));
@@ -300,10 +329,20 @@ export function createCliIntegrationService(params: {
       };
       const env = await params.environmentVariables.listForRuntimeContext(context);
       const rows = await runtimeConnectionRows(context);
-      const available = rows.some(
-        (row) => row.app_id === GITHUB_APP_ID && row.status === "active" && Boolean(env[GITHUB_ENV_NAME]),
-      );
-      return available ? [] : ["github"];
+      const unavailable = requested.filter((skill) => {
+        const definition = Object.values(cliIntegrationAppDefinitions).find(
+          (candidate) => candidate.skillId === skill || candidate.id === skill,
+        );
+        if (!definition) return false;
+        const active = rows.some(
+          (row) =>
+            row.app_id === definition.id &&
+            row.status === "active" &&
+            definition.credentialFields.every((field) => Boolean(env[field.envName])),
+        );
+        return !active;
+      });
+      return unavailable;
     },
 
     async findManagedVariable(id: string, ownerUserId: string): Promise<boolean> {
@@ -327,9 +366,13 @@ export function createCliIntegrationService(params: {
       return Boolean(row);
     },
 
-    async canManage(ownerUserId: string, connectionId: string): Promise<boolean> {
+    async canManage(ownerUserId: string, connectionId: string, requestedAppId?: CliIntegrationAppId): Promise<boolean> {
       const row = await connections.findByIdAndOwner(connectionId, ownerUserId);
-      return row?.app_id === GITHUB_APP_ID;
+      return Boolean(
+        row &&
+          cliIntegrationAppDefinition(row.app_id)?.id === row.app_id &&
+          (requestedAppId === undefined || row.app_id === requestedAppId),
+      );
     },
 
     async getManagedVariableApp(variableId: string, ownerUserId: string): Promise<string | null> {
@@ -369,7 +412,11 @@ export function createCliIntegrationService(params: {
     },
 
     async verifyGitHubToken(token: string): Promise<GithubIdentity> {
-      return verify(token);
+      return (await verifyCredential(GITHUB_APP_ID, token)) as GithubIdentity;
+    },
+
+    async verifyLinearApiKey(apiKey: string): Promise<LinearIdentity> {
+      return (await verifyCredential(LINEAR_APP_ID, apiKey)) as LinearIdentity;
     },
 
     async connectGitHub(
@@ -378,7 +425,7 @@ export function createCliIntegrationService(params: {
       targets: AgentEnvironmentShareTargetInput[] = [],
     ): Promise<CliIntegrationConnection> {
       assertEncryptionAvailable();
-      const identity = await verify(token);
+      const identity = (await verifyCredential(GITHUB_APP_ID, token)) as GithubIdentity;
       const existing = await connections.findByOwnerAndApp(ownerUserId, GITHUB_APP_ID);
       if (existing) throw new CliIntegrationServiceError("ALREADY_CONNECTED", "GitHub is already connected.", 409);
 
@@ -387,7 +434,7 @@ export function createCliIntegrationService(params: {
       const connectionId = randomUUID();
       try {
         const row = await params.db.transaction().execute(async (trx) => {
-          await assertOwnerVariableAvailable(ownerUserId, trx);
+          await assertOwnerVariableAvailable(ownerUserId, GITHUB_APP_ID, trx);
           await trx
             .insertInto("agent_environment_variables")
             .values({
@@ -416,7 +463,7 @@ export function createCliIntegrationService(params: {
             },
             trx,
           );
-          await insertShares(trx, variableId, ownerUserId, targets);
+          await insertShares(trx, variableId, ownerUserId, GITHUB_APP_ID, targets);
           return created;
         });
         if (!row) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection was not created.", 404);
@@ -425,6 +472,62 @@ export function createCliIntegrationService(params: {
         if (error instanceof CliIntegrationServiceError) throw error;
         if (isUniqueConstraintError(error)) {
           throw new CliIntegrationServiceError("ALREADY_CONNECTED", "GitHub is already connected.", 409);
+        }
+        throw error;
+      }
+    },
+
+    async connectLinear(
+      ownerUserId: string,
+      apiKey: string,
+      targets: AgentEnvironmentShareTargetInput[] = [],
+    ): Promise<CliIntegrationConnection> {
+      assertEncryptionAvailable();
+      const identity = (await verifyCredential(LINEAR_APP_ID, apiKey)) as LinearIdentity;
+      const existing = await connections.findByOwnerAndApp(ownerUserId, LINEAR_APP_ID);
+      if (existing) throw new CliIntegrationServiceError("ALREADY_CONNECTED", "Linear is already connected.", 409);
+      const now = new Date().toISOString();
+      const variableId = randomUUID();
+      const connectionId = randomUUID();
+      try {
+        const row = await params.db.transaction().execute(async (trx) => {
+          await assertOwnerVariableAvailable(ownerUserId, LINEAR_APP_ID, trx);
+          await trx
+            .insertInto("agent_environment_variables")
+            .values({
+              id: variableId,
+              user_id: ownerUserId,
+              name: LINEAR_ENV_NAME,
+              value: encodeValue(apiKey.trim(), params.encryptionKey),
+              is_secret: 1,
+              created_at: now,
+              updated_at: now,
+            })
+            .execute();
+          const created = await connections.create(
+            {
+              id: connectionId,
+              appId: LINEAR_APP_ID,
+              ownerUserId,
+              credentialVariableId: variableId,
+              accountExternalId: identity.externalId,
+              accountLogin: identity.login,
+              accountAvatarUrl: identity.avatarUrl,
+              accountType: identity.accountType,
+              status: "active",
+              verifiedAt: now,
+              lastVerificationError: null,
+            },
+            trx,
+          );
+          await insertShares(trx, variableId, ownerUserId, LINEAR_APP_ID, targets);
+          return created;
+        });
+        return serialize(row, ownerUserId);
+      } catch (error) {
+        if (error instanceof CliIntegrationServiceError) throw error;
+        if (isUniqueConstraintError(error)) {
+          throw new CliIntegrationServiceError("ALREADY_CONNECTED", "Linear is already connected.", 409);
         }
         throw error;
       }
@@ -440,10 +543,10 @@ export function createCliIntegrationService(params: {
       if (!existing || existing.app_id !== GITHUB_APP_ID) {
         throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
       }
-      const identity = await verify(token);
+      const identity = (await verifyCredential(GITHUB_APP_ID, token)) as GithubIdentity;
       const now = new Date().toISOString();
       const row = await params.db.transaction().execute(async (trx) => {
-        await updateVariableValue(existing.credential_variable_id, ownerUserId, token.trim(), trx);
+        await updateVariableValue(existing.credential_variable_id, ownerUserId, token.trim(), GITHUB_APP_ID, trx);
         return connections.updateVerification(
           connectionId,
           ownerUserId,
@@ -463,10 +566,52 @@ export function createCliIntegrationService(params: {
       return serialize(row, ownerUserId);
     },
 
-    async reverify(ownerUserId: string, connectionId: string): Promise<CliIntegrationConnection> {
+    async updateLinearApiKey(
+      ownerUserId: string,
+      connectionId: string,
+      apiKey: string,
+    ): Promise<CliIntegrationConnection> {
+      assertEncryptionAvailable();
       const existing = await connections.findByIdAndOwner(connectionId, ownerUserId);
-      if (!existing || existing.app_id !== GITHUB_APP_ID) {
-        throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      if (!existing || existing.app_id !== LINEAR_APP_ID) {
+        throw new CliIntegrationServiceError("NOT_FOUND", "Linear connection not found.", 404);
+      }
+      const identity = (await verifyCredential(LINEAR_APP_ID, apiKey)) as LinearIdentity;
+      const row = await params.db.transaction().execute(async (trx) => {
+        await updateVariableValue(existing.credential_variable_id, ownerUserId, apiKey.trim(), LINEAR_APP_ID, trx);
+        return connections.updateVerification(
+          connectionId,
+          ownerUserId,
+          {
+            accountExternalId: identity.externalId,
+            accountLogin: identity.login,
+            accountAvatarUrl: identity.avatarUrl,
+            accountType: identity.accountType,
+            status: "active",
+            verifiedAt: new Date().toISOString(),
+            lastVerificationError: null,
+          },
+          trx,
+        );
+      });
+      if (!row) throw new CliIntegrationServiceError("NOT_FOUND", "Linear connection not found.", 404);
+      return serialize(row, ownerUserId);
+    },
+
+    async reverify(
+      ownerUserId: string,
+      connectionId: string,
+      requestedAppId?: CliIntegrationAppId,
+    ): Promise<CliIntegrationConnection> {
+      const existing = await connections.findByIdAndOwner(connectionId, ownerUserId);
+      const appId = existing?.app_id as CliIntegrationAppId | undefined;
+      if (
+        !existing ||
+        !appId ||
+        !cliIntegrationAppDefinition(appId) ||
+        (requestedAppId !== undefined && appId !== requestedAppId)
+      ) {
+        throw new CliIntegrationServiceError("NOT_FOUND", "Managed integration connection not found.", 404);
       }
       const variables = await params.db
         .selectFrom("agent_environment_variables")
@@ -474,13 +619,14 @@ export function createCliIntegrationService(params: {
         .where("id", "=", existing.credential_variable_id)
         .where("user_id", "=", ownerUserId)
         .executeTakeFirst();
-      if (!variables) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      if (!variables)
+        throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
 
       try {
-        const token = variables.value.startsWith("enc:")
+        const credential = variables.value.startsWith("enc:")
           ? decrypt(variables.value, params.encryptionKey ?? "")
           : variables.value;
-        const identity = await verify(token);
+        const identity = await verifyCredential(appId, credential);
         const row = await connections.updateVerification(connectionId, ownerUserId, {
           accountExternalId: identity.externalId,
           accountLogin: identity.login,
@@ -490,13 +636,13 @@ export function createCliIntegrationService(params: {
           verifiedAt: new Date().toISOString(),
           lastVerificationError: null,
         });
-        if (!row) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+        if (!row) throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
         return serialize(row, ownerUserId);
       } catch (error) {
-        const mapped = mapVerificationError(error);
+        const mapped = mapVerificationError(error, appId);
         if (mapped.code !== "INVALID_TOKEN") throw mapped;
-        const row = await connections.markInvalid(connectionId, ownerUserId, safeErrorMessage(mapped));
-        if (!row) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+        const row = await connections.markInvalid(connectionId, ownerUserId, safeErrorMessage(mapped, appId));
+        if (!row) throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
         return serialize(row, ownerUserId);
       }
     },
@@ -505,10 +651,17 @@ export function createCliIntegrationService(params: {
       ownerUserId: string,
       connectionId: string,
       targets: AgentEnvironmentShareTargetInput[],
+      requestedAppId?: CliIntegrationAppId,
     ): Promise<CliIntegrationConnection> {
       const existing = await connections.findByIdAndOwner(connectionId, ownerUserId);
-      if (!existing || existing.app_id !== GITHUB_APP_ID) {
-        throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      const appId = existing?.app_id as CliIntegrationAppId | undefined;
+      if (
+        !existing ||
+        !appId ||
+        !cliIntegrationAppDefinition(appId) ||
+        (requestedAppId !== undefined && appId !== requestedAppId)
+      ) {
+        throw new CliIntegrationServiceError("NOT_FOUND", "Managed integration connection not found.", 404);
       }
       const variable = await params.environmentVariables.replaceShares(
         existing.credential_variable_id,
@@ -516,16 +669,22 @@ export function createCliIntegrationService(params: {
         ownerUserId,
         normalizeTargets(targets),
       );
-      if (!variable) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      if (!variable) throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
       const row = await connections.findByIdAndOwner(connectionId, ownerUserId);
-      if (!row) throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      if (!row) throw new CliIntegrationServiceError("NOT_FOUND", `${appLabel(appId)} connection not found.`, 404);
       return serialize(row, ownerUserId);
     },
 
-    async disconnect(ownerUserId: string, connectionId: string): Promise<void> {
+    async disconnect(ownerUserId: string, connectionId: string, requestedAppId?: CliIntegrationAppId): Promise<void> {
       const existing = await connections.findByIdAndOwner(connectionId, ownerUserId);
-      if (!existing || existing.app_id !== GITHUB_APP_ID) {
-        throw new CliIntegrationServiceError("NOT_FOUND", "GitHub connection not found.", 404);
+      const appId = existing?.app_id as CliIntegrationAppId | undefined;
+      if (
+        !existing ||
+        !appId ||
+        !cliIntegrationAppDefinition(appId) ||
+        (requestedAppId !== undefined && appId !== requestedAppId)
+      ) {
+        throw new CliIntegrationServiceError("NOT_FOUND", "Managed integration connection not found.", 404);
       }
       await params.db.transaction().execute(async (trx) => {
         await connections.delete(connectionId, ownerUserId, trx);
@@ -552,7 +711,11 @@ export function createCliIntegrationService(params: {
           skillId: definition.skillId,
           available: active,
           status: active ? "active" : invalid ? "invalid" : "missing",
-          reason: active ? null : invalid ? "Reconnect GitHub to restore access." : "Connect GitHub to use this skill.",
+          reason: active
+            ? null
+            : invalid
+              ? `Reconnect ${definition.name} to restore access.`
+              : `Connect ${definition.name} to use this skill.`,
         };
       });
     },

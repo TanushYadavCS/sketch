@@ -2,6 +2,32 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../config";
 
+export const MANAGED_LINEAR_SKILL = `---
+name: Linear
+description: Use Linear through its managed GraphQL API for issue and project work.
+category: engineering
+provider-type: api:linear
+requires-env:
+  - LINEAR_API_KEY
+---
+
+# Linear API
+
+Use Linear's GraphQL API at \`https://api.linear.app/graphql\` for Linear work. The runtime supplies \`LINEAR_API_KEY\` only when the current user or conversation is authorized to use the managed Linear integration.
+
+Authenticate with the raw API key in the \`Authorization\` header. Do not add \`Bearer\`, print the key, put it in a URL or command argument, or expose the process environment.
+
+## Safe workflow
+
+1. Read before writing. Use a small GraphQL query to inspect the target team, project, or issue before changing it.
+2. Use JSON request bodies with \`query\` and \`variables\`; keep queries bounded and request only fields needed for the task.
+3. Use \`viewer\`, \`teams\`, and \`projects\` to resolve identity and IDs. Use \`issues(filter: ...)\` or \`issue(id: ...)\` to locate an issue.
+4. For writes, show the intended title, description, target team, and issue identifier before asking for normal user confirmation. Then use \`issueCreate\`, \`issueUpdate\`, or \`commentCreate\` mutations with variables.
+5. Explain GraphQL errors plainly and retry only transient failures. Never log request headers or credential values.
+
+Useful operations include \`query { viewer { id name email } }\`, bounded team/project lookups, issue searches filtered by team or identifier, \`issueCreate(input: { title, description, teamId })\`, \`issueUpdate(id: \"...\", input: { title, description })\`, and \`commentCreate(input: { issueId, body })\`.
+`;
+
 export const MANAGED_GITHUB_SKILL = `---
 name: GitHub CLI
 description: Use GitHub through the managed gh CLI for repository, issue, pull request, workflow, and release work.
@@ -31,12 +57,18 @@ Never use \`$CANVAS_CLI\`, Canvas MCP tools, raw HTTP authorization headers, raw
 `;
 
 export async function ensureBuiltinManagedSkills(config: Pick<Config, "CLAUDE_CONFIG_DIR">): Promise<void> {
-  const skillPath = join(config.CLAUDE_CONFIG_DIR, "skills", "github", "SKILL.md");
-  let existing: string | null = null;
-  try {
-    existing = await readFile(skillPath, "utf8");
-  } catch {}
-  if (existing?.includes("provider-type: cli:github") && existing.includes("requires-env:")) return;
-  await mkdir(join(config.CLAUDE_CONFIG_DIR, "skills", "github"), { recursive: true });
-  await writeFile(skillPath, MANAGED_GITHUB_SKILL, "utf8");
+  const skills = [
+    { id: "github", content: MANAGED_GITHUB_SKILL, marker: "provider-type: cli:github" },
+    { id: "linear", content: MANAGED_LINEAR_SKILL, marker: "provider-type: api:linear" },
+  ];
+  for (const skill of skills) {
+    const skillPath = join(config.CLAUDE_CONFIG_DIR, "skills", skill.id, "SKILL.md");
+    let existing: string | null = null;
+    try {
+      existing = await readFile(skillPath, "utf8");
+    } catch {}
+    if (existing?.includes(skill.marker) && existing.includes("requires-env:")) continue;
+    await mkdir(join(config.CLAUDE_CONFIG_DIR, "skills", skill.id), { recursive: true });
+    await writeFile(skillPath, skill.content, "utf8");
+  }
 }

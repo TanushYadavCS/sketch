@@ -72,7 +72,7 @@ export interface ChatThreadIntegrationConnection {
   requestId: string;
   appId: string;
   appName: string;
-  executionMode?: "canvas" | "cli";
+  executionMode?: "canvas" | "cli" | "api";
   state?: "connect" | "connected";
   icon?: string;
   reason?: string;

@@ -12,7 +12,7 @@ const linearViewerSchema = z.object({
 });
 
 const linearResponseSchema = z.object({
-  data: z.object({ viewer: linearViewerSchema.nullable() }).optional(),
+  data: z.object({ viewer: linearViewerSchema.nullable() }).nullable().optional(),
   errors: z.array(z.object({ message: z.string() })).optional(),
 });
 

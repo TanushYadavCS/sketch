@@ -17,6 +17,7 @@ import {
   canvasBlockedIntegrationMessage,
   isCanvasBlockedAppId,
   isCanvasBlockedConnectionId,
+  managedCliIntegrationAppId,
 } from "../integrations/cli/policy";
 import { createProvider } from "../integrations/factory";
 import { type IntegrationProvider, canvasCredentialsSchema } from "../integrations/types";
@@ -596,13 +597,14 @@ function isCanvasBlockedConnection(connection: IntegrationConnection): boolean {
   );
 }
 
-function canvasBlockedConnectionResponse(c: import("hono").Context) {
+function canvasBlockedConnectionResponse(c: import("hono").Context, appId?: string) {
+  const managedAppId = appId ? managedCliIntegrationAppId(appId) : null;
   return c.json(
     {
       error: {
         code: "CLI_INTEGRATION",
         message: canvasBlockedIntegrationMessage(),
-        setupUrl: "/integrations?connect=github",
+        setupUrl: `/integrations?connect=${managedAppId ?? "github"}`,
       },
     },
     409,
@@ -800,7 +802,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const fallbackApp = fallbackConnectionIntentApp(parsed.data);
     if (row.type === "canvas" && (isCanvasBlockedAppId(fallbackApp.id) || isCanvasBlockedAppId(fallbackApp.name))) {
-      return canvasBlockedConnectionResponse(c);
+      return canvasBlockedConnectionResponse(c, fallbackApp.id || fallbackApp.name);
     }
     const result = await resolveConnectionIntent({
       provider,
@@ -811,7 +813,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       callbackUrl: parsed.data.callbackUrl,
     });
     if (!result.ok) {
-      if (result.code === "CLI_INTEGRATION") return canvasBlockedConnectionResponse(c);
+      if (result.code === "CLI_INTEGRATION")
+        return canvasBlockedConnectionResponse(c, fallbackApp.id || fallbackApp.name);
       return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
     }
     return c.json({ redirectUrl: result.redirectUrl });
@@ -835,7 +838,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const fallbackApp = fallbackConnectionIntentApp(parsed.data);
     if (row.type === "canvas" && (isCanvasBlockedAppId(fallbackApp.id) || isCanvasBlockedAppId(fallbackApp.name))) {
-      return canvasBlockedConnectionResponse(c);
+      return canvasBlockedConnectionResponse(c, fallbackApp.id || fallbackApp.name);
     }
     const result = await resolveConnectionIntent({
       provider,
@@ -846,7 +849,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       callbackUrl: parsed.data.callbackUrl,
     });
     if (!result.ok) {
-      if (result.code === "CLI_INTEGRATION") return canvasBlockedConnectionResponse(c);
+      if (result.code === "CLI_INTEGRATION")
+        return canvasBlockedConnectionResponse(c, fallbackApp.id || fallbackApp.name);
       return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
     }
     return c.json({ app: result.app, redirectUrl: result.redirectUrl });

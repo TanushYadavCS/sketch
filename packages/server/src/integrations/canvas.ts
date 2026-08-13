@@ -193,13 +193,13 @@ export class CanvasProvider implements IntegrationProvider {
     if (userEmail) credentialEnv.CANVAS_USER_EMAIL = userEmail;
     return {
       cliPath: join(claudeConfigDir, "skills", "canvas", "canvas-cli.js"),
-      credentialEnv: { ...credentialEnv, CANVAS_BLOCKED_APP_IDS: "github,github-oauth" },
+      credentialEnv: { ...credentialEnv, CANVAS_BLOCKED_APP_IDS: "github,github-oauth,linear,linear-oauth" },
       launcherEnvName: "CANVAS_CLI",
       argvPolicy: (argv) => {
         const blocked = argv.some((value) => {
           const normalized = value.trim().toLowerCase();
           if (isCanvasBlockedAppId(normalized) || isCanvasBlockedComponentKey(normalized)) return true;
-          return normalized.includes("github");
+          return normalized.includes("github") || normalized.includes("linear");
         });
         return blocked ? { allowed: false, message: canvasBlockedIntegrationMessage() } : { allowed: true };
       },

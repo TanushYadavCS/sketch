@@ -253,7 +253,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
       CANVAS_API_KEY_MCP: "key-1",
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
       CANVAS_USER_EMAIL: "u@example.com",
-      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth,linear,linear-oauth",
     });
   });
 
@@ -269,7 +269,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
     expect(spec.credentialEnv).toEqual({
       CANVAS_API_KEY_MCP: "key-1",
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
-      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth,linear,linear-oauth",
     });
   });
 
@@ -279,7 +279,7 @@ describe("CanvasProvider.getBrokerSpec", () => {
     expect(spec.credentialEnv).toEqual({
       CANVAS_MCP_URL: "https://canvas.example.com/mcp",
       CANVAS_USER_EMAIL: "u@example.com",
-      CANVAS_BLOCKED_APP_IDS: "github,github-oauth",
+      CANVAS_BLOCKED_APP_IDS: "github,github-oauth,linear,linear-oauth",
     });
   });
 });

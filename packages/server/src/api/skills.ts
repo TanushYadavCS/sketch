@@ -51,7 +51,8 @@ async function loadWorkspaceSkills(dataDir: string): Promise<WorkspaceSkill[]> {
 }
 
 function isImmutableManagedSkill(id: string): boolean {
-  return id.trim().toLowerCase() === "github";
+  const normalizedId = id.trim().toLowerCase();
+  return normalizedId === "github" || normalizedId === "linear";
 }
 
 function assertSkillId(id: string): string | null {

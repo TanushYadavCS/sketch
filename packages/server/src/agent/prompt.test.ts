@@ -395,6 +395,13 @@ describe("buildSystemContext", () => {
   });
 
   describe("web chat platform formatting", () => {
+    it("documents managed Linear routing", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("Linear is a managed API integration in Sketch.");
+      expect(result).toContain("use its GraphQL API");
+      expect(result).toContain("never route Linear through Canvas tools");
+    });
+
     it("includes GitHub-flavored Markdown rules", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("Sketch web chat");

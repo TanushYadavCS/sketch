@@ -1502,7 +1502,7 @@ function sanitizeIntegrationConnectionData(value: unknown): WebChatIntegrationCo
     appName: appName.trim(),
     ...(state === "connect" || state === "connected" ? { state } : {}),
     ...(typeof icon === "string" && icon.trim() ? { icon: icon.trim() } : {}),
-    ...(executionMode === "cli" ? { executionMode: "cli" as const } : {}),
+    ...(executionMode === "cli" || executionMode === "api" ? { executionMode } : {}),
     ...(typeof reason === "string" && reason.trim() ? { reason: reason.trim() } : {}),
     ...(typeof accountName === "string" && accountName.trim() ? { accountName: accountName.trim() } : {}),
     ...(typeof connectionId === "string" && connectionId.trim()

@@ -722,6 +722,83 @@ describe("runAgent AI SDK runtime path", () => {
     });
   });
 
+  it("captures a missing managed Linear card from AI SDK lifecycle tool events", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: [
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              {
+                type: "tool-call",
+                toolCallId: "tool-bash",
+                toolName: "Bash",
+                input: JSON.stringify({ command: '$CANVAS_CLI search-apps --queries="linear" --output json' }),
+              },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage: usage(20, 1),
+              },
+            ],
+          }),
+        },
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "text-start", id: "text-linear-1" },
+              { type: "text-delta", id: "text-linear-1", delta: "connect linear" },
+              { type: "text-end", id: "text-linear-1" },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: usage(10, 2),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const provider = {
+      type: "canvas",
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn(),
+      initiateConnection: vi.fn(),
+      removeConnection: vi.fn(),
+      isBrokerCapable: () => false,
+      getBrokerSpec: () => null,
+    };
+
+    const result = await runAgent(
+      makeRunParams(model, {
+        userEmail: "alice@example.com",
+        currentUserId: "alice",
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+        cliIntegrations: {
+          listCatalog: () => [
+            {
+              id: "linear",
+              name: "Linear",
+              description: "Use Linear through Sketch.",
+              icon: "https://linear.app/favicon.svg",
+              executionMode: "api",
+              connected: false,
+              connectionId: null,
+            },
+          ],
+          listConnections: vi.fn().mockResolvedValue([]),
+        },
+        agentEnv: { CANVAS_CLI: "missing-canvas-cli" },
+      }),
+    );
+
+    expect(provider.listApps).not.toHaveBeenCalled();
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      { appId: "linear", appName: "Linear", state: "connect", executionMode: "api" },
+    ]);
+  });
+
   it("captures integration cards from AI SDK lifecycle tool events", async () => {
     const model = new MockLanguageModelV4({
       provider: "mock-anthropic",

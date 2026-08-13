@@ -6,6 +6,7 @@ import {
   type IntegrationApp,
   type IntegrationConnection,
   isCanvasBlockedCliAppId,
+  managedCliIntegrationAppId,
 } from "@sketch/shared";
 /**
  * Add Integration dialog: catalog search with infinite scroll + OAuth popup flow.
@@ -56,6 +57,7 @@ export function AddIntegrationDialog({
   cliCatalog,
   cliConnections,
   onOpenGithubSetup,
+  onOpenLinearSetup,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -67,6 +69,7 @@ export function AddIntegrationDialog({
   cliCatalog?: CliIntegrationCatalogApp[];
   cliConnections?: CliIntegrationConnection[];
   onOpenGithubSetup?: () => void;
+  onOpenLinearSetup?: () => void;
 }) {
   const [step, setStep] = useState<AddIntegrationStep>({ kind: "search" });
   const [search, setSearch] = useState("");
@@ -136,8 +139,10 @@ export function AddIntegrationDialog({
       directRequestRef.current = null;
       return;
     }
-    if (initialAppId && isCanvasBlockedCliAppId(initialAppId)) {
-      onOpenGithubSetup?.();
+    const managedInitialAppId = initialAppId ? managedCliIntegrationAppId(initialAppId) : null;
+    if (managedInitialAppId) {
+      if (managedInitialAppId === "linear") onOpenLinearSetup?.();
+      else onOpenGithubSetup?.();
       return;
     }
 
@@ -171,7 +176,7 @@ export function AddIntegrationDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, initialAppId, providerId, onOpenGithubSetup]);
+  }, [open, initialAppId, providerId, onOpenGithubSetup, onOpenLinearSetup]);
 
   useEffect(() => {
     if (open && !initialAppId?.trim() && step.kind === "search") {
@@ -404,10 +409,12 @@ export function AddIntegrationDialog({
                         onConnect={() => {
                           if (
                             app.executionMode === "cli" ||
+                            app.executionMode === "api" ||
                             isCanvasBlockedCliAppId(app.id) ||
                             isCanvasBlockedCliAppId(app.name)
                           ) {
-                            onOpenGithubSetup?.();
+                            if (managedCliIntegrationAppId(app.id) === "linear") onOpenLinearSetup?.();
+                            else onOpenGithubSetup?.();
                             return;
                           }
                           void handleStartOAuth(app);

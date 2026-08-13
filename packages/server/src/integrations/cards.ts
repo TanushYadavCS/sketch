@@ -129,7 +129,9 @@ export function cardFromApp(
     ...(app.executionMode ? { executionMode: app.executionMode } : {}),
     state: "connect",
     ...(app.icon ? { icon: app.icon } : {}),
-    ...(app.executionMode === "cli" ? { connectUrl: `/integrations?connect=${encodeURIComponent(app.id)}` } : {}),
+    ...(app.executionMode === "cli" || app.executionMode === "api"
+      ? { connectUrl: `/integrations?connect=${encodeURIComponent(app.id)}` }
+      : {}),
     ...(reason?.trim() ? { reason: reason.trim() } : {}),
   };
 }
@@ -629,7 +631,7 @@ function cliConnectionCard(connection: CliIntegrationConnection): WebChatIntegra
     requestId: cardId("integration-connected", connection.appId),
     appId: connection.appId,
     appName: connection.appName,
-    executionMode: "cli",
+    executionMode: connection.executionMode,
     state: "connected",
     ...(connection.accountAvatarUrl ? { icon: connection.accountAvatarUrl } : {}),
     accountName: `@${connection.accountLogin}`,
@@ -645,12 +647,17 @@ function cliCardForApp(
     (item) => item.appId === app.id && item.status === "active" && item.canUse !== false,
   );
   if (connection) return null;
-  return cardFromApp({ ...app, executionMode: "cli" }, null, "Connect GitHub in Sketch Integrations.");
+  return cardFromApp({ ...app, executionMode: app.executionMode }, null, `Connect ${app.name} in Sketch Integrations.`);
 }
 
 function cliAppForQuery(resolver: CliIntegrationCardResolver, query: string): CliIntegrationCatalogApp | null {
-  if (!normalizeIntegrationLookup(query).includes("github")) return null;
-  return resolver.listCatalog("github").find((app) => app.id === "github") ?? null;
+  const queryKey = normalizeIntegrationLookup(query);
+  return (
+    resolver.listCatalog().find((candidate) => {
+      const candidateKeys = [candidate.id, candidate.name].map(normalizeIntegrationLookup);
+      return candidateKeys.some((candidateKey) => candidateKey === queryKey || queryKey.includes(candidateKey));
+    }) ?? null
+  );
 }
 
 function cliCardForComponentKey(
@@ -658,8 +665,9 @@ function cliCardForComponentKey(
   connections: CliIntegrationConnection[],
   componentKey: string,
 ): WebChatIntegrationConnectionData | null {
-  if (!normalizeIntegrationLookup(componentKey).startsWith("github")) return null;
-  const app = resolver.listCatalog("github").find((item) => item.id === "github");
+  const app = resolver
+    .listCatalog()
+    .find((item) => normalizeIntegrationLookup(componentKey).startsWith(normalizeIntegrationLookup(item.id)));
   return app ? cliCardForApp(app, connections) : null;
 }
 
@@ -705,7 +713,11 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   const cliComponentKeys = new Set<string>();
   const canvasComponentKeys = new Set<string>();
   for (const componentKey of componentKeys) {
-    if (params.cliIntegrations && normalizeIntegrationLookup(componentKey).startsWith("github")) {
+    if (
+      params.cliIntegrations
+        ?.listCatalog()
+        .some((app) => normalizeIntegrationLookup(componentKey).startsWith(normalizeIntegrationLookup(app.id)))
+    ) {
       cliComponentKeys.add(componentKey);
     } else {
       canvasComponentKeys.add(componentKey);

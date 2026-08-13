@@ -13,7 +13,7 @@ export interface McpServerRecord {
 }
 
 /** Execution path used by an integration catalog result. */
-export type IntegrationExecutionMode = "canvas" | "cli";
+export type IntegrationExecutionMode = "canvas" | "cli" | "api";
 
 /** App from an integration provider's catalog. */
 export interface IntegrationApp {

@@ -1,5 +1,6 @@
-import { GithubAppIcon } from "@/components/connections/app-icon";
+import { GithubAppIcon, LinearAppIcon } from "@/components/connections/app-icon";
 import { GithubIntegrationRow } from "@/components/connections/github-integration-dialog";
+import { LinearIntegrationRow } from "@/components/connections/linear-integration-dialog";
 import { QuietAddButton } from "@/components/quiet-add-button";
 import { type SlackChannelInfo, type User, type WhatsAppGroupInfo, api } from "@/lib/api";
 import { GearSixIcon, PlugIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
@@ -33,6 +34,12 @@ export function IntegrationsSection({
   githubWhatsappGroups = [],
   githubCurrentUserId = "",
   githubIsAdmin = false,
+  linearConnection,
+  linearUsers = [],
+  linearSlackChannels = [],
+  linearWhatsappGroups = [],
+  linearCurrentUserId = "",
+  linearIsAdmin = false,
 }: {
   connections: IntegrationConnection[];
   isLoadingConnections: boolean;
@@ -46,6 +53,12 @@ export function IntegrationsSection({
   githubWhatsappGroups?: WhatsAppGroupInfo[];
   githubCurrentUserId?: string;
   githubIsAdmin?: boolean;
+  linearConnection?: CliIntegrationConnection | null;
+  linearUsers?: User[];
+  linearSlackChannels?: SlackChannelInfo[];
+  linearWhatsappGroups?: WhatsAppGroupInfo[];
+  linearCurrentUserId?: string;
+  linearIsAdmin?: boolean;
 }) {
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [settingsConnection, setSettingsConnection] = useState<IntegrationConnection | null>(null);
@@ -78,7 +91,7 @@ export function IntegrationsSection({
             </div>
           ))}
         </div>
-      ) : connections.length === 0 && !githubConnection ? (
+      ) : connections.length === 0 && !githubConnection && !linearConnection ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
           <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
             <PlugIcon size={24} className="text-[#8B7A00]" />
@@ -94,12 +107,24 @@ export function IntegrationsSection({
           {githubConnection && (
             <GithubIntegrationRow
               connection={githubConnection}
-              isLast={connections.length === 0}
+              isLast={connections.length === 0 && !linearConnection}
               users={githubUsers}
               slackChannels={githubSlackChannels}
               whatsappGroups={githubWhatsappGroups}
               currentUserId={githubCurrentUserId}
               isAdmin={githubIsAdmin}
+              onChanged={onDisconnect}
+            />
+          )}
+          {linearConnection && (
+            <LinearIntegrationRow
+              connection={linearConnection}
+              isLast={connections.length === 0}
+              users={linearUsers}
+              slackChannels={linearSlackChannels}
+              whatsappGroups={linearWhatsappGroups}
+              currentUserId={linearCurrentUserId}
+              isAdmin={linearIsAdmin}
               onChanged={onDisconnect}
             />
           )}
@@ -370,6 +395,9 @@ function ConnectionIcon({
   const classes = size === "lg" ? "size-10 rounded-lg" : "size-9 rounded-lg";
   if (connection.appId.trim().toLowerCase() === "github") {
     return <GithubAppIcon className={classes} />;
+  }
+  if (connection.appId.trim().toLowerCase() === "linear") {
+    return <LinearAppIcon className={classes} />;
   }
   if (connection.icon) {
     const dimensions = size === "lg" ? 40 : 36;

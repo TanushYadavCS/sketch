@@ -853,6 +853,45 @@ describe("integration cards", () => {
     expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
   });
 
+  it("collects a missing Linear card from a managed integration lookup", async () => {
+    const cards: unknown[] = [];
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__search_apps",
+          input: { queries: ["linear"] },
+        },
+      ],
+      cliIntegrations: {
+        listCatalog: () => [
+          {
+            id: "linear",
+            name: "Linear",
+            description: "Use Linear through Sketch.",
+            icon: "https://linear.app/favicon.svg",
+            executionMode: "api",
+            connected: false,
+            connectionId: null,
+          },
+        ],
+        listConnections: async () => [],
+      },
+      currentUserId: "alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([
+      {
+        appId: "linear",
+        appName: "Linear",
+        state: "connect",
+        executionMode: "api",
+        connectUrl: "/integrations?connect=linear",
+      },
+    ]);
+  });
+
   it("collects connected account cards from observed Canvas MCP search_apps without queries", async () => {
     const cards: unknown[] = [];
     const provider = {

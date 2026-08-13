@@ -4,6 +4,7 @@ import {
 } from "@/components/connections/connection-status";
 import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
 import { GithubIntegrationDialog } from "@/components/connections/github-integration-dialog";
+import { LinearIntegrationDialog } from "@/components/connections/linear-integration-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
 import {
@@ -49,7 +50,12 @@ import {
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY, buildWebChatRecents } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { CliIntegrationConnection, IntegrationApp, IntegrationConnection } from "@sketch/shared";
+import {
+  type CliIntegrationConnection,
+  type IntegrationApp,
+  type IntegrationConnection,
+  managedCliIntegrationAppId,
+} from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -85,7 +91,7 @@ type WebChatDataParts = {
     requestId: string;
     appId: string;
     appName: string;
-    executionMode?: "canvas" | "cli";
+    executionMode?: "canvas" | "cli" | "api";
     state?: "connect" | "connected";
     icon?: string;
     reason?: string;
@@ -1023,6 +1029,8 @@ export function ChatPage() {
   );
   const [githubSetupOpen, setGithubSetupOpen] = useState(false);
   const [githubRetryText, setGithubRetryText] = useState<string | null>(null);
+  const [linearSetupOpen, setLinearSetupOpen] = useState(false);
+  const [linearRetryText, setLinearRetryText] = useState<string | null>(null);
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
@@ -1097,10 +1105,10 @@ export function ChatPage() {
     [threadMessages],
   );
   const hasCanvasIntegrationConnectionCards = integrationConnectionCards.some(
-    (connection) => connection.executionMode !== "cli",
+    (connection) => connection.executionMode !== "cli" && connection.executionMode !== "api",
   );
   const hasCliIntegrationConnectionCards = integrationConnectionCards.some(
-    (connection) => connection.executionMode === "cli" && connection.appId === "github",
+    (connection) => connection.executionMode === "cli" || connection.executionMode === "api",
   );
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
@@ -1120,18 +1128,18 @@ export function ChatPage() {
   const cliUsersQuery = useQuery({
     queryKey: ["users", "chat-github"],
     queryFn: () => api.users.list(),
-    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
   });
   const cliSlackChannelsQuery = useQuery({
     queryKey: ["slack-channels", "chat-github"],
     queryFn: () => api.channels.listSlack(),
-    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
     retry: false,
   });
   const cliWhatsappGroupsQuery = useQuery({
     queryKey: ["whatsapp-groups", "chat-github"],
     queryFn: () => api.channels.listWhatsAppGroups(),
-    enabled: githubSetupOpen || hasCliIntegrationConnectionCards,
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
   });
   const connectedAppIds = useMemo(
     () =>
@@ -1148,7 +1156,7 @@ export function ChatPage() {
       hasCanvasIntegrationConnectionCards &&
       (serversQuery.isError || (!serversQuery.isLoading && serversQuery.isFetched && !provider));
     for (const connection of integrationConnectionCards) {
-      if (connection.executionMode === "cli") {
+      if (connection.executionMode === "cli" || connection.executionMode === "api") {
         statuses[connection.requestId] =
           connection.state === "connected"
             ? "connected"
@@ -1310,6 +1318,12 @@ export function ChatPage() {
         setGithubSetupOpen(true);
         return;
       }
+      if (connection.executionMode === "api" && managedCliIntegrationAppId(connection.appId) === "linear") {
+        const retryMessage = [...chat.messages].reverse().find((message) => message.role === "user");
+        setLinearRetryText(retryMessage ? textFromMessage(retryMessage) : null);
+        setLinearSetupOpen(true);
+        return;
+      }
       if (providerLoading) return;
       if (!provider) {
         setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "unavailable" }));
@@ -1349,6 +1363,29 @@ export function ChatPage() {
       }
     },
     [chat.sendMessage, conversationId, githubRetryText, integrationConnectionCards, queryClient],
+  );
+
+  const handleLinearIntegrationSuccess = useCallback(
+    (connection: CliIntegrationConnection) => {
+      setLocalIntegrationConnectionStatuses((current) => {
+        const next = { ...current };
+        for (const card of integrationConnectionCards) {
+          if (card.appId === connection.appId) next[card.requestId] = "connected";
+        }
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["cli-integration-connections"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+      if (linearRetryText) {
+        queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+        void Promise.resolve(chat.sendMessage(outgoingTextMessage(linearRetryText))).then(() =>
+          queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+        );
+        setLinearRetryText(null);
+      }
+    },
+    [chat.sendMessage, conversationId, integrationConnectionCards, linearRetryText, queryClient],
   );
 
   const handleIntegrationConnected = useCallback(
@@ -1545,6 +1582,17 @@ export function ChatPage() {
         currentUserId={dashboardAuth.userId ?? ""}
         isAdmin={dashboardAuth.role === "admin"}
         onSuccess={handleGithubIntegrationSuccess}
+      />
+
+      <LinearIntegrationDialog
+        open={linearSetupOpen}
+        onOpenChange={setLinearSetupOpen}
+        users={cliUsersQuery.data?.users ?? []}
+        slackChannels={cliSlackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={cliWhatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={dashboardAuth.userId ?? ""}
+        isAdmin={dashboardAuth.role === "admin"}
+        onSuccess={handleLinearIntegrationSuccess}
       />
 
       <ChatIntegrationConnectionFrame

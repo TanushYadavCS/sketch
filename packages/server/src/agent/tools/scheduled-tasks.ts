@@ -87,7 +87,7 @@ const workflowStepSchema = z.object({
       scheduleType: z.enum(["cron", "interval", "once"]).optional(),
       scheduleValue: z.string().optional(),
       timezone: z.string().optional(),
-      app: z.string().optional().describe("Source app for Canvas-managed triggers, e.g. 'clickup' or 'linear'."),
+      app: z.string().optional().describe("Source app for Canvas-managed triggers, e.g. 'clickup'."),
       eventDescription: z.string().optional().describe("Human-readable event description, e.g. 'new issue created'."),
       componentKey: z.string().optional().describe("Canvas trigger component ID/key found through search_components."),
       configuredProps: z.record(z.string(), z.unknown()).optional(),

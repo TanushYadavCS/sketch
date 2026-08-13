@@ -133,6 +133,7 @@ function buildAgentChildEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...integrationEnv, ...agentEnv };
   if (!agentEnv?.GH_TOKEN) env.GH_TOKEN = undefined;
+  if (!agentEnv?.LINEAR_API_KEY) env.LINEAR_API_KEY = undefined;
   return env;
 }
 

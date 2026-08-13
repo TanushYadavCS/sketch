@@ -1,4 +1,4 @@
-import { isCanvasBlockedCliAppId, isCanvasBlockedCliComponentKey } from "@sketch/shared";
+import { isCanvasBlockedCliAppId, isCanvasBlockedCliComponentKey, managedCliIntegrationAppId } from "@sketch/shared";
 
 export function isCanvasBlockedAppId(value: string): boolean {
   return isCanvasBlockedCliAppId(value);
@@ -7,6 +7,8 @@ export function isCanvasBlockedAppId(value: string): boolean {
 export function isCanvasBlockedComponentKey(value: string): boolean {
   return isCanvasBlockedCliComponentKey(value);
 }
+
+export { managedCliIntegrationAppId };
 
 export function isCanvasBlockedConnectionId(value: string): boolean {
   return value
@@ -17,5 +19,5 @@ export function isCanvasBlockedConnectionId(value: string): boolean {
 }
 
 export function canvasBlockedIntegrationMessage(): string {
-  return "GitHub is managed by Sketch's GitHub integration. Connect it from Integrations instead of Canvas.";
+  return "GitHub and Linear are managed by Sketch integrations. Connect them from Integrations instead of Canvas.";
 }
