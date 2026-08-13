@@ -297,14 +297,13 @@ describe("runMigrations — full sequence", () => {
     expect(names[173]).toBe("178-whatsapp-chunk-knobs");
     expect(names[174]).toBe("179-whatsapp-open-slices");
     expect(names[175]).toBe("180-whatsapp-chunk-conversion-state");
-<<<<<<< HEAD
     expect(names[176]).toBe("181-project-minting-verdicts");
     expect(names[177]).toBe("182-project-minting-states");
     expect(names[178]).toBe("183-graph-pass-runs");
     expect(names[179]).toBe("184-person-contact-point-cutover");
-=======
-    expect(names[176]).toBe("181-automation-shares");
->>>>>>> 2be43a3d (feat(db): automation task shares and grant-aware access core [subagent:lifecycle-worker/sharing-data-core])
+    expect(names[180]).toBe("185-queue-pass-reason");
+    expect(names[181]).toBe("186-entity-merge-groups");
+    expect(names[182]).toBe("181-automation-shares");
   });
 
   it("backfills only exact web origin task conversations", async () => {
