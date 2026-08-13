@@ -38,8 +38,10 @@ function taskTitle(task: { title: string | null; prompt: string }): string {
 
 /**
  * Resolve a user reference by exact email first, then by name substring.
- * Ambiguous name matches are rejected with the candidate names so the caller
- * can ask for a full email; zero matches resolve to null.
+ * Admin users are excluded from grant/revoke targets to match the web picker
+ * contract (auth_role !== 'admin'); ambiguous name matches are rejected with
+ * the candidate names so the caller can ask for a full email; zero matches
+ * resolve to null.
  */
 async function resolveUser(
   userRepo: SearchableUserRepo | undefined,
@@ -48,12 +50,13 @@ async function resolveUser(
   if (!userRepo) return null;
   if (userRepo.findByEmail) {
     const byEmail = await userRepo.findByEmail(query).catch(() => undefined);
-    if (byEmail) return { id: byEmail.id, name: byEmail.name };
+    if (byEmail && byEmail.auth_role !== "admin") return { id: byEmail.id, name: byEmail.name };
   }
   if (!userRepo.searchByNameSubstring) return null;
   const byName = await userRepo.searchByNameSubstring(query, 10).catch(() => []);
-  if (byName.length === 1) return { id: byName[0].id, name: byName[0].name };
-  if (byName.length > 1) return { ambiguous: byName.map((user) => user.name) };
+  const nonAdmins = byName.filter((user) => user.auth_role !== "admin");
+  if (nonAdmins.length === 1) return { id: nonAdmins[0].id, name: nonAdmins[0].name };
+  if (nonAdmins.length > 1) return { ambiguous: nonAdmins.map((user) => user.name) };
   return null;
 }
 

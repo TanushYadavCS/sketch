@@ -2,29 +2,36 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import pino from "pino";
+import { ensureWorkspace } from "../agent/workspace";
 import {
   type AutomationTaskConversationLockSummary,
   type BuilderConversationAccessResult,
   createAutomationTaskConversationService,
 } from "../automation/task-conversations";
+import type { Config } from "../config";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
+import { readWebChatTranscript, readWebChatTranscriptUpdatedAt } from "./web-chat";
 
 const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const CONVERSATION_KINDS = new Set(["builder", "web_chat"]);
 
 interface ScheduledTaskConversationRouteOptions {
   logger?: Logger;
+  /** Web-chat transcript storage; required for the transcript-content route. */
+  config?: Config;
 }
 
 function errorResponse(
   c: Context,
   code: string,
   message: string,
-  status: 400 | 403 | 404 | 409,
+  status: 400 | 403 | 404 | 409 | 503,
   details: Record<string, unknown> = {},
 ) {
   return c.json({ error: { code, message, ...details } }, status);
@@ -76,6 +83,8 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
   const tasks = createScheduledTaskRepository(db);
   const shares = createAutomationSharesRepository(db);
   const conversations = createAutomationTaskConversationService(db);
+  const conversationRows = createScheduledTaskConversationRepository(db);
+  const logger = options.logger ?? pino({ level: "silent" });
 
   async function loadAccessibleTask(c: Context, taskId: string) {
     const row = await tasks.getById(taskId);
@@ -224,6 +233,49 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       builderLock: result.lock,
     };
     return result.created ? c.json(response, 201) : c.json(response);
+  });
+
+  routes.get("/:id/conversations/:conversationId/messages", async (c) => {
+    const taskId = c.req.param("id");
+    const conversationId = parseConversationId(c.req.param("conversationId"));
+    if (!conversationId) return errorResponse(c, "VALIDATION_ERROR", "Conversation id is invalid", 400);
+    if (!options.config) {
+      return errorResponse(c, "TRANSCRIPT_UNAVAILABLE", "Transcript storage is not configured", 503);
+    }
+
+    const access = await loadAccessibleTask(c, taskId);
+    if ("response" in access) return access.response;
+    if (!access.userId) return errorResponse(c, "TRANSCRIPT_ACCESS_DENIED", "Transcript access is viewer-scoped", 403);
+
+    // Owners and admins may read any associated conversation's transcript;
+    // other members stay scoped to their own transcript user id.
+    const rows =
+      access.transcriptAccess === "viewer"
+        ? await conversationRows.listByTaskConversationForTranscriptUser(taskId, conversationId, access.userId, {
+            includeArchived: true,
+          })
+        : await conversationRows.listByTaskConversationForTask(taskId, conversationId, { includeArchived: true });
+    if (rows.length === 0) {
+      return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
+    }
+
+    const transcriptUserId = rows[0].transcript_user_id;
+    const workspaceDir = await ensureWorkspace(options.config, transcriptUserId);
+    const messages = await readWebChatTranscript(
+      options.config,
+      workspaceDir,
+      transcriptUserId,
+      logger,
+      conversationId,
+    );
+    const updatedAt = await readWebChatTranscriptUpdatedAt(
+      options.config,
+      workspaceDir,
+      transcriptUserId,
+      logger,
+      conversationId,
+    );
+    return c.json({ messages, updatedAt });
   });
 
   routes.get("/:id/conversations/:conversationId", async (c) => {

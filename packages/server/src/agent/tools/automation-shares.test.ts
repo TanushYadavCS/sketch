@@ -326,6 +326,38 @@ describe("ManageAutomationShares", () => {
     await expect(createAutomationSharesRepository(db).hasGrant("share-admin-denied", "member-2")).resolves.toBe(false);
   });
 
+  it("excludes admin users from grant/revoke resolution targets", async () => {
+    await createTask("share-admin-excluded");
+    await db
+      .insertInto("users")
+      .values({ id: "admin-2", name: "Admin Two", email: "admin-two@sketch.test", auth_role: "admin" })
+      .execute();
+
+    const byEmail = await handleManageAutomationShares(
+      { action: "grant", task_id: "share-admin-excluded", user: "admin-two@sketch.test" },
+      {
+        db,
+        scheduler: schedulerFor("share-admin-excluded"),
+        taskContext: taskContextFor("share-admin-excluded", "owner-1"),
+        userRepo: userRepo(),
+      },
+    );
+    expect(byEmail.content[0].text).toBe('Error: No user matches "admin-two@sketch.test".');
+
+    const byName = await handleManageAutomationShares(
+      { action: "revoke", task_id: "share-admin-excluded", user: "Admin Two" },
+      {
+        db,
+        scheduler: schedulerFor("share-admin-excluded"),
+        taskContext: taskContextFor("share-admin-excluded", "owner-1"),
+        userRepo: userRepo(),
+      },
+    );
+    expect(byName.content[0].text).toBe('Error: No user matches "Admin Two".');
+
+    await expect(createAutomationSharesRepository(db).hasGrant("share-admin-excluded", "admin-2")).resolves.toBe(false);
+  });
+
   it("denies a granted member further grant/revoke control (no grant bypass)", async () => {
     await createTask("share-grantee-denied");
     await createAutomationSharesRepository(db).grant({

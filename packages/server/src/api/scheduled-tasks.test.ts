@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import { acquireOrRenewLock } from "../automation/lock-service";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import * as automationRunsModule from "../db/repositories/automation-runs";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
@@ -20,6 +21,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb } from "../test-utils";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
 
 const config = createTestConfig();
@@ -2375,6 +2377,150 @@ describe("Scheduled Tasks API", () => {
     expect(postLockStealRequestMessage).toHaveBeenCalledWith(
       "D9",
       expect.objectContaining({ taskId: "task-slack-lock", requesterName: "Bob" }),
+    );
+  });
+
+  it("delivers a steal request to a Slack-identified holder acquired through the production lock route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice-route-hold@test.com",
+      slackUserId: "USLACKROUTE",
+    });
+    const bob = await users.create({ name: "Bob", email: "bob-route-steal@test.com" });
+    await tasks.add({
+      id: "task-route-slack-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D9",
+      thread_ts: null,
+      prompt: "Route-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-route-slack-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
+
+    const postLockStealRequestMessage = vi.fn().mockResolvedValue(undefined);
+    const postMessage = vi.fn().mockResolvedValue(undefined);
+    const getSlack = () => ({ postLockStealRequestMessage, postMessage }) as unknown as SlackBot;
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler, getSlack });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    // Production acquire: the holder row records the Slack DM surface.
+    const acquired = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(acquired.status).toBe(200);
+    await expect(createAutomationLocksRepository(db).getByTaskId("task-route-slack-lock")).resolves.toMatchObject({
+      holder_user_id: alice.id,
+      holder_platform: "slack",
+      holder_surface: "dm",
+      holder_conversation_id: "USLACKROUTE",
+    });
+
+    const res = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(postLockStealRequestMessage).toHaveBeenCalled();
+    });
+    expect(postLockStealRequestMessage).toHaveBeenCalledWith(
+      "USLACKROUTE",
+      expect.objectContaining({ taskId: "task-route-slack-lock", requesterName: "Bob" }),
+    );
+  });
+
+  it("delivers a steal request to a WhatsApp-identified holder acquired through the production lock route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice-wa-route@test.com",
+      whatsappNumber: "+15550001111",
+    });
+    const bob = await users.create({ name: "Bob", email: "bob-wa-route@test.com" });
+    await tasks.add({
+      id: "task-route-wa-lock",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "15550001111@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Route-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-route-wa-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
+
+    const sendText = vi.fn().mockResolvedValue(null);
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, {
+      scheduler,
+      whatsappRuntime: { sendText } as unknown as WhatsAppRuntime,
+    });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    const acquired = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(acquired.status).toBe(200);
+    await expect(createAutomationLocksRepository(db).getByTaskId("task-route-wa-lock")).resolves.toMatchObject({
+      holder_user_id: alice.id,
+      holder_platform: "whatsapp",
+      holder_surface: "dm",
+      holder_conversation_id: "15550001111@s.whatsapp.net",
+    });
+
+    const res = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(sendText).toHaveBeenCalled();
+    });
+    expect(sendText).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15550001111", providerConversationId: "15550001111@s.whatsapp.net" },
+      expect.stringContaining("CONFIRM-STEAL task-route-wa-lock"),
     );
   });
 

@@ -605,7 +605,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }),
     );
   }
-  app.route("/api/scheduled-tasks", scheduledTaskConversationRoutes(db, { logger }));
+  app.route("/api/scheduled-tasks", scheduledTaskConversationRoutes(db, { logger, config }));
   app.route(
     "/api/channels",
     channelRoutes({

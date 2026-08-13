@@ -257,6 +257,17 @@ describe("buildSystemContext", () => {
       expect(result).toContain("pass the resolved target ID in ManageScheduledTasks delivery");
       expect(result).toContain("Operational actions remain deterministic");
     });
+
+    it("routes share requests to the web app instead of granting access in chat", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("do not grant or revoke access directly in chat");
+      expect(result).toContain("/scheduled-tasks/{taskId}/edit");
+      expect(result).toContain("open the Share dialog");
+      expect(result).toContain("/scheduled-tasks");
+      expect(result).toContain("You may still list current shares for information");
+      expect(result).toContain("Do not construct automation URLs yourself");
+    });
   });
 
   describe("file attachments section", () => {

@@ -1398,7 +1398,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     ]);
   });
 
-  it("keeps ownership on the owner while denying a member; an admin passes the tool guard but persistence stays owner-or-grantee", async () => {
+  it("keeps ownership on the owner while denying a member; an admin mutation succeeds", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
@@ -1413,17 +1413,19 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         taskContext: { ...taskContextFor("ownership-task", "admin-1"), canManageAnyTask: true },
       },
     );
-    // The tool guard admits admins; persistence (owner-or-grantee only) still
-    // denies the mutation until L5 makes it admin-aware.
-    expect(adminResult.content[0].text).toContain("you do not have permission to update task");
+    // Admins pass the tool guard and persistence re-grants the mutation; the
+    // task stays owned by the original owner.
+    expect(adminResult.content[0].text).toContain("Automation updated:");
     expect(adminResult.content[0].text).not.toContain("created by");
+    expect(adminResult.content[0].text).not.toContain("you do not have permission");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
       created_by: "owner-1",
-      revision: 0,
+      revision: 1,
+      last_edited_by: "admin-1",
     });
 
     const memberResult = await handleManageScheduledTasks(
-      { action: "update", task_id: "ownership-task", prompt: "Member edit", expected_revision: 0 },
+      { action: "update", task_id: "ownership-task", prompt: "Member edit", expected_revision: 1 },
       {
         db,
         scheduler: schedulerFor("ownership-task", "owner-1"),
@@ -1433,8 +1435,8 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(memberResult.content[0].text).toContain("created by");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
       created_by: "owner-1",
-      revision: 0,
-      last_edited_by: "owner-1",
+      revision: 1,
+      last_edited_by: "admin-1",
     });
   });
 
@@ -2023,7 +2025,7 @@ describe("ManageScheduledTasks grant-aware access", () => {
     expect(JSON.parse(result.content[0].text)).toEqual([expect.objectContaining({ id: "granted-list-task" })]);
   });
 
-  it("does not expand DM listings for an admin without grants", async () => {
+  it("expands DM listings for an admin to every automation including inactive ones", async () => {
     const scheduler = {
       listTasks: vi.fn().mockResolvedValue([]),
       listTasksForUser: vi.fn().mockResolvedValue([]),
@@ -2038,10 +2040,10 @@ describe("ManageScheduledTasks grant-aware access", () => {
       },
     );
 
-    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).toHaveBeenCalledWith(
-      "admin-1",
-    );
-    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).not.toHaveBeenCalled();
+    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).toHaveBeenCalledWith({
+      includeInactive: true,
+    });
+    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).not.toHaveBeenCalled();
     expect(JSON.parse(result.content[0].text)).toEqual([]);
   });
 
@@ -2280,6 +2282,36 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     });
   });
 
+  it("records the requester's chat conversation surface on a production-path steal request", async () => {
+    await createTask("steal-surface-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "holder-1" }).execute();
+    await acquireOrRenewLock(db, { taskId: "steal-surface-task", holder });
+    const scheduler = schedulerFor("steal-surface-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-surface-task" },
+      {
+        db,
+        scheduler,
+        taskContext: {
+          ...taskContextFor("steal-surface-task", "owner-1"),
+          platform: "whatsapp",
+          contextType: "group",
+          deliveryTarget: "group-1@g.us",
+        },
+      },
+    );
+
+    expect(result.content[0].text).toBe("Waiting for holder-1 to approve your request to take over this automation.");
+    await expect(createAutomationLocksRepository(db).getByTaskId("steal-surface-task")).resolves.toMatchObject({
+      holder_user_id: "holder-1",
+      steal_requester_user_id: "owner-1",
+      steal_requester_platform: "whatsapp",
+      steal_requester_surface: "chat",
+      steal_requester_conversation_id: "group-1@g.us",
+    });
+  });
+
   it("steal reports not locked when the automation is free or the caller holds the lock", async () => {
     await createTask("steal-free-task");
     const scheduler = schedulerFor("steal-free-task");
@@ -2478,13 +2510,15 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
         expect(text, `${role} ${action}`).toContain("You can't share");
       } else {
         expect(text, `${role} ${action}`).not.toContain("created by");
-        // Interim behavior until L5: admin mutations pass the tool guard but
-        // persistence (owner-or-grantee / owner-only) rejects them.
-        if (role === "admin" && (action === "update" || action === "updateStepContent")) {
-          expect(text, `${role} ${action}`).toContain("you do not have permission to update task");
+        // Admins pass the tool guard and persistence re-grants the mutation.
+        if (role === "admin" && action === "update") {
+          expect(text, `${role} ${action}`).toContain("Automation updated:");
+        }
+        if (role === "admin" && action === "updateStepContent") {
+          expect(text, `${role} ${action}`).toContain("content updated at revision");
         }
         if (role === "admin" && action === "remove") {
-          expect(text, `${role} ${action}`).toContain("you do not have permission to delete task");
+          expect(text, `${role} ${action}`).toContain("removed.");
         }
       }
     }

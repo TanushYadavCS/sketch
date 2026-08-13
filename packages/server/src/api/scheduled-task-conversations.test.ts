@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
@@ -527,5 +530,153 @@ describe("scheduled task conversation API", () => {
     await expect(
       db.selectFrom("scheduled_task_conversations").selectAll().where("task_id", "=", "safe-task").execute(),
     ).resolves.toEqual([]);
+  });
+
+  async function writeTranscript(
+    dataDir: string,
+    userId: string,
+    conversationId: string,
+    messages: unknown[],
+  ): Promise<void> {
+    const transcriptDir = join(dataDir, "web-chat", userId);
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, `${conversationId}.json`),
+      `${JSON.stringify({ version: 1, messages }, null, 2)}\n`,
+    );
+  }
+
+  it("serves task-scoped transcript messages to the owner and admin while keeping members viewer-scoped", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-messages@test.com" });
+    const member = await createUserRepository(db).create({ name: "Maya", email: "maya-messages@test.com" });
+    await seedTask(db, "messages-task", owner.id);
+    await createAutomationTaskConversationService(db).associate({
+      taskId: "messages-task",
+      conversationId: "owner-chat",
+      transcriptUserId: owner.id,
+      kind: "builder",
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "messages-task",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const dataDir = await mkdtemp(join(tmpdir(), "sketch-conv-messages-"));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    await writeTranscript(dataDir, owner.id, "owner-chat", [
+      {
+        id: "msg-1",
+        role: "user",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        parts: [{ type: "text", text: "Build the account brief" }],
+      },
+      {
+        id: "msg-2",
+        role: "assistant",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        parts: [{ type: "text", text: "Brief is ready." }],
+      },
+    ]);
+
+    // The owner reads the transcript of their own conversation.
+    const ownerRes = await app.request("/api/scheduled-tasks/messages-task/conversations/owner-chat/messages", {
+      headers: { Cookie: await memberCookie(db, owner.id) },
+    });
+    expect(ownerRes.status).toBe(200);
+    const ownerBody = await ownerRes.json();
+    expect(ownerBody.messages).toEqual([
+      expect.objectContaining({ id: "msg-1", role: "user" }),
+      expect.objectContaining({ id: "msg-2", role: "assistant" }),
+    ]);
+    expect(typeof ownerBody.updatedAt).toBe("string");
+
+    // The admin reads the owner's transcript content.
+    const adminRes = await app.request("/api/scheduled-tasks/messages-task/conversations/owner-chat/messages", {
+      headers: { Cookie: await loginAdmin(app) },
+    });
+    expect(adminRes.status).toBe(200);
+    await expect(adminRes.json()).resolves.toMatchObject({
+      messages: [expect.objectContaining({ id: "msg-1" }), expect.objectContaining({ id: "msg-2" })],
+    });
+
+    // A granted member cannot read the owner's transcript content (viewer scope).
+    const memberRes = await app.request("/api/scheduled-tasks/messages-task/conversations/owner-chat/messages", {
+      headers: { Cookie: await memberCookie(db, member.id) },
+    });
+    expect(memberRes.status).toBe(404);
+    await expect(memberRes.json()).resolves.toMatchObject({
+      error: { code: "CONVERSATION_NOT_FOUND" },
+    });
+  });
+
+  it("serves a member's own conversation transcript but never another member's", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-scope@test.com" });
+    const maya = await createUserRepository(db).create({ name: "Maya", email: "maya-scope@test.com" });
+    const nora = await createUserRepository(db).create({ name: "Nora", email: "nora-scope@test.com" });
+    await seedTask(db, "scope-task", owner.id);
+    await createAutomationTaskConversationService(db).associate({
+      taskId: "scope-task",
+      conversationId: "maya-chat",
+      transcriptUserId: maya.id,
+      kind: "builder",
+    });
+    await createAutomationTaskConversationService(db).associate({
+      taskId: "scope-task",
+      conversationId: "nora-chat",
+      transcriptUserId: nora.id,
+      kind: "builder",
+    });
+    for (const member of [maya, nora]) {
+      await createAutomationSharesRepository(db).grant({
+        taskId: "scope-task",
+        userId: member.id,
+        grantedByUserId: owner.id,
+      });
+    }
+
+    const dataDir = await mkdtemp(join(tmpdir(), "sketch-conv-scope-"));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    await writeTranscript(dataDir, maya.id, "maya-chat", [
+      { id: "m-1", role: "user", parts: [{ type: "text", text: "Maya's message" }] },
+    ]);
+
+    const mayaRes = await app.request("/api/scheduled-tasks/scope-task/conversations/maya-chat/messages", {
+      headers: { Cookie: await memberCookie(db, maya.id) },
+    });
+    expect(mayaRes.status).toBe(200);
+    await expect(mayaRes.json()).resolves.toMatchObject({
+      messages: [expect.objectContaining({ id: "m-1", role: "user" })],
+    });
+
+    const noraRes = await app.request("/api/scheduled-tasks/scope-task/conversations/maya-chat/messages", {
+      headers: { Cookie: await memberCookie(db, nora.id) },
+    });
+    expect(noraRes.status).toBe(404);
+
+    // The owner still sees the member's transcript content.
+    const ownerRes = await app.request("/api/scheduled-tasks/scope-task/conversations/maya-chat/messages", {
+      headers: { Cookie: await memberCookie(db, owner.id) },
+    });
+    expect(ownerRes.status).toBe(200);
+    await expect(ownerRes.json()).resolves.toMatchObject({
+      messages: [expect.objectContaining({ id: "m-1" })],
+    });
   });
 });

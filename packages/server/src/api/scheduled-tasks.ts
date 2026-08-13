@@ -19,7 +19,7 @@ import {
   selectAutomationSetupExecutionMode,
 } from "../automation/persistence";
 import { parseAutomationTriggerConfig } from "../automation/webhook";
-import type { AutomationTaskLockRow } from "../db/repositories/automation-locks";
+import type { AutomationTaskLockRow, LockHolderFields } from "../db/repositories/automation-locks";
 
 import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -37,6 +37,7 @@ import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import type { SlackBot } from "../slack/bot";
 import { notifyStealRequested } from "../whatsapp/lock-confirmations";
+import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -810,7 +811,31 @@ export function scheduledTaskRoutes(
   });
 
   // --- Edit-lock endpoints (pessimistic whole-automation locks) ---
-  // Locks are held from the web builder surface; channel surfaces are a later lane.
+  // Lock holders carry their known chat surface when they have one so steal
+  // notifications can be delivered; pure web builders stay on the builder
+  // surface, whose polling owns approval.
+
+  /**
+   * Lock-holder surface for web API lock acquisition. Web users with a chat
+   * identity record that surface (so steal notifications and outcomes can be
+   * delivered); pure web users stay on the builder surface, whose polling owns
+   * approval.
+   */
+  async function webLockHolderFor(userId: string): Promise<LockHolderFields> {
+    const user = await users.findById(userId);
+    if (user?.slack_user_id) {
+      return { userId, platform: "slack", surface: "dm", conversationId: user.slack_user_id };
+    }
+    if (user?.whatsapp_number) {
+      return {
+        userId,
+        platform: "whatsapp",
+        surface: "dm",
+        conversationId: phoneE164ToWhatsAppJid(user.whatsapp_number),
+      };
+    }
+    return { userId, platform: "web", surface: "builder", conversationId: null };
+  }
 
   routes.post("/:id/lock", async (c) => {
     const id = c.req.param("id");
@@ -821,7 +846,7 @@ export function scheduledTaskRoutes(
     }
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
-      holder: { userId: result.userId, platform: "web", surface: "builder", conversationId: null },
+      holder: await webLockHolderFor(result.userId),
     });
     const lock = await toLockView(acquired.lock, result.userId, users);
     if (acquired.kind === "locked") {
@@ -850,7 +875,7 @@ export function scheduledTaskRoutes(
     }
     const stolen = await requestSteal(db, {
       taskId: id,
-      requester: { userId: result.userId, platform: "web", surface: "builder", conversationId: null },
+      requester: await webLockHolderFor(result.userId),
     });
     if (stolen.kind === "not_locked") {
       return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);

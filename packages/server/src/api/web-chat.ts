@@ -184,7 +184,7 @@ type WebChatTranscriptPart =
 type WebChatProgressTranscriptPart = { type: "data-progress"; id: string; data: WebChatProgressData };
 type WebChatStoredPart = WebChatTranscriptPart | WebChatProgressTranscriptPart;
 
-interface WebChatTranscriptMessage {
+export interface WebChatTranscriptMessage {
   id: string;
   role: "user" | "assistant";
   createdAt?: string;
@@ -1531,7 +1531,7 @@ function sanitizeTranscriptMessage(message: unknown): WebChatTranscriptMessage |
   return { id: message.id, role: message.role, ...(createdAt ? { createdAt } : {}), parts: sanitizedParts };
 }
 
-async function readWebChatTranscript(
+export async function readWebChatTranscript(
   config: Config,
   workspaceDir: string,
   userId: string,
@@ -1596,7 +1596,7 @@ function questionAnswerMatchesPendingInteraction(
   return "customResponse" in answer || pending.options.some((option) => option.id === answer.optionId);
 }
 
-async function readWebChatTranscriptUpdatedAt(
+export async function readWebChatTranscriptUpdatedAt(
   config: Config,
   workspaceDir: string,
   userId: string,

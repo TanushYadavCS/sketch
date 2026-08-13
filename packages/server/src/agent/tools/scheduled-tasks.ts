@@ -367,10 +367,23 @@ async function lockedAutomationMessage(
 function lockHolderFor(ctx: TaskContext): LockHolderFields {
   return {
     userId: ctx.createdBy as string,
-    platform: ctx.platform,
-    surface: "chat",
-    conversationId: null,
+    platform: ctx.origin?.platform === "web" ? "web" : ctx.platform,
+    surface: ctx.origin?.platform === "web" ? "builder" : "chat",
+    conversationId: lockHolderConversationId(ctx),
   };
+}
+
+/**
+ * Deliverable conversation surface for the lock holder row. Chat contexts use
+ * the delivery target (Slack DM/channel id, WhatsApp group jid) so steal
+ * notifications can reach the holder; web-chat contexts carry the origin
+ * conversation id as attribution for the web UI, with the web platform
+ * keeping steal-notification delivery a deliberate no-op (the web builder's
+ * polling owns web approval).
+ */
+function lockHolderConversationId(ctx: TaskContext): string | null {
+  if (ctx.origin?.platform === "web") return ctx.origin.conversationId || null;
+  return ctx.deliveryTarget || null;
 }
 
 /** Resolves a holder user id to a display name, falling back to the raw id. */
@@ -1087,6 +1100,11 @@ export async function handleManageScheduledTasks(
         for (const task of [...deliveryTasks, ...accessibleTasks]) tasksById.set(task.id, task);
         return text(JSON.stringify([...tasksById.values()], null, 2));
       }
+      if (ctx.canManageAnyTask) {
+        // Admin DM context: every automation, active or not.
+        const tasks = await deps.scheduler.listTasks({ includeInactive: true });
+        return text(JSON.stringify(tasks, null, 2));
+      }
       const tasks = await deps.scheduler.listTasksForUser(ctx.createdBy);
       return text(JSON.stringify(tasks, null, 2));
     }
@@ -1383,6 +1401,7 @@ export async function handleManageScheduledTasks(
           patch,
           actor: {
             userId: ctx.createdBy,
+            role: ctx.canManageAnyTask ? "admin" : undefined,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
@@ -1484,6 +1503,7 @@ export async function handleManageScheduledTasks(
         taskId: task_id,
         actor: {
           userId: ctx.createdBy,
+          role: ctx.canManageAnyTask ? "admin" : undefined,
         },
         scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
         encryptionKey: deps.encryptionKey,
@@ -1655,6 +1675,7 @@ export async function handleManageScheduledTasks(
           },
           actor: {
             userId: ctx.createdBy,
+            role: ctx.canManageAnyTask ? "admin" : undefined,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,

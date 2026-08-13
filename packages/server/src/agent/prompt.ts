@@ -390,30 +390,24 @@ export function buildSystemContext(params: {
   );
 
   sections.push(
-    ...[
-      "",
-      "## Scheduled Tasks",
-      "",
-      "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
-      "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
-      params.automationAuthoringEnabled
-        ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
-        : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
-      "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
-      "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
-      "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
-      "Automations have three user-facing execution modes: Deterministic is code-only with no agent; Hybrid combines code and agent steps; Agent is agent-only, Sketch handles the work, and it has no code steps. A mode recommendation is advisory, not a forced choice. Preserve an explicit mode request, and let save validation explain when a selected mode does not fit the current steps.",
-      params.automationBuilderChat
-        ? "For a new automation that needs setup questions, first ask the user to describe what the automation should do in their own words. After they provide that description, ask them to choose the execution mode before asking about cadence, delivery, or any other setup detail unless they already chose a mode. Execution mode must be the first bounded choice, with Deterministic, Hybrid, and Agent as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow."
-        : params.platform !== "web"
-          ? "For a new automation that needs setup questions, ask the user to choose the execution mode before asking about cadence, delivery, or any other setup detail unless the user already chose a mode. Execution mode must be the first question in a batch, with Deterministic, Hybrid, and Agent as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow."
-          : null,
-      params.automationAuthoringEnabled
-        ? "For external app events handled by semantic automation authoring, use only the admitted schedule, webhook, or Slack channel-message trigger types. Do not invent a Canvas-managed app trigger or component key; if polling versus a native event is unclear, ask the user to choose."
-        : "For generic inbound webhook events, use Sketch's native webhook trigger: set triggerConfig.type='webhook', schedule_type='external', and schedule_value='webhook'. Never use the Canvas componentKey='webhook-trigger' or canvasEndpoint. Canvas-managed triggers are reserved for explicitly requested provider app events with a selected Canvas component; otherwise use a native webhook or a normal scheduled cron/interval/once trigger.",
-    ].filter((entry): entry is string => entry !== null),
+    "",
+    "## Scheduled Tasks",
+    "",
+    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
+    "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
+    "When a user asks to share an automation or manage who has access to it, do not grant or revoke access directly in chat. Direct the user to the web app instead: if the automation is specified, give the exact automation URL (the web app's base URL plus /scheduled-tasks/{taskId}/edit, obtained from ManageScheduledTasks with action 'share' and the automation ID) and tell the user to open the Share dialog on that page; if the automation is unspecified, give the automation list URL (the web app's base URL plus /scheduled-tasks). You may still list current shares for information.",
+    params.automationAuthoringEnabled
+      ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
+      : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
+    "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
+    "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
+    "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
+    "Automations have three user-facing execution modes: Fixed recipe runs action steps exactly as saved and has no AI steps; Recipe + AI combines deterministic action steps with bounded agent steps; Agent-led uses AI steps only and has no code or action steps. A mode recommendation is advisory, not a forced choice. Preserve an explicit mode request, and let save validation explain when a selected mode does not fit the current steps.",
+    "For a new automation that needs setup questions, ask the user to choose the execution mode before asking about cadence, behavior, delivery, or any other setup detail unless the user already chose a mode. Execution mode must be the first question in a batch, with Fixed recipe, Recipe + AI, and Agent-led as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow.",
+    params.automationAuthoringEnabled
+      ? "For external app events handled by semantic automation authoring, use only the admitted schedule, webhook, or Slack channel-message trigger types. Do not invent a Canvas-managed app trigger or component key; if polling versus a native event is unclear, ask the user to choose."
+      : "For generic inbound webhook events, use Sketch's native webhook trigger: set triggerConfig.type='webhook', schedule_type='external', and schedule_value='webhook'. Never use the Canvas componentKey='webhook-trigger' or canvasEndpoint. Canvas-managed triggers are reserved for explicitly requested provider app events with a selected Canvas component; otherwise use a native webhook or a normal scheduled cron/interval/once trigger.",
   );
-
   if (!params.automationAuthoringEnabled) {
     sections.push(
       "Prefer explicit workflow steps for deterministic automations. For mapping fields, filtering records, normalizing data, calculations, bounded JSON transformations, routing, or known integration reads and writes, call ManageScheduledTasks with a steps array containing a trigger step and one or more action steps with script content. Do not use the simple prompt field for this work because that legacy shorthand creates an agent step.",

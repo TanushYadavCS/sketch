@@ -488,14 +488,14 @@ describe("handleManageScheduledTasks — list", () => {
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: taskContext.deliveryTarget });
   });
 
-  it("keeps DM listings grant-aware for an admin without grants", async () => {
+  it("expands DM listings for an admin to every automation including inactive ones", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
     );
-    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
-    expect(scheduler.listTasks).not.toHaveBeenCalled();
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ includeInactive: true });
+    expect(scheduler.listTasksForUser).not.toHaveBeenCalled();
   });
 
   it("keeps explicit list behavior when ambient builder context exists", async () => {

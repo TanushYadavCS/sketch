@@ -24,6 +24,7 @@ import { createAutomationAuthoringService } from "./automation/authoring/service
 import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
 import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { createChatAutomationAuthoring } from "./automation/chat-authoring";
+import { AutomationLockSweeper } from "./automation/lock-service";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
@@ -848,6 +849,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   }
   if (backgroundWork) await scheduler.start();
 
+  // Automation edit-lock hygiene: 60s stale-row sweeper. Correctness relies on
+  // lazy expiry at access time; this only prevents stale-row accumulation.
+  const automationLockSweeper = backgroundWork ? new AutomationLockSweeper({ db, logger }) : null;
+  automationLockSweeper?.start();
+
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const slackIndexingFacade = createSettingsBackedSlackIndexingFacade({
     db,
@@ -1309,6 +1315,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
     queueDrainSequence?.stop();
+    automationLockSweeper?.stop();
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();
