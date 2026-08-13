@@ -663,6 +663,7 @@ async function resolveAutomationBuilderContext(params: {
     hasGrant ? new Set([params.currentUserId]) : new Set<string>(),
     {
       userId: params.currentUserId,
+      role: params.role,
     },
   );
   if (!accessibleTask) {
@@ -2070,6 +2071,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         hasGrant ? new Set([currentUser.id]) : new Set<string>(),
         {
           userId: currentUser.id,
+          role: c.get("role"),
         },
       );
       if (!accessibleTask) {

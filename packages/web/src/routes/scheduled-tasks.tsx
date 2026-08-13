@@ -68,7 +68,7 @@ export const scheduledTasksRoute = createRoute({
 
 const TASKS_QUERY_KEY = AUTOMATION_QUERY_KEY;
 
-type OwnershipTab = "mine" | "shared";
+type OwnershipTab = "all" | "mine" | "shared";
 type StatusFilter = "all" | "active" | "attention" | "paused";
 type TaskSort = "recent" | "next" | "name" | "attention";
 
@@ -468,6 +468,7 @@ export function ScheduledTasksPage() {
   const normalizedQuery = query.trim().toLowerCase();
   const ownershipGroups = useMemo(
     () => ({
+      all: tasks,
       mine: tasks.filter((task) => isOwnedTask(task, auth.userId)),
       shared: tasks.filter(isSharedTask),
     }),
@@ -551,7 +552,9 @@ export function ScheduledTasksPage() {
               onSortChange={setSort}
               ownershipTab={ownershipTab}
               onOwnershipTabChange={handleOwnershipTabChange}
+              isAdmin={isAdmin}
               ownershipCounts={{
+                all: ownershipGroups.all.length,
                 mine: ownershipGroups.mine.length,
                 shared: ownershipGroups.shared.length,
               }}
@@ -631,6 +634,7 @@ function AutomationToolbar({
   onSortChange,
   ownershipTab,
   onOwnershipTabChange,
+  isAdmin,
   ownershipCounts,
   statusFilter,
   onStatusFilterChange,
@@ -642,6 +646,7 @@ function AutomationToolbar({
   onSortChange: (value: TaskSort) => void;
   ownershipTab: OwnershipTab;
   onOwnershipTabChange: (value: OwnershipTab) => void;
+  isAdmin: boolean;
   ownershipCounts: Record<OwnershipTab, number>;
   statusFilter: StatusFilter;
   onStatusFilterChange: (value: StatusFilter) => void;
@@ -681,6 +686,14 @@ function AutomationToolbar({
       </div>
 
       <div className="flex items-center gap-1 border-b border-border">
+        {isAdmin ? (
+          <OwnershipTabButton
+            label="All"
+            count={ownershipCounts.all}
+            active={ownershipTab === "all"}
+            onClick={() => onOwnershipTabChange("all")}
+          />
+        ) : null}
         <OwnershipTabButton
           label="Mine"
           count={ownershipCounts.mine}

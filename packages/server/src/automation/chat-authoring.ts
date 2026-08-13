@@ -188,6 +188,7 @@ export function createChatAutomationAuthoring(deps: {
       hasGrant ? new Set(input.taskContext.createdBy ? [input.taskContext.createdBy] : []) : new Set<string>(),
       {
         userId: input.taskContext.createdBy,
+        role: input.taskContext.canManageAnyTask ? "admin" : undefined,
       },
     );
     if (!accessibleRow) {
@@ -222,6 +223,7 @@ export function createChatAutomationAuthoring(deps: {
         request: result.definition,
         actor: {
           userId: input.taskContext.createdBy,
+          role: input.taskContext.canManageAnyTask ? "admin" : undefined,
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,

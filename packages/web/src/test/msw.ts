@@ -55,6 +55,16 @@ export function seedAutomationLockFixture(taskId: string, state: Partial<MockAut
 }
 
 /**
+ * Admin-tab list fixture: installs a handler for GET /api/scheduled-tasks
+ * returning the given task payloads (e.g. foreign-owned tasks an admin sees
+ * through the backend list-all path). Overrides the default handler for the
+ * duration of the test.
+ */
+export function seedAdminScheduledTaskListFixture(tasks: unknown[]) {
+  server.use(http.get("/api/scheduled-tasks", () => HttpResponse.json({ tasks })));
+}
+
+/**
  * Default MSW handlers — happy-path responses for all API endpoints.
  * Override per-test with server.use(...) for error/edge cases.
  */

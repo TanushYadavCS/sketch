@@ -5,6 +5,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { acquireOrRenewLock } from "../automation/lock-service";
 import * as automationRunsModule from "../db/repositories/automation-runs";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
@@ -16,9 +17,8 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
-import { acquireOrRenewLock } from "../automation/lock-service";
-import type { SlackBot } from "../slack/bot";
 import { createApp } from "../http";
+import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb } from "../test-utils";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
 
@@ -614,7 +614,7 @@ describe("Scheduled Tasks API", () => {
     expect(steps[0].triggerConfig.scheduleValue).toBe("*/10 * * * *");
   });
 
-  it("members see only their own tasks and admins get no automatic access", async () => {
+  it("members see only their own tasks and admins see every task", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -670,9 +670,9 @@ describe("Scheduled Tasks API", () => {
 
     const adminCookie = await loginAdmin(app);
     const adminRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: adminCookie } });
-    // Admins have no automatic access: the admin created none of these tasks.
+    // Admins see every task in the workspace (pre-sharing-feature behavior).
     const adminBody = await adminRes.json();
-    expect(adminBody.tasks).toEqual([]);
+    expect(adminBody.tasks.map((t: { id: string }) => t.id).sort()).toEqual(["task-alice", "task-bob"]);
   });
 
   it("falls back to raw delivery targets when metadata is missing", async () => {
@@ -821,11 +821,12 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
-  it("denies an admin without a grant on a foreign task via every route", async () => {
+  it("grants an admin automatic access to a foreign task but keeps shares owner-only", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+    const stranger = await users.create({ name: "Stranger", email: "stranger@test.com" });
 
     await tasks.add({
       id: "task-bob",
@@ -854,20 +855,38 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const adminCookie = await loginAdmin(app);
 
-    const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: cookie } });
-    expect(runsRes.status).toBe(404);
+    const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: adminCookie } });
+    expect(runsRes.status).toBe(200);
 
-    const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", { headers: { Cookie: cookie } });
-    expect(stepRes.status).toBe(404);
+    const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(stepRes.status).toBe(200);
 
     const pauseRes = await app.request("/api/scheduled-tasks/task-bob/pause", {
       method: "POST",
-      headers: { Cookie: cookie },
+      headers: { Cookie: adminCookie },
     });
-    expect(pauseRes.status).toBe(404);
-    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+    expect(pauseRes.status).toBe(200);
+    expect((await pauseRes.json()).task.status).toBe("paused");
+    expect(scheduler.pauseTask).toHaveBeenCalledWith("task-bob");
+
+    // Share grant/revoke stays owner-only, admins included.
+    for (const { method, path } of [
+      { method: "GET", path: "/api/scheduled-tasks/task-bob/shares" },
+      { method: "PUT", path: `/api/scheduled-tasks/task-bob/shares/${stranger.id}` },
+      { method: "DELETE", path: `/api/scheduled-tasks/task-bob/shares/${stranger.id}` },
+    ]) {
+      const res = await app.request(path, { method, headers: { Cookie: adminCookie } });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+
+    // A member without a grant is still denied on every route.
+    const strangerCookie = await getMemberCookie(db, stranger.id);
+    const denied = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: strangerCookie } });
+    expect(denied.status).toBe(404);
 
     const ownerRes = await app.request("/api/scheduled-tasks/task-bob/runs", {
       headers: { Cookie: await getMemberCookie(db, bob.id) },
@@ -1300,6 +1319,85 @@ describe("Scheduled Tasks API", () => {
       canEdit: true,
       canDelete: false,
       shareCount: 1,
+    });
+  });
+
+  it("admins list every task with edit/delete capability and no share capability on foreign tasks", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-admin-list@test.com" });
+
+    await tasks.add({
+      id: "task-foreign-list",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Foreign list task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const adminCookie = await loginAdmin(app);
+
+    const listRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: adminCookie } });
+    expect(listRes.status).toBe(200);
+    const body = await listRes.json();
+    expect(body.tasks).toHaveLength(1);
+    expect(body.tasks[0]).toMatchObject({
+      id: "task-foreign-list",
+      isOwner: false,
+      sharedWithMe: false,
+      canShare: false,
+      canEdit: true,
+      canDelete: true,
+      shareCount: 0,
+    });
+
+    // The detail view mirrors the same capability fields and keeps the shares roster owner-only.
+    const detailRes = await app.request("/api/scheduled-tasks/task-foreign-list", { headers: { Cookie: adminCookie } });
+    expect(detailRes.status).toBe(200);
+    await expect(detailRes.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-foreign-list",
+        isOwner: false,
+        canShare: false,
+        canEdit: true,
+        shares: [],
+      },
+    });
+
+    // Admins can edit foreign-owned automations through the builder save route.
+    const editRes = await app.request("/api/scheduled-tasks/task-foreign-list", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Admin-edited brief" })),
+    });
+    expect(editRes.status).toBe(200);
+    await expect(editRes.json()).resolves.toMatchObject({
+      automation: { id: "task-foreign-list", revision: 1, isOwner: false, canEdit: true },
+    });
+    expect(refreshTaskSchedule).toHaveBeenCalledWith("task-foreign-list");
+    await expect(tasks.getById("task-foreign-list")).resolves.toMatchObject({
+      title: "Admin-edited brief",
+      revision: 1,
+      last_edited_by: expect.any(String),
     });
   });
 
@@ -1937,12 +2035,13 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-delete");
   });
 
-  it("denies an admin delete of a foreign-owned task and lets the owner delete", async () => {
+  it("lets the owner and an admin delete a foreign-owned task and denies members and grantees", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner-delete@test.com" });
     const member = await users.create({ name: "Member", email: "member-delete@test.com" });
+    const grantee = await users.create({ name: "Grantee", email: "grantee-delete@test.com" });
 
     await tasks.add({
       id: "task-delete-foreign",
@@ -1958,6 +2057,11 @@ describe("Scheduled Tasks API", () => {
       created_by: owner.id,
       status: "active",
       next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-delete-foreign",
+      userId: grantee.id,
+      grantedByUserId: owner.id,
     });
 
     class InstanceBoundScheduler {
@@ -1981,20 +2085,18 @@ describe("Scheduled Tasks API", () => {
     });
     expect(memberResponse.status).toBe(404);
 
+    const granteeResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
+      method: "DELETE",
+      headers: { Cookie: await getMemberCookie(db, grantee.id) },
+    });
+    expect(granteeResponse.status).toBe(404);
+
     const adminResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
       method: "DELETE",
       headers: { Cookie: await loginAdmin(app) },
     });
-    expect(adminResponse.status).toBe(404);
-    expect(scheduler.removedTaskIds).toEqual([]);
-    await expect(tasks.getById("task-delete-foreign")).resolves.toBeDefined();
-
-    const ownerResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
-      method: "DELETE",
-      headers: { Cookie: await getMemberCookie(db, owner.id) },
-    });
-    expect(ownerResponse.status).toBe(200);
-    expect(await ownerResponse.json()).toEqual({ success: true });
+    expect(adminResponse.status).toBe(200);
+    expect(await adminResponse.json()).toEqual({ success: true });
     expect(scheduler.removedTaskIds).toEqual(["task-delete-foreign"]);
     await expect(tasks.getById("task-delete-foreign")).resolves.toBeUndefined();
   });
@@ -2239,7 +2341,11 @@ describe("Scheduled Tasks API", () => {
       status: "active",
       next_run_at: null,
     });
-    await createAutomationSharesRepository(db).grant({ taskId: "task-slack-lock", userId: bob.id, grantedByUserId: alice.id });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-slack-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
     await acquireOrRenewLock(db, {
       taskId: "task-slack-lock",
       holder: { userId: alice.id, platform: "slack", surface: "slack_dm", conversationId: "D9" },

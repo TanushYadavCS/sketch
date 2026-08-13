@@ -35,15 +35,15 @@ import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
+import type { SlackBot } from "../slack/bot";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
-<<<<<<< HEAD
 import { denyIfNotAdmin } from "./auth-helpers";
-=======
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { notifyStealRequested } from "../whatsapp/lock-confirmations";
->>>>>>> 6210bcf8 (feat(sharing): wire steal-request notifications into API route and agent steal action [parent])
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
@@ -234,7 +234,7 @@ async function buildTaskListItems(
   db: Kysely<DB>,
   rows: ScheduledTaskRow[],
   options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> & {
-    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string> };
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string>; role?: string };
   },
 ): Promise<ScheduledTaskListItem[]> {
   const users = createUserRepository(db);
@@ -365,6 +365,7 @@ async function buildTaskListItems(
       : triggerConfig;
 
     const isOwner = options.viewer.userId !== null && row.created_by === options.viewer.userId;
+    const isAdmin = options.viewer.role === "admin";
     const sharedWithMe = !isOwner && options.viewer.grantedTaskIds.has(row.id);
     const rd = runData.get(row.id);
     const delivery = resolveWorkflowDelivery(row);
@@ -404,11 +405,11 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
-      canDelete: isOwner,
+      canDelete: isOwner || isAdmin,
       isOwner,
       sharedWithMe,
       canShare: isOwner,
-      canEdit: isOwner || options.viewer.grantedTaskIds.has(row.id),
+      canEdit: isOwner || isAdmin || options.viewer.grantedTaskIds.has(row.id),
       shareCount: shareCounts.get(row.id) ?? 0,
       title: row.title,
       description: row.description,
@@ -596,6 +597,7 @@ export function scheduledTaskRoutes(
     const grantedUserIds = hasGrant && userId ? new Set([userId]) : new Set<string>();
     const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, grantedUserIds, {
       userId,
+      role: c.get("role"),
     });
     if (!accessibleRow) {
       logger?.warn(
@@ -631,9 +633,27 @@ export function scheduledTaskRoutes(
     return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
   }
 
+  async function loadDeletableTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result;
+    if (!result.userId || (result.userId !== result.row.created_by && c.get("role") !== "admin")) {
+      logger?.warn(
+        { userId: result.userId, taskId: id, ownerUserId: result.row.created_by },
+        "scheduled-tasks: non-owner non-admin denied deletion",
+      );
+      return {
+        response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
+      };
+    }
+    return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
+  }
+
   async function loadFullDefinition(
     row: ScheduledTaskRow,
-    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string> },
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string>; role?: string },
   ) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
@@ -656,11 +676,12 @@ export function scheduledTaskRoutes(
       webhookEndpoint,
     });
     const isOwner = viewer.userId !== null && row.created_by === viewer.userId;
+    const isAdmin = viewer.role === "admin";
     return {
       ...definition,
       isOwner,
       canShare: isOwner,
-      canEdit: isOwner || viewer.grantedTaskIds.has(row.id),
+      canEdit: isOwner || isAdmin || viewer.grantedTaskIds.has(row.id),
       shares: isOwner ? await listSharesWithNames(db, row.id) : [],
       // Lazy expiry on access: an expired lock is not a lock — hide it from the view.
       ...(lockRow && lockRow.expires_at > new Date().toISOString()
@@ -721,8 +742,9 @@ export function scheduledTaskRoutes(
       return c.json({ tasks: [] });
     }
     const grantedTaskIds = await loadGrantedTaskIds(userId);
+    const isAdmin = c.get("role") === "admin";
 
-    let rows: ScheduledTaskRow[] = await repo.listAccessibleByUser(userId);
+    let rows: ScheduledTaskRow[] = isAdmin ? await repo.listAll() : await repo.listAccessibleByUser(userId);
 
     const stepContentRepo = createAutomationStepContentRepository(db);
     rows = (
@@ -745,7 +767,7 @@ export function scheduledTaskRoutes(
         baseUrl: options.baseUrl,
         port: options.port,
         encryptionKey: options.encryptionKey,
-        viewer: { userId, grantedTaskIds },
+        viewer: { userId, grantedTaskIds, role: c.get("role") },
       }),
     });
   });
@@ -785,6 +807,7 @@ export function scheduledTaskRoutes(
       automation: await loadFullDefinition(result.row, {
         userId: result.userId,
         grantedTaskIds: result.grantedTaskIds,
+        role: c.get("role"),
       }),
     });
   });
@@ -845,30 +868,35 @@ export function scheduledTaskRoutes(
         logger,
         taskId: id,
         senders: {
-        ...(options.getSlack
-          ? {
-              slack: {
-                postLockStealRequest: async (p: { channelId: string; taskId: string; requesterName: string; taskTitle: string }) => {
-                  const slack = options.getSlack?.();
-                  if (!slack) return;
-                  return slack.postLockStealRequestMessage(p.channelId, p);
+          ...(options.getSlack
+            ? {
+                slack: {
+                  postLockStealRequest: async (p: {
+                    channelId: string;
+                    taskId: string;
+                    requesterName: string;
+                    taskTitle: string;
+                  }) => {
+                    const slack = options.getSlack?.();
+                    if (!slack) return;
+                    return slack.postLockStealRequestMessage(p.channelId, p);
+                  },
+                  sendText: async (channelId: string, text: string) => {
+                    const slack = options.getSlack?.();
+                    if (!slack) return;
+                    return slack.postMessage(channelId, text);
+                  },
                 },
-                sendText: async (channelId: string, text: string) => {
-                  const slack = options.getSlack?.();
-                  if (!slack) return;
-                  return slack.postMessage(channelId, text);
+              }
+            : {}),
+          ...(options.whatsappRuntime
+            ? {
+                whatsapp: {
+                  sendText: async (target: Parameters<WhatsAppRuntime["sendText"]>[0], text: string) =>
+                    options.whatsappRuntime?.sendText(target, text),
                 },
-              },
-            }
-          : {}),
-        ...(options.whatsappRuntime
-          ? {
-              whatsapp: {
-                sendText: async (target: Parameters<WhatsAppRuntime["sendText"]>[0], text: string) =>
-                  options.whatsappRuntime?.sendText(target, text),
-              },
-            }
-          : {}),
+              }
+            : {}),
         },
       }).catch((err) => {
         logger.warn({ err, taskId: id }, "Steal request notification delivery failed");
@@ -984,6 +1012,7 @@ export function scheduledTaskRoutes(
       automation: await loadFullDefinition(saveResult.row, {
         userId: accessible.userId,
         grantedTaskIds: accessible.grantedTaskIds,
+        role: c.get("role"),
       }),
     });
   });
@@ -1014,7 +1043,7 @@ export function scheduledTaskRoutes(
         db,
         taskId: id,
         request,
-        actor: { userId },
+        actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
         brokerCapable,
         encryptionKey: options.encryptionKey,
       });
@@ -1066,6 +1095,7 @@ export function scheduledTaskRoutes(
       automation: await loadFullDefinition(refreshed, {
         userId: result.userId,
         grantedTaskIds: result.grantedTaskIds,
+        role: c.get("role"),
       }),
     });
   });
@@ -1139,7 +1169,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
-          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds },
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
         })
       )[0],
     });
@@ -1165,7 +1195,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
-          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds },
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
         })
       )[0],
     });
@@ -1173,7 +1203,7 @@ export function scheduledTaskRoutes(
 
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadOwnedTask(c, id);
+    const access = await loadDeletableTask(c, id);
     if ("response" in access) return access.response;
     const removeTaskRuntime = scheduler.removeTaskRuntime;
     if (!removeTaskRuntime) {
@@ -1186,7 +1216,7 @@ export function scheduledTaskRoutes(
     const deletion = await deleteAutomation({
       db,
       taskId: id,
-      actor: { userId },
+      actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
       scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
       encryptionKey: options.encryptionKey,
     });

@@ -389,7 +389,7 @@ describe("automation persistence", () => {
     });
   });
 
-  it("denies an admin without a grant and allows a granted member to replace", async () => {
+  it("allows an admin to replace a foreign-owned task and denies an un-granted member", async () => {
     await createAutomationDefinition({
       db,
       request: makeDefinition(),
@@ -397,18 +397,25 @@ describe("automation persistence", () => {
       brokerCapable: true,
     });
 
-    const denied = await replaceAutomationDefinition({
+    const memberDenied = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-admin",
+      request: makeDefinition({ expectedRevision: 0, title: "Member replacement" }),
+      actor: { userId: "member-1" },
+      brokerCapable: true,
+    });
+    expect(memberDenied).toEqual({ kind: "not_found" });
+
+    const adminAllowed = await replaceAutomationDefinition({
       db,
       taskId: "automation-admin",
       request: makeDefinition({ expectedRevision: 0, title: "Admin replacement" }),
-      actor: { userId: "admin-1" },
+      actor: { userId: "admin-1", role: "admin" },
       brokerCapable: true,
     });
-
-    expect(denied).toEqual({ kind: "not_found" });
-    await expect(createScheduledTaskRepository(db).getById("automation-admin")).resolves.toMatchObject({
-      title: "Daily account brief",
-      revision: 0,
+    expect(adminAllowed).toMatchObject({
+      kind: "saved",
+      row: { title: "Admin replacement", revision: 1, last_edited_by: "admin-1" },
     });
 
     await addUser("grantee-1");
@@ -420,14 +427,14 @@ describe("automation persistence", () => {
     const allowed = await replaceAutomationDefinition({
       db,
       taskId: "automation-admin",
-      request: makeDefinition({ expectedRevision: 0, title: "Granted replacement" }),
+      request: makeDefinition({ expectedRevision: 1, title: "Granted replacement" }),
       actor: { userId: "grantee-1" },
       brokerCapable: true,
     });
 
     expect(allowed).toMatchObject({
       kind: "saved",
-      row: { title: "Granted replacement", revision: 1, last_edited_by: "grantee-1" },
+      row: { title: "Granted replacement", revision: 2, last_edited_by: "grantee-1" },
     });
   });
 
@@ -782,7 +789,7 @@ describe("automation persistence", () => {
     await expect(createScheduledTaskRepository(db).getById("automation-delete-throw")).resolves.toBeUndefined();
   });
 
-  it("deletes only for the owner and returns not-found for repeat deletes", async () => {
+  it("deletes only for the owner or an admin and returns not-found for repeat deletes", async () => {
     await createAutomationDefinition({
       db,
       request: makeDefinition(),
@@ -809,6 +816,8 @@ describe("automation persistence", () => {
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "access_denied" });
+    // An admin without the role field still gets no delete rights; with the
+    // role field the delete goes through.
     await expect(
       deleteAutomation({
         db,
@@ -817,16 +826,15 @@ describe("automation persistence", () => {
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "access_denied" });
-    await expect(createScheduledTaskRepository(db).getById("automation-delete-access")).resolves.toBeDefined();
-
     await expect(
       deleteAutomation({
         db,
         taskId: "automation-delete-access",
-        actor: { userId: "user-1" },
+        actor: { userId: "admin-1", role: "admin" },
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "deleted" });
+    expect(removeTaskRuntime).toHaveBeenCalledOnce();
     await expect(
       deleteAutomation({
         db,
@@ -835,7 +843,66 @@ describe("automation persistence", () => {
         scheduler: { removeTaskRuntime },
       }),
     ).resolves.toEqual({ kind: "not_found" });
-    expect(removeTaskRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("lets an admin edit a foreign-owned task inside the mutation transaction", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-admin-edit"),
+      brokerCapable: true,
+    });
+
+    const updated = await updateAutomationDefinition({
+      db,
+      taskId: "automation-admin-edit",
+      patch: { expectedRevision: 0, title: "Admin direct edit" },
+      actor: { userId: "admin-1", role: "admin" },
+      brokerCapable: true,
+    });
+    expect(updated).toMatchObject({
+      kind: "saved",
+      row: { title: "Admin direct edit", revision: 1, last_edited_by: "admin-1" },
+    });
+
+    const mode = await selectAutomationSetupExecutionMode({
+      db,
+      taskId: "automation-admin-edit",
+      executionMode: "agent-led",
+      actor: { userId: "admin-1", role: "admin" },
+    });
+    expect(mode.kind).toBe("not_placeholder");
+  });
+
+  it("cleans up share rows when an admin deletes a foreign-owned task", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-admin-delete-shares"),
+      brokerCapable: true,
+    });
+    await addUser("grantee-1");
+    await addUser("grantee-2");
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "automation-admin-delete-shares", userId: "grantee-1", grantedByUserId: "user-1" });
+    await shares.grant({ taskId: "automation-admin-delete-shares", userId: "grantee-2", grantedByUserId: "user-1" });
+
+    const result = await deleteAutomation({
+      db,
+      taskId: "automation-admin-delete-shares",
+      actor: { userId: "admin-1", role: "admin" },
+      scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    await expect(
+      db
+        .selectFrom("automation_task_shares")
+        .selectAll()
+        .where("task_id", "=", "automation-admin-delete-shares")
+        .execute(),
+    ).resolves.toEqual([]);
+    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-shares")).resolves.toBeUndefined();
   });
 
   it("removes share rows for the task inside the delete transaction", async () => {

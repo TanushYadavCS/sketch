@@ -54,9 +54,9 @@ export interface AutomationCreateContext {
 
 /**
  * Actor for automation mutations. Rights are owner-or-explicit-grant, re-checked
- * inside each mutation's transaction against the shares table — there is no
- * admin bypass. `role` is reserved for a later lane and currently carries no
- * semantics.
+ * inside each mutation's transaction against the shares table. `role: "admin"`
+ * re-grants full edit and delete access (pre-sharing-feature behavior); lock
+ * discipline still applies to admins like any other editor.
  */
 export interface AutomationEditActor {
   userId: string | null;
@@ -266,13 +266,16 @@ function contentTypeForStep(step: WorkflowStep | undefined): "prompt" | "script"
 /**
  * Owner-or-grantee check evaluated inside the caller's transaction so a
  * revoke between the access read and the mutation write cannot slip through.
+ * Admin actors are always editors; they still need the edit lock to mutate.
  */
 async function isTaskEditor(
   trx: Kysely<DB>,
   taskId: string,
   createdBy: string | null,
   userId: string,
+  role?: "admin",
 ): Promise<boolean> {
+  if (role === "admin") return true;
   if (createdBy === userId) return true;
   return createAutomationSharesRepository(trx).hasGrant(taskId, userId);
 }
@@ -426,7 +429,7 @@ export async function deleteAutomation(params: {
         .executeTakeFirst();
 
       if (!current) return { kind: "not_found" as const };
-      if (!params.actor.userId || current.created_by !== params.actor.userId) {
+      if (!params.actor.userId || (current.created_by !== params.actor.userId && params.actor.role !== "admin")) {
         return { kind: "access_denied" as const };
       }
 
@@ -479,7 +482,7 @@ export async function updateAutomationDefinition(params: {
       .executeTakeFirst();
     if (!current) return { kind: "not_found" as const };
     if (!params.actor.userId) return { kind: "access_denied" as const };
-    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
+    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId, params.actor.role))) {
       return { kind: "access_denied" as const };
     }
     const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
@@ -704,7 +707,9 @@ export async function selectAutomationSetupExecutionMode(params: {
   return params.db.transaction().execute(async (trx) => {
     const row = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", params.taskId).executeTakeFirst();
     if (!row || !params.actor.userId) return { kind: "not_found" as const };
-    if (!(await isTaskEditor(trx, row.id, row.created_by, params.actor.userId))) return { kind: "not_found" as const };
+    if (!(await isTaskEditor(trx, row.id, row.created_by, params.actor.userId, params.actor.role))) {
+      return { kind: "not_found" as const };
+    }
     const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
     if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
     const [stepContentRows, runRows] = await Promise.all([
@@ -754,7 +759,7 @@ export async function replaceAutomationDefinition(params: {
       .executeTakeFirst();
     if (!current) return { kind: "not_found" as const };
     if (!params.actor.userId) return { kind: "not_found" as const };
-    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId))) {
+    if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId, params.actor.role))) {
       return { kind: "not_found" as const };
     }
     const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);

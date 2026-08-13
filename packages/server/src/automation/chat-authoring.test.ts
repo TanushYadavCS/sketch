@@ -373,7 +373,7 @@ describe("chat automation authoring orchestration", () => {
     expect(edit).not.toHaveBeenCalled();
   });
 
-  it("denies an admin without a grant on a foreign-owned task", async () => {
+  it("re-grants an admin editor on a foreign-owned task", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
@@ -415,9 +415,52 @@ describe("chat automation authoring orchestration", () => {
         taskContext: { ...taskContext(), createdBy: "admin-id", canManageAnyTask: true },
         currentAutomation: current,
       }),
+    ).resolves.toMatchObject({ kind: "saved", task: { id: "foreign-admin-edit" } });
+    expect(edit).toHaveBeenCalledTimes(1);
+    await expect(createScheduledTaskRepository(db).getById("foreign-admin-edit")).resolves.toMatchObject({
+      created_by: "owner-id",
+      title: "Admin-edited brief",
+      revision: 1,
+    });
+  });
+
+  it("keeps an admin without canManageAnyTask out of a foreign-owned edit", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "foreign-member-edit",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: "owner-id",
+        originPlatform: null,
+        originConversationId: null,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      brokerCapable: true,
+    });
+
+    const edit = vi.fn();
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: { create: vi.fn(), edit },
+      scheduler: { refreshTaskSchedule: vi.fn(), getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Rename the brief",
+        taskId: "foreign-member-edit",
+        taskContext: { ...taskContext(), createdBy: "admin-id" },
+      }),
     ).resolves.toEqual({ kind: "error", message: "Automation not found." });
     expect(edit).not.toHaveBeenCalled();
-    await expect(createScheduledTaskRepository(db).getById("foreign-admin-edit")).resolves.toMatchObject({
+    await expect(createScheduledTaskRepository(db).getById("foreign-member-edit")).resolves.toMatchObject({
       created_by: "owner-id",
       revision: 0,
     });

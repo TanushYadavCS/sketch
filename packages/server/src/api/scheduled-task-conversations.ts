@@ -90,6 +90,7 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       hasGrant ? new Set(userId ? [userId] : []) : new Set<string>(),
       {
         userId,
+        role: c.get("role"),
       },
     );
     if (!accessibleTask) {

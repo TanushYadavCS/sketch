@@ -1,12 +1,13 @@
 export interface ScheduledTaskAccessSubject {
   userId: string | null;
+  role?: string;
 }
 
 /**
- * Access to an automation is owner OR explicit per-person grant. Admins have
- * no automatic access — callers must preload the grant set (e.g. via
- * createAutomationSharesRepository().listTaskIdsForUser / hasGrant) and pass
- * it in; the access decision itself is a pure function.
+ * Access to an automation is owner OR explicit per-person grant, with admins
+ * re-granted automatic access (the pre-sharing-feature behavior). An admin
+ * subject without a resolved tenant user is still denied — callers must
+ * resolve `userId` from the tenant's user table before the access decision.
  */
 export function canAccessScheduledTask(
   ownerId: string | null | undefined,
@@ -14,7 +15,7 @@ export function canAccessScheduledTask(
   subject: ScheduledTaskAccessSubject,
 ): boolean {
   if (!subject.userId) return false;
-  return ownerId === subject.userId || grantedUserIds.has(subject.userId);
+  return subject.role === "admin" || ownerId === subject.userId || grantedUserIds.has(subject.userId);
 }
 
 export function resolveScheduledTaskAccess<T>(

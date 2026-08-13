@@ -178,7 +178,7 @@ describe("scheduled task conversation API", () => {
     expect(admin.id).not.toBe(member.id);
   });
 
-  it("keeps foreign-owner transcripts out of admin task navigation", async () => {
+  it("re-grants admin task navigation but keeps transcripts viewer-scoped", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-conversations@test.com" });
     const member = await createUserRepository(db).create({ name: "Member", email: "member-two@test.com" });
@@ -199,15 +199,27 @@ describe("scheduled task conversation API", () => {
       },
     });
     const adminCookie = await loginAdmin(app);
+    // The admin can navigate the foreign task (task access re-granted) but the
+    // transcript list is viewer-scoped: no rows are associated with the admin.
     const adminList = await app.request("/api/scheduled-tasks/foreign-task/conversations", {
       headers: { Cookie: adminCookie },
     });
-    expect(adminList.status).toBe(404);
+    expect(adminList.status).toBe(200);
+    await expect(adminList.json()).resolves.toEqual({
+      taskId: "foreign-task",
+      conversations: [],
+      builderLock: { state: "available", conversationId: null, owner: null, expiresAt: null },
+      transcriptAccess: "viewer",
+    });
 
+    // The owner's transcript conversation itself stays out of the admin's view.
     const adminDetail = await app.request("/api/scheduled-tasks/foreign-task/conversations/owner-private-chat", {
       headers: { Cookie: adminCookie },
     });
     expect(adminDetail.status).toBe(404);
+    await expect(adminDetail.json()).resolves.toMatchObject({
+      error: { code: "CONVERSATION_NOT_FOUND" },
+    });
 
     const memberResponse = await app.request("/api/scheduled-tasks/foreign-task/conversations", {
       headers: { Cookie: await memberCookie(db, member.id) },
@@ -267,7 +279,7 @@ describe("scheduled task conversation API", () => {
     });
   });
 
-  it("does not let an admin create a second active builder chat while the owner holds one", async () => {
+  it("keeps the builder-chat lock discipline for admins on a foreign task", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder-lock@test.com" });
     await seedTask(db, "locked-task", owner.id);
@@ -294,7 +306,10 @@ describe("scheduled task conversation API", () => {
       headers: { Cookie: adminCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ createNew: true }),
     });
-    expect(adminStart.status).toBe(404);
+    // The admin passes the task access gate but the builder-chat lock is held
+    // by the owner, so the create is refused — lock discipline is uniform.
+    expect(adminStart.status).toBe(409);
+    await expect(adminStart.json()).resolves.toMatchObject({ error: { code: "BUILDER_CHAT_LOCKED" } });
 
     const ownerSecond = await app.request("/api/scheduled-tasks/locked-task/conversations", {
       method: "POST",

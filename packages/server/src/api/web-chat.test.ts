@@ -1775,6 +1775,7 @@ describe("web chat API", () => {
     expect(builderAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
   });
 
+<<<<<<< HEAD
   it("preserves the original web-chat requirements when trimming builder history", async () => {
     const admin = await seedAdmin(db);
     const conversations = createScheduledTaskConversationRepository(db);
@@ -1868,7 +1869,7 @@ describe("web chat API", () => {
     );
   });
 
-  it("does not grant an admin access to the owner transcript", async () => {
+  it("re-grants an admin task access but keeps the owner transcript viewer-scoped", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
     const conversations = createScheduledTaskConversationRepository(db);
@@ -1927,8 +1928,10 @@ describe("web chat API", () => {
       body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign" }),
     });
 
+    // The admin passes the task access gate (re-granted) but the owner's
+    // transcript conversation stays out of the admin's view.
     expect(res.status).toBe(404);
-    expect(await res.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
+    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
     expect(runAgent).not.toHaveBeenCalled();
     await expect(readFile(webChatTranscriptPath(dataDir, admin.id, "owner-builder"), "utf-8")).rejects.toMatchObject({
       code: "ENOENT",
@@ -1940,6 +1943,84 @@ describe("web chat API", () => {
       conversations.listByTaskConversationForTranscriptUser("task-foreign", "owner-builder", admin.id),
     ).resolves.toHaveLength(0);
     expect(scheduler.getTaskById).toHaveBeenCalledWith("task-foreign");
+  });
+
+  it("opens the builder context to an admin on a foreign-owned task", async () => {
+    const admin = await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-admin-wc@test.com" });
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-foreign-admin",
+      conversationId: "admin-builder",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-foreign-admin",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D_OWNER",
+        threadTs: null,
+        prompt: "Send the owner a brief",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: owner.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 2,
+        title: "Owner brief",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: { platform: "slack", targetType: "dm", targetId: "D_OWNER", threadTs: null, mode: "deliver" },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=admin-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign-admin" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).toContain("task_id: task-foreign-admin");
+    expect(call.taskContext).toMatchObject({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_OWNER",
+      createdBy: admin.id,
+      canManageAnyTask: true,
+      origin: {
+        platform: "web",
+        conversationId: "admin-builder",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    });
   });
 
   it("rejects inaccessible automation ids before running or mutating the transcript", async () => {

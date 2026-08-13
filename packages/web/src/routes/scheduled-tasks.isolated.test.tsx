@@ -1,6 +1,6 @@
 import type { AutomationRunItem, ScheduledTaskListItem } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
-import { server } from "@/test/msw";
+import { seedAdminScheduledTaskListFixture, server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -115,6 +115,11 @@ function installTaskHandlers(initialTasks: ScheduledTaskListItem[]) {
       return HttpResponse.json({ success: true });
     }),
   );
+}
+
+function ownershipTabBar(): HTMLElement {
+  const mineTab = screen.getByRole("button", { name: /Mine \d+/i });
+  return mineTab.closest("div") as HTMLElement;
 }
 
 describe("ScheduledTasksPage", () => {
@@ -457,6 +462,102 @@ describe("ScheduledTasksPage", () => {
 
     await user.type(screen.getByLabelText("Search tasks"), "owned");
     expect(screen.getByText("No tasks match these filters")).toBeInTheDocument();
+  });
+
+  it("shows an All tab with every workspace task for admins", async () => {
+    setMockAuth({ role: "admin", userId: "admin-1" });
+    seedAdminScheduledTaskListFixture([
+      buildTask({
+        id: "task-owned",
+        title: "My automation",
+        createdBy: "admin-1",
+        creatorName: "Admin User",
+        isOwner: true,
+        sharedWithMe: false,
+      }),
+      buildTask({
+        id: "task-foreign",
+        title: "Foreign workflow",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        isOwner: false,
+        sharedWithMe: false,
+        canShare: false,
+        canDelete: true,
+      }),
+      buildTask({
+        id: "task-shared",
+        title: "Shared digest",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        isOwner: false,
+        sharedWithMe: true,
+        canShare: false,
+        canDelete: false,
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("My automation")).toBeInTheDocument();
+    });
+    const tabBar = ownershipTabBar();
+    expect(within(tabBar).getByRole("button", { name: /All 3/i })).toBeInTheDocument();
+    expect(within(tabBar).getByRole("button", { name: /Mine 1/i })).toBeInTheDocument();
+    expect(within(tabBar).getByRole("button", { name: /Shared with me 1/i })).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
+
+    await user.click(within(tabBar).getByRole("button", { name: /All/i }));
+    expect(screen.getByText("My automation")).toBeInTheDocument();
+    expect(screen.getByText("Foreign workflow")).toBeInTheDocument();
+    expect(screen.getByText("Shared digest")).toBeInTheDocument();
+    expect(screen.getAllByText(/by Beta User/).length).toBeGreaterThanOrEqual(2);
+
+    // No admin share UI: share stays owner-only, so the foreign row has no share action.
+    await user.click(screen.getByRole("button", { name: /Actions for Foreign workflow/i }));
+    expect(screen.queryByRole("menuitem", { name: /share/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /open builder/i })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(within(tabBar).getByRole("button", { name: /Mine/i }));
+    expect(screen.getByText("My automation")).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
+  });
+
+  it("hides the All tab from members", async () => {
+    setMockAuth({ role: "member", userId: "u1" });
+    seedAdminScheduledTaskListFixture([
+      buildTask({
+        id: "task-owned",
+        title: "My automation",
+        createdBy: "u1",
+        creatorName: "Alice Member",
+        isOwner: true,
+      }),
+      buildTask({
+        id: "task-foreign",
+        title: "Foreign workflow",
+        createdBy: "u2",
+        creatorName: "Bob Jones",
+        isOwner: false,
+        sharedWithMe: false,
+        canShare: false,
+        canDelete: false,
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("My automation")).toBeInTheDocument();
+    });
+    expect(within(ownershipTabBar()).queryByRole("button", { name: /^All /i })).not.toBeInTheDocument();
+    expect(within(ownershipTabBar()).getByRole("button", { name: /Mine 1/i })).toBeInTheDocument();
+    expect(within(ownershipTabBar()).getByRole("button", { name: /Shared with me 0/i })).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
   });
 
   it("shows a member only their own and shared-with-me tasks", async () => {
