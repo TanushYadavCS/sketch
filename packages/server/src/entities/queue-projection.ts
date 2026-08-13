@@ -4,8 +4,6 @@ import type { DB } from "../db/schema";
 
 export type PassReason =
   | "name_already_resolved"
-  | "superseded_by_entity"
-  | "candidate_merged_away"
   | "different_emails"
   | "co_listed_participants"
   | "type_mismatch"
@@ -22,8 +20,6 @@ export type PassReason =
  */
 export const REASON_PRIORITY: Record<PassReason, number> = {
   name_already_resolved: 1,
-  superseded_by_entity: 1,
-  candidate_merged_away: 1,
   different_emails: 2,
   co_listed_participants: 2,
   type_mismatch: 2,

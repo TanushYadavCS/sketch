@@ -1,18 +1,25 @@
 import type { Kysely } from "kysely";
+import type { Logger } from "pino";
 import type { QueueRunSnapshot } from "../db/repositories/graph-pass-runs";
 import type { DB } from "../db/schema";
+import { runDuplicateDrain } from "./duplicate-drain";
 import { applyProjection, resolveReasons } from "./queue-projection";
 import { liveEntitiesForNames, loadQueueRows, reconcileQueue } from "./queue-reconcile";
 import { structuralPass } from "./queue-structural";
+
+export interface QueueDrainSequenceHandle {
+  done: Promise<void>;
+  stop: () => void;
+}
 
 /**
  * One queue graph pass: reconcile, then structure, then one projection.
  *
  * The rows are re-read between the two passes because phase A re-points and
  * clears candidates, and phase B's rules are all about the candidate. Neither
- * pass writes to the graph, and the projection recomputes `(status,
- * pass_reason)` from scratch, so a run that overlaps another converges rather
- * than corrupting anything.
+ * pass writes to the graph. The projection recomputes `(status, pass_reason)`
+ * from scratch, so overlapping runs converge once every emitted reason still
+ * describes the post-reconcile row.
  */
 export async function runQueuePasses(db: Kysely<DB>): Promise<QueueRunSnapshot> {
   const initialRows = await loadQueueRows(db);
@@ -37,5 +44,33 @@ export async function runQueuePasses(db: Kysely<DB>): Promise<QueueRunSnapshot> 
     frozen: counts.frozen,
     candidatesRepointed: reconciled.repointed,
     candidatesCleared: reconciled.cleared,
+  };
+}
+
+/**
+ * Runs boot graph maintenance in the measured order: queue, duplicate drain,
+ * queue. The sequence is intentionally in-memory and assumes a single server
+ * process; there is no durable lock preventing two booting processes from
+ * interleaving their drains.
+ */
+export function startQueueDrainSequence(db: Kysely<DB>, logger?: Logger): QueueDrainSequenceHandle {
+  let stopped = false;
+  const done = (async () => {
+    await runQueuePasses(db);
+    try {
+      await runDuplicateDrain(db, { logger, shouldStop: () => stopped });
+    } finally {
+      await runQueuePasses(db);
+    }
+  })()
+    .then(() => undefined)
+    .catch((err) => {
+      logger?.error({ err }, "queue/drain startup sequence failed");
+    });
+  return {
+    done,
+    stop: () => {
+      stopped = true;
+    },
   };
 }

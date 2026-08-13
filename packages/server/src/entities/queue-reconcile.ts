@@ -1,6 +1,6 @@
 import type { Kysely } from "kysely";
 import type { DB } from "../db/schema";
-import { type PassReason, type ReasonHit, reviewFreezeBoundary } from "./queue-projection";
+import { type ReasonHit, reviewFreezeBoundary } from "./queue-projection";
 import { inScope, nonTerminal } from "./queue-scope";
 
 export type QueueRowForPasses = {
@@ -208,8 +208,7 @@ export async function reconcileQueue(
 
       if (usable) {
         group(row.id, candidateId, usable.id);
-        const reason: PassReason = live && live.id === usable.id ? "name_already_resolved" : "candidate_merged_away";
-        hits.push({ rowId: row.id, reason });
+        if (live && live.id === usable.id) hits.push({ rowId: row.id, reason: "name_already_resolved" });
         continue;
       }
 
@@ -220,8 +219,11 @@ export async function reconcileQueue(
 
     if (live && live.id !== candidateId) {
       group(row.id, candidateId, live.id);
-      hits.push({ rowId: row.id, reason: "superseded_by_entity" });
+      hits.push({ rowId: row.id, reason: "name_already_resolved" });
+      continue;
     }
+
+    if (live && live.id === candidateId) hits.push({ rowId: row.id, reason: "name_already_resolved" });
   }
 
   let repointed = 0;
