@@ -25,10 +25,12 @@ import {
   type ProjectLifecycleStatus,
   type VerdictConfidence,
   clusterClientFiles,
+  fragmentNameTokens,
   isV2MintingVerdict,
   normalizeTitleFamily,
   readClusterVerdict,
 } from "./project-minting";
+import { scanTokenRecurrence } from "./token-recurrence-scan";
 
 const ACCEPT_SOURCE = "project-minting";
 const RELATION_SOURCE = "project_minting_acceptance";
@@ -54,6 +56,14 @@ export interface AcceptedEntitySummary {
   /** Entity id of the parent project (v2 verdicts); null for top-level and every v1 entity. */
   parentId: string | null;
   fileIds: string[];
+  /** v2 accepts only: files claimed by the content scan and tasks re-parented because of them. */
+  retroClaim?: { filesClaimed: number; tasksReparented: number };
+  /**
+   * Earliest file day attached to this entity — a left-censored floor, never
+   * the project start: connector history routinely begins mid-assignment
+   * (Redseer's Fireflies starts 4 months into a 12-month engagement).
+   */
+  activeSinceAtLeast?: string | null;
 }
 
 export interface ProjectMintingAcceptResult {
@@ -877,6 +887,127 @@ async function parentTasksForFiles(db: Kysely<DB>, entityId: string, fileIds: st
   return ids;
 }
 
+/**
+ * Retro-claim: after a v2 accept decides which entities exist, scan the
+ * cluster's file CONTENT for each accepted project's names (the project name,
+ * its renamed form, every fragment merged into it, and every cited evidence
+ * fragment) and claim matching files the anchors missed — stored mentions
+ * undercount content 5-6x. Children are claimed before parents so an account
+ * container named after the company cannot swallow a workstream's files;
+ * whatever nothing claims still falls to the residual target afterwards.
+ */
+async function retroClaimFiles(
+  db: Kysely<DB>,
+  plan: AcceptancePlan,
+  projectIdsByOriginalName: Map<string, string>,
+  filesByEntity: Map<string, Set<string>>,
+  anchoredToAccepted: Set<string>,
+): Promise<Map<string, Set<string>>> {
+  const fragmentNameById = new Map(plan.verdict.existingEntities.map((entity) => [entity.entityId, entity.name]));
+  const candidates: { key: string; tokens: string[] }[] = [];
+  const entityByKey = new Map<string, string>();
+  for (const project of plan.orderedProjects) {
+    const entityId = projectIdsByOriginalName.get(project.name);
+    if (!entityId) continue;
+    const names = new Set<string>([project.name, renameFor(project.name, plan.renameMap)]);
+    for (const merge of plan.plannedMerges) {
+      if (merge.intoOriginalName === project.name) {
+        const fragmentName = fragmentNameById.get(merge.entityId);
+        if (fragmentName) names.add(fragmentName);
+      }
+    }
+    for (const fragmentId of project.evidenceFragments) {
+      const fragmentName = fragmentNameById.get(fragmentId);
+      if (fragmentName) names.add(fragmentName);
+    }
+    for (const name of names) {
+      const tokens = fragmentNameTokens(name);
+      if (tokens.length === 0) continue;
+      const key = `${entityId}:${candidates.length}`;
+      candidates.push({ key, tokens });
+      entityByKey.set(key, entityId);
+    }
+  }
+  const claimedByEntity = new Map<string, Set<string>>();
+  if (candidates.length === 0) return claimedByEntity;
+
+  const scan = await scanTokenRecurrence(db, {
+    candidates,
+    fileIds: plan.cluster.files.map((file) => file.fileId),
+  });
+  const matchesByEntity = new Map<string, Set<string>>();
+  for (const [key, recurrence] of scan) {
+    const entityId = entityByKey.get(key);
+    if (!entityId) continue;
+    const set = matchesByEntity.get(entityId) ?? new Set<string>();
+    for (const fileId of recurrence.files) set.add(fileId);
+    matchesByEntity.set(entityId, set);
+  }
+
+  const claimedGlobally = new Set<string>();
+  for (const project of [...plan.orderedProjects].reverse()) {
+    const entityId = projectIdsByOriginalName.get(project.name);
+    if (!entityId) continue;
+    const own = filesByEntity.get(entityId) ?? new Set<string>();
+    const claimed = new Set<string>();
+    for (const fileId of matchesByEntity.get(entityId) ?? []) {
+      if (own.has(fileId) || claimedGlobally.has(fileId)) continue;
+      own.add(fileId);
+      claimed.add(fileId);
+      claimedGlobally.add(fileId);
+      anchoredToAccepted.add(fileId);
+    }
+    filesByEntity.set(entityId, own);
+    claimedByEntity.set(entityId, claimed);
+  }
+  return claimedByEntity;
+}
+
+/**
+ * Tasks re-parented because their evidence sits on a retro-claimed file get
+ * a task_evidence row pointing at the project entity — the WHY of the
+ * re-parent, recorded where task evidence already lives.
+ */
+async function recordClaimEvidence(
+  db: Kysely<DB>,
+  entityId: string,
+  reparentedTaskIds: string[],
+  claimedFileIds: Set<string>,
+): Promise<number> {
+  if (reparentedTaskIds.length === 0 || claimedFileIds.size === 0) return 0;
+  const rows = await db
+    .selectFrom("task_evidence")
+    .select("task_id")
+    .where("kind", "=", "file")
+    .where("ref_id", "in", [...claimedFileIds])
+    .where("task_id", "in", reparentedTaskIds)
+    .execute();
+  const taskIds = [...new Set(rows.map((row) => row.task_id))].sort();
+  for (const taskId of taskIds) {
+    await db
+      .insertInto("task_evidence")
+      .values({ task_id: taskId, kind: "entity", ref_id: entityId })
+      .onConflict((oc) => oc.doNothing())
+      .execute();
+  }
+  return taskIds.length;
+}
+
+async function earliestFileDay(db: Kysely<DB>, fileIds: string[]): Promise<string | null> {
+  if (fileIds.length === 0) return null;
+  let earliest: string | null = null;
+  for (let i = 0; i < fileIds.length; i += 200) {
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(sql<string | null>`min(coalesce(source_created_at, synced_at))`.as("first"))
+      .where("id", "in", fileIds.slice(i, i + 200))
+      .executeTakeFirst();
+    const value = row?.first ? row.first.slice(0, 10) : null;
+    if (value && (!earliest || value < earliest)) earliest = value;
+  }
+  return earliest;
+}
+
 async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promise<ProjectMintingAcceptResult> {
   const { verdict, cluster, renameMap, canonicalByName } = plan;
   const projectIdsByOriginalName = new Map<string, string>();
@@ -952,6 +1083,10 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
     for (const fileId of files) anchoredToAccepted.add(fileId);
   }
 
+  const retroClaimByEntity = plan.isV2
+    ? await retroClaimFiles(db, plan, projectIdsByOriginalName, filesByEntity, anchoredToAccepted)
+    : new Map<string, Set<string>>();
+
   const residualTargetId =
     plan.residualTarget === null
       ? null
@@ -989,7 +1124,10 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
   for (const [entityId, fileIds] of filesByEntity) {
     const orderedFileIds = [...fileIds].sort();
     for (const fileId of orderedFileIds) await insertMention(db, entityId, fileId);
-    taskParentUpdates += (await parentTasksForFiles(db, entityId, orderedFileIds)).length;
+    const reparentedTaskIds = await parentTasksForFiles(db, entityId, orderedFileIds);
+    taskParentUpdates += reparentedTaskIds.length;
+    const claimed = retroClaimByEntity.get(entityId) ?? new Set<string>();
+    const tasksReparentedByClaim = await recordClaimEvidence(db, entityId, reparentedTaskIds, claimed);
     const kind = entityId === engagementId ? "engagement" : "project";
     const entity = await db
       .selectFrom("entities")
@@ -1002,6 +1140,12 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
       kind,
       parentId: parentIdByEntityId.get(entityId) ?? null,
       fileIds: orderedFileIds,
+      ...(plan.isV2
+        ? {
+            retroClaim: { filesClaimed: claimed.size, tasksReparented: tasksReparentedByClaim },
+            activeSinceAtLeast: await earliestFileDay(db, orderedFileIds),
+          }
+        : {}),
     });
   }
 

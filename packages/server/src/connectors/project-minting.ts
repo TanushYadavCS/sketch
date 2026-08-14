@@ -46,6 +46,7 @@ import { isPersonalOrSharedDomain } from "../entities/personal-domains";
 import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { GeminiGenerator } from "./gemini-generate";
+import { type TokenRecurrence, scanTokenRecurrence } from "./token-recurrence-scan";
 
 export const PROJECT_MINTING_PROMPT_VERSION = "project-minting-verdict-v3";
 
@@ -152,6 +153,12 @@ export interface CandidateWorkstream {
   members: CandidateWorkstreamMember[];
   clusterFileCount: number;
   singletonTitleCount: number;
+  /** >=2 fragments, or >=3 files counting singleton-title support. */
+  meetsStructuralFloor: boolean;
+  /** Content recurrence for this group's tokens; null until scanned. */
+  scan: TokenRecurrence | null;
+  /** Set when the candidate came from a recurring meeting title with no stored fragment (e.g. Benchmarks). */
+  titleFamily?: string;
 }
 
 export interface DossierEvent {
@@ -325,6 +332,68 @@ export function channelMatchesCompany(channelName: string, candidateNames: strin
 const FRAGMENT_OWNERSHIP_FLOOR = 0.5;
 const CANDIDATE_MIN_FRAGMENTS = 2;
 const CANDIDATE_MIN_FILES = 3;
+/**
+ * Scan-days floor for candidacy. Measured on Redseer: every junk fragment
+ * (bulk imports, one-off notes) scanned at exactly 1 distinct day; every
+ * real workstream at 2+. Habuild's Langraph — real, user-visible — sits at
+ * 2, which is why the floor is "recurred at all", not 3.
+ */
+export const SCAN_CANDIDACY_MIN_DAYS = 2;
+
+/**
+ * Tokens that name meeting cadence or back-office paperwork, not work
+ * streams. Used only to keep title-family candidates honest — a recurring
+ * "Weekly Standup" family recurs by definition and would otherwise top the
+ * candidate ranking.
+ */
+const CADENCE_TOKENS = new Set([
+  "standup",
+  "weekly",
+  "daily",
+  "monthly",
+  "quarterly",
+  "biweekly",
+  "fortnightly",
+  "review",
+  "retro",
+  "retrospective",
+  "catchup",
+  "checkin",
+  "townhall",
+  "huddle",
+  "alignment",
+  "discussion",
+  "intro",
+  "introduction",
+  "kickoff",
+  "demo",
+  "walkthrough",
+  "onboarding",
+  "invoice",
+  "invoices",
+  "payment",
+  "payments",
+  "payroll",
+  "sprint",
+  "planning",
+  "remaining",
+  "items",
+  "next",
+  "steps",
+  "agenda",
+  "notes",
+  "minutes",
+  "recap",
+  "summary",
+  "slack",
+  "support",
+  "connect",
+  "with",
+  "from",
+  "into",
+  "about",
+  "month",
+]);
 const FRAGMENT_STOP_TOKENS: ReadonlySet<string> = new Set([
   "project",
   "projects",
@@ -418,9 +487,6 @@ export function groupFragmentCandidates(
             return tokens.some((token) => familyTokens.has(token));
           }).length
         : 0;
-    if (members.length < CANDIDATE_MIN_FRAGMENTS && clusterFileCount + singletonTitleCount < CANDIDATE_MIN_FILES) {
-      continue;
-    }
     result.push({
       tokens,
       members: members.map((member) => ({
@@ -430,12 +496,100 @@ export function groupFragmentCandidates(
       })),
       clusterFileCount,
       singletonTitleCount,
+      meetsStructuralFloor:
+        members.length >= CANDIDATE_MIN_FRAGMENTS || clusterFileCount + singletonTitleCount >= CANDIDATE_MIN_FILES,
+      scan: null,
     });
   }
   result.sort(
     (a, b) => b.clusterFileCount - a.clusterFileCount || (a.tokens[0] ?? "").localeCompare(b.tokens[0] ?? ""),
   );
   return result;
+}
+
+/**
+ * Candidacy after the content scan: structural-floor groups stay, and a
+ * below-floor group (usually a single fragment with one stored mention) gets
+ * a second chance when its own name recurs in content on enough distinct
+ * days — stored mentions undercount content 5-6x, so a stream like Langraph
+ * (1 fragment, 1 mention, months of recurring discussion) only survives
+ * here. Ranking is by scan distinct-days; mention counts never rank.
+ */
+/**
+ * Every group gets scanned — including below-structural-floor singletons,
+ * which is the entire point: their second chance rides on the scan. The
+ * singleton fragment's own tokens are the candidate; groups whose distinctive
+ * tokens all got corpus-stopped scan as nothing and keep scan = null.
+ *
+ * Recurring title families with no stored fragment also enter as candidates
+ * (Benchmarks on Redseer: 0 fragments, 15+ scan days, user-confirmed real —
+ * missed by every stored-graph signal). Their tokens are stripped of company
+ * names and cadence words so "Weekly Standup" cannot top the ranking, and
+ * families whose tokens overlap a fragment group fold into that group
+ * instead of duplicating it.
+ */
+async function scanAndRankCandidates(
+  db: Kysely<DB>,
+  cluster: ClientCluster,
+  groups: CandidateWorkstream[],
+  titleFamilies: TitleFamily[],
+  people: DossierPerson[],
+): Promise<CandidateWorkstream[]> {
+  const companyTokens = [
+    ...new Set(
+      [cluster.companyName, ...cluster.groupMembers.map((member) => member.name)].flatMap((name) => tokenizeName(name)),
+    ),
+  ];
+  const personTokens = new Set(people.flatMap((person) => tokenizeName(person.name)));
+  const isCompanyToken = (token: string) =>
+    companyTokens.some(
+      (companyToken) =>
+        token === companyToken ||
+        (token.length >= 4 && companyToken.startsWith(token)) ||
+        (companyToken.length >= 4 && token.startsWith(companyToken)),
+    );
+  const groupTokens = new Set(groups.flatMap((group) => group.tokens));
+  for (const family of titleFamilies) {
+    if (family.count < 2) continue;
+    const tokens = fragmentNameTokens(family.key).filter(
+      (token) =>
+        !isCompanyToken(token) && !personTokens.has(token) && !CADENCE_TOKENS.has(token) && !groupTokens.has(token),
+    );
+    if (tokens.length === 0) continue;
+    for (const token of tokens) groupTokens.add(token);
+    groups.push({
+      tokens,
+      members: [],
+      clusterFileCount: family.count,
+      singletonTitleCount: 0,
+      meetsStructuralFloor: false,
+      scan: null,
+      titleFamily: family.display,
+    });
+  }
+
+  const scannable = groups.filter((group) => group.tokens.length > 0);
+  if (scannable.length > 0) {
+    const results = await scanTokenRecurrence(db, {
+      candidates: scannable.map((group, index) => ({ key: String(index), tokens: group.tokens })),
+      fileIds: cluster.files.map((file) => file.fileId),
+    });
+    scannable.forEach((group, index) => {
+      group.scan = results.get(String(index)) ?? null;
+    });
+  }
+  return applyCandidacyFloor(groups);
+}
+
+export function applyCandidacyFloor(groups: CandidateWorkstream[]): CandidateWorkstream[] {
+  return groups
+    .filter((group) => group.meetsStructuralFloor || (group.scan?.distinctDays ?? 0) >= SCAN_CANDIDACY_MIN_DAYS)
+    .sort(
+      (a, b) =>
+        (b.scan?.distinctDays ?? 0) - (a.scan?.distinctDays ?? 0) ||
+        b.clusterFileCount - a.clusterFileCount ||
+        (a.tokens[0] ?? "").localeCompare(b.tokens[0] ?? ""),
+    );
 }
 
 export interface ClusterClientFilesOptions {
@@ -969,7 +1123,13 @@ export async function buildClusterDossier(
     channels: cluster.channels,
     fragments,
     ownedElsewhere,
-    candidateWorkstreams: groupFragmentCandidates(fragments, titleFamilies),
+    candidateWorkstreams: await scanAndRankCandidates(
+      db,
+      cluster,
+      groupFragmentCandidates(fragments, titleFamilies),
+      titleFamilies,
+      dossierPeople,
+    ),
     events,
     markdown: "",
   };
@@ -1059,18 +1219,32 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
     lines.push("");
   }
 
-  lines.push("## Candidate workstreams (deterministic name-token grouping of the fragments above)");
+  lines.push(
+    "## Candidate workstreams (name-token groups of the fragments above, ranked by content recurrence — how often the tokens actually appear across file text, which stored mentions undercount)",
+  );
   if (dossier.candidateWorkstreams.length === 0) lines.push("- none crossed the candidacy floor");
   for (const candidate of dossier.candidateWorkstreams) {
     const singleton =
       candidate.singletonTitleCount > 0
         ? `, ${candidate.singletonTitleCount} singleton meeting titles echo these tokens`
         : "";
-    lines.push(
-      `- tokens [${candidate.tokens.join(", ")}] — ${candidate.members.length} fragments, ${candidate.clusterFileCount} cluster files${singleton}: ${candidate.members
-        .map((member) => `"${member.name}" [id: ${member.entityId}]`)
-        .join(", ")}`,
-    );
+    const scan = candidate.scan;
+    const monthly = scan
+      ? Object.entries(scan.monthly)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([month, count]) => `${month}:${count}`)
+          .join(" ")
+      : "";
+    const scanText =
+      scan && scan.files.length > 0
+        ? `recurs in content on ${scan.distinctDays} distinct days across ${scan.files.length} files (${scan.firstDay ?? "?"} → ${scan.lastDay ?? "?"}${monthly ? `; monthly ${monthly}` : ""}) · `
+        : "no content recurrence beyond the stored mentions · ";
+    const membership = candidate.titleFamily
+      ? `recurring meeting title "${candidate.titleFamily}" (${candidate.clusterFileCount} meetings, no stored fragment)`
+      : `${candidate.members.length} fragments, ${candidate.clusterFileCount} cluster files${singleton}: ${candidate.members
+          .map((member) => `"${member.name}" [id: ${member.entityId}]`)
+          .join(", ")}`;
+    lines.push(`- tokens [${candidate.tokens.join(", ")}] — ${scanText}${membership}`);
   }
   lines.push("");
 
