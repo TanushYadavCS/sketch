@@ -21,6 +21,26 @@ const config = createTestConfig({
   DEV_TOOLS_ENABLED: true,
 });
 
+function defaultGeneratedTasks(): unknown[] {
+  return [
+    {
+      title: "Send the launch plan",
+      owner: { name: "Owner" },
+      dueDate: "2026-08-15",
+      hasOwnerVerbObject: true,
+      sourceExcerpt: "Owner will send the launch plan by August 15.",
+      projectId: "P1",
+    },
+    {
+      title: "Publish release notes",
+      owner: { email: "owner@example.com" },
+      hasOwnerVerbObject: true,
+      sourceExcerpt: "Owner will publish the release notes.",
+      projectId: "P1",
+    },
+  ];
+}
+
 describe("POST /api/connectors/files/:fileId/tasks", () => {
   let db: Kysely<DB>;
   let ownerCookie: string;
@@ -30,6 +50,7 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
   let ownerId: string;
   let adminId: string;
   let generatorCalls: number;
+  let generateTasks: (prompt: string) => unknown[];
   let app: ReturnType<typeof createApp>;
   let adminCookie: string;
 
@@ -41,31 +62,14 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
     ownerId = fixture.ownerId;
     adminId = fixture.adminId;
     generatorCalls = 0;
+    generateTasks = defaultGeneratedTasks;
     const generator: GeminiGenerator = {
       async generate() {
         return "{}";
       },
-      async generateJSON<T>() {
+      async generateJSON<T>(prompt: string) {
         generatorCalls++;
-        return {
-          tasks: [
-            {
-              title: "Send the launch plan",
-              owner: { name: "Owner" },
-              dueDate: "2026-08-15",
-              hasOwnerVerbObject: true,
-              sourceExcerpt: "Owner will send the launch plan by August 15.",
-              projectId: "P1",
-            },
-            {
-              title: "Publish release notes",
-              owner: { email: "owner@example.com" },
-              hasOwnerVerbObject: true,
-              sourceExcerpt: "Owner will publish the release notes.",
-              projectId: "P1",
-            },
-          ],
-        } as T;
+        return { tasks: generateTasks(prompt) } as T;
       },
     };
     app = createApp(db, config, { logger, taskMintingGenerator: generator });
@@ -150,8 +154,8 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
     const context = await mintTraceContext(app, adminCookie, fileId);
     const existingTasks = context.find((block) => block.key === "existing_tasks");
 
-    expect(existingTasks?.items).toContain("Neighbourhood follow-up");
-    expect(existingTasks?.items).not.toContain("Unrelated follow-up");
+    expect(existingTasks?.items.some((item) => item.includes("Neighbourhood follow-up"))).toBe(true);
+    expect(existingTasks?.items.some((item) => item.includes("Unrelated follow-up"))).toBe(false);
   });
 
   it("falls back to this file when it has no embedding and reports the degraded selection", async () => {
@@ -161,6 +165,110 @@ describe("POST /api/connectors/files/:fileId/tasks", () => {
       TASK_MINTING_NO_EMBEDDING_SELECTION,
     );
     expect(context.every((block) => block.via === "prompt")).toBe(true);
+  });
+
+  it("uses model updateOf to attach evidence and activity without creating another task", async () => {
+    const { neighbourFileId } = await seedEmbeddingCorpus(db, fileId, connectorConfigId);
+    const taskId = await seedVisibleTask(db, "Finalize launch plan", "update-target-task", neighbourFileId, ownerId);
+    generateTasks = () => [
+      {
+        title: "Send revised launch plan",
+        owner: { name: "Owner" },
+        hasOwnerVerbObject: true,
+        sourceExcerpt: "Owner said the launch plan is now in progress.",
+        updateOf: `<t:${taskId.slice(0, 8)}>`,
+        statusHint: "in_progress",
+      },
+    ];
+
+    const response = await app.request(`/api/connectors/files/${fileId}/tasks`, {
+      method: "POST",
+      headers: { Cookie: ownerCookie },
+    });
+
+    expect(response.status).toBe(200);
+    await waitForTaskCount(db, 1);
+    await waitForTaskFileEvidence(db, taskId, [neighbourFileId, fileId]);
+    const task = await db.selectFrom("tasks").selectAll().where("id", "=", taskId).executeTakeFirstOrThrow();
+    const events = await listTaskActivityEvents(db, taskId);
+    expect(task.title).toBe("Finalize launch plan");
+    expect(task.status).toBe("in_progress");
+    expect(events).toEqual([
+      expect.objectContaining({ event_kind: "status_changed", actor_type: "system", surface: "sync" }),
+    ]);
+    expect(JSON.parse(events[0].evidence_json ?? "{}")).toMatchObject({ fileIds: [fileId] });
+  });
+
+  it("links conversational evidence to an external ClickUp task without applying a done status hint", async () => {
+    const taskId = await seedStructuralTask(db, {
+      title: "Close billing audit",
+      sourceTaskId: "clickup-task-1",
+      parentEntityId: PROJECT_ID,
+      status: "in_progress",
+    });
+    generateTasks = () => [
+      {
+        title: "Close billing audit",
+        owner: { name: "Owner" },
+        hasOwnerVerbObject: true,
+        sourceExcerpt: "Owner said the billing audit is done.",
+        statusHint: "done",
+      },
+    ];
+
+    const response = await app.request(`/api/connectors/files/${fileId}/tasks`, {
+      method: "POST",
+      headers: { Cookie: ownerCookie },
+    });
+
+    expect(response.status).toBe(200);
+    await waitForTaskFileEvidence(db, taskId, [fileId]);
+    await waitForTaskCount(db, 1);
+    const task = await db.selectFrom("tasks").selectAll().where("id", "=", taskId).executeTakeFirstOrThrow();
+    const events = await listTaskActivityEvents(db, taskId);
+    expect(task.status).toBe("in_progress");
+    expect(task.status_authority).toBe("external");
+    expect(events).toEqual([
+      expect.objectContaining({ event_kind: "evidence_added", actor_type: "system", surface: "sync" }),
+    ]);
+  });
+
+  it("converges the same candidate from two files into one task with two evidence rows and two events", async () => {
+    const secondFileId = await seedAdditionalFile(db, connectorConfigId, {
+      providerFileId: "mint-transcript-second",
+      fileName: "Launch follow-up",
+      content: "Owner will send the launch plan by August 15.",
+      contentHash: "mint-content-hash-second",
+    });
+    generateTasks = () => [
+      {
+        title: "Send the launch plan",
+        owner: { name: "Owner" },
+        dueDate: "2026-08-15",
+        hasOwnerVerbObject: true,
+        sourceExcerpt: "Owner will send the launch plan by August 15.",
+        projectId: "P1",
+      },
+    ];
+
+    const firstResponse = await app.request(`/api/connectors/files/${fileId}/tasks`, {
+      method: "POST",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(firstResponse.status).toBe(200);
+    const taskId = await waitForTaskByTitle(db, "Send the launch plan");
+
+    const secondResponse = await app.request(`/api/connectors/files/${secondFileId}/tasks`, {
+      method: "POST",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(secondResponse.status).toBe(200);
+
+    await waitForTaskFileEvidence(db, taskId, [fileId, secondFileId]);
+    await waitForTaskCount(db, 1);
+    const events = await listTaskActivityEvents(db, taskId);
+    expect(events.map((event) => event.event_kind).sort()).toEqual(["created", "evidence_added"]);
+    expect(new Set(events.map((event) => event.dedupe_key)).size).toBe(2);
   });
 });
 
@@ -177,6 +285,65 @@ async function waitForMintedTasks(db: Kysely<DB>, expected: number) {
     },
     { timeout: 20_000, interval: 25 },
   );
+}
+
+async function waitForTaskCount(db: Kysely<DB>, expected: number) {
+  await vi.waitFor(
+    async () => {
+      const row = await db
+        .selectFrom("tasks")
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .where("valid_to", "is", null)
+        .executeTakeFirstOrThrow();
+      expect(Number(row.count)).toBe(expected);
+    },
+    { timeout: 20_000, interval: 25 },
+  );
+}
+
+async function waitForTaskByTitle(db: Kysely<DB>, title: string): Promise<string> {
+  let taskId = "";
+  await vi.waitFor(
+    async () => {
+      const row = await db
+        .selectFrom("tasks")
+        .select("id")
+        .where("title", "=", title)
+        .where("valid_to", "is", null)
+        .executeTakeFirst();
+      expect(row).toBeTruthy();
+      taskId = row?.id ?? "";
+    },
+    { timeout: 20_000, interval: 25 },
+  );
+  return taskId;
+}
+
+async function waitForTaskFileEvidence(db: Kysely<DB>, taskId: string, fileIds: string[]) {
+  const expected = [...fileIds].sort();
+  await vi.waitFor(
+    async () => {
+      const rows = await db
+        .selectFrom("task_evidence")
+        .select("ref_id")
+        .where("task_id", "=", taskId)
+        .where("kind", "=", "file")
+        .orderBy("ref_id", "asc")
+        .execute();
+      expect(rows.map((row) => row.ref_id)).toEqual(expected);
+    },
+    { timeout: 20_000, interval: 25 },
+  );
+}
+
+async function listTaskActivityEvents(db: Kysely<DB>, taskId: string) {
+  return db
+    .selectFrom("task_activity_events")
+    .select(["event_kind", "actor_type", "surface", "evidence_json", "dedupe_key"])
+    .where("task_id", "=", taskId)
+    .orderBy("occurred_at", "asc")
+    .orderBy("id", "asc")
+    .execute();
 }
 
 /**
@@ -335,13 +502,37 @@ async function seedEmbeddingCorpus(db: Kysely<DB>, targetFileId: string, connect
   return { neighbourFileId, unrelatedFileId: unrelated.id };
 }
 
+async function seedAdditionalFile(
+  db: Kysely<DB>,
+  connectorConfigId: string,
+  input: { providerFileId: string; fileName: string; content: string; contentHash: string },
+): Promise<string> {
+  const connectorRepo = createConnectorRepository(db);
+  const file = await connectorRepo.upsertFile({
+    source: "fireflies",
+    providerFileId: input.providerFileId,
+    providerUrl: null,
+    fileName: input.fileName,
+    fileType: "transcript",
+    contentCategory: "document",
+    content: input.content,
+    sourcePath: null,
+    contentHash: input.contentHash,
+    sourceCreatedAt: "2026-08-09T09:00:00.000Z",
+    sourceUpdatedAt: null,
+    connectorConfigId,
+  });
+  await connectorRepo.linkConnectorFile(connectorConfigId, file.id);
+  return file.id;
+}
+
 async function seedVisibleTask(
   db: Kysely<DB>,
   title: string,
   sourceTaskId: string,
   evidenceFileId: string,
   ownerId: string,
-) {
+): Promise<string> {
   const result = await createTaskRepository(db).upsertTask({
     parentEntityId: null,
     parentSourceRef: null,
@@ -363,6 +554,30 @@ async function seedVisibleTask(
     .insertInto("task_evidence")
     .values({ task_id: result.taskId, kind: "file", ref_id: evidenceFileId })
     .execute();
+  return result.taskId;
+}
+
+async function seedStructuralTask(
+  db: Kysely<DB>,
+  input: { title: string; sourceTaskId: string; parentEntityId: string; status: "open" | "in_progress" | "done" },
+): Promise<string> {
+  const result = await createTaskRepository(db).upsertTask({
+    parentEntityId: input.parentEntityId,
+    parentSourceRef: "clickup:list-1",
+    parentName: "Mint Project",
+    source: "clickup",
+    externalRef: `https://app.clickup.com/t/${input.sourceTaskId}`,
+    title: input.title,
+    status: input.status,
+    statusRaw: input.status,
+    statusAuthority: "external",
+    assigneeEntityId: null,
+    priority: null,
+    dueAt: null,
+    provenance: "structural",
+    sourceTaskId: input.sourceTaskId,
+  });
+  return result.taskId;
 }
 
 function makeVector(dims: number, values: Record<number, number> = {}): string {

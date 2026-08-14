@@ -108,6 +108,13 @@ export interface UpdateLocalTaskStatusInput {
   surface?: TaskActivitySurface;
 }
 
+export interface UpdateTaskStatusFromEvidenceInput {
+  taskId: string;
+  status: TaskStatus;
+  indexedFileId: string;
+  excerpt?: string | null;
+}
+
 export interface ReanchorNullParentTasksResult {
   count: number;
   taskIds: string[];
@@ -667,7 +674,78 @@ export async function upsertLlmTask(
     createdByUserId: input.ownerUserId,
   });
   await promoteLlmTaskEvidence(db, result.taskId, input.evidence);
+  if (result.created) {
+    await createTaskActivityRepository(db).append({
+      taskId: result.taskId,
+      eventKind: "created",
+      actorType: "system",
+      surface: "sync",
+      identityParts: [result.taskId],
+      occurredAt: new Date().toISOString(),
+    });
+  }
   return result;
+}
+
+export async function updateTaskStatusFromEvidence(
+  db: Kysely<DB>,
+  input: UpdateTaskStatusFromEvidenceInput,
+): Promise<{ task: Selectable<TasksTable>; changed: boolean } | null> {
+  return db.transaction().execute(async (trx) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const existing = await trx
+        .selectFrom("tasks")
+        .selectAll()
+        .where("id", "=", input.taskId)
+        .where("valid_to", "is", null)
+        .executeTakeFirst();
+      if (
+        !existing ||
+        existing.status_authority !== "local" ||
+        (existing.provenance !== "brief" && existing.provenance !== "summary" && existing.provenance !== "llm")
+      ) {
+        return null;
+      }
+      if (existing.status === input.status) return { task: existing, changed: false };
+
+      const previousStatusChangedAt = Date.parse(existing.status_changed_at ?? "");
+      const now = new Date(
+        Number.isFinite(previousStatusChangedAt) ? Math.max(Date.now(), previousStatusChangedAt + 1) : Date.now(),
+      ).toISOString();
+      const result = await trx
+        .updateTable("tasks")
+        .set({
+          status: input.status,
+          status_raw: input.status,
+          status_authority: "local",
+          status_changed_at: now,
+          completed_at: input.status === "done" ? now : null,
+          updated_at: now,
+        })
+        .where("id", "=", input.taskId)
+        .where("valid_to", "is", null)
+        .where("status", "=", existing.status)
+        .where("status_authority", "=", "local")
+        .where("provenance", "in", ["brief", "summary", "llm"])
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) === 0) continue;
+
+      await createTaskActivityRepository(trx).append({
+        taskId: existing.id,
+        eventKind: "status_changed",
+        actorType: "system",
+        surface: "sync",
+        changes: { status: { before: existing.status, after: input.status } },
+        evidence: { fileIds: [input.indexedFileId], excerpt: input.excerpt ?? undefined },
+        identityParts: [existing.id, input.indexedFileId, "status_changed"],
+        occurredAt: now,
+      });
+      const task = await trx.selectFrom("tasks").selectAll().where("id", "=", input.taskId).executeTakeFirstOrThrow();
+      return { task, changed: true };
+    }
+
+    return null;
+  });
 }
 
 export async function retireLlmTasksForTombstonedFacts(db: Kysely<DB>, factIds: string[]): Promise<number> {

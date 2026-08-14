@@ -1,3 +1,4 @@
+import type { Logger } from "pino";
 import type { GeminiGenerator } from "./gemini-generate";
 import type { LlmTaskCandidate } from "./types";
 
@@ -23,6 +24,8 @@ export interface ExtractLlmTaskCandidatesInput {
   priorTitles?: string[];
   projects?: LlmTaskProjectCandidate[];
   existingTasks?: string[];
+  existingTaskIdMap?: Map<string, string | null>;
+  logger?: Logger;
   generator: GeminiGenerator;
   promptVersion?: string;
   dumpDir?: string;
@@ -74,7 +77,9 @@ Return only JSON:
       "dueDate": "2025-04-30",
       "hasOwnerVerbObject": true,
       "sourceExcerpt": "Jane will ship Slack capture by Friday.",
-      "projectId": "a P-id from Available projects, or null"
+      "projectId": "a P-id from Available projects, or null",
+      "updateOf": "<t:id8> from Existing open tasks, or null",
+      "statusHint": "done, in_progress, blocked, or null"
     }
   ]
 }
@@ -88,8 +93,10 @@ Rules:
 - dueDate: ISO date (YYYY-MM-DD) the action is due, resolved against the source date below; null if no due date is stated. Do not invent one.
 - sourceExcerpt should be a brief supporting quote from the source.
 - projectId must be one of the P-ids above, or null.
-- Do not emit an action already covered by Existing open tasks.
-- Existing open tasks take precedence over prior-title reuse: omit an action if an open task already covers it.
+- If this evidence is about a task already in the Existing open tasks list — progress, completion, ownership change, or simply a new discussion of it — return updateOf with that task's id instead of re-stating it as new.
+- Only mint new when no listed task covers it.
+- Existing open tasks take precedence over prior-title reuse: use updateOf if an open task already covers it.
+- statusHint is optional. Set it only when the evidence clearly says the task is done, in_progress, or blocked.
 - If no action-items are present, return { "tasks": [] }.
 
 Attendees:
@@ -118,12 +125,14 @@ ${input.content.slice(0, LLM_TASK_CONTENT_LIMIT)}
   });
   const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
   const projectsById = new Map((input.projects ?? []).map((project) => [project.shortId, project]));
-  return tasks.flatMap((task) => readCandidate(task, projectsById));
+  return tasks.flatMap((task) => readCandidate(task, projectsById, input.existingTaskIdMap ?? new Map(), input.logger));
 }
 
 function readCandidate(
   value: unknown,
   projectsById: Map<string, LlmTaskProjectCandidate>,
+  existingTaskIdMap: Map<string, string | null>,
+  logger?: Logger,
 ): ExtractedLlmTaskCandidate[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const record = value as Record<string, unknown>;
@@ -133,6 +142,8 @@ function readCandidate(
   const dueDate =
     typeof record.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(record.dueDate) ? record.dueDate : undefined;
   const project = typeof record.projectId === "string" ? projectsById.get(record.projectId) : undefined;
+  const updateOf = resolveUpdateOf(record.updateOf, existingTaskIdMap, logger);
+  const statusHint = readStatusHint(record.statusHint);
   return [
     {
       title: record.title.trim(),
@@ -140,9 +151,30 @@ function readCandidate(
       dueDate,
       hasOwnerVerbObject: record.hasOwnerVerbObject,
       sourceExcerpt: typeof record.sourceExcerpt === "string" ? record.sourceExcerpt.trim() : undefined,
+      ...(updateOf ? { updateOf } : {}),
+      ...(statusHint ? { statusHint } : {}),
       ...(project ? { parentEntityId: project.id, projectName: project.name } : {}),
     },
   ];
+}
+
+function resolveUpdateOf(value: unknown, existingTaskIdMap: Map<string, string | null>, logger?: Logger) {
+  if (typeof value !== "string") return undefined;
+  const id = /^<?t:([a-zA-Z0-9]{8})>?$/.exec(value.trim())?.[1];
+  if (!id) {
+    logger?.warn({ updateOf: value }, "Dropping malformed task update reference");
+    return undefined;
+  }
+  const taskId = existingTaskIdMap.get(id);
+  if (!taskId) {
+    logger?.warn({ updateOf: value, id }, "Dropping unknown or ambiguous task update reference");
+    return undefined;
+  }
+  return taskId;
+}
+
+function readStatusHint(value: unknown): "done" | "in_progress" | "blocked" | undefined {
+  return value === "done" || value === "in_progress" || value === "blocked" ? value : undefined;
 }
 
 function readOwner(value: unknown): { name?: string; email?: string } | undefined {

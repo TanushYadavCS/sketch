@@ -1,5 +1,6 @@
 import { normalizeName } from "../connectors/name-normalize";
-import { upsertLlmTask } from "../db/repositories/tasks";
+import { createTaskActivityRepository } from "../db/repositories/task-activity";
+import { type TaskStatus, updateTaskStatusFromEvidence, upsertLlmTask } from "../db/repositories/tasks";
 import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
 import { readJsonObject } from "./materialize-json";
 import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
@@ -7,15 +8,29 @@ import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeRe
 export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   const raw = readLlmTask(readJsonObject(fact.raw));
   if (!raw) return { kind: "skipped", reason: "invalid_llm_task" };
+  const indexedFileId = fact.indexed_file_id;
+  if (!indexedFileId) return { kind: "skipped", reason: "invalid_llm_task" };
 
   const ownerUserId = deps.resolveOwner(fact);
   if (!ownerUserId) return { kind: "skipped", reason: "llm_task_no_owner" };
+
+  if (raw.updateOf) {
+    const updated = await materializeTaskUpdate(deps, raw.updateOf, raw, indexedFileId);
+    if (updated) return { kind: "task_materialized", taskId: raw.updateOf, created: false, updated: true };
+  }
 
   const parent = resolveParent(deps, raw);
   const collatedTaskId = await findCollationTaskId(deps, raw.title, parent?.id ?? null, ownerUserId);
   if (collatedTaskId) {
     await upsertTaskEvidence(deps, collatedTaskId, evidenceForFact(raw, [fact.id]));
-    return { kind: "task_materialized", taskId: collatedTaskId, created: false };
+    await appendTaskEvidenceActivity(deps, collatedTaskId, indexedFileId, raw.sourceExcerpt);
+    return { kind: "task_materialized", taskId: collatedTaskId, created: false, updated: true };
+  }
+
+  const mechanicalTaskId = await findMechanicalDedupTaskId(deps, raw.title, parent?.id ?? null, ownerUserId);
+  if (mechanicalTaskId) {
+    await materializeTaskUpdate(deps, mechanicalTaskId, raw, indexedFileId);
+    return { kind: "task_materialized", taskId: mechanicalTaskId, created: false, updated: true };
   }
 
   const corroborationCount = await countCorroboratingFiles(deps, raw.corroborationKey, ownerUserId);
@@ -105,6 +120,117 @@ async function findCollationTaskId(
     (row) => (row.provenance === "brief" || row.provenance === "llm") && row.created_by_user_id === ownerUserId,
   );
   return local?.id ?? null;
+}
+
+/**
+ * Parentless conversation evidence may not know the tracker parent. Structural
+ * tasks are authoritative about that shape, so a higher token-overlap bar is
+ * used before linking across the parent scope.
+ */
+async function findMechanicalDedupTaskId(
+  deps: MaterializeDeps,
+  title: string,
+  parentEntityId: string | null,
+  ownerUserId: string,
+): Promise<string | null> {
+  const candidateTokens = titleTokens(title);
+  if (candidateTokens.length < 2) return null;
+  const rows = await deps.db
+    .selectFrom("tasks")
+    .select(["id", "title", "parent_entity_id", "provenance", "created_by_user_id"])
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"])
+    .where((eb) =>
+      eb.or([
+        eb("provenance", "=", "structural"),
+        eb.and([eb("provenance", "in", ["llm", "brief"]), eb("created_by_user_id", "=", ownerUserId)]),
+      ]),
+    )
+    .execute();
+  const structural = rows.filter((row) => row.provenance === "structural");
+  const local = rows.filter((row) => row.provenance === "llm" || row.provenance === "brief");
+  for (const task of [...structural, ...local]) {
+    const taskTokens = titleTokens(task.title);
+    const shared = sharedTokenCount(candidateTokens, taskTokens);
+    if (shared < 2) continue;
+    const overlap = shared / Math.max(candidateTokens.length, taskTokens.length);
+    if ((task.parent_entity_id ?? null) === parentEntityId && overlap >= 0.8) return task.id;
+    if (
+      task.provenance === "structural" &&
+      parentEntityId === null &&
+      task.parent_entity_id !== null &&
+      overlap >= 0.9
+    ) {
+      return task.id;
+    }
+  }
+  return null;
+}
+
+async function materializeTaskUpdate(
+  deps: MaterializeDeps,
+  taskId: string,
+  raw: LlmTaskInput,
+  indexedFileId: string,
+): Promise<boolean> {
+  const task = await deps.db
+    .selectFrom("tasks")
+    .select(["id", "status", "status_authority"])
+    .where("id", "=", taskId)
+    .where("valid_to", "is", null)
+    .executeTakeFirst();
+  if (!task) return false;
+  await upsertTaskEvidence(deps, task.id, { fileIds: [indexedFileId], entityIds: [], factIds: [] });
+  const status = taskStatusFromHint(raw.statusHint);
+  if (status && task.status_authority === "local" && task.status !== status) {
+    const result = await updateTaskStatusFromEvidence(deps.db, {
+      taskId: task.id,
+      status,
+      indexedFileId,
+      excerpt: raw.sourceExcerpt,
+    });
+    if (result?.changed) return true;
+  }
+  await appendTaskEvidenceActivity(deps, task.id, indexedFileId, raw.sourceExcerpt);
+  return true;
+}
+
+async function appendTaskEvidenceActivity(
+  deps: MaterializeDeps,
+  taskId: string,
+  indexedFileId: string,
+  excerpt?: string,
+): Promise<void> {
+  await createTaskActivityRepository(deps.db).append({
+    taskId,
+    eventKind: "evidence_added",
+    actorType: "system",
+    surface: "sync",
+    evidence: { fileIds: [indexedFileId], excerpt },
+    identityParts: [taskId, indexedFileId, "evidence_added"],
+    occurredAt: new Date().toISOString(),
+  });
+}
+
+function taskStatusFromHint(value: LlmTaskInput["statusHint"]): TaskStatus | null {
+  if (value === "done" || value === "in_progress") return value;
+  return null;
+}
+
+function titleTokens(title: string): string[] {
+  return normalizeName(title)
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function sharedTokenCount(left: string[], right: string[]): number {
+  const rightTokens = new Set(right);
+  let count = 0;
+  for (const token of new Set(left)) {
+    if (rightTokens.has(token)) count += 1;
+  }
+  return count;
 }
 
 async function countCorroboratingFiles(
@@ -205,6 +331,8 @@ interface LlmTaskInput {
   owner?: { name?: string; email?: string };
   dueDate?: string;
   hasOwnerVerbObject: boolean;
+  updateOf?: string;
+  statusHint?: "done" | "in_progress" | "blocked";
   corroborationKey: string;
   parentRef?: { source: string; sourceId: string };
   parentEntityId?: string;
@@ -230,6 +358,8 @@ function readLlmTask(raw: Record<string, unknown>): LlmTaskInput | null {
     owner: readOwner(raw.owner),
     dueDate: readDueDate(raw.dueDate),
     hasOwnerVerbObject: raw.hasOwnerVerbObject,
+    updateOf: readOptionalString(raw.updateOf),
+    statusHint: readStatusHint(raw.statusHint),
     corroborationKey: raw.corroborationKey,
     parentRef: readParentRef(raw.parentRef),
     parentEntityId: readOptionalString(raw.parentEntityId),
@@ -271,4 +401,8 @@ function readOptionalString(value: unknown): string | undefined {
 
 function readDueDate(value: unknown): string | undefined {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
+function readStatusHint(value: unknown): "done" | "in_progress" | "blocked" | undefined {
+  return value === "done" || value === "in_progress" || value === "blocked" ? value : undefined;
 }
