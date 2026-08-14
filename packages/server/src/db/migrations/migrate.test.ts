@@ -29,7 +29,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 
-const EXPECTED_MIGRATION_COUNT = 184;
+const EXPECTED_MIGRATION_COUNT = 183;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
