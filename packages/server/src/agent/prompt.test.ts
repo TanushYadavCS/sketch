@@ -209,10 +209,10 @@ describe("buildSystemContext", () => {
     it("uses the same plain-language execution mode names as the builder", () => {
       const result = buildSystemContext({ platform: "slack" });
 
-      expect(result).toContain("Deterministic is code-only with no agent");
-      expect(result).toContain("Hybrid combines code and agent steps");
-      expect(result).toContain("Agent is agent-only");
-      expect(result).toContain("with Deterministic, Hybrid, and Agent as the choices");
+      expect(result).toContain("Fixed recipe runs action steps exactly as saved and has no AI steps");
+      expect(result).toContain("Recipe + AI combines deterministic action steps with bounded agent steps");
+      expect(result).toContain("Agent-led uses AI steps only and has no code or action steps");
+      expect(result).toContain("with Fixed recipe, Recipe + AI, and Agent-led as the choices");
     });
 
     it("prefers deterministic action steps for fixed automation work", () => {
