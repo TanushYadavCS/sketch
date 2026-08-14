@@ -495,6 +495,6 @@ describe("AutomationBuilderPage sharing", () => {
     expect(screen.getByText("Done — it runs Mondays at 9.")).toBeInTheDocument();
     await waitFor(() => expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-maya"));
     expect(mocks.setMessages).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: "maya-1" })]));
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
   });
 });
