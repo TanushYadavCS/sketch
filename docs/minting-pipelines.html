@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project minting and task minting — how both pipelines actually work</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  /* DESIGN TOKENS — change these, not the rules below. */
+  :root {
+    --ink:#14130e; --body:#33322a; --muted:#6f6e64; --faint:#8a8880;
+    --line:#e4e2da; --card:#faf9f6; --code:#f4f3ee; --page:#fff;
+    --bad:#8c2f1d; --ok:#2f5d3a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:"Inter",system-ui,sans-serif; background:var(--page); color:var(--body);
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+    max-width:880px; margin:0 auto; padding:56px 28px 120px;
+  }
+
+  h1 { font-size:30px; font-weight:700; color:var(--ink); letter-spacing:-.02em; line-height:1.2; }
+  .sub { color:var(--muted); font-size:16px; margin-top:10px; }
+  .meta { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); margin-top:14px; }
+
+  h2 { font-size:20px; font-weight:700; color:var(--ink); margin:52px 0 6px; letter-spacing:-.01em; }
+  h2 .n { font-family:"JetBrains Mono",monospace; font-size:14px; color:var(--faint); margin-right:10px; }
+  h3 { font-size:14px; font-weight:600; color:var(--ink); margin:22px 0 8px; }
+  p { margin:10px 0; font-size:15.5px; }
+  hr { border:0; border-top:1px solid var(--line); margin:0; }
+
+  .where { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--muted);
+           background:var(--code); border-radius:5px; padding:3px 8px; display:inline-block; margin-top:4px; }
+
+  .diagram { margin:36px 0 8px; border:1px solid var(--line); border-radius:12px; padding:26px 22px; background:var(--card); }
+  .blk { border:1px solid var(--line); background:var(--page); border-radius:9px; padding:13px 16px; display:flex; gap:14px; align-items:baseline; }
+  .blk .bn { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); flex:0 0 18px; }
+  .blk .bt { font-weight:600; color:var(--ink); font-size:15px; flex:0 0 190px; }
+  .blk .bd { font-size:13.5px; color:var(--muted); }
+  .blk.dead { opacity:.55; border-style:dashed; }
+  .arrow { text-align:center; color:var(--faint); font-size:15px; line-height:1; margin:5px 0; }
+  .arrow small { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.06em; margin-left:8px; color:var(--faint); }
+  .gap { height:14px; }
+  .lane { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.11em;
+          text-transform:uppercase; color:var(--faint); margin:16px 0 8px; }
+
+  pre { background:var(--code); border:1px solid var(--line); border-radius:8px; padding:15px 17px;
+        overflow-x:auto; font-family:"JetBrains Mono",monospace; font-size:12.5px; line-height:1.65;
+        color:var(--ink); margin:12px 0; white-space:pre; }
+  pre .c { color:var(--faint); }
+  pre .x { color:var(--bad); font-weight:500; }
+  code { font-family:"JetBrains Mono",monospace; font-size:13px; background:var(--code);
+         padding:1px 5px; border-radius:4px; color:var(--ink); }
+
+  .note { border-left:3px solid var(--ink); background:var(--card); padding:12px 16px;
+          border-radius:0 8px 8px 0; margin:16px 0; font-size:14.5px; }
+  .note b { color:var(--ink); }
+  .note.bad { border-left-color:var(--bad); }
+  .note.ok  { border-left-color:var(--ok); }
+
+  ul { margin:10px 0 10px 20px; } li { margin:5px 0; font-size:15px; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
+  td.k { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--ink); white-space:nowrap; }
+  td.z { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--bad); font-weight:500; }
+
+  .pr { border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; background:var(--card); }
+  .pr .t { font-weight:700; color:var(--ink); font-size:15.5px; }
+  .pr .s { font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--faint);
+           text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
+</style>
+</head>
+<body>
+
+<h1>Two minting pipelines that never meet</h1>
+<p class="sub">Project minting builds the containers. Task minting fills a project slot on every task it creates. In 1,123 measured candidates, that slot was filled zero times.</p>
+<p class="meta">sketch · packages/server/src/connectors · feat/project-minting-reconcile @ 0d5c8ae6</p>
+
+<div class="diagram">
+  <div class="lane">Project minting — per company, run by hand</div>
+  <div class="blk"><span class="bn">1</span><span class="bt">Cluster files</span><span class="bd">Group every file around one outside company, by three signals.</span></div>
+  <div class="arrow">↓ <small>3,801 files → 2,298 inside a cluster, 90 clusters</small></div>
+  <div class="blk"><span class="bn">2</span><span class="bt">Trigger check</span><span class="bd">Does any title family recur on ≥2 distinct days?</span></div>
+  <div class="arrow">↓ <small>90 clusters → 35 triggered</small></div>
+  <div class="blk"><span class="bn">3</span><span class="bt">Build dossier</span><span class="bd">Deterministic markdown: files, people, channels, what is already declared.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">4</span><span class="bt">Verdict (model)</span><span class="bd">Nominates what the counterparty is, and proposes a container plus projects.</span></div>
+  <div class="arrow">↓ <small>nothing is written yet</small></div>
+  <div class="blk"><span class="bn">5</span><span class="bt">Human accepts</span><span class="bd">Confirms the axes. Only now do project entities exist.</span></div>
+
+  <div class="gap"></div>
+  <div class="lane">Task minting — per file, during enrichment</div>
+  <div class="blk"><span class="bn">6</span><span class="bt">Nearest 20 files</span><span class="bd">Cosine neighbours by embedding. Defines what context is in scope.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">7</span><span class="bt">Gather context</span><span class="bd">Attendees, up to 100 projects, up to 60 open tasks, 50 prior titles.</span></div>
+  <div class="arrow">↓ <small>336 of 3,801 files ever produced a candidate</small></div>
+  <div class="blk"><span class="bn">8</span><span class="bt">Extract (model)</span><span class="bd">Returns title, owner, due date, an honesty flag, and a project id.</span></div>
+  <div class="arrow">↓ <small>1,123 candidates</small></div>
+  <div class="blk"><span class="bn">9</span><span class="bt">Collate, then gate</span><span class="bd">Fold into an existing task, or require corroboration from a second file.</span></div>
+  <div class="arrow">↓ <small>891 reached a task · 232 left nothing</small></div>
+  <div class="blk"><span class="bn">10</span><span class="bt">Write task</span><span class="bd">714 tasks. Every one of them parentless.</span></div>
+
+  <div class="gap"></div>
+  <div class="lane">The link between them</div>
+  <div class="blk dead"><span class="bn">11</span><span class="bt">Task → project</span><span class="bd">Step 7 sends the projects step 5 created. Step 8 may name one. It never has.</span></div>
+</div>
+<p style="font-size:14px;color:var(--muted)">The two lanes run on different clocks and different units — one per company on demand, one per file during enrichment. Nothing schedules them together.</p>
+
+<hr style="margin-top:40px" />
+
+<h2><span class="n">01</span>The corpus these numbers come from</h2>
+<p>Everything below was measured against a clone of a real workspace, not a fixture. Where a number is missing, I say so rather than estimating.</p>
+<table>
+  <tr><th>Thing</th><th>Count</th><th>So what</th></tr>
+  <tr><td>Indexed files</td><td class="k">3,801</td><td>The whole input to both pipelines.</td></tr>
+  <tr><td>Files with an embedding</td><td class="k">3,527</td><td>274 files have no embedding, so task minting sees no neighbours for them.</td></tr>
+  <tr><td>Live companies</td><td class="k">305</td><td>Only 90 of these gather enough files to cluster.</td></tr>
+  <tr><td>Live projects</td><td class="k">78</td><td>What task minting has available to attach a task to.</td></tr>
+  <tr><td>Tasks, all sources</td><td class="k">1,373</td><td>714 from the model, 362 Linear, 286 brief, 11 summary.</td></tr>
+</table>
+
+<h2><span class="n">02</span>Project minting, stage 1: what puts a file in a cluster</h2>
+<p>A cluster is every file that belongs to one outside company. Three signals put a file there, and a file can arrive by more than one.</p>
+<p><span class="where">connectors/project-minting.ts:306 · clusterClientFiles</span></p>
+<table>
+  <tr><th>Signal</th><th>File memberships</th><th>Rule</th></tr>
+  <tr><td><code>participant_domain</code></td><td class="k">1,944</td><td>Someone on the file has an email at the company's corporate domain.</td></tr>
+  <tr><td><code>dedicated_channel</code></td><td class="k">309</td><td>The file came from a channel named after the company.</td></tr>
+  <tr><td><code>family_accretion</code></td><td class="k">198</td><td>The file shares a recurring title family with files already in the cluster.</td></tr>
+</table>
+<p>Companies are deduplicated first, so shards join as one cluster — Oliver Wyman and OW are two entities and one cluster. Own-org groups and email-provider names (Gmail, iCloud) are dropped before any of this runs.</p>
+
+<div class="note"><b>Channel matching requires the complete name.</b> A company called "Sketch Design" cannot claim the <code>#design</code> channel from a fragment of its own name. That rule exists because the earlier substring version over-linked heavily.</div>
+
+<h2><span class="n">03</span>Stage 2: the trigger, and why most clusters stop here</h2>
+<p>Existing is not the same as worth asking about. A cluster is only sent to the model if it shows a <em>rhythm</em>.</p>
+<pre>export function clusterIsTriggered(families: TitleFamily[]): boolean {
+  return families.some((family) =&gt; family.count &gt;= 2 &amp;&amp; family.distinctDays &gt;= 2);
+}</pre>
+<p>One title family — a normalised subject or meeting name — has to appear at least twice, on at least two different days. One long thread on one day is not a relationship.</p>
+<table>
+  <tr><th>Cluster size</th><th>Clusters</th><th>Of those, triggered</th></tr>
+  <tr><td>≥ 2 files</td><td class="k">90</td><td class="k">35</td></tr>
+  <tr><td>≥ 5 files</td><td class="k">31</td><td class="k">27</td></tr>
+  <tr><td>≥ 10 files</td><td class="k">21</td><td class="k">21</td></tr>
+  <tr><td>≥ 50 files</td><td class="k">8</td><td class="k">8</td></tr>
+</table>
+<p>The filter does its work at the small end. Every cluster with 10 or more files triggers; below 5 files, most do not. The largest are Oliver Wyman (689 files, 2 shards), Getepik (409, 2 shards) and Habuild (336).</p>
+
+<h2><span class="n">04</span>Stages 3–5: the model nominates, a human declares</h2>
+<p>The dossier is built by code, not by a model — files, people, channels, tracker containers, and what the registry already says about this counterparty. The model reads it and returns a verdict.</p>
+<p>What the model returns is a <b>nomination</b>, never a declaration. It proposes two axes — what the counterparty is (<code>client</code>, <code>vendor</code>, <code>investor</code>, <code>partner</code>, <code>other</code>) and, for a client or partner, where the relationship stands (<code>prospect</code>, <code>pilot</code>, <code>active</code>, <code>dormant</code>, <code>ended</code>). Accepting is what turns the reviewer's answer into the declaration.</p>
+<p><span class="where">connectors/project-minting-acceptance.ts:200 · acceptedProjectsForConfirmedAxes</span></p>
+<p>The stage decides the shape that may be written:</p>
+<table>
+  <tr><th>Confirmed</th><th>Container</th><th>Projects</th></tr>
+  <tr><td><code>vendor · investor · other</code></td><td>none</td><td>none</td></tr>
+  <tr><td><code>dormant · ended</code></td><td>none</td><td>none — existing entities untouched</td></tr>
+  <tr><td><code>prospect</code></td><td>must be absent</td><td>permitted</td></tr>
+  <tr><td><code>pilot</code></td><td>a project, not an engagement</td><td>at least one</td></tr>
+  <tr><td><code>active</code></td><td>an engagement, required</td><td>as proposed</td></tr>
+</table>
+<p>Two rules resolve every case: the gate never invents shape, so a confirmed stage needing a container the verdict lacks is refused; and it never mints above the confirmed ceiling, so correcting downward drops the excess and reports what it dropped.</p>
+
+<div class="note bad"><b>I got the pilot row wrong first time.</b> I wrote a build brief saying "pilot and active get a container", which reads as an engagement for both. The prompt actually mints a pilot's container as a <em>project</em> named "&lt;Counterparty&gt; deployment" with a null engagement. A gate built from my sentence would have refused every correctly-formed pilot verdict. A review caught it before it was built.</div>
+
+<h2><span class="n">05</span>Task minting: a different unit, a different clock</h2>
+<p>Task minting runs per file, inside enrichment. It does not know about clusters, and clustering does not know about it.</p>
+<p><span class="where">connectors/task-minting.ts:114 · mintTasksFromFile</span></p>
+<p>The first step decides everything downstream: the 20 nearest files by embedding distance. That neighbourhood is what "relevant open tasks" and "relevant projects" are computed from. A file with no embedding gets no neighbourhood, and its context collapses to itself.</p>
+<p>Then five context blocks go into the prompt:</p>
+<table>
+  <tr><th>Block</th><th>Cap</th><th>Selected by</th></tr>
+  <tr><td>Attendees</td><td class="k">—</td><td>People on this file.</td></tr>
+  <tr><td>Projects</td><td class="k">100</td><td>Live and visible; those mentioned in the 20 nearest files first, then A–Z.</td></tr>
+  <tr><td>Open tasks</td><td class="k">60</td><td>Evidenced in the 20 nearest files, plus tasks assigned to this file's attendees.</td></tr>
+  <tr><td>Prior titles</td><td class="k">50</td><td>Titles already minted, so the model can avoid repeating itself.</td></tr>
+  <tr><td>Parent refs</td><td class="k">—</td><td>Tracker containers this file already belongs to.</td></tr>
+</table>
+
+<div class="note"><b>Minting reads globally on purpose.</b> The neighbourhood query applies no visibility filter. The comment in the code is the design: the control that matters is on what minting <em>writes</em>, not what it reads.</div>
+
+<h2><span class="n">06</span>The gate: an honesty flag, or a second file</h2>
+<p>The model returns <code>hasOwnerVerbObject</code> — its own claim that the text named a person, an action, and a thing. That flag is the whole gate.</p>
+<p><span class="where">entities/materialize-llm-task.ts:7 · materializeLlmTask</span></p>
+<pre>const corroborationCount = await countCorroboratingFiles(deps, raw.corroborationKey, ownerUserId);
+if (raw.hasOwnerVerbObject || corroborationCount &gt;= deps.llmTaskCorroborationThreshold) {
+  <span class="c">// …write the task</span>
+}
+return { kind: "skipped", reason: "llm_task_ungated" };</pre>
+<p>A confident candidate is written from one file. An unconfident one waits until the same normalised title shows up in a second file (<code>LLM_TASK_CORROBORATION_THRESHOLD</code>, default 2). Before either check, collation runs: if a task with that title and parent already exists, the candidate becomes extra evidence on it rather than a new row.</p>
+<table>
+  <tr><th>Stage</th><th>Count</th><th>Share</th></tr>
+  <tr><td>Candidates extracted</td><td class="k">1,123</td><td>from 336 distinct files</td></tr>
+  <tr><td>Claimed owner + verb + object</td><td class="k">651</td><td>58% — written on their own</td></tr>
+  <tr><td>Did not claim it</td><td class="k">472</td><td>42% — need a second file</td></tr>
+  <tr><td>Reached a task</td><td class="k">891</td><td>79%</td></tr>
+  <tr><td>Left no task at all</td><td class="z">232</td><td>21%</td></tr>
+  <tr><td>Distinct tasks created</td><td class="k">714</td><td>572 from a single candidate; 142 collated from 2–5</td></tr>
+</table>
+
+<div class="note bad"><b>A gated candidate is stamped <code>materialized_at</code> anyway.</b> All 1,123 facts carry a materialization timestamp, including the 232 that produced nothing. The flag means "processed, do not retry", not "became a task" — <code>shouldMarkMaterialized</code> returns true for <code>skipped</code> unless the reason is one of five specific ones, and <code>llm_task_ungated</code> is not among them. Querying <code>materialized_at</code> to find what minting produced gives 100% and is wrong.</div>
+
+<h2><span class="n">07</span>Where the two pipelines were supposed to meet</h2>
+<p>The wiring exists. Task minting sends up to 100 projects into the prompt, each with a short id. The model may return a <code>projectId</code>, which is resolved through a lookup table — an id, not a name match, so it cannot invent one.</p>
+<pre>const project = typeof record.projectId === "string" ? projectsById.get(record.projectId) : undefined;
+return [{
+  title: record.title.trim(),
+  <span class="c">/* … */</span>
+  ...(project ? { parentEntityId: project.id, projectName: project.name } : {}),   <span class="x">// never taken</span>
+}];</pre>
+<p>Measured across every stored candidate:</p>
+<table>
+  <tr><th>Measure</th><th>Count</th><th>Of</th></tr>
+  <tr><td>Candidates naming a project</td><td class="z">0</td><td>1,123</td></tr>
+  <tr><td>Tasks with a project parent</td><td class="z">0</td><td>714</td></tr>
+  <tr><td>Live projects available to name</td><td class="k">78</td><td>—</td></tr>
+</table>
+<p>All 1,123 facts carry <code>promptVersion: "llm-task-v1"</code>, which is the version the code runs today, minted 6–13 July 2026. So this is not a stale-snapshot artefact of an older prompt. It is what the current prompt produces on this corpus.</p>
+
+<div class="note bad"><b>This is the finding.</b> Project minting's entire output is a set of containers. Task minting has a slot for exactly that, sends the candidates, and fills it zero times out of 1,123. Every model-minted task in this workspace is parentless.</div>
+
+<p>What I did <em>not</em> measure, and would need before assigning a cause: whether the projects block was non-empty in those runs. The block is assembled at mint time and not stored on the fact, so a run against a workspace with few projects is indistinguishable from a model ignoring a full list. The 78 live projects exist now; how many existed in early July, and how many survived the visibility filter and the 100 cap, is not recoverable from the stored data. That is the next thing to measure, and it decides whether this is a prompt problem or a context problem.</p>
+
+<h2><span class="n">08</span>Assignees resolve much better than projects</h2>
+<p>Worth stating because it shows the parentless result is specific, not a general failure to link.</p>
+<table>
+  <tr><th>Assignee on model-minted tasks</th><th>Count</th><th>Share of 714</th></tr>
+  <tr><td>Resolved to a person entity</td><td class="k">566</td><td>79%</td></tr>
+  <tr><td>Name recorded, no entity</td><td class="k">81</td><td>11%</td></tr>
+  <tr><td>No assignee</td><td class="k">67</td><td>9%</td></tr>
+</table>
+<p>The same model, on the same files, links four out of five tasks to a real person and zero to a project. Whatever is wrong is not the model's general ability to pick from a list.</p>
+
+<h2><span class="n">09</span>Where this stands</h2>
+<ul>
+  <li>Project minting works through stage 5 and now has a review surface at <code>/dev-tools</code>. Nothing triggers it over HTTP — the pass runs from <code>scripts/project-mint-pass.ts</code>.</li>
+  <li>Task minting runs automatically inside enrichment and needs no operator.</li>
+  <li>The two do not compose. The link is one field, it is wired end to end, and it has never carried a value.</li>
+  <li>Open, and decidable with one measurement: whether the projects context block is arriving empty. Until that is known, do not change the prompt.</li>
+</ul>
+
+<p class="meta" style="margin-top:38px">Measured against a clone of a live workspace, 3,801 files. Related: .planning/tasks/to-be-developed/PROJECT_MINTING.md</p>
+
+</body>
+</html>
