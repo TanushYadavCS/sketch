@@ -269,7 +269,7 @@ const authoredScheduledTasksSchema = {
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
 - 'share': return the canonical URL for an automation (requires task_id)
 - 'lockStatus': report who currently holds the edit lock on an automation and when it expires (requires task_id)
-- 'steal': request the edit lock on an automation another editor is holding (requires task_id)`
+- 'steal': request the edit lock on an automation another editor is holding (requires task_id)`,
     ),
   request: z
     .string()
