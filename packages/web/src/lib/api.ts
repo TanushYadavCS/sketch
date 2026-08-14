@@ -435,8 +435,12 @@ export interface ProjectMintingProject {
   name: string;
   status: "proposed" | "active" | "delivered" | "lost";
   confidence: "high" | "medium" | "low";
+  /** v2 verdicts only: the name of another project in the same verdict, or null for top-level. */
+  parentName?: string | null;
   evidenceTitleFamilies: string[];
   evidenceRepos: string[];
+  /** v2 verdicts only: existing project-entity ids cited as evidence. */
+  evidenceFragments?: string[];
   evidencePeople: string[];
   reasoning?: string;
 }
@@ -476,6 +480,9 @@ export interface ProjectMintingVerdict {
     notes: string[];
   };
   dossier?: string;
+  promptVersion: string;
+  /** True for one-noun (recursive parentName) verdicts; false for engagement-era rows. */
+  schemaV2: boolean;
   status: string;
   supersededAt: string | null;
   decidedAt: string | null;
@@ -511,12 +518,14 @@ export interface ProjectMintingAcceptBody {
   struckProjectNames?: string[];
   renameMap?: Record<string, string>;
   overrideTripwireFlags?: boolean;
+  /** Compute the full acceptance without writing anything. */
+  dryRun?: boolean;
 }
 
 export interface ProjectMintingAcceptance {
   verdictId: string;
   entityIds: { engagementId: string | null; projectIds: string[] };
-  entities: { id: string; name: string; kind: "engagement" | "project"; fileIds: string[] }[];
+  entities: { id: string; name: string; kind: "engagement" | "project"; parentId?: string | null; fileIds: string[] }[];
   mergeIds: string[];
   struckProjects: string[];
   droppedByGate: {
@@ -526,6 +535,10 @@ export interface ProjectMintingAcceptance {
   };
   /** Anchors that matched nothing. The accept still went through on the ones that did. Absent on older stored results. */
   unresolvedAnchors?: string[];
+  /** Dry runs only: where files matching no project will attach, or null when nothing catches them. */
+  residualTarget?: string | null;
+  /** Present and true when the acceptance was computed without writes. */
+  dryRun?: boolean;
   declaration: { subjectEntityId: string; counterpartyKind: CounterpartyKind; clientStage: ClientStage | null };
   taskParentUpdates: number;
 }

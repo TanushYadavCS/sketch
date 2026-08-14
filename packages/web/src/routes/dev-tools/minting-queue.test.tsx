@@ -38,6 +38,8 @@ function verdict(overrides: Partial<ProjectMintingVerdict> = {}): ProjectMinting
       notes: [],
     },
     dossier: "# Oliver Wyman\n\nfiles…",
+    promptVersion: "project-minting-verdict-v2",
+    schemaV2: false,
     status: "pending",
     supersededAt: null,
     decidedAt: null,
@@ -48,15 +50,47 @@ function verdict(overrides: Partial<ProjectMintingVerdict> = {}): ProjectMinting
   };
 }
 
-function serve(row: ProjectMintingVerdict, onAccept?: (body: Record<string, unknown>) => void) {
+/**
+ * The sheet now previews via a server dry run (POST acceptance with
+ * dryRun: true), so every scenario needs an acceptance handler; `onDryRun`
+ * shapes what the preview shows, and `onAccept` observes only real accepts.
+ */
+function serve(
+  row: ProjectMintingVerdict,
+  opts: {
+    onAccept?: (body: Record<string, unknown>) => void;
+    dryRunAcceptance?: (body: Record<string, unknown>) => Record<string, unknown> | Response;
+  } = {},
+) {
   server.use(
     http.get("/api/project-minting/verdicts", () => HttpResponse.json({ verdicts: [row] })),
     http.get("/api/project-minting/verdicts/:id", () => HttpResponse.json({ verdict: row })),
     http.post("/api/project-minting/verdicts/:id/acceptance", async ({ request }) => {
-      onAccept?.((await request.json()) as Record<string, unknown>);
+      const body = (await request.json()) as Record<string, unknown>;
+      if (body.dryRun === true) {
+        const acceptance = opts.dryRunAcceptance?.(body) ?? emptyAcceptance(row.id);
+        if (acceptance instanceof HttpResponse) return acceptance;
+        return HttpResponse.json({ acceptance });
+      }
+      opts.onAccept?.(body);
       return HttpResponse.json({ acceptance: { verdictId: row.id } });
     }),
   );
+}
+
+function emptyAcceptance(verdictId: string): Record<string, unknown> {
+  return {
+    verdictId,
+    entityIds: { engagementId: null, projectIds: [] },
+    entities: [],
+    mergeIds: [],
+    struckProjects: [],
+    droppedByGate: { engagement: null, projects: [], unmergedFragments: [] },
+    unresolvedAnchors: [],
+    residualTarget: null,
+    taskParentUpdates: 0,
+    dryRun: true,
+  };
 }
 
 describe("project minting review", () => {
@@ -80,13 +114,16 @@ describe("project minting review", () => {
    */
   it("accepts with the axes the reviewer picked, not the ones the model nominated", async () => {
     let accepted: Record<string, unknown> | null = null;
-    serve(verdict(), (body) => {
-      accepted = body;
+    serve(verdict(), {
+      onAccept: (body) => {
+        accepted = body;
+      },
     });
     renderWithProviders(<MintingQueue />);
 
     await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
     await userEvent.click(await screen.findByRole("button", { name: "vendor" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Accept as vendor" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Accept as vendor" }));
 
     await waitFor(() => expect(accepted).not.toBeNull());
@@ -98,7 +135,25 @@ describe("project minting review", () => {
    * to say so — that consequence is the reason this surface exists.
    */
   it("shows the container being dropped when the stage is corrected down to prospect", async () => {
-    serve(verdict());
+    const row = verdict();
+    serve(row, {
+      dryRunAcceptance: (body) =>
+        body.confirmedClientStage === "active"
+          ? {
+              ...emptyAcceptance(row.id),
+              entities: [
+                { id: "", name: "Oliver Wyman", kind: "engagement", parentId: null, fileIds: [] },
+                { id: "", name: "OW risk platform", kind: "project", parentId: null, fileIds: ["f1", "f2"] },
+              ],
+              residualTarget: "Oliver Wyman",
+            }
+          : {
+              ...emptyAcceptance(row.id),
+              entities: [{ id: "", name: "OW risk platform", kind: "project", parentId: null, fileIds: ["f1"] }],
+              droppedByGate: { engagement: "Oliver Wyman", projects: [], unmergedFragments: [] },
+              residualTarget: "OW risk platform",
+            },
+    });
     renderWithProviders(<MintingQueue />);
 
     await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
@@ -132,20 +187,92 @@ describe("project minting review", () => {
     renderWithProviders(<MintingQueue />);
 
     await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Accept as client · active" }));
+    const acceptButton = await screen.findByRole("button", { name: "Accept as client · active" });
+    await waitFor(() => expect(acceptButton).toBeEnabled());
+    await userEvent.click(acceptButton);
 
     expect(await screen.findByText(/1 anchor matched nothing/)).toBeInTheDocument();
     expect(screen.getByText('title family "Mobile App Redesign" on project "Mobile App Redesign"')).toBeInTheDocument();
   });
 
-  it("refuses to offer accept when an active client has no container to mint", async () => {
+  it("shows the server's refusal and disables accept when the dry run is rejected", async () => {
     const row = verdict();
-    serve({ ...row, verdict: { ...row.verdict, engagement: null } });
+    serve(
+      { ...row, verdict: { ...row.verdict, engagement: null } },
+      {
+        dryRunAcceptance: () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: "INVALID_ACCEPTANCE_SHAPE",
+                message: "An active client needs an account container, and this verdict proposes none.",
+              },
+            },
+            { status: 422 },
+          ),
+      },
+    );
     renderWithProviders(<MintingQueue />);
 
     await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
 
     expect(await screen.findByText(/An active client needs an account container/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Accept as client · active" })).toBeDisabled();
+  });
+
+  it("renders v2 verdicts as a tree, children indented under their parents", async () => {
+    const row = verdict({
+      promptVersion: "project-minting-verdict-v3",
+      schemaV2: true,
+      verdict: {
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: null,
+        projects: [
+          {
+            name: "Habuild Sketch deployment",
+            status: "active",
+            confidence: "high",
+            parentName: "Habuild",
+            evidenceTitleFamilies: [],
+            evidenceRepos: [],
+            evidencePeople: [],
+            evidenceFragments: ["frag-1"],
+          },
+          {
+            name: "Habuild",
+            status: "active",
+            confidence: "high",
+            parentName: null,
+            evidenceTitleFamilies: ["Habuild standup"],
+            evidenceRepos: [],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      },
+    });
+    serve(row, {
+      dryRunAcceptance: () => ({
+        ...emptyAcceptance(row.id),
+        entities: [
+          { id: "", name: "Habuild", kind: "project", parentId: null, fileIds: ["f1"] },
+          { id: "", name: "Habuild Sketch deployment", kind: "project", parentId: null, fileIds: ["f2"] },
+        ],
+        residualTarget: "Habuild",
+      }),
+    });
+    renderWithProviders(<MintingQueue />);
+
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+
+    const parentRow = (await screen.findByText("Habuild", { selector: "label span span" })).closest("div[style]");
+    const childRow = screen.getByText("Habuild Sketch deployment").closest("div[style]");
+    expect(parentRow).toHaveStyle({ paddingLeft: "12px" });
+    expect(childRow).toHaveStyle({ paddingLeft: "32px" });
+    expect(await screen.findByText(/Create “Habuild Sketch deployment” under “Habuild”/)).toBeInTheDocument();
+    expect(screen.getByText(/1 fragments/)).toBeInTheDocument();
   });
 });
