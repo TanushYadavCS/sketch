@@ -220,10 +220,10 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[179]).toBe("184-person-contact-point-cutover");
     expect(names[180]).toBe("185-queue-pass-reason");
     expect(names[181]).toBe("186-entity-merge-groups");
-    expect(names[182]).toBe("187-automation-shares");
-    expect(names[183]).toBe("187-entity-name-proposals");
-    expect(names[184]).toBe("188-automation-locks");
-    expect(names[185]).toBe("189-cli-integration-connections");
+    expect(names[182]).toBe("187-entity-name-proposals");
+    expect(names[183]).toBe("188-automation-shares");
+    expect(names[184]).toBe("189-automation-locks");
+    expect(names[185]).toBe("190-cli-integration-connections");
   });
 
   it("keeps the automation-sharing migration ledger in order", async () => {
@@ -244,9 +244,9 @@ describe("runMigrations on Postgres — full sequence", () => {
       "184-person-contact-point-cutover",
       "185-queue-pass-reason",
       "186-entity-merge-groups",
-      "187-automation-shares",
       "187-entity-name-proposals",
-      "188-automation-locks",
+      "188-automation-shares",
+      "189-automation-locks",
     ]);
   });
 
