@@ -131,7 +131,6 @@ export class ProjectMintingAcceptanceError extends Error {
       | "WOULD_CYCLE"
       | "CLUSTER_NOT_FOUND"
       | "INVALID_ACCEPTANCE_SHAPE"
-      | "WOULD_CYCLE"
       | "INVALID_ACCEPTANCE",
     message: string,
     public readonly details?: Record<string, unknown>,
