@@ -90,7 +90,7 @@
   <div class="blk"><span class="bn">5</span><span class="bt">Human accepts</span><span class="bd">Confirms the axes. Only now do project entities exist.</span></div>
 
   <div class="gap"></div>
-  <div class="lane">Task minting — per file, during enrichment</div>
+  <div class="lane">Task minting — per file, only when a human clicks "Mint tasks"</div>
   <div class="blk"><span class="bn">6</span><span class="bt">Nearest 20 files</span><span class="bd">Cosine neighbours by embedding. Defines what context is in scope.</span></div>
   <div class="arrow">↓</div>
   <div class="blk"><span class="bn">7</span><span class="bt">Gather context</span><span class="bd">Attendees, up to 100 projects, up to 60 open tasks, 50 prior titles.</span></div>
@@ -105,7 +105,7 @@
   <div class="lane">The link between them</div>
   <div class="blk dead"><span class="bn">11</span><span class="bt">Task → project</span><span class="bd">Step 7 sends the projects step 5 created. Step 8 may name one. It never has.</span></div>
 </div>
-<p style="font-size:14px;color:var(--muted)">The two lanes run on different clocks and different units — one per company on demand, one per file during enrichment. Nothing schedules them together.</p>
+<p style="font-size:14px;color:var(--muted)">Neither lane runs on a clock. Project minting is a script someone runs; task minting is a button someone clicks on one file. Nothing schedules either, and nothing connects them.</p>
 
 <hr style="margin-top:40px" />
 
@@ -165,8 +165,11 @@
 
 <div class="note bad"><b>I got the pilot row wrong first time.</b> I wrote a build brief saying "pilot and active get a container", which reads as an engagement for both. The prompt actually mints a pilot's container as a <em>project</em> named "&lt;Counterparty&gt; deployment" with a null engagement. A gate built from my sentence would have refused every correctly-formed pilot verdict. A review caught it before it was built.</div>
 
-<h2><span class="n">05</span>Task minting: a different unit, a different clock</h2>
-<p>Task minting runs per file, inside enrichment. It does not know about clusters, and clustering does not know about it.</p>
+<h2><span class="n">05</span>Task minting: a different unit, and no clock at all</h2>
+<p>Task minting runs on one file, and only when someone asks. There are two entry points and both are a button: <b>Mint tasks</b> on the file detail sheet, and the Mint button in <code>/dev-tools</code>. Nothing in the enrichment pipeline calls it, and no scheduler, queue or cron does either.</p>
+<p><span class="where">api/connectors.ts:2569 · POST /files/:fileId/tasks</span></p>
+<p>That shows up in the data. Only <b>336 of 3,801 files</b> — 9% — have ever produced a candidate. This is not a pipeline that swept the corpus; it is one that was fired by hand a few hundred times.</p>
+<p>It does not know about clusters, and clustering does not know about it.</p>
 <p><span class="where">connectors/task-minting.ts:114 · mintTasksFromFile</span></p>
 <p>The first step decides everything downstream: the 20 nearest files by embedding distance. That neighbourhood is what "relevant open tasks" and "relevant projects" are computed from. A file with no embedding gets no neighbourhood, and its context collapses to itself.</p>
 <p>Then five context blocks go into the prompt:</p>
@@ -236,7 +239,7 @@ return [{
 <h2><span class="n">09</span>Where this stands</h2>
 <ul>
   <li>Project minting works through stage 5 and now has a review surface at <code>/dev-tools</code>. Nothing triggers it over HTTP — the pass runs from <code>scripts/project-mint-pass.ts</code>.</li>
-  <li>Task minting runs automatically inside enrichment and needs no operator.</li>
+  <li>Task minting is reachable in the product but entirely operator-driven — one file per click, from the file sheet or dev-tools. Nothing runs it in the background, so coverage is whatever someone happened to click.</li>
   <li>The two do not compose. The link is one field, it is wired end to end, and it has never carried a value.</li>
   <li>Open, and decidable with one measurement: whether the projects context block is arriving empty. Until that is known, do not change the prompt.</li>
 </ul>
