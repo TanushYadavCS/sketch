@@ -2224,21 +2224,23 @@ function BuilderChatTranscript({
   return (
     <>
       <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4">
-        {historyReady && !historyLoadError && chat.messages.length === 0 ? (
+        {historyReady && !historyLoadError ? (
           <div className="mb-6 space-y-5">
             {originContextLoading ? <BuilderSourceContextLoading /> : null}
             {originContextMessages.length > 0 ? <BuilderSourceContext messages={originContextMessages} /> : null}
-            {!isSetupPlaceholder || originContextMessages.length > 0 ? (
-              <SketchMessage>
-                <AutomationSetupCard
-                  mode={executionMode}
-                  recommendation={executionModeRecommendation}
-                  onSelect={onExecutionModeSelect}
-                />
-              </SketchMessage>
-            ) : (
-              <AutomationDescriptionPrompt />
-            )}
+            {chat.messages.length === 0 ? (
+              !isSetupPlaceholder || originContextMessages.length > 0 ? (
+                <SketchMessage>
+                  <AutomationSetupCard
+                    mode={executionMode}
+                    recommendation={executionModeRecommendation}
+                    onSelect={onExecutionModeSelect}
+                  />
+                </SketchMessage>
+              ) : (
+                <AutomationDescriptionPrompt />
+              )
+            ) : null}
           </div>
         ) : null}
         {!historyReady ? (

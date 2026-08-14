@@ -525,6 +525,64 @@ describe("AutomationBuilderPage", () => {
     expect(screen.queryByText("What should this automation do?")).not.toBeInTheDocument();
   });
 
+  it("keeps the originating request visible after the execution-mode message is added", async () => {
+    const placeholder = {
+      ...automation,
+      isPlaceholderDraft: true,
+      originChat: {
+        platform: "web" as const,
+        conversationId: "chat-alpha",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    };
+    mocks.getAutomation.mockResolvedValue(placeholder);
+    mocks.search = { conversationId: "builder-alpha" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-alpha",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.chatMessages = [
+      {
+        id: "mode-selection",
+        role: "user",
+        parts: [{ type: "text", text: "Deterministic selected." }],
+      },
+    ];
+    mocks.loadMessages.mockImplementation(async (conversationId: string) =>
+      conversationId === "chat-alpha"
+        ? {
+            messages: [
+              {
+                id: "source-user",
+                role: "user",
+                parts: [{ type: "text", text: "Create a daily ClickUp summary and send it to Slack." }],
+              },
+            ],
+            updatedAt: "2026-06-01T00:00:00.000Z",
+          }
+        : { messages: [], updatedAt: null },
+    );
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-source-context")).toHaveTextContent(
+      "Create a daily ClickUp summary and send it to Slack.",
+    );
+    expect(screen.getByText("Deterministic selected.")).toBeInTheDocument();
+  });
+
   it("discards an untouched setup only after deletion succeeds", async () => {
     mocks.getAutomation.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
     renderBuilder();

@@ -981,13 +981,14 @@ async function automationBuilderHistoryForPrompt(params: {
   userName: string;
   logger: Logger;
 }): Promise<BufferedMessage[]> {
-  const conversationIds = new Set<string>([params.builderConversationId]);
-  if (params.context.task.originChat?.platform === "web") {
-    conversationIds.add(params.context.task.originChat.conversationId);
-  }
-
+  const originConversationId =
+    params.context.task.originChat?.platform === "web" ? params.context.task.originChat.conversationId : null;
+  const conversationIds = [originConversationId, params.builderConversationId].filter(
+    (conversationId, index, ids): conversationId is string =>
+      Boolean(conversationId) && ids.indexOf(conversationId) === index,
+  );
   const transcripts = await Promise.all(
-    [...conversationIds].map((conversationId) =>
+    conversationIds.map((conversationId) =>
       readWebChatTranscript(params.config, params.workspaceDir, params.userId, params.logger, conversationId),
     ),
   );

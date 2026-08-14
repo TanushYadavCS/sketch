@@ -1774,6 +1774,99 @@ describe("web chat API", () => {
     expect(builderAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
   });
 
+  it("preserves the original web-chat requirements when trimming builder history", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-web-origin",
+      conversationId: "builder-web-origin",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await mkdir(join(dataDir, "web-chat", admin.id), { recursive: true });
+    await writeFile(
+      webChatTranscriptPath(dataDir, admin.id, "source-web-origin"),
+      JSON.stringify({
+        messages: [
+          {
+            id: "source-requirements",
+            role: "user",
+            parts: [
+              {
+                type: "text",
+                text: "Create a daily GitHub PR digest for my open pull requests and send it to Slack.",
+              },
+            ],
+          },
+          ...Array.from({ length: 14 }, (_, index) => ({
+            id: `source-follow-up-${index}`,
+            role: index % 2 === 0 ? "assistant" : "user",
+            parts: [{ type: "text", text: `Source chat follow-up ${index}` }],
+          })),
+        ],
+      }),
+    );
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I found the source requirements."));
+    const scheduler = makeBuilderScheduler("task-web-origin", admin.id);
+    const getTaskById = (scheduler as unknown as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById;
+    getTaskById.mockResolvedValue({
+      id: "task-web-origin",
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_BUILDER",
+      threadTs: null,
+      prompt: "Automation setup",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      timezone: "UTC",
+      sessionMode: "fresh",
+      nextRunAt: null,
+      lastRunAt: null,
+      status: "active",
+      createdBy: admin.id,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      revision: 0,
+      title: "GitHub PR digest",
+      description: null,
+      originChat: {
+        platform: "web",
+        conversationId: "source-web-origin",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+      steps: null,
+      edges: null,
+      outputTarget: null,
+      outputPlatform: null,
+      outputThreadTs: null,
+      outputMode: "deliver",
+      delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=builder-web-origin", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Deterministic).',
+        automationTaskId: "task-web-origin",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(runAgent.mock.calls[0]?.[0].userMessage).toContain(
+      "Create a daily GitHub PR digest for my open pull requests and send it to Slack.",
+    );
+  });
+
   it("does not grant an admin access to the owner transcript", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
