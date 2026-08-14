@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [1.3.0] -- 2026-08-14
+
+- Decouples chat history access from indexing by authorizing against passive membership state before fetching, consolidating Slack and WhatsApp history into a unified search/read API with directional page tokens.
+- Adds role-scoped automation URL sharing, restricting members to their own automations while allowing admins organization-wide access.
+- Shows WhatsApp typing indicators while an agent prepares its reply, for both self-hosted and managed Wati tenants.
+- Binds automation edits to the current access-checked context with revision-level CAS, atomic task/step writes, and canonicalized partial mutations.
+- Introduces Slack entity identity foundation — durable person entities keyed by `team_id:slack_user_id` with source-ref-first upsert, single-match email linking, and ambiguity review queue support.
+- Fixes WhatsApp backfill tests that broke after the 30-day history lookback boundary by using relative timestamps.
+- Reconciles automation builder transcript on window visibility and reconnects, and truncates long run-selector labels to prevent toolbar overflow.
+- Prefers deterministic action steps over prompt-only behavior for fixed automation work in the main Sketch agent.
+- Adds Microsoft Outlook Calendar connector with delta sync, ACL email mapping, and calendar scope selection through Canvas OAuth.
+- Bounds every model HTTP request with a 600-second wall-clock deadline and adds a slow-run watchdog event for stalled agent runs.
+- Flips `AGENT_RUNTIME` default from the legacy Claude Agent SDK to `aisdk`, matching what all deployments actually run.
+- Exposes creator-scoped Sketch capabilities (`search`, `searchEntities`, `getEntityContext`, `findTeammate`) to deterministic automation action steps through a bounded capability registry.
+- Enables stopping a running Slack agent by saying "stop", "kill", or "cancel" in the originating channel or DM, with pre-queue interception and child-run signal propagation.
+- Upgrades file and access-scope membership from email-only to typed principals (`email`, `phone`, `slack_user`, `whatsapp_lid`), stamping all known identifiers and matching the viewer on any one of them.
+- Fixes admin deletion of foreign-owned automations by preserving the scheduler instance context during runtime cleanup.
+- Consolidates four separate file-visibility implementations into one expression of the access rule, closing an entity-share leak for viewers with no email principal and canonicalizing all principal types in one place.
+- Replaces raw WhatsApp disconnect alerts with plain-language messages and a reconnect link, slows the reconnect loop to an hourly pause after repeated failures, and presents honest socket-state liveness on the channels card.
+- Defaults WhatsApp groups to indexed on discovery and completes E.164 phone-number backfill.
+- Retains WhatsApp identity aliases and enriches entity identity aliases through contact-point resolution and deterministic duplicate draining with a reconciliation review queue.
+- Makes `learned_facts` append idempotent and adds WhatsApp LLM chunking configuration with per-call model routing and differential enrichment.
+- Makes native Sketch webhook triggers production-ready with general-user accessible setup.
+- Adds person identity contact points and stabilizes the entity review queue verdicts, preserving real names when merging into placeholders and showing proposed names beside placeholders.
+- Consolidates automation authoring and builder UX, adds task review schema, and preserves production migration order.
+
 ## [1.2.4] -- 2026-07-30
 
 - Fixes conversation context retrieval by selecting the newest eligible backlog and correctly scoping Slack mentions to channel roots or active threads, ensuring accurate agent issue creation.
