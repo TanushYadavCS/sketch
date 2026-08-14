@@ -9,6 +9,7 @@ import {
   resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import {
   type ProjectMintingVerdictRow,
   createProjectMintingVerdictRepository,
@@ -272,10 +273,17 @@ async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerd
   return cluster;
 }
 
+/**
+ * Every key here must be a string the dossier actually printed, because the
+ * model can only echo back what it was shown. Keying on anything else — a bare
+ * name where the dossier rendered `Name <email>`, a different set of fact
+ * types than the dossier gathered — makes every anchor of that kind miss, and
+ * the miss surfaces as a refusal to accept the whole verdict.
+ */
 async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster) {
   const titleFamilies = new Map<string, Set<string>>();
   for (const file of cluster.files) {
-    const family = normalizeTitleFamily(file.fileName).display;
+    const family = normalizeTitleFamily(file.fileName).key;
     const set = titleFamilies.get(family) ?? new Set<string>();
     set.add(file.fileId);
     titleFamilies.set(family, set);
@@ -305,17 +313,21 @@ async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster) {
   if (fileIds.length > 0) {
     const rows = await db
       .selectFrom("indexed_file_facts")
-      .select(["indexed_file_id as fileId", "subject_name as name"])
+      .select(["indexed_file_id as fileId", "subject_name as name", "subject_email as email"])
       .where("indexed_file_id", "in", fileIds)
-      .where("fact_type", "in", ["attendee", "participant", "sender", "recipient", "cc"])
+      .where("fact_type", "in", [...PERSON_PARTICIPANT_FACT_TYPES])
       .where("deleted_at", "is", null)
       .where("subject_name", "is not", null)
       .execute();
     for (const row of rows) {
-      if (!row.fileId || !row.name?.trim()) continue;
-      const set = people.get(row.name.trim()) ?? new Set<string>();
-      set.add(row.fileId);
-      people.set(row.name.trim(), set);
+      const name = row.name?.trim();
+      if (!row.fileId || !name) continue;
+      const email = row.email?.trim();
+      for (const key of email ? [`${name} <${email}>`, name] : [name]) {
+        const set = people.get(key.toLowerCase()) ?? new Set<string>();
+        set.add(row.fileId);
+        people.set(key.toLowerCase(), set);
+      }
     }
   }
 
@@ -333,7 +345,7 @@ function resolveProjectAnchors(
     if (!acceptedOriginalNames.has(project.name)) continue;
     const files = new Set<string>();
     for (const family of project.evidenceTitleFamilies) {
-      const matched = maps.titleFamilies.get(family);
+      const matched = maps.titleFamilies.get(normalizeTitleFamily(family).key);
       if (!matched) errors.push(`title family "${family}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
     }
@@ -343,7 +355,7 @@ function resolveProjectAnchors(
       else for (const fileId of matched) files.add(fileId);
     }
     for (const person of project.evidencePeople) {
-      const matched = maps.people.get(person);
+      const matched = maps.people.get(person.trim().toLowerCase());
       if (!matched) errors.push(`person "${person}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
     }
