@@ -1201,6 +1201,22 @@ export interface HierarchyMappingConfig {
   containers: Record<string, ContainerTarget>;
 }
 
+export type ContainerClassificationConfidence = "high" | "medium" | "low";
+export type ContainerClassificationStatus = "proposed" | "accepted" | "edited";
+
+export interface ContainerClassificationProposal {
+  containerId: string;
+  containerName: string;
+  level: string;
+  proposedTarget: ContainerTarget;
+  confidence: ContainerClassificationConfidence;
+  reasoning: string;
+  digestHash: string;
+  status: ContainerClassificationStatus;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface HierarchyLevel {
   key: string;
   label: string;
@@ -2723,6 +2739,17 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ scopeConfig }),
       });
+    },
+    containerClassifications(id: string) {
+      return request<{ proposals: ContainerClassificationProposal[] }>(
+        `/api/connectors/${id}/container-classification`,
+      );
+    },
+    classifyContainers(id: string) {
+      return request<{
+        run: { status: "unchanged" | "completed"; digestHash: string };
+        proposals: ContainerClassificationProposal[];
+      }>(`/api/connectors/${id}/container-classification`, { method: "POST" });
     },
   },
   googleOAuth: {
