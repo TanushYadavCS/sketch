@@ -1,9 +1,17 @@
-import { isReservedAgentEnvName } from "@sketch/shared";
+import { cliIntegrationAppDefinitions, isReservedAgentEnvName } from "@sketch/shared";
 
 export { isReservedAgentEnvName };
 
+const managedIntegrationEnvNames = new Set(
+  Object.values(cliIntegrationAppDefinitions).flatMap((definition) =>
+    definition.credentialFields.map((field) => field.envName),
+  ),
+);
+
 export function removeReservedAgentEnv(env: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => !isReservedAgentEnvName(name)));
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => !isReservedAgentEnvName(name) || managedIntegrationEnvNames.has(name)),
+  );
 }
 
 /**
