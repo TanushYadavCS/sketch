@@ -274,6 +274,7 @@ describe("entity domains repository", () => {
       confidenceScore: 0.9,
       source: "structural_assignee",
     });
+    if (!relationshipId) throw new Error("contributes_to relationship should not be skipped");
     const keepNote = "structural_assignee:task:keep-task";
     const staleNote = "structural_assignee:task:stale-task";
     await domainsRepo.addEvidence({ relationshipId, indexedFileId: "prune-file", note: keepNote, sourceFactId: null });

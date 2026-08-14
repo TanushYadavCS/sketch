@@ -240,6 +240,7 @@ describe("sweepCoMentionContributesTo", () => {
       confidenceScore: 0.94,
       source: "llm_extraction",
     });
+    if (!directRelationshipId) throw new Error("contributes_to relationship should not be skipped");
     await domainsRepo.addEvidence({
       relationshipId: directRelationshipId,
       indexedFileId: fileIds[0],
@@ -297,6 +298,7 @@ describe("sweepCoMentionContributesTo", () => {
       confidenceScore: 0.9,
       source: "manual",
     });
+    if (!relationshipId) throw new Error("contributes_to relationship should not be skipped");
     await domainsRepo.addEvidence({
       relationshipId,
       indexedFileId: "owned-1",

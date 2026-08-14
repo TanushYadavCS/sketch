@@ -26,10 +26,24 @@ import {
   normalizeWhatsAppIdentityPhone,
 } from "../../identity-normalization";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
-import type { DB } from "../schema";
+import type { DB, IndexedFilesTable } from "../schema";
 import { fileVisibilityRuleSql } from "./file-visibility-rule";
 
 export { accessPrincipalPredicateSql } from "./file-visibility-rule";
+
+export function readSourceMeta(row: Pick<IndexedFilesTable, "source_meta">): Record<string, unknown> | null {
+  if (!row.source_meta) return null;
+  try {
+    const parsed = JSON.parse(row.source_meta);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function serializeSourceMeta(value: Record<string, unknown> | undefined): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
 
 /**
  * File-list viewer for RBAC. Admins bypass; others match by email.
@@ -498,6 +512,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       contentCategory: ContentCategory;
       content: string | null;
       sourcePath: string | null;
+      sourceMeta?: Record<string, unknown>;
       contentHash: string | null;
       sourceCreatedAt: string | null;
       sourceUpdatedAt: string | null;
@@ -509,6 +524,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       const now = new Date().toISOString();
       const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
       const sourceUpdatedAt = normalizeSourceTimestampForStorage(data.sourceUpdatedAt);
+      const sourceMeta = serializeSourceMeta(data.sourceMeta);
 
       const existing = data.providerMessageId
         ? await db
@@ -553,6 +569,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           content_category: data.contentCategory,
           content: data.content,
           source_path: data.sourcePath,
+          source_meta: sourceMeta,
           content_hash: data.contentHash,
           is_archived: 0,
           source_created_at: sourceCreatedAt,
@@ -592,6 +609,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           content: data.content,
           source: data.source,
           source_path: data.sourcePath,
+          source_meta: sourceMeta,
           content_hash: data.contentHash,
           source_created_at: sourceCreatedAt,
           source_updated_at: sourceUpdatedAt,

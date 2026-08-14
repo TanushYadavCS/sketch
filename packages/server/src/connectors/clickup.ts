@@ -113,6 +113,7 @@ function getAccessToken(credentials: ConnectorCredentials): string {
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
+const MAX_TASK_PAGES = 200;
 
 const CLICKUP_HIERARCHY_LEVELS: HierarchyLevelDeclaration[] = [
   { key: "workspace", label: "Workspace", allowedTargets: ["team", "ignore"], default: "ignore" },
@@ -467,6 +468,11 @@ function taskToSyncedItem(
     contentCategory: hasDescription ? "document" : "structured",
     content,
     sourcePath,
+    sourceMeta: {
+      spaceId,
+      ...(folderId ? { folderId } : {}),
+      listId: task.list.id,
+    },
     contentHash: contentHash(content),
     sourceCreatedAt: parseClickUpTimestamp(task.date_created ?? null),
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
@@ -931,35 +937,39 @@ async function* fetchTasksFromList(
   hierarchyMapping?: HierarchyMapping,
 ): AsyncGenerator<SyncedItem> {
   try {
-    let url = `/list/${listId}/task?include_subtasks=true&subtasks=true&include_closed=true`;
-    if (sinceMs) {
-      url += `&date_updated_gt=${sinceMs}`;
-    }
+    for (let page = 0; page < MAX_TASK_PAGES; page++) {
+      let url = `/list/${listId}/task?include_subtasks=true&subtasks=true&include_closed=true&page=${page}`;
+      if (sinceMs) {
+        url += `&date_updated_gt=${sinceMs}`;
+      }
 
-    const tasksRes = (await clickupRequest(url, token, logger)) as { tasks: ClickUpTask[] };
+      const tasksRes = (await clickupRequest(url, token, logger)) as { tasks: ClickUpTask[]; last_page?: boolean };
 
-    for (const task of tasksRes.tasks) {
-      if (seenAssignees) {
-        for (const assignee of task.assignees) {
-          if (assignee.username && !seenAssignees.has(assignee.username)) {
-            seenAssignees.set(assignee.username, { username: assignee.username, email: assignee.email });
+      for (const task of tasksRes.tasks) {
+        if (seenAssignees) {
+          for (const assignee of task.assignees) {
+            if (assignee.username && !seenAssignees.has(assignee.username)) {
+              seenAssignees.set(assignee.username, { username: assignee.username, email: assignee.email });
+            }
           }
         }
+        yield taskToSyncedItem(
+          task,
+          workspaceName,
+          workspaceId,
+          spaceName,
+          spaceId,
+          folderName,
+          folderId,
+          listProjectParent,
+          accessScope,
+          cycle,
+          hierarchyMapping,
+        );
       }
-      yield taskToSyncedItem(
-        task,
-        workspaceName,
-        workspaceId,
-        spaceName,
-        spaceId,
-        folderName,
-        folderId,
-        listProjectParent,
-        accessScope,
-        cycle,
-        hierarchyMapping,
-      );
+      if (tasksRes.last_page !== false) return;
     }
+    logger.warn({ listId, maxPages: MAX_TASK_PAGES }, "ClickUp task pagination hit hard cap");
   } catch (err) {
     logger.warn({ err, listId }, "Failed to fetch tasks from list");
   }

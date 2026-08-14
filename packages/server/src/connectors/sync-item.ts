@@ -157,6 +157,7 @@ export async function processSyncedItem({
         ...(item.isAllDay !== undefined ? { is_all_day: item.isAllDay ? 1 : 0 } : {}),
         mime_type: item.mimeType ?? undefined,
         rollup_group_id: item.rollupGroupId ?? null,
+        ...(item.sourceMeta !== undefined ? { source_meta: JSON.stringify(item.sourceMeta) } : {}),
       })
       .where("id", "=", existing.id)
       .execute();
@@ -180,6 +181,7 @@ export async function processSyncedItem({
       contentCategory: item.contentCategory,
       content: item.content,
       sourcePath: item.sourcePath,
+      sourceMeta: item.sourceMeta,
       contentHash: item.contentHash,
       sourceCreatedAt: item.sourceCreatedAt,
       sourceUpdatedAt: item.sourceUpdatedAt,

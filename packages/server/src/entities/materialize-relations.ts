@@ -65,6 +65,7 @@ export async function materializeLlmRelationFact(
     confidenceScore,
     source: "llm_extraction",
   });
+  if (!relationshipId) return { kind: "skipped", reason: "relationship_would_cycle" };
   relationshipsWritten++;
   if (fact.indexed_file_id) {
     await deps.domainsRepo.addEvidence({
@@ -84,8 +85,10 @@ export async function materializeLlmRelationFact(
       confidenceScore,
       source: "llm_extraction",
     });
-    relationshipsWritten++;
-    if (fact.indexed_file_id) {
+    if (reverseId) {
+      relationshipsWritten++;
+    }
+    if (reverseId && fact.indexed_file_id) {
       await deps.domainsRepo.addEvidence({
         relationshipId: reverseId,
         indexedFileId: fact.indexed_file_id,
@@ -152,6 +155,7 @@ export async function materializeCrmRelationFact(
     confidenceScore: 1,
     source: fact.source,
   });
+  if (!relationshipId) return { kind: "skipped", reason: "relationship_would_cycle" };
 
   if (fact.indexed_file_id) {
     await deps.domainsRepo.addEvidence({

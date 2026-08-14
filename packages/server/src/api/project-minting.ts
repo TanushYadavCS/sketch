@@ -107,7 +107,10 @@ function errorResponse(c: Context, err: unknown) {
     const status =
       err.code === "NOT_FOUND"
         ? 404
-        : err.code === "STALE_VERDICT" || err.code === "TRIPWIRE_BLOCKED" || err.code === "STRIKE_CASCADE"
+        : err.code === "STALE_VERDICT" ||
+            err.code === "TRIPWIRE_BLOCKED" ||
+            err.code === "STRIKE_CASCADE" ||
+            err.code === "WOULD_CYCLE"
           ? 409
           : 400;
     return c.json({ error: { code: err.code, message: err.message, details: err.details ?? null } }, status);

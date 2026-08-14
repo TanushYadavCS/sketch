@@ -7,6 +7,7 @@
 import type { Kysely } from "kysely";
 import { beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
+import { createGraphPassRunRepository } from "../db/repositories/graph-pass-runs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -64,6 +65,92 @@ async function runCount(db: Kysely<DB>): Promise<number> {
   return rows.length;
 }
 
+async function seedProjectMintingCluster(db: Kysely<DB>): Promise<string> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "project-minting-route-connector",
+      connector_type: "fireflies",
+      auth_type: "api_key",
+      credentials: "{}",
+      scope_config: "{}",
+      created_by: "admin-user",
+    })
+    .execute();
+  await db
+    .insertInto("entities")
+    .values({
+      id: "route-company",
+      name: "Routeco",
+      source_type: "company",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  await db
+    .insertInto("entity_domains")
+    .values({
+      id: "route-company-domain",
+      entity_id: "route-company",
+      domain: "routeco.example",
+      kind: "corporate",
+      is_primary: 1,
+      confidence: 1,
+      source: "manual",
+    })
+    .execute();
+
+  for (const [index, date] of ["2026-08-01T09:00:00.000Z", "2026-08-08T09:00:00.000Z"].entries()) {
+    const fileId = `route-file-${index}`;
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: fileId,
+        connector_config_id: "project-minting-route-connector",
+        provider_file_id: fileId,
+        provider_url: null,
+        file_name: "Routeco delivery sync",
+        file_type: "transcript",
+        content_category: "document",
+        content: "Recurring Routeco delivery notes.",
+        summary: null,
+        source: "fireflies",
+        source_path: null,
+        content_hash: fileId,
+        source_created_at: date,
+        source_updated_at: null,
+        synced_at: date,
+        context_note: null,
+        access_scope_id: null,
+      })
+      .execute();
+    await db
+      .insertInto("indexed_file_facts")
+      .values({
+        id: `route-fact-${index}`,
+        indexed_file_id: fileId,
+        connector_config_id: "project-minting-route-connector",
+        created_by_user_id: null,
+        source: "test",
+        fact_type: "attendee",
+        relation: "attended",
+        subject_name: "Routeco Lead",
+        subject_email: "lead@routeco.example",
+        fact_key: `${fileId}:attendee`,
+      })
+      .execute();
+  }
+
+  return "route-company";
+}
+
 describe("project minting pass route", () => {
   let db: Kysely<DB>;
 
@@ -104,5 +191,66 @@ describe("project minting pass route", () => {
 
     expect(res.status).toBe(404);
     expect(await runCount(db)).toBe(0);
+  });
+
+  it("round-trips project minting runs without leaking into post-sync listings and closes interrupted runs", async () => {
+    const companyEntityId = await seedProjectMintingCluster(db);
+    const app = createApp(
+      db,
+      createTestConfig({
+        DEV_TOOLS_ENABLED: true,
+        OPENROUTER_API_KEY: "test-openrouter-key",
+        PROJECT_MINTING_MODEL: "test/project-minting-model",
+      }),
+      { logger },
+    );
+    const cookie = await login(app, ADMIN_EMAIL);
+
+    const start = await startPass(app, cookie, companyEntityId);
+    expect(start.status).toBe(201);
+    const startBody = (await start.json()) as { run: { id: string } };
+
+    const read = await app.request(`/api/project-minting/passes/${startBody.run.id}`, { headers: { Cookie: cookie } });
+    expect(read.status).toBe(200);
+    const readBody = (await read.json()) as {
+      run: {
+        snapshot: {
+          kind: string;
+          companyEntityId: string;
+          companyName: string;
+          model: string;
+          clustersConsidered: number;
+          verdictsStored: number;
+        };
+      };
+    };
+    expect(readBody.run.snapshot).toEqual({
+      kind: "project_minting",
+      companyEntityId,
+      companyName: "Routeco",
+      model: "test/project-minting-model",
+      clustersConsidered: 1,
+      verdictsStored: 0,
+    });
+
+    const list = await app.request("/api/graph-passes/runs", { headers: { Cookie: cookie } });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as { runs: Array<{ id: string }> };
+    expect(listBody.runs.map((run) => run.id)).not.toContain(startBody.run.id);
+
+    const runs = createGraphPassRunRepository(db);
+    const interruptedId = await runs.start({
+      kind: "project_minting",
+      companyEntityId,
+      companyName: "Routeco",
+      model: "test/project-minting-model",
+      clustersConsidered: 1,
+      verdictsStored: 0,
+    });
+    await expect(runs.failUnfinishedProjectMintingRuns()).resolves.toBeGreaterThanOrEqual(1);
+    await expect(runs.get(interruptedId)).resolves.toMatchObject({
+      status: "failed",
+      errorMessage: "project minting pass interrupted by restart",
+    });
   });
 });

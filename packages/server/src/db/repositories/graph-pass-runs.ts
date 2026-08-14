@@ -119,6 +119,16 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
       aliasOnlyDropped: readNumber(parsed.aliasOnlyDropped),
     };
   }
+  if (parsed?.kind === "project_minting") {
+    return {
+      kind: "project_minting",
+      companyEntityId: typeof parsed.companyEntityId === "string" ? parsed.companyEntityId : "",
+      companyName: typeof parsed.companyName === "string" ? parsed.companyName : "",
+      model: typeof parsed.model === "string" ? parsed.model : "",
+      clustersConsidered: readNumber(parsed.clustersConsidered),
+      verdictsStored: readNumber(parsed.verdictsStored),
+    };
+  }
   return {
     kind: "post_sync",
     affectedIndexedFileIds: Array.isArray(parsed?.affectedIndexedFileIds)
@@ -257,6 +267,25 @@ export function createGraphPassRunRepository(db: Kysely<DB>) {
           status: "failed",
           finished_at: new Date().toISOString(),
           error_message: "interrupted by restart",
+        })
+        .where("id", "in", ids)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
+    async failUnfinishedProjectMintingRuns(): Promise<number> {
+      const unfinished = await db.selectFrom("graph_pass_runs").selectAll().where("status", "=", "running").execute();
+      const ownedKinds = new Set<GraphPassRunSnapshot["kind"]>(["project_minting"]);
+      const ids = unfinished
+        .filter((row) => ownedKinds.has(parseSnapshot(row.input_snapshot_json).kind))
+        .map((r) => r.id);
+      if (ids.length === 0) return 0;
+      const result = await db
+        .updateTable("graph_pass_runs")
+        .set({
+          status: "failed",
+          finished_at: new Date().toISOString(),
+          error_message: "project minting pass interrupted by restart",
         })
         .where("id", "in", ids)
         .executeTakeFirst();

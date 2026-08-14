@@ -17,6 +17,7 @@ import {
 import type { DB } from "../db/schema";
 import { withMaterializeReplayQueue } from "../entities/materialize-replay";
 import { EntityMergeError, mergeEntities } from "../entities/merge";
+import { ProjectBindingError, assertNoPartOfCycle } from "../entities/project-bindings";
 import { normalizeName } from "./name-normalize";
 import {
   type ClientCluster,
@@ -106,6 +107,7 @@ export class ProjectMintingAcceptanceError extends Error {
       | "STRIKE_CASCADE"
       | "CLUSTER_NOT_FOUND"
       | "INVALID_ACCEPTANCE_SHAPE"
+      | "WOULD_CYCLE"
       | "INVALID_ACCEPTANCE",
     message: string,
     public readonly details?: Record<string, unknown>,
@@ -469,6 +471,19 @@ async function ensureRelationship(
   targetEntityId: string,
   relationshipType: "engagement_for" | "part_of",
 ): Promise<void> {
+  if (relationshipType === "part_of") {
+    try {
+      await assertNoPartOfCycle(db, sourceEntityId, targetEntityId);
+    } catch (err) {
+      if (err instanceof ProjectBindingError && err.code === "WOULD_CYCLE") {
+        throw new ProjectMintingAcceptanceError("WOULD_CYCLE", "Acceptance would create a project hierarchy cycle", {
+          sourceEntityId,
+          targetEntityId,
+        });
+      }
+      throw err;
+    }
+  }
   await db
     .insertInto("entity_relationships")
     .values({
