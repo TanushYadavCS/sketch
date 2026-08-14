@@ -962,7 +962,7 @@ export interface GraphPassRunsTable {
 
 export interface ProjectMintingVerdictsTable {
   id: string;
-  company_entity_id: string;
+  company_entity_id: string | null;
   company_name: string;
   file_count: number;
   dossier: string;

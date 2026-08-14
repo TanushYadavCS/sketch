@@ -6,7 +6,12 @@ import { createTestLogger, createTestPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
 import { readClusterVerdict } from "./project-minting";
 import { seedAttendee, seedCompany, seedConnector, seedFile } from "./project-minting-fixtures";
-import { WEEKLY_MINT_PROMPT_VERSION, WeeklyMintProcessCrash, createWeeklyMintService } from "./weekly-mint";
+import {
+  WEEKLY_MINT_PROMPT_VERSION,
+  WeeklyMintProcessCrash,
+  createWeeklyMintService,
+  partitionFiles,
+} from "./weekly-mint";
 
 function fakeGenerator(counter: { calls: number }): GeminiGenerator {
   return {
@@ -89,6 +94,33 @@ async function queueProjectReview(
       })
       .execute();
   }
+  return id;
+}
+
+async function seedStandingProduct(db: Kysely<DB>, name: string): Promise<string> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "product",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      provenance_tier: "declared",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 1,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
   return id;
 }
 
@@ -225,5 +257,99 @@ describe("weekly mint pass", () => {
     const completed = await db.selectFrom("weekly_mint_runs").selectAll().executeTakeFirstOrThrow();
     expect(completed).toMatchObject({ status: "completed", verdicts_requested: 1, verdicts_stored: 1 });
     expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(1);
+  });
+
+  it("stores an internal recurring topic under a matching standing product when a repo is referenced twice", async () => {
+    const connectorId = await seedConnector(db);
+    const productId = await seedStandingProduct(db, "Sketch");
+    const fileIds = [];
+    for (const [index, date] of ["2026-04-06", "2026-04-07", "2026-04-08"].entries()) {
+      fileIds.push(
+        await seedFile(db, connectorId, {
+          fileName: `sketch-memory-${index}.txt`,
+          source: "fireflies",
+          date: `${date}T10:00:00.000Z`,
+          content:
+            index < 2
+              ? "Sketch Memory work continues in github.com/canvasxai/sketch-memory."
+              : "Sketch Memory rollout notes.",
+        }),
+      );
+    }
+    const reviewId = await queueProjectReview(db, { name: "Sketch Memory", fileIds });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(1);
+    const verdicts = await db.selectFrom("project_minting_verdicts").selectAll().execute();
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]?.company_entity_id).toBeNull();
+    const project = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true }).projects[0];
+    expect(project).toMatchObject({ name: "Sketch Memory", parentEntityId: productId });
+    expect(project?.evidenceFragments).toEqual([reviewId]);
+  });
+
+  it("keeps an internal recurring topic pooled when it has no structural co-signal", async () => {
+    const connectorId = await seedConnector(db);
+    const fileIds = [];
+    for (const [index, date] of ["2026-05-04", "2026-05-05", "2026-05-06"].entries()) {
+      fileIds.push(
+        await seedFile(db, connectorId, {
+          fileName: `sketch-memory-${index}.txt`,
+          source: "fireflies",
+          date: `${date}T10:00:00.000Z`,
+          content: "Sketch Memory notes without a structural artifact.",
+        }),
+      );
+    }
+    await queueProjectReview(db, { name: "Sketch Memory", fileIds });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-05-11T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(0);
+    expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(0);
+  });
+
+  it("partitions a prospect-domain sales call into the prospect external cluster instead of the internal pot", async () => {
+    const connectorId = await seedConnector(db);
+    await seedStandingProduct(db, "Sketch");
+    const prospectId = await seedCompany(db, "Prospectco", "prospectco.test");
+    await db
+      .insertInto("company_relationship_declarations")
+      .values({
+        subject_entity_id: prospectId,
+        counterparty_kind: "client",
+        client_stage: "prospect",
+        note: null,
+      })
+      .execute();
+    const fileId = await seedFile(db, connectorId, {
+      fileName: "sketch-prospect-demo.txt",
+      source: "fireflies",
+      date: "2026-06-02T10:00:00.000Z",
+      content: "Sales call about Sketch rollout and onboarding.",
+    });
+    await seedAttendee(db, connectorId, fileId, "Prospect Buyer", "buyer@prospectco.test");
+
+    const partition = await partitionFiles(db);
+
+    expect(partition.external.get(prospectId)?.has(fileId)).toBe(true);
+    expect(partition.internal.has(fileId)).toBe(false);
   });
 });

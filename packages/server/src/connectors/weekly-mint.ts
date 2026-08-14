@@ -12,8 +12,10 @@ import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
   type ClientCluster,
+  type ClusterFile,
   type ClusterVerdict,
   type VerdictProject,
+  channelMatchesCompany,
   clusterClientFiles,
   fragmentNameTokens,
   readClusterVerdict,
@@ -33,6 +35,9 @@ const WEEKLY_MINT_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const RECURRENCE_FLOOR_DAYS = 3;
 const AGE_OUT_WEEKS = 8;
 const CONTAINMENT_FLOOR = 0.8;
+const INTERNAL_CONTAINER_KEY = "internal";
+const INTERNAL_COMPANY_NAME = "Internal";
+const GITHUB_REPO_PATTERN = /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
 
 /**
  * Weekly minting only claims content-extraction project pool rows. The list is
@@ -111,6 +116,21 @@ type ExistingProject = {
   fileIds: Set<string>;
 };
 
+type StandingProduct = {
+  entityId: string;
+  name: string;
+  aliases: string[];
+};
+
+type WeeklyMintContainer = {
+  key: string;
+  companyEntityId: string | null;
+  companyName: string;
+  fileIds: string[];
+  files: ClusterFile[];
+  cluster: ClientCluster | null;
+};
+
 type DeterministicDisposition =
   | { action: "new" }
   | { action: "alias_of"; entityId: string; entityName: string }
@@ -187,14 +207,93 @@ function parseAliases(value: string | null): string[] {
   }
 }
 
+async function loadFileMeta(db: Kysely<DB>, fileIds: string[]): Promise<ClusterFile[]> {
+  const files: ClusterFile[] = [];
+  for (const fileChunk of chunk([...new Set(fileIds)].sort(), 500)) {
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "file_name", "source", "source_created_at", "synced_at"])
+      .where("id", "in", fileChunk)
+      .execute();
+    for (const row of rows) {
+      files.push({
+        fileId: row.id,
+        fileName: row.file_name,
+        source: row.source,
+        date: row.source_created_at ?? row.synced_at,
+        via: [],
+      });
+    }
+  }
+  return files.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "") || a.fileId.localeCompare(b.fileId));
+}
+
+/**
+ * External membership is any file emitted by `clusterClientFiles`, whose
+ * signals accumulate independently per company: participant corporate domain,
+ * dedicated channel, and vocabulary/title-family accretion. There is no
+ * exclusive claiming order to reuse or invent here. A multi-claimed file stays
+ * external for every claiming company, and the internal pot is exactly the set
+ * of indexed files claimed by no cluster.
+ */
+export async function partitionFiles(
+  db: Kysely<DB>,
+): Promise<{ external: Map<string, Set<string>>; internal: Set<string> }> {
+  const clusters = await clusterClientFiles(db, { minFiles: 1 });
+  const external = new Map<string, Set<string>>();
+  const claimed = new Set<string>();
+  for (const cluster of clusters) {
+    const files = new Set<string>();
+    for (const file of cluster.files) {
+      files.add(file.fileId);
+      claimed.add(file.fileId);
+    }
+    external.set(cluster.companyEntityId, files);
+  }
+  const rows = await db.selectFrom("indexed_files").select("id").execute();
+  return {
+    external,
+    internal: new Set(rows.map((row) => row.id).filter((fileId) => !claimed.has(fileId))),
+  };
+}
+
+async function buildWeeklyMintContainers(db: Kysely<DB>, clock: Date): Promise<WeeklyMintContainer[]> {
+  const clusters = (await clusterClientFiles(db, { minFiles: 1 }))
+    .map((cluster) => ({
+      ...cluster,
+      files: cluster.files.filter((file) => isAtOrBeforeClock(file.date, clock)),
+    }))
+    .filter((cluster) => cluster.files.length > 0);
+  const claimed = new Set(clusters.flatMap((cluster) => cluster.files.map((file) => file.fileId)));
+  const internalRows = await db.selectFrom("indexed_files").select("id").execute();
+  const internalFileIds = internalRows.map((row) => row.id).filter((fileId) => !claimed.has(fileId));
+  const external = clusters.map((cluster) => ({
+    key: cluster.companyEntityId,
+    companyEntityId: cluster.companyEntityId,
+    companyName: cluster.companyName,
+    fileIds: cluster.files.map((file) => file.fileId),
+    files: cluster.files,
+    cluster,
+  }));
+  const internal: WeeklyMintContainer = {
+    key: INTERNAL_CONTAINER_KEY,
+    companyEntityId: null,
+    companyName: INTERNAL_COMPANY_NAME,
+    fileIds: internalFileIds,
+    files: await loadFileMeta(db, internalFileIds),
+    cluster: null,
+  };
+  return [...external, internal].sort((a, b) => a.key.localeCompare(b.key));
+}
+
 async function claimCandidatesForCompany(
   db: Kysely<DB>,
-  cluster: ClientCluster,
+  container: WeeklyMintContainer,
   companyKey: string,
   clock: Date,
   now: string,
 ): Promise<number> {
-  const fileIds = cluster.files.filter((file) => isAtOrBeforeClock(file.date, clock)).map((file) => file.fileId);
+  const fileIds = container.files.filter((file) => isAtOrBeforeClock(file.date, clock)).map((file) => file.fileId);
   if (fileIds.length === 0) return 0;
   const reviewIds = new Set<string>();
   for (const fileChunk of chunk(fileIds, 500)) {
@@ -226,11 +325,11 @@ async function claimCandidatesForCompany(
 async function readClaimedCandidates(
   db: Kysely<DB>,
   companyKey: string,
-  cluster: ClientCluster,
+  container: WeeklyMintContainer,
   clock: Date,
 ): Promise<ClaimedCandidate[]> {
   const fileIds = new Set(
-    cluster.files.filter((file) => isAtOrBeforeClock(file.date, clock)).map((file) => file.fileId),
+    container.files.filter((file) => isAtOrBeforeClock(file.date, clock)).map((file) => file.fileId),
   );
   if (fileIds.size === 0) return [];
   const rows = await db
@@ -366,6 +465,27 @@ async function loadExistingProjects(db: Kysely<DB>, clusterFileIds: string[]): P
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+async function loadStandingProducts(db: Kysely<DB>): Promise<StandingProduct[]> {
+  const rows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("source_type", "=", "product")
+    .where("provenance_tier", "in", ["declared", "human_confirmed"])
+    .where(whereLiveEntity())
+    .execute();
+  return rows
+    .map((row) => ({ entityId: row.id, name: row.name, aliases: parseAliases(row.aliases) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function matchingStandingProduct(group: CandidateGroup, products: StandingProduct[]): StandingProduct | null {
+  const vocabulary = [...group.names, group.tokens.join(" ")].join(" ");
+  for (const product of products) {
+    if (channelMatchesCompany(vocabulary, [product.name, ...product.aliases])) return product;
+  }
+  return null;
+}
+
 function chooseDeterministicDisposition(group: CandidateGroup, projects: ExistingProject[]): DeterministicDisposition {
   const nameKeys = new Set(group.names.map((name) => normalizeName(name)));
   for (const project of projects) {
@@ -453,6 +573,97 @@ async function resetDryStreak(
   }
 }
 
+function groupVocabularyMatchesName(group: CandidateGroup, name: string): boolean {
+  return channelMatchesCompany(name, [...group.names, group.tokens.join(" ")]);
+}
+
+async function groupHasRepoCoSignal(db: Kysely<DB>, group: CandidateGroup): Promise<boolean> {
+  const fileIds = group.scan?.files.length ? group.scan.files : group.evidenceFileIds;
+  const repoFiles = new Map<string, Set<string>>();
+  for (const fileChunk of chunk(fileIds, 100)) {
+    const rows = await db.selectFrom("indexed_files").select(["id", "content"]).where("id", "in", fileChunk).execute();
+    for (const row of rows) {
+      for (const match of (row.content ?? "").matchAll(GITHUB_REPO_PATTERN)) {
+        const repo = `github.com/${match[1]}/${match[2].replace(/\.git$/, "")}`.toLowerCase();
+        const files = repoFiles.get(repo) ?? new Set<string>();
+        files.add(row.id);
+        repoFiles.set(repo, files);
+      }
+    }
+  }
+  return [...repoFiles.values()].some((files) => files.size >= 2);
+}
+
+async function groupHasDedicatedInternalChannelCoSignal(db: Kysely<DB>, group: CandidateGroup): Promise<boolean> {
+  const fileIds = group.scan?.files.length ? group.scan.files : group.evidenceFileIds;
+  if (fileIds.length === 0) return false;
+  const rows = await db
+    .selectFrom("indexed_files")
+    .select(["source", "source_path"])
+    .where("id", "in", fileIds)
+    .where("source", "in", ["slack", "whatsapp"])
+    .execute();
+  const conversationIds = new Set<number>();
+  for (const row of rows) {
+    const match = row.source_path?.match(/[?&]conversationId=(\d+)/);
+    if (match) conversationIds.add(Number(match[1]));
+  }
+  if (conversationIds.size === 0) return false;
+  const channels = await db
+    .selectFrom("conversations")
+    .leftJoin("whatsapp_groups", "whatsapp_groups.jid", "conversations.provider_conversation_id")
+    .select(["conversations.id", "conversations.display_name as displayName", "whatsapp_groups.name as groupName"])
+    .where("conversations.id", "in", [...conversationIds])
+    .where("conversations.kind", "in", ["channel", "group"])
+    .execute();
+  return channels.some((channel) => groupVocabularyMatchesName(group, channel.groupName ?? channel.displayName ?? ""));
+}
+
+async function groupHasTrackerContainerCoSignal(db: Kysely<DB>, group: CandidateGroup): Promise<boolean> {
+  const fileIds = group.scan?.files.length ? group.scan.files : group.evidenceFileIds;
+  if (fileIds.length === 0) return false;
+  const fileRows = await db
+    .selectFrom("indexed_files")
+    .select(["connector_config_id", "source_path"])
+    .where("id", "in", fileIds)
+    .execute();
+  const connectorIds = [...new Set(fileRows.map((row) => row.connector_config_id))];
+  if (connectorIds.length === 0) return false;
+  const classifications = await db
+    .selectFrom("container_classifications")
+    .select(["connector_config_id", "container_name", "proposed_target", "status"])
+    .where("connector_config_id", "in", connectorIds)
+    .execute();
+  const sourcePaths = fileRows.map((row) => row.source_path ?? "");
+  return classifications.some((classification) => {
+    if (classification.proposed_target === "ignore") return false;
+    if (
+      classification.status !== "proposed" &&
+      classification.status !== "accepted" &&
+      classification.status !== "edited"
+    ) {
+      return false;
+    }
+    if (!groupVocabularyMatchesName(group, classification.container_name)) return false;
+    return sourcePaths.some((path) => path.includes(classification.container_name));
+  });
+}
+
+/**
+ * Internal candidates require recurrence plus a structural co-signal because
+ * the no-client pot is the noisiest corpus: one person's own-org files measured
+ * at 1,325. A group crosses only when its tokens recur on at least three scan
+ * days and the same group also carries a repo repeated across files, a matching
+ * dedicated internal channel, or a matching tracker container name.
+ */
+async function groupHasInternalStructuralCoSignal(db: Kysely<DB>, group: CandidateGroup): Promise<boolean> {
+  return (
+    (await groupHasRepoCoSignal(db, group)) ||
+    (await groupHasDedicatedInternalChannelCoSignal(db, group)) ||
+    (await groupHasTrackerContainerCoSignal(db, group))
+  );
+}
+
 async function markAliasCandidates(
   db: Kysely<DB>,
   groups: Array<{ group: CandidateGroup; targetEntityId: string }>,
@@ -496,11 +707,12 @@ async function ageOutStaleCandidates(db: Kysely<DB>, companyKey: string, clock: 
   return rows.length;
 }
 
-async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyKey: string): Promise<Set<string>> {
+async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: string | null): Promise<Set<string>> {
   const row = await db
     .selectFrom("project_minting_verdicts")
     .select(["verdict", "prompt_version"])
-    .where("company_entity_id", "=", companyKey)
+    .$if(companyEntityId === null, (qb) => qb.where("company_entity_id", "is", null))
+    .$if(companyEntityId !== null, (qb) => qb.where("company_entity_id", "=", companyEntityId))
     .where("prompt_version", "=", WEEKLY_MINT_PROMPT_VERSION)
     .where("status", "=", "pending")
     .where("superseded_at", "is", null)
@@ -511,7 +723,12 @@ async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyKey: string)
   return new Set(verdict.projects.flatMap((project) => project.evidenceFragments));
 }
 
-function buildWeeklyPrompt(cluster: ClientCluster, groups: CandidateGroup[], projects: ExistingProject[]): string {
+function buildWeeklyPrompt(
+  container: WeeklyMintContainer,
+  groups: CandidateGroup[],
+  projects: ExistingProject[],
+  products: StandingProduct[],
+): string {
   const groupLines = groups
     .map((group) => {
       const deterministic =
@@ -534,7 +751,13 @@ function buildWeeklyPrompt(cluster: ClientCluster, groups: CandidateGroup[], pro
         `- ${project.entityId}: ${project.name}${project.aliases.length ? ` aliases=${project.aliases.join(", ")}` : ""}`,
     )
     .join("\n");
-  return `You are reviewing weekly project minting candidates for ${cluster.companyName}.
+  const productLines = products
+    .map(
+      (product) =>
+        `- ${product.entityId}: ${product.name}${product.aliases.length ? ` aliases=${product.aliases.join(", ")}` : ""}`,
+    )
+    .join("\n");
+  return `You are reviewing weekly project minting candidates for ${container.companyName}.
 
 For every group, return exactly one action: new, alias_of, or child_of. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of. Use projectName for new and child_of.
 
@@ -547,6 +770,9 @@ Return only JSON:
 
 Existing accepted projects:
 ${projectLines || "none"}
+
+Standing products:
+${productLines || "none"}
 
 Crossing groups:
 ${groupLines}`;
@@ -591,12 +817,18 @@ function defaultProjectName(group: CandidateGroup): string {
   return group.names[0] ?? group.tokens.join(" ");
 }
 
-function projectForGroup(group: CandidateGroup, name: string, parentName: string | null): VerdictProject {
+function projectForGroup(
+  group: CandidateGroup,
+  name: string,
+  parentName: string | null,
+  parentEntityId?: string,
+): VerdictProject {
   return {
     name,
     status: "active",
     confidence: "medium",
     parentName,
+    ...(parentEntityId ? { parentEntityId } : {}),
     evidenceTitleFamilies: group.names,
     evidenceRepos: [],
     evidenceFragments: group.reviewIds,
@@ -606,10 +838,11 @@ function projectForGroup(group: CandidateGroup, name: string, parentName: string
 }
 
 function buildStoredVerdict(
-  cluster: ClientCluster,
+  container: WeeklyMintContainer,
   groups: CandidateGroup[],
   dispositions: Map<string, ModelDisposition>,
   projects: ExistingProject[],
+  products: StandingProduct[],
 ): {
   verdict: ClusterVerdict;
   storedGroups: CandidateGroup[];
@@ -664,29 +897,30 @@ function buildStoredVerdict(
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
-    verdictProjects.set(name.toLowerCase(), projectForGroup(group, name, null));
+    const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
+    verdictProjects.set(name.toLowerCase(), projectForGroup(group, name, null, product?.entityId));
     storedGroups.push(group);
   }
 
   const verdict: ClusterVerdict = {
-    counterpartyKind: "client",
-    clientStage: "active",
+    counterpartyKind: container.companyEntityId === null ? "other" : "client",
+    clientStage: container.companyEntityId === null ? null : "active",
     engagement: null,
     projects: [...verdictProjects.values()],
     existingEntities,
     trackerFit: projects.length > 0 ? "containers_hold_clusters" : "no_containers",
-    notes: [`Weekly mint pass for ${cluster.companyName}.`],
+    notes: [`Weekly mint pass for ${container.companyName}.`],
   };
   readClusterVerdict(verdict, { strict: true });
   return { verdict, storedGroups, aliasGroups };
 }
 
-function renderWeeklyDossier(cluster: ClientCluster, groups: CandidateGroup[]): string {
+function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGroup[]): string {
   const lines = [
-    `# Weekly project mint candidates: ${cluster.companyName}`,
+    `# Weekly project mint candidates: ${container.companyName}`,
     "",
-    `Company entity: ${cluster.companyEntityId}`,
-    `Files considered: ${cluster.files.length}`,
+    `Company entity: ${container.companyEntityId ?? "internal"}`,
+    `Files considered: ${container.fileIds.length}`,
     "",
     "## Crossing groups",
   ];
@@ -780,13 +1014,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
     });
 
     try {
-      const clusters = (await clusterClientFiles(deps.db, { minFiles: 1 }))
-        .map((cluster) => ({
-          ...cluster,
-          files: cluster.files.filter((file) => isAtOrBeforeClock(file.date, clock)),
-        }))
-        .filter((cluster) => cluster.files.length > 0)
-        .sort((a, b) => a.companyEntityId.localeCompare(b.companyEntityId));
+      const containers = await buildWeeklyMintContainers(deps.db, clock);
       let companyCursor = ownedRun.company_cursor;
       const declaredById = new Map(
         (await createCompanyRelationshipDeclarationRepository(deps.db).list()).map((row) => [
@@ -794,31 +1022,36 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
           row,
         ]),
       );
-      for (const cluster of clusters) {
-        if (companyCursor && cluster.companyEntityId <= companyCursor) continue;
+      const standingProducts = await loadStandingProducts(deps.db);
+      for (const container of containers) {
+        if (companyCursor && container.key <= companyCursor) continue;
         const batchNow = timestamp(deps.now);
-        const claimed = await claimCandidatesForCompany(deps.db, cluster, cluster.companyEntityId, clock, batchNow);
+        const claimed = await claimCandidatesForCompany(deps.db, container, container.key, clock, batchNow);
         counters.candidatesGrouped += claimed;
         if (deps.mode === "live") {
-          counters.agedOut += await ageOutStaleCandidates(deps.db, cluster.companyEntityId, clock, batchNow);
+          counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
         }
-        const candidates = await readClaimedCandidates(deps.db, cluster.companyEntityId, cluster, clock);
+        const candidates = await readClaimedCandidates(deps.db, container.key, container, clock);
         const groups = groupClaimedCandidates(candidates).filter((group) => group.tokens.length > 0);
         const scanResults = await scanTokenRecurrence(deps.db, {
           candidates: groups.map((group) => ({ key: group.key, tokens: group.tokens })),
-          fileIds: cluster.files.map((file) => file.fileId),
+          fileIds: container.fileIds,
         });
         for (const group of groups) group.scan = scanResults.get(group.key) ?? null;
-        await updateScanState(deps.db, cluster.companyEntityId, groups, batchNow);
+        await updateScanState(deps.db, container.key, groups, batchNow);
         const nonCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) < RECURRENCE_FLOOR_DAYS);
-        await incrementDryStreak(deps.db, cluster.companyEntityId, nonCrossing, batchNow);
-        const crossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) >= RECURRENCE_FLOOR_DAYS);
-        const existingProjects = await loadExistingProjects(
-          deps.db,
-          cluster.files.map((file) => file.fileId),
-        );
+        await incrementDryStreak(deps.db, container.key, nonCrossing, batchNow);
+        const recurrenceCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) >= RECURRENCE_FLOOR_DAYS);
+        const crossing = container.companyEntityId === null ? [] : recurrenceCrossing;
+        if (container.companyEntityId === null) {
+          for (const group of recurrenceCrossing) {
+            if (await groupHasInternalStructuralCoSignal(deps.db, group)) crossing.push(group);
+            else await incrementDryStreak(deps.db, container.key, [group], batchNow);
+          }
+        }
+        const existingProjects = await loadExistingProjects(deps.db, container.fileIds);
         for (const group of crossing) group.deterministic = chooseDeterministicDisposition(group, existingProjects);
-        const covered = await coveredByPendingWeeklyVerdict(deps.db, cluster.companyEntityId);
+        const covered = await coveredByPendingWeeklyVerdict(deps.db, container.companyEntityId);
         const pendingCrossing = crossing.filter(
           (group) =>
             !group.reviewIds.every((reviewId) => covered.has(reviewId)) && group.deterministic.action !== "alias_of",
@@ -837,16 +1070,20 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
           counters.verdictsRequested += 1;
           if (deps.mode === "shadow") {
             deps.logger.info(
-              { companyEntityId: cluster.companyEntityId, groups: pendingCrossing.length },
+              {
+                companyEntityId: container.companyEntityId,
+                containerKey: container.key,
+                groups: pendingCrossing.length,
+              },
               "Weekly mint would request verdict",
             );
           } else {
             if (!deps.generator || !deps.model) throw new Error("weekly mint live mode requires a generator and model");
             const raw = await deps.generator.generateJSON<unknown>(
-              buildWeeklyPrompt(cluster, pendingCrossing, existingProjects),
+              buildWeeklyPrompt(container, pendingCrossing, existingProjects, standingProducts),
               {
                 maxTokens: 12_000,
-                label: `weeklyMint:${cluster.companyName.replace(/\s+/g, "-")}`,
+                label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
                 model: deps.model,
                 reasoningEffort: "medium",
                 thinkingBudget: null,
@@ -854,21 +1091,26 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             );
             const dispositions = readModelDispositions(raw, pendingCrossing);
             const { verdict, storedGroups, aliasGroups } = buildStoredVerdict(
-              cluster,
+              container,
               pendingCrossing,
               dispositions,
               existingProjects,
+              standingProducts,
             );
             if (aliasGroups.length > 0) await markAliasCandidates(deps.db, aliasGroups, batchNow);
             if (verdict.projects.length > 0) {
-              const declaration = resolveDeclaration(
-                cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
-              );
+              const declaration = container.cluster
+                ? resolveDeclaration(
+                    container.cluster.groupMembers
+                      .map((member) => declaredById.get(member.entityId))
+                      .filter((row) => row != null),
+                  )
+                : null;
               await createProjectMintingVerdictRepository(deps.db).storePending({
-                companyEntityId: cluster.companyEntityId,
-                companyName: cluster.companyName,
-                fileCount: cluster.files.length,
-                dossier: renderWeeklyDossier(cluster, storedGroups),
+                companyEntityId: container.companyEntityId,
+                companyName: container.companyName,
+                fileCount: container.fileIds.length,
+                dossier: renderWeeklyDossier(container, storedGroups),
                 verdict: JSON.stringify(verdict),
                 model: deps.model,
                 promptVersion: WEEKLY_MINT_PROMPT_VERSION,
@@ -878,11 +1120,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 declaredClientStage: declaration?.client_stage ?? null,
               });
               counters.verdictsStored += 1;
-              await resetDryStreak(deps.db, cluster.companyEntityId, storedGroups, batchNow);
+              await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
             }
           }
         }
-        companyCursor = cluster.companyEntityId;
+        companyCursor = container.key;
         await updateOwnedRun({
           stage: COMPANIES_STAGE,
           company_cursor: companyCursor,
@@ -890,7 +1132,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
           ...dbCounters(),
           updated_at: timestamp(deps.now),
         });
-        await deps.afterCompanyBatch?.(cluster.companyEntityId);
+        await deps.afterCompanyBatch?.(container.key);
         if (batchSize <= 1) await new Promise((resolve) => setTimeout(resolve, 0));
       }
       const completed = await updateOwnedRun({
