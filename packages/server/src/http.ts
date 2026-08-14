@@ -500,7 +500,15 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/graph-passes", graphPassRoutes(db, logger));
-  app.route("/api/project-minting", projectMintingRoutes(db, logger));
+  app.route(
+    "/api/project-minting",
+    projectMintingRoutes(db, logger, {
+      encryptionKey: config.ENCRYPTION_KEY,
+      openRouterApiKey: config.OPENROUTER_API_KEY,
+      projectMintingModel: config.PROJECT_MINTING_MODEL,
+      passesEnabled: config.DEV_TOOLS_ENABLED,
+    }),
+  );
   app.route(
     "/api/skills",
     skillsRoutes(config, {

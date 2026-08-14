@@ -38,7 +38,25 @@ export type DuplicateDrainRunSnapshot = {
   aliasOnlyDropped: number;
 };
 
-export type GraphPassRunSnapshot = PostSyncRunSnapshot | QueueRunSnapshot | DuplicateDrainRunSnapshot;
+/**
+ * One project-minting pass, scoped to a single company cluster. Stage 3 calls a
+ * reasoning model per cluster, so the run is tracked rather than fired blind:
+ * the caller needs to know it is still going, and what it produced.
+ */
+export type ProjectMintingRunSnapshot = {
+  kind: "project_minting";
+  companyEntityId: string;
+  companyName: string;
+  model: string;
+  clustersConsidered: number;
+  verdictsStored: number;
+};
+
+export type GraphPassRunSnapshot =
+  | PostSyncRunSnapshot
+  | QueueRunSnapshot
+  | DuplicateDrainRunSnapshot
+  | ProjectMintingRunSnapshot;
 
 export interface GraphPassRun {
   id: string;

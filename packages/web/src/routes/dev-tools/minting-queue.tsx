@@ -12,6 +12,7 @@ import { type ProjectMintingVerdict, api } from "@/lib/api";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { MintingClusters } from "./minting-clusters";
 import { MintingVerdictSheet } from "./minting-sheet";
 
 export function MintingQueue() {
@@ -44,32 +45,29 @@ export function MintingQueue() {
   const verdicts = data?.verdicts ?? [];
 
   return (
-    <section className="mt-6">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Pending verdicts · {verdicts.length}
-      </h2>
+    <>
+      <MintingClusters />
+      <section className="mt-8">
+        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Pending verdicts · {verdicts.length}
+        </h2>
 
-      {verdicts.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border px-4 py-8 text-center">
-          <p className="text-[13px] text-muted-foreground">Nothing waiting.</p>
-          <p className="mt-1.5 text-[12px] text-muted-foreground">
-            Verdicts are not generated over HTTP yet. Fill the queue from the repo with{" "}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
-              tsx src/scripts/project-mint-pass.ts --store
-            </code>
-            .
-          </p>
-        </div>
-      ) : (
-        <div className="divide-y divide-border rounded-md border border-border">
-          {verdicts.map((verdict) => (
-            <QueueRow key={verdict.id} verdict={verdict} onOpen={() => setOpenId(verdict.id)} />
-          ))}
-        </div>
-      )}
+        {verdicts.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border px-4 py-8 text-center">
+            <p className="text-[13px] text-muted-foreground">Nothing waiting.</p>
+            <p className="mt-1.5 text-[12px] text-muted-foreground">Run a pass on a company above to fill this.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-border rounded-md border border-border">
+            {verdicts.map((verdict) => (
+              <QueueRow key={verdict.id} verdict={verdict} onOpen={() => setOpenId(verdict.id)} />
+            ))}
+          </div>
+        )}
 
-      <MintingVerdictSheet verdictId={openId} onClose={() => setOpenId(null)} onDecided={() => void refetch()} />
-    </section>
+        <MintingVerdictSheet verdictId={openId} onClose={() => setOpenId(null)} onDecided={() => void refetch()} />
+      </section>
+    </>
   );
 }
 

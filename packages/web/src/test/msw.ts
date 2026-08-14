@@ -567,6 +567,14 @@ export const handlers = [
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),
 
+  http.get("/api/project-minting/verdicts", () => {
+    return HttpResponse.json({ verdicts: [] });
+  }),
+
+  http.get("/api/project-minting/clusters", () => {
+    return HttpResponse.json({ clusters: [], passesEnabled: true });
+  }),
+
   http.get("/api/entity-review", () => {
     return HttpResponse.json({ rows: [], total: 0 });
   }),

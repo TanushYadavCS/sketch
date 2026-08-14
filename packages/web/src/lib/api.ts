@@ -484,6 +484,27 @@ export interface ProjectMintingVerdict {
   updatedAt: string;
 }
 
+export interface ProjectMintingCluster {
+  companyEntityId: string;
+  companyName: string;
+  fileCount: number;
+  triggered: boolean;
+  shardNames: string[];
+  channels: string[];
+  signals: string[];
+  /** Set when this cluster already has a verdict waiting, so the UI does not invite a second paid run. */
+  pendingVerdictId: string | null;
+}
+
+export interface ProjectMintingPassRun {
+  id: string;
+  status: "running" | "complete" | "failed";
+  startedAt: string;
+  finishedAt: string | null;
+  errorMessage: string | null;
+  snapshot: { kind: string; companyName?: string; verdictsStored?: number } | null;
+}
+
 export interface ProjectMintingAcceptBody {
   confirmedCounterpartyKind: CounterpartyKind;
   confirmedClientStage?: ClientStage;
@@ -3638,6 +3659,18 @@ export const api = {
       return request<{ verdict: ProjectMintingVerdict }>(`/api/project-minting/verdicts/${id}/rejection`, {
         method: "POST",
       });
+    },
+    listClusters() {
+      return request<{ clusters: ProjectMintingCluster[]; passesEnabled: boolean }>("/api/project-minting/clusters");
+    },
+    startPass(companyEntityId: string) {
+      return request<{ run: { id: string; status: string; companyName: string; model: string } }>(
+        "/api/project-minting/passes",
+        { method: "POST", body: JSON.stringify({ companyEntityId }) },
+      );
+    },
+    getPass(id: string) {
+      return request<{ run: ProjectMintingPassRun }>(`/api/project-minting/passes/${id}`);
     },
   },
   entityReview: {

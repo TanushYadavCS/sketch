@@ -1,7 +1,9 @@
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { readClusterVerdict } from "../connectors/project-minting";
+import { resolveOpenRouterEnrichmentConfig } from "../connectors/enrichment-providers";
+import { createOpenRouterGenerator } from "../connectors/openrouter-generate";
+import { clusterClientFiles, readClusterVerdict, runProjectMintingPass } from "../connectors/project-minting";
 import {
   ProjectMintingAcceptanceError,
   acceptProjectMintingVerdict,
@@ -18,11 +20,25 @@ import {
   isCounterpartyKind,
   kindCarriesStage,
 } from "../db/repositories/company-relationship-declarations";
+import { createGraphPassRunRepository } from "../db/repositories/graph-pass-runs";
 import {
   type ProjectMintingVerdictRow,
   createProjectMintingVerdictRepository,
 } from "../db/repositories/project-minting-verdicts";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
+
+/**
+ * What the pass route needs from config. Kept narrow so the routes stay
+ * testable without a whole `AppConfig`.
+ */
+export interface ProjectMintingRouteConfig {
+  encryptionKey?: string;
+  openRouterApiKey?: string | null;
+  projectMintingModel?: string | null;
+  /** Running a pass calls a reasoning model per cluster, so it is gated with the dev surface it is driven from. */
+  passesEnabled: boolean;
+}
 
 function requireAdmin(c: Context) {
   if (c.get("role") !== "admin") {
@@ -160,10 +176,145 @@ function readConfirmedAxes(body: Record<string, unknown>) {
   return { confirmedCounterpartyKind: kind, confirmedClientStage: stage };
 }
 
-export function projectMintingRoutes(db: Kysely<DB>, logger: Logger) {
+export function projectMintingRoutes(
+  db: Kysely<DB>,
+  logger: Logger,
+  routeConfig: ProjectMintingRouteConfig = { passesEnabled: false },
+) {
   const routes = new Hono();
   const verdicts = createProjectMintingVerdictRepository(db);
   const declarations = createCompanyRelationshipDeclarationRepository(db);
+  const passRuns = createGraphPassRunRepository(db);
+
+  /**
+   * Stages 1–2 only — cluster the corpus and report what would be sent. No
+   * model call, so this is safe to poll; it costs about 120ms on a 3,800-file
+   * corpus. `pendingVerdictId` is what lets the UI show a cluster as already
+   * queued instead of inviting a second paid run.
+   */
+  routes.get("/clusters", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const clusters = await clusterClientFiles(db, { minFiles: 2 });
+    const pending = await verdicts.listPending();
+    const pendingByCompany = new Map(pending.map((row) => [row.company_entity_id, row.id]));
+    return c.json({
+      clusters: clusters
+        .map((cluster) => ({
+          companyEntityId: cluster.companyEntityId,
+          companyName: cluster.companyName,
+          fileCount: cluster.files.length,
+          triggered: cluster.triggered,
+          shardNames: cluster.groupMembers.map((member) => member.name),
+          channels: cluster.channels.map((channel) => channel.name),
+          signals: [...new Set(cluster.files.flatMap((file) => file.via))].sort(),
+          pendingVerdictId: pendingByCompany.get(cluster.companyEntityId) ?? null,
+        }))
+        .sort((a, b) => b.fileCount - a.fileCount),
+      passesEnabled: routeConfig.passesEnabled,
+    });
+  });
+
+  /**
+   * Runs stage 3 for one cluster in the background and returns the run id to
+   * poll. Scoped to a single company on purpose: an unscoped pass would call
+   * the model once per triggered cluster, which is real money on a click.
+   */
+  routes.post("/passes", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    if (!routeConfig.passesEnabled) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Project minting passes are not enabled" } }, 404);
+    }
+
+    const body = await readJsonObject(c);
+    const companyEntityId = typeof body.companyEntityId === "string" ? body.companyEntityId : null;
+    if (!companyEntityId) {
+      return c.json({ error: { code: "INVALID_REQUEST", message: "companyEntityId is required" } }, 400);
+    }
+
+    const clusters = await clusterClientFiles(db, { minFiles: 2 });
+    const cluster = clusters.find((candidate) => candidate.companyEntityId === companyEntityId);
+    if (!cluster) {
+      return c.json({ error: { code: "NOT_FOUND", message: "No cluster for that company" } }, 404);
+    }
+
+    const settings = await createSettingsRepository(db, routeConfig.encryptionKey).get();
+    const openRouter = resolveOpenRouterEnrichmentConfig(settings, routeConfig.openRouterApiKey);
+    const model = routeConfig.projectMintingModel ?? openRouter.openRouterModel;
+    if (!openRouter.openRouterApiKey || !model) {
+      return c.json(
+        {
+          error: {
+            code: "LLM_NOT_CONFIGURED",
+            message: "Stage 3 needs an OpenRouter key and a reasoning-tier model",
+          },
+        },
+        503,
+      );
+    }
+
+    const runId = await passRuns.start({
+      kind: "project_minting",
+      companyEntityId: cluster.companyEntityId,
+      companyName: cluster.companyName,
+      model,
+      clustersConsidered: 1,
+      verdictsStored: 0,
+    });
+
+    const generator = createOpenRouterGenerator(openRouter.openRouterApiKey, {
+      model,
+      reasoningEffort: "medium",
+      timeoutMs: 300_000,
+    });
+
+    void runProjectMintingPass({
+      db,
+      logger: logger.child({ component: "project-minting-pass", runId }),
+      generator,
+      model,
+      storeVerdicts: true,
+      onlyTriggered: false,
+      companyFilter: (name) => name === cluster.companyName,
+    })
+      .then(async (pass) => {
+        await passRuns.updateSnapshot(runId, {
+          kind: "project_minting",
+          companyEntityId: cluster.companyEntityId,
+          companyName: cluster.companyName,
+          model,
+          clustersConsidered: pass.results.length,
+          verdictsStored: pass.results.filter((result) => result.verdictId).length,
+        });
+        await passRuns.complete(runId);
+      })
+      .catch(async (err) => {
+        logger.error({ err, runId }, "Project minting pass failed");
+        await passRuns.fail(runId, err instanceof Error ? err.message : String(err));
+      });
+
+    return c.json({ run: { id: runId, status: "running", companyName: cluster.companyName, model } }, 201);
+  });
+
+  routes.get("/passes/:id", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const run = await passRuns.get(c.req.param("id"));
+    if (!run) return c.json({ error: { code: "NOT_FOUND", message: "Run not found" } }, 404);
+    return c.json({
+      run: {
+        id: run.id,
+        status: run.status,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+        errorMessage: run.errorMessage,
+        snapshot: run.inputSnapshot,
+      },
+    });
+  });
 
   routes.get("/verdicts", async (c) => {
     const forbidden = requireAdmin(c);
