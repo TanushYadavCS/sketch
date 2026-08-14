@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 183;
+const EXPECTED_MIGRATION_COUNT = 184;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
