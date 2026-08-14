@@ -11,7 +11,13 @@
  * one click, but it reads as a choice, and the accept button names the decision
  * it is about to record.
  */
-import { type ClientStage, type CounterpartyKind, type ProjectMintingVerdict, api } from "@/lib/api";
+import {
+  type ClientStage,
+  type CounterpartyKind,
+  type ProjectMintingAcceptance,
+  type ProjectMintingVerdict,
+  api,
+} from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { Button } from "@sketch/ui/components/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
@@ -31,7 +37,7 @@ export function MintingVerdictSheet({
 }: {
   verdictId: string | null;
   onClose: () => void;
-  onDecided: () => void;
+  onDecided: (accepted: ProjectMintingAcceptance | null) => void;
 }) {
   return (
     <Sheet open={!!verdictId} onOpenChange={(open) => !open && onClose()}>
@@ -53,7 +59,7 @@ function SheetBody({
 }: {
   verdictId: string;
   onClose: () => void;
-  onDecided: () => void;
+  onDecided: (accepted: ProjectMintingAcceptance | null) => void;
 }) {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -74,10 +80,10 @@ function SheetBody({
     setStage(verdict.verdict.clientStage);
   }, [verdict]);
 
-  const settle = () => {
+  const settle = (accepted: ProjectMintingAcceptance | null) => {
     queryClient.invalidateQueries({ queryKey: ["project-minting"] });
     queryClient.invalidateQueries({ queryKey: ["entities"] });
-    onDecided();
+    onDecided(accepted);
     onClose();
   };
 
@@ -91,9 +97,12 @@ function SheetBody({
         ...(override ? { overrideTripwireFlags: true } : {}),
       });
     },
-    onSuccess: settle,
+    onSuccess: (result) => settle(result.acceptance),
   });
-  const reject = useMutation({ mutationFn: () => api.projectMinting.reject(verdictId), onSuccess: settle });
+  const reject = useMutation({
+    mutationFn: () => api.projectMinting.reject(verdictId),
+    onSuccess: () => settle(null),
+  });
 
   if (isLoading || !verdict || !kind) {
     return (

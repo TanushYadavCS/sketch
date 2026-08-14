@@ -815,6 +815,120 @@ describe("project minting verdict acceptance", () => {
     expect(res.status).toBe(200);
     expect(body.acceptance.entities.find((entity) => entity.name === "Billing cleanup")?.fileIds).toHaveLength(4);
   });
+  /**
+   * The Getepik failure: one paraphrased title family among eight good ones
+   * refused the whole verdict, and the only way out was reject and re-run.
+   * A miss is now a warning — the anchors that resolved still mint.
+   */
+  it("mints on the anchors that resolved and reports the ones that did not", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchorpartial", "anchorpartial.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Platform rebuild sync",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Platform rebuild progress.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@anchorpartial.example");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Platform rebuild",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Platform rebuild sync", "Platform rebuild"],
+            evidenceRepos: [],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as {
+      acceptance: { entities: { name: string; fileIds: string[] }[]; unresolvedAnchors: string[] };
+    };
+    expect(res.status).toBe(200);
+    expect(body.acceptance.entities.find((entity) => entity.name === "Platform rebuild")?.fileIds).toHaveLength(4);
+    expect(body.acceptance.unresolvedAnchors).toEqual([
+      'title family "Platform rebuild" on project "Platform rebuild"',
+    ]);
+  });
+
+  /**
+   * The one case still worth refusing. Nothing ties the project to the corpus,
+   * so minting it would create an entity on no evidence at all.
+   */
+  it("still refuses a project whose every anchor missed", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchorgroundless", "anchorgroundless.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Platform rebuild sync",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Platform rebuild progress.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@anchorgroundless.example");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Invented workstream",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Nothing like this exists"],
+            evidenceRepos: [],
+            evidencePeople: ["Nobody <nobody@elsewhere.example>"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as { error: { code: string; details: { projects: string[] } } };
+    expect(res.status).toBe(400);
+    expect(body.error.code).toBe("ANCHOR_NOT_FOUND");
+    expect(body.error.details.projects).toEqual(["Invented workstream"]);
+    const written = await db.selectFrom("entities").select("id").where("name", "=", "Invented workstream").execute();
+    expect(written).toHaveLength(0);
+  });
 });
 
 /** Runs the pass with a canned verdict and returns the id of the single row it stored. */

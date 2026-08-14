@@ -524,6 +524,8 @@ export interface ProjectMintingAcceptance {
     projects: string[];
     unmergedFragments: { entityId: string; intoName: string }[];
   };
+  /** Anchors that matched nothing. The accept still went through on the ones that did. Absent on older stored results. */
+  unresolvedAnchors?: string[];
   declaration: { subjectEntityId: string; counterpartyKind: CounterpartyKind; clientStage: ClientStage | null };
   taskParentUpdates: number;
 }

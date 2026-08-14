@@ -73,6 +73,14 @@ export interface ProjectMintingAcceptResult {
      */
     unmergedFragments: { entityId: string; intoName: string }[];
   };
+  /**
+   * Anchors the verdict named that matched nothing in the current corpus,
+   * usually because the model paraphrased a title family. The accept still
+   * went through on the anchors that did resolve; these are reported so the
+   * reviewer can see the evidence was thinner than the verdict claimed.
+   * Absent on results stored before this was recorded.
+   */
+  unresolvedAnchors: string[];
   declaration: {
     subjectEntityId: string;
     counterpartyKind: CounterpartyKind;
@@ -334,34 +342,53 @@ async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster) {
   return { titleFamilies, repos, people };
 }
 
+/**
+ * A missing anchor is a warning, not a refusal. The model paraphrases — it will
+ * write "Mobile App Redesign" for the family "Mobile App Redesign <> Amitesh" —
+ * and refusing the whole verdict over one paraphrase leaves the reviewer no
+ * path but reject-and-re-run, which costs another model call and can paraphrase
+ * again. The anchors that did resolve are still good evidence, and files that
+ * match no project already fall back to the residual target.
+ *
+ * The one case that is still fatal: a project that named anchors and had every
+ * one of them miss. Nothing connects it to the corpus, so minting it would
+ * create an entity on no evidence. A project that named no anchors at all is
+ * left alone — that is a different decision, and today it is allowed.
+ */
 function resolveProjectAnchors(
   verdict: ClusterVerdict,
   acceptedOriginalNames: Set<string>,
   maps: Awaited<ReturnType<typeof buildAnchorMaps>>,
-): { projectFiles: Map<string, Set<string>>; errors: string[] } {
+): { projectFiles: Map<string, Set<string>>; unresolvedAnchors: string[]; groundlessProjects: string[] } {
   const projectFiles = new Map<string, Set<string>>();
-  const errors: string[] = [];
+  const unresolvedAnchors: string[] = [];
+  const groundlessProjects: string[] = [];
   for (const project of verdict.projects) {
     if (!acceptedOriginalNames.has(project.name)) continue;
     const files = new Set<string>();
+    let declaredAnchors = 0;
     for (const family of project.evidenceTitleFamilies) {
+      declaredAnchors++;
       const matched = maps.titleFamilies.get(normalizeTitleFamily(family).key);
-      if (!matched) errors.push(`title family "${family}" on project "${project.name}"`);
+      if (!matched) unresolvedAnchors.push(`title family "${family}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
     }
     for (const repo of project.evidenceRepos) {
+      declaredAnchors++;
       const matched = maps.repos.get(repo.toLowerCase());
-      if (!matched) errors.push(`repo "${repo}" on project "${project.name}"`);
+      if (!matched) unresolvedAnchors.push(`repo "${repo}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
     }
     for (const person of project.evidencePeople) {
+      declaredAnchors++;
       const matched = maps.people.get(person.trim().toLowerCase());
-      if (!matched) errors.push(`person "${person}" on project "${project.name}"`);
+      if (!matched) unresolvedAnchors.push(`person "${person}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
     }
+    if (declaredAnchors > 0 && files.size === 0) groundlessProjects.push(project.name);
     projectFiles.set(project.name, files);
   }
-  return { projectFiles, errors };
+  return { projectFiles, unresolvedAnchors, groundlessProjects };
 }
 
 async function attachSourceRef(db: Kysely<DB>, entityId: string, sourceId: string): Promise<void> {
@@ -572,11 +599,17 @@ async function computeAcceptance(
     acceptedProjectsForConfirmedAxes(verdict, input, struck);
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const anchorMaps = await buildAnchorMaps(db, cluster);
-  const { projectFiles, errors } = resolveProjectAnchors(verdict, acceptedOriginalNames, anchorMaps);
-  if (errors.length > 0) {
-    throw new ProjectMintingAcceptanceError("ANCHOR_NOT_FOUND", "One or more verdict anchors resolved to no files", {
-      anchors: errors,
-    });
+  const { projectFiles, unresolvedAnchors, groundlessProjects } = resolveProjectAnchors(
+    verdict,
+    acceptedOriginalNames,
+    anchorMaps,
+  );
+  if (groundlessProjects.length > 0) {
+    throw new ProjectMintingAcceptanceError(
+      "ANCHOR_NOT_FOUND",
+      "Every anchor on one or more projects resolved to no files",
+      { projects: groundlessProjects, anchors: unresolvedAnchors },
+    );
   }
 
   const canonicalByName = new Map<string, string>();
@@ -686,6 +719,7 @@ async function computeAcceptance(
     mergeIds: mergeIds.sort(),
     struckProjects,
     droppedByGate,
+    unresolvedAnchors,
     declaration: {
       subjectEntityId: cluster.companyEntityId,
       counterpartyKind: input.confirmedCounterpartyKind,

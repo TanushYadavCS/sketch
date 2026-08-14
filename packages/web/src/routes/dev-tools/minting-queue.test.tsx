@@ -110,6 +110,34 @@ describe("project minting review", () => {
     expect(screen.getByRole("button", { name: "Accept as client · prospect" })).toBeEnabled();
   });
 
+  /**
+   * A partial accept succeeds, so the sheet closes and takes its own state with
+   * it. Without this the reviewer gets no signal at all that the evidence was
+   * thinner than the verdict claimed — it looks like a clean accept.
+   */
+  it("reports anchors that matched nothing after a partial accept", async () => {
+    const row = verdict();
+    server.use(
+      http.get("/api/project-minting/verdicts", () => HttpResponse.json({ verdicts: [row] })),
+      http.get("/api/project-minting/verdicts/:id", () => HttpResponse.json({ verdict: row })),
+      http.post("/api/project-minting/verdicts/:id/acceptance", () =>
+        HttpResponse.json({
+          acceptance: {
+            verdictId: row.id,
+            unresolvedAnchors: ['title family "Mobile App Redesign" on project "Mobile App Redesign"'],
+          },
+        }),
+      ),
+    );
+    renderWithProviders(<MintingQueue />);
+
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Accept as client · active" }));
+
+    expect(await screen.findByText(/1 anchor matched nothing/)).toBeInTheDocument();
+    expect(screen.getByText('title family "Mobile App Redesign" on project "Mobile App Redesign"')).toBeInTheDocument();
+  });
+
   it("refuses to offer accept when an active client has no container to mint", async () => {
     const row = verdict();
     serve({ ...row, verdict: { ...row.verdict, engagement: null } });
