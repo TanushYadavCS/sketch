@@ -372,20 +372,31 @@ function automationsFromParts(parts: WebChatPart[]): AutomationArtifact[] {
 }
 
 export function automationArtifactFromDraftHandoff(handoff: AutomationDraftHandoff): AutomationArtifact {
-  const builderConversationId = handoff.builderConversationId ?? handoff.sourceConversationId;
-  const builderUrl = automationBuilderUrlWithConversationId(handoff.builderUrl, builderConversationId);
+  const builderUrl = handoff.builderConversationId
+    ? automationBuilderUrlWithConversationId(handoff.builderUrl, handoff.builderConversationId)
+    : builderUrlWithoutConversationId(handoff.builderUrl);
   return {
     taskId: handoff.taskId,
     requiresBuilder: true,
-    kind: "Automation setup",
-    title: "Set up automation",
-    description: "Continue configuring this automation in the automation builder.",
-    tags: ["Setup"],
+    kind: "New automation",
+    title: "Create automation",
+    description: "This seems like a new automation. You can go to the builder to create it.",
+    tags: ["Recommended: builder"],
     scheduleLabel: "Not configured",
     deliveryLabel: "Not configured",
     builderUrl,
     status: handoff.status,
   };
+}
+
+function builderUrlWithoutConversationId(builderUrl: string): string {
+  try {
+    const url = new URL(builderUrl, "http://sketch.local");
+    url.searchParams.delete("conversationId");
+    return builderUrl.startsWith("/") ? `${url.pathname}${url.search}${url.hash}` : url.toString();
+  } catch {
+    return builderUrl;
+  }
 }
 
 function automationBuilderUrlWithConversationId(builderUrl: string, conversationId: string): string {
@@ -402,40 +413,16 @@ function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
   return automationsFromParts(visibleMessageParts(message));
 }
 
-export const AUTOMATION_BUILDER_NAVIGATION_DELAY_MS = 3_000;
+export { AUTOMATION_BUILDER_AUTO_OPEN_DELAY_MS as AUTOMATION_BUILDER_NAVIGATION_DELAY_MS } from "@/components/sketch/automation-artifact-card";
 
-type AutomationBuilderNavigation = {
-  key: string;
-  taskId: string;
-  conversationId?: string;
-  createConversation: boolean;
-};
-
-function automationBuilderNavigationFromMessage(
-  message: WebChatMessage | undefined,
-): AutomationBuilderNavigation | null {
-  if (!message || message.role !== "assistant") return null;
+function hasActionableAutomationArtifact(message: WebChatMessage | undefined): boolean {
+  if (!message || message.role !== "assistant") return false;
   const parts = visibleMessageParts(message);
-  const handoffIndex = findLastPartIndex(parts, (part) => part.type === "data-automation-handoff");
-  const handoffPart = handoffIndex === -1 ? undefined : parts[handoffIndex];
-  if (handoffPart?.type === "data-automation-handoff") {
-    const conversationId = handoffPart.data.builderConversationId ?? handoffPart.data.sourceConversationId;
-    return {
-      key: `${message.id}:${handoffPart.data.taskId}:${conversationId}`,
-      taskId: handoffPart.data.taskId,
-      conversationId,
-      createConversation: false,
-    };
-  }
-
+  if (findLastPartIndex(parts, (part) => part.type === "data-automation-handoff") !== -1) return true;
   const automationIndex = findLastPartIndex(parts, (part) => part.type === "data-automation");
-  const automationPart = automationIndex === -1 ? undefined : parts[automationIndex];
-  if (automationPart?.type !== "data-automation" || automationPart.data.requiresBuilder === false) return null;
-  return {
-    key: `${message.id}:${automationPart.data.taskId}`,
-    taskId: automationPart.data.taskId,
-    createConversation: true,
-  };
+  if (automationIndex === -1) return false;
+  const automationPart = parts[automationIndex];
+  return automationPart.type === "data-automation" && automationPart.data.requiresBuilder !== false;
 }
 
 function integrationConnectionsFromParts(parts: WebChatPart[]): ChatThreadIntegrationConnection[] {
@@ -1094,46 +1081,10 @@ export function ChatPage() {
     lastAutomationRefreshKey.current = latestAutomationRefresh.key;
     void invalidateAutomationQueries(queryClient, latestAutomationRefresh.taskIds);
   }, [historyReady, latestAutomationRefresh, queryClient]);
-  const latestAutomationNavigation = useMemo(
-    () => automationBuilderNavigationFromMessage(chat.messages.at(-1)),
+  const latestActionableAutomation = useMemo(
+    () => hasActionableAutomationArtifact(chat.messages.at(-1)),
     [chat.messages],
   );
-  const automationNavigationBaselineConversationId = useRef<string | null>(null);
-  const lastAutomationNavigationKey = useRef<string | null>(null);
-  useEffect(() => {
-    if (!historyReady || automationNavigationBaselineConversationId.current === conversationId) return;
-    automationNavigationBaselineConversationId.current = conversationId;
-    lastAutomationNavigationKey.current = latestAutomationNavigation?.key ?? "";
-  }, [conversationId, historyReady, latestAutomationNavigation]);
-  useEffect(() => {
-    if (!historyReady || !latestAutomationNavigation) return;
-    if (lastAutomationNavigationKey.current === latestAutomationNavigation.key) return;
-    lastAutomationNavigationKey.current = latestAutomationNavigation.key;
-    let cancelled = false;
-    const openBuilder = (builderConversationId: string) => {
-      if (cancelled) return;
-      void navigate({
-        to: "/scheduled-tasks/$taskId/edit",
-        params: { taskId: latestAutomationNavigation.taskId },
-        search: { conversationId: builderConversationId },
-        viewTransition: shouldUseChatViewTransition(),
-      });
-    };
-    const timeoutId = window.setTimeout(() => {
-      if (!latestAutomationNavigation.createConversation && latestAutomationNavigation.conversationId) {
-        openBuilder(latestAutomationNavigation.conversationId);
-        return;
-      }
-      void api.scheduledTasks
-        .createConversation(latestAutomationNavigation.taskId, { createNew: true })
-        .then(({ conversation }) => openBuilder(conversation.conversationId))
-        .catch(() => toast.error("Could not open automation setup"));
-    }, AUTOMATION_BUILDER_NAVIGATION_DELAY_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [historyReady, latestAutomationNavigation, navigate]);
   const rawThreadMessages = useMemo(() => buildChatThreadMessages(chat.messages), [chat.messages]);
   const threadMessages = useSmoothedChatThreadMessages(rawThreadMessages, chatBusy, conversationId);
   const integrationConnectionCards = useMemo(
@@ -1463,6 +1414,7 @@ export function ChatPage() {
               onAnswerQuestion={handleAnswerQuestion}
               onSelectQuestion={handleSelectQuestion}
               onSubmitQuestionBatch={handleSubmitQuestionBatch}
+              autoOpenAutomation={latestActionableAutomation}
               conversationId={conversationId}
             />
           ) : historyLoadFailed ? (

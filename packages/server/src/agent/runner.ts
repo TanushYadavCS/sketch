@@ -350,6 +350,7 @@ export interface RunAgentParams {
   scheduler?: TaskScheduler;
   chatAutomationAuthoring?: ChatAutomationAuthoring;
   automationAuthoringEnabled?: boolean;
+  automationBuilderChat?: boolean;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
@@ -828,6 +829,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
     automationAuthoringEnabled: params.automationAuthoringEnabled,
+    automationBuilderChat: params.automationBuilderChat,
   });
   const claudeMdContext = await loadAgentRuntimeClaudeMdContext({
     orgClaudeDir: params.claudeConfigDir,
@@ -1198,6 +1200,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
     automationAuthoringEnabled: params.automationAuthoringEnabled,
+    automationBuilderChat: params.automationBuilderChat,
   });
 
   const sdkBuiltInTools = resolveSdkBuiltInTools(params.agentAllowedTools);

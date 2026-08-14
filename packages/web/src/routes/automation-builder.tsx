@@ -1,9 +1,10 @@
 import { ChatInput } from "@/components/sketch/chat-input";
-import { SketchMessage } from "@/components/sketch/chat-message";
+import { SketchMessage, UserMessage } from "@/components/sketch/chat-message";
 import {
   ChatThread,
   type ChatThreadInterruption,
   type ChatThreadMessage,
+  type ChatThreadProgressItem,
   questionBatchSignature,
 } from "@/components/sketch/chat-thread";
 import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
@@ -19,6 +20,7 @@ import {
   type ScheduledTaskConversationLock,
   type ScheduledTaskConversationSummary,
   type ScheduledTaskConversationsResponse,
+  type ScheduledTaskOriginChatMessage,
   type StepOutput,
   type WebChatConversationSummary,
   type WebChatQuestion,
@@ -26,6 +28,7 @@ import {
   type WebChatQuestionBatch,
   type WebChatQuestionBatchAnswer,
   type WebChatQuestionOption,
+  type WebChatStoredMessage,
   type WebChatUploadedAttachment,
   type WorkflowEdge,
   type WorkflowStep,
@@ -64,11 +67,22 @@ import {
   SlackLogoIcon,
   SpinnerGapIcon,
   TableIcon,
+  TrashIcon,
   WebhooksLogoIcon,
   WhatsappLogoIcon,
   XCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -163,6 +177,28 @@ interface ExecutionModeSelection {
   mode: AutomationExecutionMode;
 }
 
+type BuilderSourceContextMessage = Pick<ScheduledTaskOriginChatMessage, "id" | "text" | "createdAt">;
+
+function sourceContextMessagesFromWebChat(messages: WebChatStoredMessage[]): BuilderSourceContextMessage[] {
+  return messages
+    .filter((message) => message.role === "user")
+    .flatMap((message) => {
+      const text = message.parts
+        .filter(
+          (part): part is Extract<WebChatStoredMessage["parts"][number], { type: "text" }> => part.type === "text",
+        )
+        .map((part) => part.text)
+        .join("\n")
+        .trim();
+      return text ? [{ id: message.id, text, createdAt: message.createdAt ?? "" }] : [];
+    })
+    .slice(-4);
+}
+
+function sourceContextMessagesFromProvider(messages: ScheduledTaskOriginChatMessage[]): BuilderSourceContextMessage[] {
+  return messages.filter((message) => message.role === "user" && message.text.trim()).slice(-4);
+}
+
 type UiStatus = "idle" | "running" | "success" | "failed" | "skipped";
 export type AutomationRunLifecycleState = "pending" | "running" | "success" | "failure" | "aborted";
 
@@ -215,6 +251,7 @@ function runStatusLabel(state: AutomationRunLifecycleState): string {
 type BuilderWebChatDataParts = {
   progress: {
     lines: string[];
+    items?: ChatThreadProgressItem[];
   };
   file: {
     name: string;
@@ -262,24 +299,6 @@ const connectionLineStyle = {
   strokeWidth: 2,
   strokeDasharray: "5 5",
 } satisfies CSSProperties;
-const builderChatSuggestions: Array<{ label: string; prompt: string; icon: ComponentType<IconProps> }> = [
-  {
-    label: "Change schedule",
-    prompt: "Change the schedule for this automation.",
-    icon: CalendarDotsIcon,
-  },
-  {
-    label: "Add a step",
-    prompt: "Add one useful step to this automation.",
-    icon: GitBranchIcon,
-  },
-  {
-    label: "Tighten criteria",
-    prompt: "Tighten the criteria this automation uses before it acts.",
-    icon: CheckCircleIcon,
-  },
-];
-
 export const automationBuilderRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: "/scheduled-tasks/$taskId/edit",
@@ -380,6 +399,47 @@ function BuilderLoadError({
         </div>
       </div>
     </main>
+  );
+}
+
+function BuilderDeleteDialog({
+  automationTitle,
+  open,
+  isDeleting,
+  onOpenChange,
+  onConfirm,
+}: {
+  automationTitle: string;
+  open: boolean;
+  isDeleting: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent className="sm:max-w-sm">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete automation?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This permanently deletes <span className="font-medium text-foreground">{automationTitle}</span> and its
+            workflow history. Future runs will not be triggered.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={onConfirm} disabled={isDeleting}>
+            {isDeleting ? (
+              <>
+                <SpinnerGapIcon size={14} className="animate-spin" />
+                Deleting…
+              </>
+            ) : (
+              "Delete automation"
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -507,13 +567,19 @@ export function AutomationBuilderPage() {
   const [runRequestError, setRunRequestError] = useState<unknown | null>(null);
   const [savingPromptStepId, setSavingPromptStepId] = useState<string | null>(null);
   const [executionModeSelection, setExecutionModeSelection] = useState<ExecutionModeSelection | null>(null);
-  const [questionPortalTarget, setQuestionPortalTarget] = useState<Element | null>(null);
+  const [setupExecutionMode, setSetupExecutionMode] = useState<AutomationExecutionMode | null>(null);
   const [discardingSetup, setDiscardingSetup] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [builderChatBusy, setBuilderChatBusy] = useState(false);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveCountRef = useRef(0);
+
+  const navigateToAutomations = useCallback(() => {
+    void navigate({ to: "/scheduled-tasks" });
+  }, [navigate]);
 
   const navigateRun = useCallback(
     (runId: string | null) => {
@@ -606,6 +672,17 @@ export function AutomationBuilderPage() {
       await invalidateAutomationQueries(queryClient, [taskId]);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Test failed"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.scheduledTasks.remove(taskId),
+    onSuccess: async () => {
+      await invalidateAutomationQueries(queryClient, [taskId]);
+      setDeleteDialogOpen(false);
+      toast.success("Automation deleted");
+      navigateToAutomations();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not delete automation"),
   });
 
   const saveDraftPatch = useCallback(
@@ -711,6 +788,7 @@ export function AutomationBuilderPage() {
           .selectSetupExecutionMode(taskId, executionMode)
           .then(async (updatedAutomation) => {
             if (executionModeRequestIdRef.current !== requestId) return;
+            setSetupExecutionMode(executionMode);
             const updatedDraft = draftFromDefinition(updatedAutomation);
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
@@ -793,11 +871,8 @@ export function AutomationBuilderPage() {
     selectedRunLifecycle === "pending" ||
     selectedRunLifecycle === "running";
   const closeBuilder = () => {
-    const goToAutomations = () => {
-      void navigate({ to: "/scheduled-tasks" });
-    };
     if (!placeholderSetup) {
-      goToAutomations();
+      navigateToAutomations();
       return;
     }
     setDiscardingSetup(true);
@@ -811,7 +886,7 @@ export function AutomationBuilderPage() {
           });
         }
         await invalidateAutomationQueries(queryClient, [taskId]);
-        goToAutomations();
+        navigateToAutomations();
       })
       .catch((error) => toast.error(error instanceof Error ? error.message : "Could not discard this setup"))
       .finally(() => setDiscardingSetup(false));
@@ -828,13 +903,15 @@ export function AutomationBuilderPage() {
         taskId={taskId}
         title={automationTitle}
         queryKey={queryKey}
-        executionMode={draft.executionMode}
+        executionMode={isPlaceholderDraft(automation) ? setupExecutionMode : draft.executionMode}
         executionModeRecommendation={draft.executionModeRecommendation}
         isSetupPlaceholder={isPlaceholderDraft(automation)}
         executionModeSelection={executionModeSelection}
+        originChat={automation.originChat}
         onExecutionModeSelect={updateExecutionMode}
         onExecutionModeSelectionHandled={handleExecutionModeSelectionHandled}
-        questionPortalTarget={questionPortalTarget}
+        onBusyChange={setBuilderChatBusy}
+        onBackToAutomations={navigateToAutomations}
         className="automation-builder-sidecar-enter hidden lg:flex"
       />
 
@@ -884,6 +961,19 @@ export function AutomationBuilderPage() {
                 requestFailed={Boolean(runRequestError)}
               />
             ) : null}
+            {!placeholderSetup ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5 rounded-[7px] border-destructive/35 px-2.5 text-[12px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                aria-label="Delete automation"
+                onClick={() => setDeleteDialogOpen(true)}
+                disabled={deleteMutation.isPending}
+              >
+                <TrashIcon size={14} />
+                <span>Delete</span>
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -930,11 +1020,20 @@ export function AutomationBuilderPage() {
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           testingStepId={testingStepId}
+          isSetupPlaceholder={placeholderSetup}
+          isBuilderChatBusy={builderChatBusy}
           onSelectStep={setSelectedStepId}
           onUpdateStepPositions={updateStepPositions}
-          onQuestionPortalTarget={setQuestionPortalTarget}
         />
       </div>
+
+      <BuilderDeleteDialog
+        automationTitle={automationTitle}
+        open={deleteDialogOpen}
+        isDeleting={deleteMutation.isPending}
+        onOpenChange={setDeleteDialogOpen}
+        onConfirm={() => deleteMutation.mutate()}
+      />
 
       <NodeDrawer
         key={selectedStep?.id ?? "closed"}
@@ -1065,20 +1164,20 @@ function normalizeBuilderDisplayText(text: string): string {
   return metadata ? `${metadata.label} selected.` : "Execution mode selected.";
 }
 
-function modeSelectionFromBuilderMessages(messages: BuilderWebChatMessage[]): AutomationExecutionMode | null {
-  for (const message of [...messages].reverse()) {
-    if (message.role !== "user") continue;
-    const text = textFromBuilderMessage(message);
-    for (const mode of ["deterministic", "hybrid", "agent-led"] as const) {
-      if (text === `${automationExecutionModeMetadata[mode].label} selected.`) return mode;
-    }
-  }
-  return null;
+function isBuilderNavigationProgressText(value: string): boolean {
+  return /opening (?:the )?automation builder/i.test(value);
 }
 
 function progressLinesFromBuilderMessage(message: BuilderWebChatMessage): string[] {
   const progressPart = message.parts.find((part) => part.type === "data-progress");
-  return progressPart?.data.lines.filter((line) => line.trim().length > 0) ?? [];
+  return (
+    progressPart?.data.lines.filter((line) => line.trim().length > 0 && !isBuilderNavigationProgressText(line)) ?? []
+  );
+}
+
+function progressItemsFromBuilderMessage(message: BuilderWebChatMessage): ChatThreadProgressItem[] {
+  const progressPart = message.parts.find((part) => part.type === "data-progress");
+  return progressPart?.data.items?.filter((item) => !isBuilderNavigationProgressText(item.label)) ?? [];
 }
 
 function filesFromBuilderMessage(message: BuilderWebChatMessage) {
@@ -1131,9 +1230,10 @@ function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | u
 export function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThreadMessage[] {
   return messages.flatMap<ChatThreadMessage>((message) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
-    const text = textFromBuilderMessage(message);
+    const rawText = textFromBuilderMessage(message);
+    const text = message.role === "assistant" && isBuilderNavigationProgressText(rawText) ? "" : rawText;
     const files = filesFromBuilderMessage(message);
-    const automations = automationsFromBuilderMessage(message);
+    const automations: AutomationArtifact[] = [];
     const interruption = interruptionFromBuilderMessage(message);
     const question = message.role === "assistant" ? questionFromBuilderMessage(message) : undefined;
     const questionBatch = message.role === "assistant" ? questionBatchFromBuilderMessage(message) : undefined;
@@ -1155,7 +1255,18 @@ export function builderChatThreadMessages(messages: BuilderWebChatMessage[]): Ch
     }
     if (message.role === "assistant") {
       const progressLines = progressLinesFromBuilderMessage(message);
-      if (progressLines.length > 0) return [{ id: message.id, role: message.role, createdAt, progressLines }];
+      const progressItems = progressItemsFromBuilderMessage(message);
+      if (progressLines.length > 0 || progressItems.length > 0) {
+        return [
+          {
+            id: message.id,
+            role: message.role,
+            createdAt,
+            ...(progressLines.length > 0 ? { progressLines } : {}),
+            ...(progressItems.length > 0 ? { progressItems } : {}),
+          },
+        ];
+      }
     }
     return [];
   });
@@ -1164,9 +1275,12 @@ export function builderChatThreadMessages(messages: BuilderWebChatMessage[]): Ch
 function hasPendingBuilderAssistantProgress(messages: BuilderWebChatMessage[]): boolean {
   const latestMessage = messages.at(-1);
   if (!latestMessage || latestMessage.role !== "assistant") return false;
+  const text = textFromBuilderMessage(latestMessage);
+  const visibleText = isBuilderNavigationProgressText(text) ? "" : text;
   return (
-    progressLinesFromBuilderMessage(latestMessage).length > 0 &&
-    !textFromBuilderMessage(latestMessage) &&
+    (progressLinesFromBuilderMessage(latestMessage).length > 0 ||
+      progressItemsFromBuilderMessage(latestMessage).length > 0) &&
+    !visibleText &&
     !interruptionFromBuilderMessage(latestMessage) &&
     filesFromBuilderMessage(latestMessage).length === 0 &&
     automationsFromBuilderMessage(latestMessage).length === 0 &&
@@ -1327,22 +1441,26 @@ function BuilderChatSidecar({
   executionModeRecommendation,
   isSetupPlaceholder,
   executionModeSelection,
+  originChat,
   onExecutionModeSelect,
   onExecutionModeSelectionHandled,
-  questionPortalTarget,
+  onBusyChange,
+  onBackToAutomations,
   className,
 }: {
   requestedConversationId: string | null;
   taskId: string;
   title: string;
   queryKey: readonly unknown[];
-  executionMode: AutomationExecutionMode;
+  executionMode: AutomationExecutionMode | null;
   executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
   isSetupPlaceholder: boolean;
   executionModeSelection: ExecutionModeSelection | null;
+  originChat: AutomationDefinition["originChat"];
   onExecutionModeSelect: (mode: AutomationExecutionMode) => void;
   onExecutionModeSelectionHandled: (selectionId: number) => void;
-  questionPortalTarget?: Element | null;
+  onBusyChange: (busy: boolean) => void;
+  onBackToAutomations: () => void;
   className?: string;
 }) {
   const navigate = useNavigate();
@@ -1369,6 +1487,24 @@ function BuilderChatSidecar({
   const selectedConversation = visibleConversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
+  const originContextQuery = useQuery({
+    queryKey: ["automation-origin-context", taskId, originChat?.platform, originChat?.conversationId],
+    queryFn: async (): Promise<BuilderSourceContextMessage[]> => {
+      if (!originChat?.conversationId) return [];
+      if (originChat.platform === "web") {
+        const response = await api.webChat.messages(originChat.conversationId);
+        return sourceContextMessagesFromWebChat(response.messages);
+      }
+      const response = await api.scheduledTasks.originChatMessages(taskId);
+      return sourceContextMessagesFromProvider(response.messages);
+    },
+    enabled: Boolean(
+      requestedConversationId &&
+        selectedConversation?.state === "active" &&
+        selectedConversation.kinds.includes("builder"),
+    ),
+    staleTime: 30_000,
+  });
 
   const openConversation = useCallback(
     (conversationId: string) => {
@@ -1430,7 +1566,7 @@ function BuilderChatSidecar({
       data-testid="automation-builder-chat-sidecar"
       aria-label="Automation chats"
       className={cn(
-        "box-border w-[360px] min-w-[320px] max-w-[440px] shrink-0 resize-x flex-col overflow-hidden border-r border-border/80 bg-background text-foreground",
+        "box-border w-[460px] min-w-[400px] max-w-[560px] shrink-0 resize-x flex-col overflow-hidden border-r border-border/80 bg-background text-foreground",
         className,
       )}
     >
@@ -1439,6 +1575,7 @@ function BuilderChatSidecar({
         summary={selectedConversation ? webChatSummaryById.get(selectedConversation.conversationId) : undefined}
         title={title}
         onBack={selectedConversation ? openChatList : undefined}
+        onBackToAutomations={onBackToAutomations}
         onNew={() => createMutation.mutate()}
         newPending={createMutation.isPending}
         onArchive={
@@ -1485,9 +1622,11 @@ function BuilderChatSidecar({
             executionModeRecommendation={executionModeRecommendation}
             isSetupPlaceholder={isSetupPlaceholder}
             executionModeSelection={executionModeSelection}
+            originContextMessages={originContextQuery.data ?? []}
+            originContextLoading={originContextQuery.isPending && Boolean(originChat?.conversationId)}
             onExecutionModeSelect={onExecutionModeSelect}
             onExecutionModeSelectionHandled={onExecutionModeSelectionHandled}
-            questionPortalTarget={questionPortalTarget}
+            onBusyChange={onBusyChange}
             onBack={openChatList}
           />
         )}
@@ -1501,6 +1640,7 @@ function BuilderChatHeader({
   summary,
   title,
   onBack,
+  onBackToAutomations,
   onNew,
   newPending,
   onArchive,
@@ -1510,6 +1650,7 @@ function BuilderChatHeader({
   summary?: WebChatConversationSummary;
   title: string;
   onBack?: () => void;
+  onBackToAutomations: () => void;
   onNew: () => void;
   newPending: boolean;
   onArchive?: () => void;
@@ -1519,20 +1660,30 @@ function BuilderChatHeader({
   return (
     <div className="shrink-0 border-b border-border/80 bg-background/95 px-3 py-3 backdrop-blur">
       <div className="flex min-w-0 items-center gap-2.5">
-        {onBack ? (
+        {conversation && onBack ? (
           <Button
-            size="icon"
+            size="sm"
             variant="ghost"
-            className="size-8 shrink-0 rounded-[8px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50"
+            className="h-8 shrink-0 gap-1.5 rounded-[8px] px-2 text-[12px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50"
             aria-label="Back to chats"
             onClick={onBack}
           >
-            <ArrowLeftIcon size={16} />
+            <ArrowLeftIcon size={15} />
+            <span>Chats</span>
+          </Button>
+        ) : !conversation ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 shrink-0 gap-1.5 rounded-[8px] px-2 text-[12px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50"
+            aria-label="Back to automations"
+            onClick={onBackToAutomations}
+          >
+            <ArrowLeftIcon size={15} />
+            <span>Automations</span>
           </Button>
         ) : (
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent text-[#141100]">
-            <RobotIcon size={17} weight="fill" />
-          </span>
+          <span className="size-8 shrink-0" aria-hidden />
         )}
         <div className="min-w-0 flex-1">
           {conversation ? (
@@ -1838,9 +1989,11 @@ function BuilderChatTranscript({
   executionModeRecommendation,
   isSetupPlaceholder,
   executionModeSelection,
+  originContextMessages,
+  originContextLoading,
   onExecutionModeSelect,
   onExecutionModeSelectionHandled,
-  questionPortalTarget,
+  onBusyChange,
   onBack,
 }: {
   conversationId: string;
@@ -1849,13 +2002,15 @@ function BuilderChatTranscript({
   title: string;
   queryKey: readonly unknown[];
   conversationsQueryKey: readonly unknown[];
-  executionMode: AutomationExecutionMode;
+  executionMode: AutomationExecutionMode | null;
   executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
   isSetupPlaceholder: boolean;
   executionModeSelection: ExecutionModeSelection | null;
+  originContextMessages: BuilderSourceContextMessage[];
+  originContextLoading: boolean;
   onExecutionModeSelect: (mode: AutomationExecutionMode) => void;
   onExecutionModeSelectionHandled: (selectionId: number) => void;
-  questionPortalTarget?: Element | null;
+  onBusyChange: (busy: boolean) => void;
   onBack: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -1906,20 +2061,11 @@ function BuilderChatTranscript({
   const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
   const threadMessages = builderChatThreadMessages(chat.messages);
-  const setupSelectedMode = isSetupPlaceholder
-    ? (executionModeSelection?.mode ?? modeSelectionFromBuilderMessages(chat.messages))
-    : executionMode;
-  const transcriptMessages = useMemo(
-    () =>
-      questionPortalTarget
-        ? threadMessages.map((message) =>
-            message.role === "assistant" && !message.text && (message.question || message.questionBatch)
-              ? { ...message, text: "I need one detail to finish this setup. Answer below the workflow." }
-              : message,
-          )
-        : threadMessages,
-    [questionPortalTarget, threadMessages],
-  );
+  const transcriptMessages = threadMessages;
+  useEffect(() => {
+    onBusyChange(chatBusy);
+    return () => onBusyChange(false);
+  }, [chatBusy, onBusyChange]);
   const latestMessage = chat.messages.at(-1);
   const threadScrollKey = latestMessage
     ? [
@@ -1937,7 +2083,6 @@ function BuilderChatTranscript({
         chat.status,
       ].join(":")
     : "";
-  const showEmptyState = historyReady && !historyLoadError && threadMessages.length === 0 && !chatBusy && !chat.error;
   useEffect(() => {
     if (!executionModeSelection || !historyReady || chatBusy) return;
     const { mode } = executionModeSelection;
@@ -2079,15 +2224,21 @@ function BuilderChatTranscript({
   return (
     <>
       <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4">
-        {historyReady && !historyLoadError ? (
-          <div className="mb-6">
-            <SketchMessage>
-              <AutomationSetupCard
-                mode={setupSelectedMode}
-                recommendation={isSetupPlaceholder && !setupSelectedMode ? undefined : executionModeRecommendation}
-                onSelect={onExecutionModeSelect}
-              />
-            </SketchMessage>
+        {historyReady && !historyLoadError && chat.messages.length === 0 ? (
+          <div className="mb-6 space-y-5">
+            {originContextLoading ? <BuilderSourceContextLoading /> : null}
+            {originContextMessages.length > 0 ? <BuilderSourceContext messages={originContextMessages} /> : null}
+            {!isSetupPlaceholder || originContextMessages.length > 0 ? (
+              <SketchMessage>
+                <AutomationSetupCard
+                  mode={executionMode}
+                  recommendation={executionModeRecommendation}
+                  onSelect={onExecutionModeSelect}
+                />
+              </SketchMessage>
+            ) : (
+              <AutomationDescriptionPrompt />
+            )}
           </div>
         ) : null}
         {!historyReady ? (
@@ -2112,8 +2263,6 @@ function BuilderChatTranscript({
               </Button>
             </div>
           </div>
-        ) : showEmptyState ? (
-          <BuilderChatEmptyState title={title} onPrompt={sendBuilderMessage} />
         ) : (
           <ChatThread
             className="mt-4 gap-4"
@@ -2123,7 +2272,6 @@ function BuilderChatTranscript({
             conversationId={conversationId}
             onAnswerQuestion={selectBuilderQuestion}
             onSubmitQuestionBatch={submitBuilderQuestionBatch}
-            questionPortalTarget={questionPortalTarget}
           />
         )}
       </div>
@@ -2131,7 +2279,7 @@ function BuilderChatTranscript({
         <ChatInput
           key={conversationId}
           disabled={!historyReady || Boolean(historyLoadError) || chatBusy}
-          disabledPlaceholder={historyReady ? "Transcript unavailable" : "Loading conversation..."}
+          disabledPlaceholder={chatBusy ? "" : historyReady ? "Transcript unavailable" : "Loading conversation..."}
           running={chatBusy}
           runningPlaceholder="Sketch is thinking..."
           stopping={stoppingRun}
@@ -2155,37 +2303,44 @@ function BuilderChatLoadingState() {
   );
 }
 
-function BuilderChatEmptyState({ title, onPrompt }: { title: string; onPrompt: (prompt: string) => void }) {
+function BuilderSourceContext({ messages }: { messages: BuilderSourceContextMessage[] }) {
   return (
-    <div className="flex min-h-full items-center justify-center px-1">
-      <div className="w-full max-w-[340px] border-l border-brand-accent pl-4">
-        <div className="flex items-start gap-3">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent/12 text-brand-accent">
-            <RobotIcon size={18} weight="fill" />
-          </span>
-          <div className="min-w-0">
-            <p className="text-[14px] font-semibold text-foreground">What should change?</p>
-            <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-muted-foreground">{title}</p>
-          </div>
-        </div>
-        <div className="mt-4 grid gap-2">
-          {builderChatSuggestions.map((suggestion) => {
-            const Icon = suggestion.icon;
-            return (
-              <button
-                key={suggestion.label}
-                type="button"
-                className="flex min-h-9 items-center gap-2 rounded-[7px] px-2 text-left text-[12px] font-medium text-foreground/80 transition hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55"
-                onClick={() => onPrompt(suggestion.prompt)}
-              >
-                <Icon size={14} className="shrink-0 text-brand-accent" />
-                <span className="min-w-0 truncate">{suggestion.label}</span>
-              </button>
-            );
-          })}
-        </div>
+    <div data-testid="automation-builder-source-context" className="space-y-2">
+      <div className="ml-[36px] flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70">
+        <span className="h-px w-5 bg-border/80" aria-hidden />
+        <span>From the originating chat</span>
       </div>
+      {messages.map((message) => (
+        <UserMessage key={message.id}>
+          <p className="whitespace-pre-wrap">{message.text}</p>
+        </UserMessage>
+      ))}
     </div>
+  );
+}
+
+function BuilderSourceContextLoading() {
+  return (
+    <output
+      data-testid="automation-builder-source-context-loading"
+      className="ml-[36px] flex items-center gap-2 text-[12px] text-muted-foreground"
+    >
+      <span className="automation-builder-source-context-dot" aria-hidden />
+      <span>Bringing in your web-chat request…</span>
+    </output>
+  );
+}
+
+function AutomationDescriptionPrompt() {
+  return (
+    <SketchMessage>
+      <div className="max-w-[640px] border-l border-brand-accent pl-4">
+        <p className="text-[15px] font-semibold leading-6 text-foreground">What should this automation do?</p>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          Describe the workflow in your own words. You can include what starts it and what Sketch should do.
+        </p>
+      </div>
+    </SketchMessage>
   );
 }
 
@@ -2484,18 +2639,20 @@ function AutomationCanvas({
   stepOutputs,
   runStatus,
   testingStepId,
+  isSetupPlaceholder,
+  isBuilderChatBusy,
   onSelectStep,
   onUpdateStepPositions,
-  onQuestionPortalTarget,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: string;
   testingStepId: string | null;
+  isSetupPlaceholder: boolean;
+  isBuilderChatBusy: boolean;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
-  onQuestionPortalTarget: (target: Element | null) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -2505,11 +2662,120 @@ function AutomationCanvas({
         stepOutputs={stepOutputs}
         runStatus={runStatus}
         testingStepId={testingStepId}
+        isSetupPlaceholder={isSetupPlaceholder}
+        isBuilderChatBusy={isBuilderChatBusy}
         onSelectStep={onSelectStep}
         onUpdateStepPositions={onUpdateStepPositions}
-        onQuestionPortalTarget={onQuestionPortalTarget}
       />
     </ReactFlowProvider>
+  );
+}
+
+function AutomationBuilderPlaceholder({
+  isSetupPlaceholder,
+  running,
+}: {
+  isSetupPlaceholder: boolean;
+  running: boolean;
+}) {
+  const authoringInProgress = isSetupPlaceholder && running;
+
+  return (
+    <div
+      data-testid={isSetupPlaceholder ? "automation-builder-graph-loading" : undefined}
+      className="w-full max-w-[520px] text-left"
+    >
+      <div
+        className={cn(
+          "automation-builder-empty-diagram mb-5",
+          authoringInProgress && "automation-builder-empty-diagram-loading",
+        )}
+        aria-hidden
+      >
+        <div className="automation-builder-empty-diagram-meta">
+          <span>Workflow preview</span>
+          <span className="automation-builder-empty-diagram-meta-status">
+            {authoringInProgress ? "Assembling steps" : "Awaiting setup"}
+          </span>
+        </div>
+        <svg className="automation-builder-empty-edges" viewBox="0 0 520 280" fill="none" aria-hidden="true">
+          <path
+            className="automation-builder-empty-edge automation-builder-empty-edge-track"
+            d="M150 140C174 140 165 92 185 92"
+          />
+          <path
+            className="automation-builder-empty-edge automation-builder-empty-edge-track"
+            d="M335 92C355 92 346 164 370 164"
+          />
+          <path
+            className="automation-builder-empty-edge automation-builder-empty-edge-progress automation-builder-empty-edge-progress-one"
+            d="M150 140C174 140 165 92 185 92"
+          />
+          <path
+            className="automation-builder-empty-edge automation-builder-empty-edge-progress automation-builder-empty-edge-progress-two"
+            d="M335 92C355 92 346 164 370 164"
+          />
+          <circle className="automation-builder-empty-edge-junction" cx="150" cy="140" r="3" />
+          <circle className="automation-builder-empty-edge-junction" cx="185" cy="92" r="3" />
+          <circle className="automation-builder-empty-edge-junction" cx="335" cy="92" r="3" />
+          <circle className="automation-builder-empty-edge-junction" cx="370" cy="164" r="3" />
+        </svg>
+        <div className="automation-builder-empty-node automation-builder-empty-node-trigger">
+          <span className="automation-builder-empty-node-icon">
+            <LightningIcon size={15} weight="fill" />
+          </span>
+          <span>
+            <strong>Trigger</strong>
+            <small>Start event</small>
+          </span>
+        </div>
+        <div className="automation-builder-empty-node automation-builder-empty-node-action">
+          <span className="automation-builder-empty-node-icon">
+            <RobotIcon size={15} weight="fill" />
+          </span>
+          <span>
+            <strong>Action</strong>
+            <small>Workflow logic</small>
+          </span>
+        </div>
+        <div className="automation-builder-empty-node automation-builder-empty-node-delivery">
+          <span className="automation-builder-empty-node-icon">
+            <CheckCircleIcon size={15} weight="fill" />
+          </span>
+          <span>
+            <strong>Delivery</strong>
+            <small>Final output</small>
+          </span>
+        </div>
+      </div>
+      <div className="border-l border-brand-accent pl-5">
+        {authoringInProgress ? (
+          <div className="flex items-center gap-2 text-[12px] font-medium text-brand-accent">
+            <span className="automation-builder-scribble-status-dot" />
+            <span>Composing automation</span>
+          </div>
+        ) : null}
+        <p
+          className={cn(
+            "mt-2 text-sm font-semibold text-foreground",
+            authoringInProgress && "automation-builder-typewriter",
+          )}
+        >
+          {authoringInProgress
+            ? "Building your workflow"
+            : isSetupPlaceholder
+              ? "Workflow canvas"
+              : "No workflow steps yet"}
+        </p>
+        <p className="mt-1 text-sm leading-5 text-muted-foreground">
+          {authoringInProgress
+            ? "Sketch is applying your answers to the workflow canvas."
+            : isSetupPlaceholder
+              ? "Your workflow will appear here as you configure it in the chat."
+              : "Ask Sketch to add the first workflow step in the chat."}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -2519,18 +2785,20 @@ function AutomationCanvasFlow({
   stepOutputs,
   runStatus,
   testingStepId,
+  isSetupPlaceholder,
+  isBuilderChatBusy,
   onSelectStep,
   onUpdateStepPositions,
-  onQuestionPortalTarget,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: string;
   testingStepId: string | null;
+  isSetupPlaceholder: boolean;
+  isBuilderChatBusy: boolean;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
-  onQuestionPortalTarget: (target: Element | null) => void;
 }) {
   const { fitView } = useReactFlow<BuilderNode>();
   const nodesInitialized = useNodesInitialized();
@@ -2621,19 +2889,14 @@ function AutomationCanvasFlow({
 
   if (draft.steps.length === 0) {
     return (
-      <div className="relative size-full">
+      <div className="relative size-full overflow-hidden">
+        <div className="automation-builder-empty-grid pointer-events-none absolute inset-0" aria-hidden />
         <div
           data-testid="automation-builder-empty-canvas"
-          className="automation-builder-empty-state flex size-full items-center justify-center bg-background px-6 pb-36 text-center"
+          className="automation-builder-empty-state relative z-[1] flex size-full items-center justify-center bg-transparent px-6 pb-36 text-center"
         >
-          <div className="max-w-sm border-l border-brand-accent pl-4 text-left">
-            <p className="text-sm font-semibold text-foreground">Your automation is taking shape</p>
-            <p className="mt-1 text-sm leading-5 text-muted-foreground">
-              Answer the setup questions below and Sketch will build the workflow here.
-            </p>
-          </div>
+          <AutomationBuilderPlaceholder isSetupPlaceholder={isSetupPlaceholder} running={isBuilderChatBusy} />
         </div>
-        <QuestionDock onTarget={onQuestionPortalTarget} />
       </div>
     );
   }
@@ -2674,23 +2937,12 @@ function AutomationCanvasFlow({
         connectionLineStyle={connectionLineStyle}
         connectionRadius={28}
         proOptions={{ hideAttribution: true }}
-        className="automation-builder-flow"
+        className="automation-builder-flow automation-builder-flow-ready"
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="var(--automation-builder-grid)" />
         <Controls showInteractive={false} position="bottom-left" className="automation-builder-controls" />
       </ReactFlow>
-      <QuestionDock onTarget={onQuestionPortalTarget} />
     </div>
-  );
-}
-
-function QuestionDock({ onTarget }: { onTarget: (target: Element | null) => void }) {
-  return (
-    <div
-      data-testid="automation-builder-question-dock"
-      ref={onTarget}
-      className="automation-builder-question-dock pointer-events-auto absolute right-4 bottom-4 left-16 z-20 mx-auto max-w-[680px] empty:hidden"
-    />
   );
 }
 

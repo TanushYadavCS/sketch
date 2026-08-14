@@ -165,7 +165,7 @@ describe("ScheduledTasksPage", () => {
         "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Create automation" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
   });
 
   it("creates an admin draft and navigates to its fresh builder conversation", async () => {
@@ -180,7 +180,7 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
-    await user.click(screen.getAllByRole("button", { name: "Create automation" })[0]);
+    await user.click(screen.getAllByRole("button", { name: "Create with Sketch" })[0]);
 
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({
@@ -198,7 +198,7 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Create automation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create with Sketch" })).not.toBeInTheDocument();
   });
 
   it("refreshes the list graph and run history after an external run starts", async () => {

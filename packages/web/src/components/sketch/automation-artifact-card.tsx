@@ -1,9 +1,36 @@
-import type { AutomationArtifact } from "@/lib/api";
+import { type AutomationArtifact, api } from "@/lib/api";
 import { shouldUseChatViewTransition } from "@/lib/chat-target";
-import { CalendarDotsIcon } from "@phosphor-icons/react";
+import { CalendarDotsIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useNavigate } from "@tanstack/react-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+
+export const AUTOMATION_BUILDER_AUTO_OPEN_DELAY_MS = 3_000;
+const AUTOMATION_AUTO_OPEN_STORAGE_PREFIX = "sketch:automation-auto-open:";
+
+function autoOpenStorageKey(key: string): string {
+  return `${AUTOMATION_AUTO_OPEN_STORAGE_PREFIX}${key}`;
+}
+
+function hasConsumedAutoOpen(key: string | undefined): boolean {
+  if (!key) return false;
+  try {
+    return window.sessionStorage.getItem(autoOpenStorageKey(key)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function consumeAutoOpen(key: string | undefined): void {
+  if (!key) return;
+  try {
+    window.sessionStorage.setItem(autoOpenStorageKey(key), "true");
+  } catch {
+    return;
+  }
+}
 
 function conversationIdFromBuilderUrl(builderUrl: string): string | undefined {
   try {
@@ -17,27 +44,76 @@ function conversationIdFromBuilderUrl(builderUrl: string): string | undefined {
 export function AutomationArtifactCard({
   artifact,
   conversationId,
+  autoOpen = false,
+  autoOpenKey,
   className,
 }: {
   artifact: AutomationArtifact;
   conversationId?: string;
+  autoOpen?: boolean;
+  autoOpenKey?: string;
   className?: string;
 }) {
   const navigate = useNavigate();
   const tags = Array.from(new Set(artifact.tags));
-  const continuationConversationId = conversationIdFromBuilderUrl(artifact.builderUrl) ?? conversationId;
+  const isUpdate = artifact.kind.trim().toLowerCase() === "updated automation";
+  const existingConversationId = conversationIdFromBuilderUrl(artifact.builderUrl);
+  const [opening, setOpening] = useState(false);
+  const openingRef = useRef(false);
+  const autoOpenHandledRef = useRef(false);
+  const autoOpenTimerRef = useRef<number | null>(null);
 
-  const openBuilder = () => {
-    void navigate({
-      to: "/scheduled-tasks/$taskId/edit",
-      params: { taskId: artifact.taskId },
-      search: continuationConversationId ? { conversationId: continuationConversationId } : {},
-      viewTransition: shouldUseChatViewTransition(),
-    });
-  };
+  const setOpeningState = useCallback((value: boolean) => {
+    openingRef.current = value;
+    setOpening(value);
+  }, []);
 
-  const saveAsIs = () => {
-    void navigate({ to: "/scheduled-tasks" });
+  const openBuilder = useCallback(async () => {
+    if (openingRef.current) return;
+    setOpeningState(true);
+    try {
+      const builderConversationId = existingConversationId
+        ? existingConversationId
+        : (await api.scheduledTasks.createConversation(artifact.taskId, { createNew: true })).conversation
+            .conversationId;
+      await navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: artifact.taskId },
+        search: { conversationId: builderConversationId },
+        viewTransition: shouldUseChatViewTransition(),
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not open automation builder");
+    } finally {
+      setOpeningState(false);
+    }
+  }, [artifact.taskId, existingConversationId, navigate, setOpeningState]);
+
+  useEffect(() => {
+    if (!autoOpen || autoOpenHandledRef.current || hasConsumedAutoOpen(autoOpenKey)) return;
+    if (autoOpenTimerRef.current !== null) return;
+    autoOpenTimerRef.current = window.setTimeout(() => {
+      autoOpenTimerRef.current = null;
+      autoOpenHandledRef.current = true;
+      consumeAutoOpen(autoOpenKey);
+      void openBuilder();
+    }, AUTOMATION_BUILDER_AUTO_OPEN_DELAY_MS);
+    return () => {
+      if (autoOpenTimerRef.current !== null) {
+        window.clearTimeout(autoOpenTimerRef.current);
+        autoOpenTimerRef.current = null;
+      }
+    };
+  }, [autoOpen, autoOpenKey, openBuilder]);
+
+  const handleOpenClick = () => {
+    if (autoOpenTimerRef.current !== null) {
+      window.clearTimeout(autoOpenTimerRef.current);
+      autoOpenTimerRef.current = null;
+    }
+    consumeAutoOpen(autoOpenKey);
+    openingRef.current = false;
+    void openBuilder();
   };
 
   return (
@@ -60,6 +136,12 @@ export function AutomationArtifactCard({
         </div>
       </div>
 
+      <p className="mt-4 text-[13px] leading-5 text-muted-foreground">
+        {isUpdate
+          ? "Would you like to go to this automation in the builder?"
+          : "This seems like a new automation. You can go to the builder to create it."}
+      </p>
+
       {tags.length > 0 ? (
         <div className="mt-4 flex flex-wrap gap-x-2 gap-y-1 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
           {tags.map((tag, index) => (
@@ -75,17 +157,11 @@ export function AutomationArtifactCard({
         <Button
           type="button"
           className="h-9 rounded-[8px] bg-brand-accent px-4 font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-[#161300] shadow-none hover:bg-brand-accent/90 sm:px-5"
-          onClick={openBuilder}
+          onClick={handleOpenClick}
+          disabled={opening}
         >
-          {continuationConversationId ? "Continue" : "Open automation"}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          className="h-9 rounded-[8px] px-4 font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground sm:px-5"
-          onClick={saveAsIs}
-        >
-          Save as-is
+          {opening ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+          {opening ? "Opening builder…" : "Go to builder"}
         </Button>
       </div>
     </div>

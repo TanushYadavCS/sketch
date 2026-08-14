@@ -26,6 +26,7 @@ import {
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createWebhookEndpointRepository } from "../../db/repositories/webhook-endpoints";
 import type { DB } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
@@ -109,12 +110,26 @@ const deliverySchema = z.object({
 
 const manageScheduledTasksSchema = {
   action: z
-    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share", "updateStepContent"])
+    .enum([
+      "list",
+      "add",
+      "update",
+      "remove",
+      "pause",
+      "resume",
+      "run",
+      "get",
+      "getRun",
+      "open",
+      "share",
+      "updateStepContent",
+    ])
     .describe(
       `Action to perform.
-- 'add': create an automation (legacy agent form: prompt + schedule_type + schedule_value; deterministic form: title + steps with action scripts)
-- 'list': list automations in this context
-- 'update': modify an automation (requires task_id unless the current builder automation is implicit)
+- 'add': create an automation (legacy agent form: prompt + schedule_type + schedule_value; deterministic form: title + steps with action scripts). Successful add emits the builder-opening artifact.
+- 'list': list automations in this context. Always use this before editing by name; inspect each returned task ID and title. Never ask setup questions or invoke create-automation before resolving the task ID.
+- 'update': modify an automation (requires task_id unless the current builder automation is implicit). Successful update emits the builder-opening artifact.
+- 'open': open an existing automation in its builder (requires task_id). This is a read-only routing action; it does not change the automation.
 - 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
@@ -133,7 +148,7 @@ const manageScheduledTasksSchema = {
   execution_mode: automationExecutionModeSchema
     .optional()
     .describe(
-      "How the automation runs: 'Follow exact steps' (deterministic) allows action steps but no agent steps; 'Exact steps with smart help' (hybrid) allows both; 'Let Sketch handle the details' (agent-led) allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
+      "How the automation runs: 'Deterministic' is code-only with no agent; 'Hybrid' combines code and agent steps; 'Agent' is agent-only, Sketch handles the work, and it has no code steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
     .enum(["cron", "interval", "once", "external"])
@@ -218,10 +233,13 @@ For external: use 'webhook' or 'slack_channel_message' as described above.`,
 };
 
 const authoredScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share"]).describe(
-    `Action to perform.
+  action: z
+    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "open", "share"])
+    .describe(
+      `Action to perform.
 - 'add': create an automation from the user's natural-language request
 - 'update': edit an automation from the user's natural-language request (requires task_id)
+- 'open': open an existing automation in its builder (requires task_id); this does not change the automation
 - 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'list': list automations in this context
 - 'remove': delete an automation (requires task_id)
@@ -230,7 +248,7 @@ const authoredScheduledTasksSchema = {
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
 - 'share': return the canonical URL for an automation (requires task_id)`,
-  ),
+    ),
   request: z
     .string()
     .optional()
@@ -259,6 +277,7 @@ type ManageScheduledTasksParams = {
     | "run"
     | "get"
     | "getRun"
+    | "open"
     | "share"
     | "updateStepContent";
   request?: string;
@@ -724,17 +743,30 @@ function withStepContent(
   });
 }
 
-function collectAutomationArtifact(params: {
+async function collectAutomationArtifact(params: {
   deps: ManageScheduledTasksDeps;
   task: ScheduledTask;
   steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
-}): string {
-  const sourceConversationId =
-    params.deps.taskContext.origin?.platform === "web" ? params.deps.taskContext.origin.conversationId : undefined;
-  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config, sourceConversationId);
+  kind: "New automation" | "Updated automation";
+}): Promise<string> {
+  const existingBuilderConversationId =
+    params.kind === "Updated automation" && params.deps.db && params.deps.taskContext.createdBy
+      ? (
+          await createScheduledTaskConversationRepository(params.deps.db).listByTaskAndTranscriptUser(
+            params.task.id,
+            params.deps.taskContext.createdBy,
+            { kind: "builder" },
+          )
+        ).find((row) => row.archived_at === null)?.conversation_id
+      : undefined;
+  const builderUrl = buildBuilderUrl(
+    params.task.id,
+    params.deps.config,
+    params.kind === "Updated automation" ? existingBuilderConversationId : undefined,
+  );
   const delivery = params.task.delivery;
   const deliveryLabel =
     delivery.mode === "silent"
@@ -743,8 +775,8 @@ function collectAutomationArtifact(params: {
 
   params.deps.automationArtifactCollector?.collect({
     taskId: params.task.id,
-    requiresBuilder: requiresAutomationBuilder(params),
-    kind: "New automation",
+    requiresBuilder: true,
+    kind: params.kind,
     title: params.task.title ?? params.task.prompt,
     description: params.task.description ?? `${buildArtifactScheduleLabel(params)}. Delivery: ${deliveryLabel}.`,
     tags: buildArtifactTags({
@@ -843,13 +875,14 @@ async function handleConfiguredChatAuthoring(
   if (result.kind === "error") return text(`Error: ${result.message}`);
 
   if (params.action === "add" || params.action === "update") {
-    collectAutomationArtifact({
+    await collectAutomationArtifact({
       deps,
       task: result.task,
       steps: result.artifact.steps,
       scheduleType: result.artifact.scheduleType,
       scheduleValue: result.artifact.scheduleValue,
       timezone: result.artifact.timezone,
+      kind: params.action === "add" ? "New automation" : "Updated automation",
     });
   }
   const verb = params.action === "add" ? "created" : "updated";
@@ -869,7 +902,10 @@ export async function handleManageScheduledTasks(
   const taskConversationAssociation = webChatTaskConversationAssociation(ctx);
   const explicitTaskId = params.task_id?.trim() || undefined;
   const task_id =
-    explicitTaskId ?? (action === "update" || action === "updateStepContent" ? currentAutomation?.taskId : undefined);
+    explicitTaskId ??
+    (action === "update" || action === "updateStepContent" || action === "open"
+      ? currentAutomation?.taskId
+      : undefined);
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
@@ -877,6 +913,15 @@ export async function handleManageScheduledTasks(
     "Error: Integration-backed action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use a read-only Sketch tool action.";
   const FRESH_SESSION_ONLY_MSG =
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
+
+  if (
+    ctx.conversationKind === "web_chat" &&
+    (action === "add" || action === "update" || action === "updateStepContent")
+  ) {
+    return text(
+      "Automation setup and edits happen in the builder. In web chat, use list to resolve an existing automation, then use open with its task_id. No changes were made.",
+    );
+  }
 
   if (deps.chatAuthoring && (action === "add" || action === "update" || action === "updateStepContent")) {
     return handleConfiguredChatAuthoring(params, deps);
@@ -907,6 +952,7 @@ export async function handleManageScheduledTasks(
     "resume",
     "run",
     "getRun",
+    "open",
     "share",
     "updateStepContent",
   ];
@@ -1170,13 +1216,14 @@ export async function handleManageScheduledTasks(
       const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
       const webhookMetadata = await webhookResponseMetadata(deps, refreshedTask.id, triggerStep?.triggerConfig);
 
-      collectAutomationArtifact({
+      await collectAutomationArtifact({
         deps,
         task: refreshedTask,
         steps: withStepContent(stepsForDb, stepContentForDefinition("new-task", steps)),
         scheduleType,
         scheduleValue,
         timezone: resolvedTimezone,
+        kind: "New automation",
       });
 
       const response: Record<string, unknown> = {
@@ -1249,19 +1296,39 @@ export async function handleManageScheduledTasks(
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
-      collectAutomationArtifact({
+      await collectAutomationArtifact({
         deps,
         task: updated,
         steps: withStepContent(saved.request.steps, saved.request.stepContent),
         scheduleType: saved.request.scheduleType,
         scheduleValue: saved.request.scheduleValue,
         timezone: saved.request.timezone,
+        kind: "Updated automation",
       });
       const updatedTrigger = saved.request.steps.find((step) => step.type === "trigger")?.triggerConfig;
       const webhookMetadata = await webhookResponseMetadata(deps, updated.id, updatedTrigger);
       const response = { ...updated, ...(webhookMetadata ?? {}) };
       const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
       return text(["Automation updated:", JSON.stringify(response, null, 2), testRun].join("\n"));
+    }
+
+    case "open": {
+      if (!task_id) {
+        return text("Error: task_id is required for open action.");
+      }
+      if (!guardedTask) {
+        return text("Error: task not found.");
+      }
+      const builderUrl = await collectAutomationArtifact({
+        deps,
+        task: guardedTask,
+        steps: parseWorkflowStepsJson(guardedTask.steps) ?? [],
+        scheduleType: guardedTask.scheduleType,
+        scheduleValue: guardedTask.scheduleValue,
+        timezone: guardedTask.timezone,
+        kind: "Updated automation",
+      });
+      return text(`Automation ${task_id} is ready to edit in the builder: ${builderUrl}`);
     }
 
     case "share": {

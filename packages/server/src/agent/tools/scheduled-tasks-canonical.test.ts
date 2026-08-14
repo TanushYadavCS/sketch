@@ -163,6 +163,18 @@ function normalWebChatContext(conversationId: string, createdBy = "owner-1") {
   };
 }
 
+function legacyWebChatContext(conversationId: string, createdBy = "owner-1") {
+  return {
+    ...taskContextFor("web-chat-task", createdBy),
+    origin: {
+      platform: "web" as const,
+      conversationId,
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  };
+}
+
 function currentAutomationFor(taskId: string, revision: number) {
   const current = definition();
   return {
@@ -396,6 +408,50 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
   afterEach(async () => {
     await db.destroy();
   });
+
+  it("opens an existing automation in its builder without authoring or mutating it", async () => {
+    const scheduler = schedulerFor("existing-task");
+    const automationArtifactCollector = new AutomationArtifactCollector();
+    const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
+
+    const result = await handleManageScheduledTasks(
+      { action: "open", task_id: "existing-task" },
+      {
+        db,
+        scheduler,
+        config: { PORT: 5174 },
+        automationArtifactCollector,
+        taskContext: normalWebChatContext("web-chat-update"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("ready to edit in the builder");
+    expect(collectArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "existing-task",
+        kind: "Updated automation",
+        builderUrl: "http://localhost:5174/scheduled-tasks/existing-task/edit",
+      }),
+    );
+    expect((scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule).not.toHaveBeenCalled();
+    expect((scheduler as { updateTask: ReturnType<typeof vi.fn> }).updateTask).not.toHaveBeenCalled();
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
+  it.each(["add", "update", "updateStepContent"] as const)(
+    "blocks %s authoring in web chat before any automation mutation",
+    async (action) => {
+      const scheduler = schedulerFor("existing-task");
+      const result = await handleManageScheduledTasks(
+        { action, ...(action === "update" || action === "updateStepContent" ? { task_id: "existing-task" } : {}) },
+        { db, scheduler, taskContext: normalWebChatContext("web-chat-update") },
+      );
+
+      expect(result.content[0].text).toContain("builder");
+      expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).not.toHaveBeenCalled();
+      await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+    },
+  );
 
   it("creates the complete definition atomically and refreshes scheduler state after commit", async () => {
     const scheduler = schedulerFor("new-task");
@@ -1359,7 +1415,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(stale.content[0].text).toContain("revision conflict");
   });
 
-  it("records normal web-chat create provenance and embeds the source conversation in the artifact URL", async () => {
+  it("records normal web-chat create provenance and keeps the artifact URL free of the source conversation", async () => {
     const automationArtifactCollector = new AutomationArtifactCollector();
     const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
     const result = await handleManageScheduledTasks(
@@ -1372,7 +1428,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       {
         db,
         scheduler: schedulerFor("created-task"),
-        taskContext: normalWebChatContext("normal-chat-1"),
+        taskContext: legacyWebChatContext("normal-chat-1"),
         config: { BASE_URL: "https://sketch.example", PORT: 3000 },
         automationArtifactCollector,
       },
@@ -1390,7 +1446,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       expect.objectContaining({
         taskId: task.id,
         requiresBuilder: true,
-        builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit?conversationId=normal-chat-1`,
+        builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit`,
       }),
     );
   });
@@ -1411,19 +1467,19 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
 
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "First chat edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-b", prompt: "First chat edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("many-task-b"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-b"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "Second chat edit", expected_revision: 1 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-two") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-two") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "Repeat first chat edit", expected_revision: 2 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       {
@@ -1433,7 +1489,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         step_content: "Apply the third chat's wording.",
         expected_revision: 3,
       },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-three") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-three") },
     );
 
     const conversations = createScheduledTaskConversationRepository(db);
@@ -1474,7 +1530,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         schedule_value: "30",
         expected_revision: 0,
       },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("invalid-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("invalid-chat") },
     );
     expect(invalid.content[0].text).toContain("automation definition is invalid");
 
@@ -1483,19 +1539,19 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       {
         db,
         scheduler: schedulerFor("failure-task"),
-        taskContext: normalWebChatContext("denied-chat", "member-1"),
+        taskContext: legacyWebChatContext("denied-chat", "member-1"),
       },
     );
     expect(denied.content[0].text).toContain("created by");
 
     const saved = await handleManageScheduledTasks(
       { action: "update", task_id: "failure-task", prompt: "First edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("successful-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("successful-chat") },
     );
     expect(saved.content[0].text).toContain("Automation updated:");
     const conflict = await handleManageScheduledTasks(
       { action: "update", task_id: "failure-task", prompt: "Stale edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("stale-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("stale-chat") },
     );
     expect(conflict.content[0].text).toContain("revision conflict");
 
@@ -1524,7 +1580,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         {
           db,
           scheduler: schedulerFor("failed-provenance-task"),
-          taskContext: normalWebChatContext("failing-chat"),
+          taskContext: legacyWebChatContext("failing-chat"),
           automationArtifactCollector,
         },
       ),

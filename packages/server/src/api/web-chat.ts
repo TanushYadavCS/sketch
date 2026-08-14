@@ -34,15 +34,11 @@ import {
   withActiveWebChatRun,
 } from "../agent/active-runs";
 import { type BufferedMessage, buildSketchContext } from "../agent/prompt";
-import {
-  type McpServerConfig,
-  type ProgressEvent,
-  type RunAgentParams,
-  type RunAgentResult,
-  isCreateAutomationSkillName,
-} from "../agent/runner";
+import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
+import { handleManageScheduledTasks } from "../agent/tools/scheduled-tasks";
+import { AutomationArtifactCollector } from "../agent/tools/types";
 import { ensureWorkspace } from "../agent/workspace";
 import { isAutomationPlaceholderDraft } from "../automation/definition";
 import { type AutomationCreateContext, createAutomationDraft } from "../automation/persistence";
@@ -79,7 +75,7 @@ import {
 import type { QueueManager } from "../queue";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
 import type { TaskScheduler } from "../scheduler/service";
-import type { CurrentAutomation, ScheduledTask } from "../scheduler/types";
+import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler/types";
 import type { SlackBot } from "../slack/bot";
 import { transcribeAudioFile } from "../transcription/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
@@ -170,7 +166,7 @@ interface WebChatInterruptionData {
 
 const WEB_CHAT_INTERRUPTION_DATA = {
   detail: "Sketch paused.",
-  label: "Tell Sketch what to do differently.",
+  label: "What should Sketch do differently?",
 } satisfies WebChatInterruptionData;
 
 type WebChatTranscriptPart =
@@ -371,6 +367,233 @@ function automationBuilderUrl(config: Config, taskId: string, conversationId: st
   return `${base}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?conversationId=${encodeURIComponent(conversationId)}`;
 }
 
+function hasSuccessfulCreateAutomationSkill(result: RunAgentResult): boolean {
+  return (result.rawUsage?.toolCalls ?? []).some(
+    (toolCall) => toolCall.skillName?.trim() === "create-automation" && toolCall.success === true,
+  );
+}
+
+const AUTOMATION_CREATE_INTENT_PATTERN =
+  /\b(?:create|make|set up|set-up|build|add|start|write|design)\b[^.!?\n]{0,80}\b(?:a|an|another|new)\b[^.!?\n]{0,80}\b(?:automation|workflow|scheduled task|recurring task)\b|\b(?:want|need)\b[^.!?\n]{0,40}\b(?:a|an|new)\b[^.!?\n]{0,40}\b(?:automation|workflow|scheduled task)\b|\b(?:remind me to|set a reminder|create a reminder|make a reminder)\b/i;
+
+const AUTOMATION_UPDATE_INTENT_PATTERN =
+  /\b(?:update|edit|change|modify|adjust|fix|improve|remove|delete|pause|resume|stop|disable|enable|rename|alter)\b[^.!?\n]{0,180}\b(?:automation|workflow|scheduled task)\b|\badd\b[^.!?\n]{0,120}\b(?:my|our|the|this|that|their)\b[^.!?\n]{0,60}\b(?:automation|workflow|scheduled task)\b/i;
+
+function hasAutomationCreateIntent(message: string): boolean {
+  return AUTOMATION_CREATE_INTENT_PATTERN.test(message) && !AUTOMATION_UPDATE_INTENT_PATTERN.test(message);
+}
+
+function hasAutomationUpdateIntent(message: string): boolean {
+  return AUTOMATION_UPDATE_INTENT_PATTERN.test(message);
+}
+
+function normalizedAutomationReference(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function uniqueExplicitAutomationMatch(tasks: ScheduledTask[], message: string): ScheduledTask | undefined {
+  const normalizedMessage = normalizedAutomationReference(message);
+  const titledTasks = tasks.filter((task) => task.title?.trim());
+  const exactMatches = titledTasks.filter((task) => {
+    const title = normalizedAutomationReference(task.title as string);
+    return normalizedMessage.includes(title);
+  });
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1) return undefined;
+
+  const messageWords = new Set(normalizedMessage.split(" "));
+  const stopWords = new Set(["a", "an", "and", "for", "my", "of", "the", "to"]);
+  const tokenMatches = titledTasks.filter((task) => {
+    const titleWords = normalizedAutomationReference(task.title as string)
+      .split(" ")
+      .filter((word) => word.length >= 3 && !stopWords.has(word));
+    return titleWords.length >= 2 && titleWords.every((word) => messageWords.has(word));
+  });
+  return tokenMatches.length === 1 ? tokenMatches[0] : undefined;
+}
+
+function automationReferenceTerms(message: string): string[] {
+  const ignoredWords = new Set([
+    "a",
+    "an",
+    "another",
+    "and",
+    "automation",
+    "change",
+    "delete",
+    "disable",
+    "edit",
+    "enable",
+    "fix",
+    "for",
+    "from",
+    "i",
+    "improve",
+    "my",
+    "need",
+    "new",
+    "of",
+    "our",
+    "pause",
+    "please",
+    "remove",
+    "rename",
+    "resume",
+    "schedule",
+    "scheduled",
+    "stop",
+    "task",
+    "the",
+    "this",
+    "to",
+    "update",
+    "want",
+    "workflow",
+  ]);
+  return [
+    ...new Set(
+      normalizedAutomationReference(message)
+        .split(" ")
+        .filter((word) => word.length >= 3 && !ignoredWords.has(word)),
+    ),
+  ];
+}
+
+function automationUpdateCandidates(tasks: ScheduledTask[], message: string): ScheduledTask[] {
+  const terms = automationReferenceTerms(message);
+  if (terms.length === 0) return [];
+  return tasks.filter((task) => {
+    const searchableText = normalizedAutomationReference(task.title ?? "");
+    const searchableWords = new Set(searchableText.split(" "));
+    return terms.some((term) => searchableWords.has(term));
+  });
+}
+
+type AutomationUpdateResolution =
+  | { kind: "match"; task: ScheduledTask }
+  | { kind: "ambiguous"; candidates: ScheduledTask[] }
+  | { kind: "none"; candidates: ScheduledTask[] };
+type UnmatchedAutomationUpdateResolution = Exclude<AutomationUpdateResolution, { kind: "match" }>;
+
+async function resolveAutomationUpdate(params: {
+  scheduler: TaskScheduler | undefined;
+  userId: string;
+  message: string;
+}): Promise<AutomationUpdateResolution> {
+  if (!params.scheduler) return { kind: "none", candidates: [] };
+  try {
+    const tasks = await params.scheduler.listTasks({ createdBy: params.userId, includeInactive: true });
+    const exactMatch = uniqueExplicitAutomationMatch(tasks, params.message);
+    if (exactMatch) return { kind: "match", task: exactMatch };
+    const candidates = automationUpdateCandidates(tasks, params.message);
+    return candidates.length === 1
+      ? { kind: "match", task: candidates[0] }
+      : candidates.length > 1
+        ? { kind: "ambiguous", candidates }
+        : { kind: "none", candidates: tasks };
+  } catch {
+    return { kind: "none", candidates: [] };
+  }
+}
+
+function automationUpdateOptionId(task: ScheduledTask): string {
+  const taskSuffix = task.id.replace(/[^A-Za-z0-9._-]/g, "").slice(-64);
+  return `automation-choice-${taskSuffix || "unknown"}`;
+}
+
+async function automationTaskForUpdateOption(params: {
+  scheduler: TaskScheduler | undefined;
+  userId: string;
+  optionId: string;
+}): Promise<ScheduledTask | undefined> {
+  if (!params.scheduler) return undefined;
+  try {
+    const tasks = await params.scheduler.listTasks({ createdBy: params.userId, includeInactive: true });
+    return tasks.find((task) => automationUpdateOptionId(task) === params.optionId);
+  } catch {
+    return undefined;
+  }
+}
+
+function automationUpdateQuestion(conversationId: string, candidates: ScheduledTask[]): WebChatQuestion {
+  const titleCounts = new Map<string, number>();
+  for (const task of candidates) {
+    const title = task.title?.trim() || task.prompt;
+    titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
+  }
+  const visibleCandidates = candidates.slice(0, 3);
+  const options = visibleCandidates.map((task) => {
+    const title = task.title?.trim() || task.prompt;
+    const duplicateSuffix = (titleCounts.get(title) ?? 0) > 1 ? ` · ${task.id.slice(0, 8)}` : "";
+    return {
+      id: automationUpdateOptionId(task),
+      label: `${title}${duplicateSuffix}`,
+      description: `${task.scheduleType}: ${task.scheduleValue}`,
+    };
+  });
+  options.push({
+    id: "automation-update-none-of-these",
+    label: "None of these",
+    description:
+      candidates.length > visibleCandidates.length
+        ? "More automations are available; tell me the exact name instead."
+        : "Tell me the automation's exact name instead.",
+  });
+  return {
+    id: `automation-update-${builderQuestionIdSuffix(conversationId)}`,
+    prompt: "Which automation should I open in the builder?",
+    options,
+  };
+}
+
+function automationUpdateClarification(message: string, resolution: UnmatchedAutomationUpdateResolution): string {
+  if (resolution.kind === "none" && resolution.candidates.length === 0) {
+    return "I couldn't identify the existing automation from that message. Tell me its exact name and I'll open it in the builder. No changes were made.";
+  }
+  const terms = automationReferenceTerms(message);
+  const reference =
+    resolution.kind === "ambiguous" ? (terms[0] ? ` matching “${terms[0]}”` : " matching that description") : "";
+  const choices = resolution.candidates
+    .slice(0, 8)
+    .map((task) => `- ${task.title?.trim() || task.prompt}`)
+    .join("\n");
+  const remaining = resolution.candidates.length - Math.min(resolution.candidates.length, 8);
+  return [
+    resolution.kind === "ambiguous"
+      ? `I found multiple automations${reference}. Which one should I open in the builder?`
+      : "Which automation should I open in the builder?",
+    choices,
+    remaining > 0 ? `- And ${remaining} more matching automation${remaining === 1 ? "" : "s"}` : "",
+    "No changes were made.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function openExplicitAutomationBuilder(params: {
+  deps: WebChatRouteDeps;
+  taskContext: TaskContext;
+  taskId: string;
+}): Promise<AutomationArtifact[]> {
+  const collector = new AutomationArtifactCollector();
+  await handleManageScheduledTasks(
+    { action: "open", task_id: params.taskId },
+    {
+      db: params.deps.db,
+      scheduler: params.deps.scheduler as TaskScheduler,
+      taskContext: params.taskContext,
+      config: params.deps.config,
+      encryptionKey: params.deps.config.ENCRYPTION_KEY,
+      automationArtifactCollector: collector,
+    },
+  );
+  return collector.drain();
+}
+
 async function createAutomationDraftHandoff(params: {
   deps: WebChatRouteDeps;
   currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
@@ -402,19 +625,6 @@ async function createAutomationDraftHandoff(params: {
       { conversationId: builderConversationId, transcriptUserId: params.currentUser.id, kind: "builder" },
     ],
   });
-  for (const discarded of result.discardedBuilderConversations ?? []) {
-    try {
-      await rm(webChatTranscriptPath(params.deps.config, discarded.transcriptUserId, discarded.conversationId), {
-        force: true,
-      });
-      await archiveRuntimeSessions(params.deps.db, discarded.transcriptUserId, discarded.conversationId);
-    } catch (error) {
-      params.deps.logger.warn(
-        { err: error, conversationId: discarded.conversationId, userId: discarded.transcriptUserId },
-        "Failed to clean up replaced automation setup conversation",
-      );
-    }
-  }
   return {
     id: "automation-handoff-0",
     data: automationDraftHandoffSchema.parse({
@@ -426,12 +636,6 @@ async function createAutomationDraftHandoff(params: {
       status: "paused",
     }),
   };
-}
-
-function hasSuccessfulCreateAutomationSkill(result: RunAgentResult): boolean {
-  return (result.rawUsage?.toolCalls ?? []).some(
-    (toolCall) => isCreateAutomationSkillName(toolCall.skillName) && toolCall.success === true,
-  );
 }
 
 async function resolveAutomationBuilderContext(params: {
@@ -865,9 +1069,9 @@ const AUTOMATION_SETUP_MODE_SELECTION_MARKER = "[automation-setup-mode-selection
 function cleanAutomationSetupModeSelectionMessage(message: string): string {
   if (!message.includes(AUTOMATION_SETUP_MODE_SELECTION_MARKER)) return message;
   const normalized = message.toLowerCase();
-  if (/\b(?:deterministic|fixed recipe)\b/.test(normalized)) return "Fixed recipe selected.";
-  if (/\b(?:agent-led|agent led)\b/.test(normalized)) return "Agent-led selected.";
-  if (/\b(?:hybrid|recipe \+ ai)\b/.test(normalized)) return "Recipe + AI selected.";
+  if (/\b(?:deterministic|fixed recipe)\b/.test(normalized)) return "Deterministic selected.";
+  if (/\b(?:agent|agent-led|agent led)\b/.test(normalized)) return "Agent selected.";
+  if (/\b(?:hybrid|recipe \+ ai)\b/.test(normalized)) return "Hybrid selected.";
   return "Automation mode selected.";
 }
 
@@ -2084,6 +2288,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const body = await c.req.json().catch(() => ({}));
     const incomingQuestionAnswer = extractLatestQuestionAnswer(body);
     let latestUserMessage = extractLatestUserMessage(body);
+    let selectedAutomationTaskOptionId: string | undefined;
     if (!latestUserMessage && !incomingQuestionAnswer.present) {
       return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
     }
@@ -2162,6 +2367,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             );
           }
           questionAnswer = answer;
+          if (pendingInteraction.id.startsWith("automation-update-") && "optionId" in answer) {
+            selectedAutomationTaskOptionId = answer.optionId;
+          }
           latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedOption.label };
         }
       }
@@ -2197,7 +2405,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     if (automationTaskId && !automationBuilderContext) {
       return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);
     }
-
     if (automationBuilderContext) {
       const conversationAccess = await resolveAutomationBuilderConversationAccess({
         deps,
@@ -2258,7 +2465,24 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               currentMessageId: null,
             },
           }
-        : null;
+        : deps.scheduler
+          ? {
+              platform: "slack" as const,
+              contextType: "dm" as const,
+              deliveryTarget: currentUser.slack_user_id ?? currentUser.id,
+              createdBy: currentUser.id,
+              conversationKind: "web_chat" as const,
+              creatorTimezone: currentUser.timezone,
+              canManageAnyTask: c.get("role") === "admin",
+              currentAutomation: undefined,
+              origin: {
+                platform: "web" as const,
+                conversationId,
+                providerThreadId: null,
+                currentMessageId: null,
+              },
+            }
+          : null;
     const builderHistory = automationBuilderContext
       ? await automationBuilderHistoryForPrompt({
           context: automationBuilderContext,
@@ -2310,6 +2534,19 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       timezone: currentUser.timezone,
       isSharedContext: false,
     });
+    const selectedAutomationTask = selectedAutomationTaskOptionId
+      ? await automationTaskForUpdateOption({
+          scheduler: deps.scheduler,
+          userId: currentUser.id,
+          optionId: selectedAutomationTaskOptionId,
+        })
+      : undefined;
+    const updateResolution =
+      !automationBuilderContext && !selectedAutomationTask && hasAutomationUpdateIntent(message)
+        ? await resolveAutomationUpdate({ scheduler: deps.scheduler, userId: currentUser.id, message })
+        : undefined;
+    const explicitUpdateTaskId =
+      selectedAutomationTask?.id ?? (updateResolution?.kind === "match" ? updateResolution.task.id : undefined);
 
     return webChatUiStreamResponse(async (write) => {
       write({ type: "start", messageMetadata: { createdAt: new Date().toISOString() } });
@@ -2389,6 +2626,93 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       };
 
       try {
+        if (taskContext && explicitUpdateTaskId) {
+          const automationArtifacts = await openExplicitAutomationBuilder({
+            deps,
+            taskContext,
+            taskId: explicitUpdateTaskId,
+          });
+          if (automationArtifacts.length > 0) {
+            const handoffText = "I’ll open the existing automation in the builder so we can make that change there.";
+            writeFinalText(handoffText);
+            const automationParts = automationArtifacts.map((artifact, index) => {
+              const id = `automation-${index}`;
+              write({ type: "data-automation", id, data: artifact });
+              return { id, data: artifact };
+            });
+            await completeWebChatProgressMessage(
+              deps.config,
+              workspaceDir,
+              currentUser.id,
+              deps.logger,
+              conversationId,
+              progressMessageId,
+              createAssistantTranscriptMessage(handoffText, [], automationParts),
+            );
+            return;
+          }
+        }
+
+        if (taskContext && !automationBuilderContext && selectedAutomationTaskOptionId && !selectedAutomationTask) {
+          const responseText =
+            "That automation is no longer available. Please tell me its current name and I’ll look it up again. No changes were made.";
+          writeFinalText(responseText);
+          await completeWebChatProgressMessage(
+            deps.config,
+            workspaceDir,
+            currentUser.id,
+            deps.logger,
+            conversationId,
+            progressMessageId,
+            createAssistantTranscriptMessage(responseText, []),
+          );
+          return;
+        }
+
+        if (taskContext && !automationBuilderContext && updateResolution && updateResolution.kind !== "match") {
+          const responseText = automationUpdateClarification(message, updateResolution);
+          const questionPart =
+            updateResolution.candidates.length > 0
+              ? questionPartFromInteraction(automationUpdateQuestion(conversationId, updateResolution.candidates))
+              : undefined;
+          writeFinalText(responseText);
+          if (questionPart) {
+            const question = questionPart.data;
+            if (isQuestionBatch(question)) {
+              write({ type: "data-question-batch", id: questionPart.id, data: question });
+            } else {
+              write({ type: "data-question", id: questionPart.id, data: question });
+            }
+          }
+          await completeWebChatProgressMessage(
+            deps.config,
+            workspaceDir,
+            currentUser.id,
+            deps.logger,
+            conversationId,
+            progressMessageId,
+            createAssistantTranscriptMessage(responseText, [], [], [], questionPart),
+          );
+          return;
+        }
+
+        if (!automationBuilderContext && hasAutomationCreateIntent(message)) {
+          const handoff = await createAutomationDraftHandoff({ deps, currentUser, conversationId, dmContext });
+          const handoffText = "I’ll open the automation builder so we can finish configuring it there.";
+          writeFinalText(handoffText);
+          write({ type: "data-automation-handoff", id: handoff.id, data: handoff.data });
+          await completeWebChatProgressMessage(
+            deps.config,
+            workspaceDir,
+            currentUser.id,
+            deps.logger,
+            conversationId,
+            progressMessageId,
+            createAutomationDraftAssistantTranscriptMessage(handoffText, handoff),
+          );
+          return;
+        }
+
         const activeBuilderTaskId = automationBuilderContext?.task.id;
         const runKey = activeBuilderTaskId
           ? builderWebChatRunKey(activeBuilderTaskId)
@@ -2409,7 +2733,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             platform: deliveryPlatform,
             responseSurface: "web",
             contextType: "dm",
-            stopAfterCreateAutomationSkill: false,
+            stopAfterCreateAutomationSkill: true,
+            automationBuilderChat: Boolean(automationBuilderContext),
             onProgressEvent: async (event) => {
               if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
               if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
@@ -2423,6 +2748,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               if (progressData) {
                 if (progressMode === "off") wroteOffProgress = true;
                 closeTextPart();
+                const progressPartId = `progress-${progressPartIndex}`;
+                progressPartIndex += 1;
+                write({ type: "data-progress", id: progressPartId, data: progressData });
                 await updateWebChatProgressMessage(
                   deps.config,
                   workspaceDir,
@@ -2432,9 +2760,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                   progressMessageId,
                   progressData,
                 );
-                const progressPartId = `progress-${progressPartIndex}`;
-                progressPartIndex += 1;
-                write({ type: "data-progress", id: progressPartId, data: progressData });
               }
             },
             onTextDelta: async (delta) => {
@@ -2510,18 +2835,23 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...deterministicIntegrationCards,
         ]);
         const automationArtifacts = result.trace.automationArtifacts ?? [];
+        const pendingInteraction = result.pendingInteraction ?? result.pendingQuestion;
+        const rawFinalText = result.trace.finalText?.trim()
+          ? result.trace.finalText
+          : sawAutomationTool
+            ? bufferedTextAfterAutomationTool
+            : bufferedTextDeltas;
+        const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
+        const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
         if (
-          hasSuccessfulCreateAutomationSkill(result) &&
           !automationBuilderContext &&
-          automationArtifacts.length === 0
+          automationArtifacts.length === 0 &&
+          !pendingInteraction &&
+          (hasAutomationCreateIntent(message) ||
+            (hasSuccessfulCreateAutomationSkill(result) && !hasAutomationUpdateIntent(message)))
         ) {
-          const handoff = await createAutomationDraftHandoff({
-            deps,
-            currentUser,
-            conversationId,
-            dmContext,
-          });
-          const handoffText = "Your automation setup is ready. Continue in the builder to configure and save it.";
+          const handoff = await createAutomationDraftHandoff({ deps, currentUser, conversationId, dmContext });
+          const handoffText = "Your automation is ready to configure. We recommend finishing it in the builder.";
           closeTextPart();
           writeFinalText(handoffText);
           write({ type: "data-automation-handoff", id: handoff.id, data: handoff.data });
@@ -2536,14 +2866,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           );
           return;
         }
-        const rawFinalText = result.trace.finalText?.trim()
-          ? result.trace.finalText
-          : sawAutomationTool
-            ? bufferedTextAfterAutomationTool
-            : bufferedTextDeltas;
-        const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
-        const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
-        const pendingInteraction = result.pendingInteraction ?? result.pendingQuestion;
         const fallbackBuilderQuestion =
           !pendingInteraction &&
           automationBuilderContext &&

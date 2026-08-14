@@ -571,7 +571,7 @@ export function ScheduledTasksPage() {
           <Button
             type="button"
             size="sm"
-            className="shrink-0 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
+            className="shrink-0 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-[0_8px_24px_-12px_rgba(234,208,0,0.9)] transition-all hover:-translate-y-0.5 hover:bg-brand-accent/90 hover:shadow-[0_12px_28px_-12px_rgba(234,208,0,1)]"
             onClick={() => createMutation.mutate()}
             disabled={createMutation.isPending}
           >
@@ -580,7 +580,7 @@ export function ScheduledTasksPage() {
             ) : (
               <PlusIcon size={14} weight="bold" />
             )}
-            {createMutation.isPending ? "Creating…" : "Create automation"}
+            {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
           </Button>
         ) : null}
       </div>
@@ -1570,12 +1570,12 @@ function EmptyState({
           type="button"
           variant="outline"
           size="sm"
-          className="mt-4 gap-1.5"
+          className="mt-4 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-none hover:bg-brand-accent/90"
           onClick={onCreate}
           disabled={isCreating}
         >
           {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
-          {isCreating ? "Creating…" : "Create automation"}
+          {isCreating ? "Opening builder…" : "Create with Sketch"}{" "}
         </Button>
       ) : null}
     </div>

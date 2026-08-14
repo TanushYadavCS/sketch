@@ -66,6 +66,7 @@ describe("ChatThread", () => {
     const questionCard = screen.getByTestId("question-card");
     expect(questionCard).toBeInTheDocument();
     expect(questionCard).toHaveClass("max-w-[640px]");
+    expect(questionCard.querySelector("[data-question-flow-step]")).toHaveClass("min-h-0");
     expect(screen.getByLabelText("Sketch").parentElement).toContainElement(questionCard);
     expect(questionCard).toHaveAttribute("data-question-id", question.id);
 
@@ -189,7 +190,7 @@ describe("ChatThread", () => {
             role: "assistant",
             interruption: {
               detail: "Sketch paused.",
-              label: "Tell Sketch what to do differently.",
+              label: "What should Sketch do differently?",
             },
           },
         ]}
@@ -198,7 +199,7 @@ describe("ChatThread", () => {
 
     expect(screen.queryByLabelText("Sketch")).not.toBeInTheDocument();
     expect(screen.getByText("Sketch paused.").closest("[data-interruption-notice]")).toBeInTheDocument();
-    expect(screen.getByText("Tell Sketch what to do differently.").closest("[data-interruption-notice]")).toHaveClass(
+    expect(screen.getByText("What should Sketch do differently?").closest("[data-interruption-notice]")).toHaveClass(
       "border-l-2",
     );
   });

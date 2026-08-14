@@ -231,13 +231,14 @@ describe("createProgressRenderer", () => {
 });
 
 describe("createWebProgressItem", () => {
-  it("builds generic friendly tool progress metadata without changing the rendered line contract", () => {
+  it("builds accurate friendly metadata for built-in tools without exposing arguments", () => {
     const event: ProgressEvent = { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } };
 
     expect(createWebProgressItem(event, { toolProgress: "friendly", reasoningText: false })).toEqual({
-      kind: "tool",
-      label: "Using tool",
-      icon: { type: "tool" },
+      kind: "file",
+      label: "Reading",
+      icon: { type: "tool", name: "Read" },
+      toolName: "Read",
     });
     expect(renderEvents({ toolProgress: "friendly", reasoningText: false }, [event]).lines).toEqual([
       '📖 Reading "notes.md"',
@@ -273,10 +274,22 @@ describe("createWebProgressItem", () => {
         { toolProgress: "friendly", reasoningText: false },
       ),
     ).toEqual({
-      kind: "integration",
-      label: "Running integration",
+      kind: "canvas",
+      label: "Running Canvas action",
       icon: { type: "canvas", name: "Canvas" },
+      toolName: "Bash",
     });
+  });
+
+  it("clips friendly tool names before they enter web metadata", () => {
+    const toolName = `mcp__plugin_${"x".repeat(120)}__${"y".repeat(120)}`;
+    const item = createWebProgressItem(
+      { kind: "tool_use", toolName, input: {} },
+      { toolProgress: "friendly", reasoningText: false },
+    );
+
+    expect(item?.toolName).toHaveLength(43);
+    expect(item?.toolName).toMatch(/^y{40}\.\.\.$/);
   });
 
   it("collapses disabled tool progress to generic thinking metadata", () => {
@@ -309,7 +322,7 @@ describe("createWebProgressItem", () => {
     expect(createWebProgressItem(event, { toolProgress: "friendly", reasoningText: false })).toBeNull();
   });
 
-  it("uses average-user labels for skills and integrations in friendly mode", () => {
+  it("uses accurate average-user labels for skills and integrations in friendly mode", () => {
     expect(
       createWebProgressItem(
         { kind: "tool_use", toolName: "Skill", input: { skill: "canvas-add-integration" } },
@@ -319,6 +332,7 @@ describe("createWebProgressItem", () => {
       kind: "integration",
       label: "Running integration",
       icon: { type: "generic", name: "integration" },
+      toolName: "Skill",
     });
 
     expect(
@@ -330,6 +344,7 @@ describe("createWebProgressItem", () => {
       kind: "integration",
       label: "Running Google Drive integration",
       icon: { type: "generic", name: "integration" },
+      toolName: "list_files",
     });
 
     expect(
@@ -341,12 +356,13 @@ describe("createWebProgressItem", () => {
       kind: "integration",
       label: "Running integration",
       icon: { type: "generic", name: "integration" },
+      toolName: "custom_tool",
     });
   });
 });
 
 describe("createWebProgressData", () => {
-  it("uses generic friendly lines instead of Slack-style rendered lines", () => {
+  it("uses accurate friendly lines instead of Slack-style rendered lines", () => {
     const event: ProgressEvent = { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } };
 
     expect(
@@ -354,8 +370,8 @@ describe("createWebProgressData", () => {
         '📖 Reading "notes.md"',
       ]),
     ).toEqual({
-      lines: ["Using tool"],
-      items: [{ kind: "tool", label: "Using tool", icon: { type: "tool" } }],
+      lines: ["Reading"],
+      items: [{ kind: "file", label: "Reading", icon: { type: "tool", name: "Read" }, toolName: "Read" }],
     });
   });
 

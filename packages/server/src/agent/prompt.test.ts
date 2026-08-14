@@ -206,6 +206,15 @@ describe("buildSystemContext", () => {
       expect(result).toContain("durable follow-up state is authoritative");
     });
 
+    it("uses the same plain-language execution mode names as the builder", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("Deterministic is code-only with no agent");
+      expect(result).toContain("Hybrid combines code and agent steps");
+      expect(result).toContain("Agent is agent-only");
+      expect(result).toContain("with Deterministic, Hybrid, and Agent as the choices");
+    });
+
     it("prefers deterministic action steps for fixed automation work", () => {
       const result = buildSystemContext({ platform: "slack" });
 
@@ -387,6 +396,15 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("use AskUserQuestion with two to four concrete options");
       expect(result).toContain("stop after the tool call");
+    });
+
+    it("routes web automation authoring into the builder", () => {
+      const result = buildSystemContext({ platform: "web", automationAuthoringEnabled: true });
+
+      expect(result).toContain("route automation work instead of authoring it");
+      expect(result).toContain("call action 'open' with that task_id");
+      expect(result).toContain("The builder conversation owns all setup questions and edits");
+      expect(result).not.toContain("Create or update the automation directly with ManageScheduledTasks");
     });
 
     it("tells the agent to resolve integration status without UI-render side effects", () => {

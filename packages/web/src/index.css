@@ -520,32 +520,28 @@
 
 @keyframes sketch-route-out {
   from {
-    opacity: 1;
-    transform: scale(1);
+    transform: translateX(0);
   }
   to {
-    opacity: 0;
-    transform: scale(0.995);
+    transform: translateX(-8%);
   }
 }
 
 @keyframes sketch-route-in {
   from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.997);
+    transform: translateX(8%);
   }
   to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateX(0);
   }
 }
 
 ::view-transition-old(root) {
-  animation: sketch-route-out 150ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation: sketch-route-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
 }
 
 ::view-transition-new(root) {
-  animation: sketch-route-in 280ms cubic-bezier(0.16, 1, 0.3, 1) 35ms both;
+  animation: sketch-route-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes sketch-question-card-in {
@@ -606,6 +602,36 @@
 
 [data-question-flow-step][data-transition="idle"] [data-question-option-id]:nth-child(4) {
   animation-delay: 105ms;
+}
+
+@keyframes automation-builder-compose-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+.automation-builder-scribble-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--brand-accent);
+  animation: automation-builder-compose-pulse 1.5s ease-in-out infinite;
+}
+
+.automation-builder-source-context-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--brand-accent);
+  animation: automation-builder-compose-pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes automation-builder-sidecar-in {
@@ -684,8 +710,303 @@
   animation: automation-builder-rise-in 300ms cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
 }
 
-.automation-builder-question-dock:has([data-question-flow-card]) {
-  animation: automation-builder-rise-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+.automation-builder-empty-grid {
+  background-image: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--muted-foreground) 38%, transparent) 1.2px,
+    transparent 1.5px
+  );
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+  mask-image: radial-gradient(ellipse at center, black 0%, transparent 84%);
+  opacity: 0.9;
+}
+
+.automation-builder-empty-diagram {
+  position: relative;
+  width: min(100%, 520px);
+  height: 280px;
+  color: var(--muted-foreground);
+  opacity: 0.92;
+}
+
+.automation-builder-empty-diagram-meta {
+  position: absolute;
+  top: 3px;
+  left: 8px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.automation-builder-empty-diagram-meta-status {
+  color: color-mix(in srgb, var(--brand-accent) 72%, var(--muted-foreground));
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.automation-builder-empty-edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.automation-builder-empty-edge {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.automation-builder-empty-edge-track {
+  stroke: color-mix(in srgb, var(--border) 90%, transparent);
+  opacity: 0.58;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-edge-track {
+  stroke: color-mix(in srgb, var(--brand-accent) 44%, var(--border));
+  opacity: 0.78;
+}
+
+.automation-builder-empty-edge-progress {
+  stroke: color-mix(in srgb, var(--brand-accent) 84%, transparent);
+  stroke-dasharray: 9 190;
+  stroke-dashoffset: 190;
+  opacity: 0.26;
+  animation: automation-builder-empty-idle-signal 7s linear infinite;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-edge-progress {
+  stroke-width: 2.4;
+  stroke-dasharray: 22 180;
+  stroke-dashoffset: 202;
+  animation: automation-builder-empty-edge-trace 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.automation-builder-empty-edge-progress-two {
+  animation-delay: -3.5s;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-edge-progress-two {
+  animation-delay: 1.1s;
+}
+
+.automation-builder-empty-edge-junction {
+  fill: color-mix(in srgb, var(--border) 95%, transparent);
+  opacity: 0.9;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-edge-junction {
+  fill: color-mix(in srgb, var(--brand-accent) 78%, var(--border));
+}
+
+.automation-builder-empty-node {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 150px;
+  min-height: 62px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 76%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, black 16%, transparent), 0 1px 0
+    color-mix(in srgb, var(--foreground) 6%, transparent);
+  color: var(--foreground);
+  text-align: left;
+  transform: translateZ(0);
+}
+
+.automation-builder-empty-node > span:last-child {
+  display: grid;
+  gap: 4px;
+}
+
+.automation-builder-empty-node strong {
+  color: color-mix(in srgb, var(--foreground) 84%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.automation-builder-empty-node small {
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.automation-builder-empty-node-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--muted) 76%, transparent);
+  color: color-mix(in srgb, var(--muted-foreground) 84%, transparent);
+}
+
+.automation-builder-empty-node-trigger {
+  top: 109px;
+  left: 0;
+  opacity: 0.63;
+}
+
+.automation-builder-empty-node-action {
+  top: 61px;
+  left: calc(50% - 75px);
+  border-color: color-mix(in srgb, var(--brand-accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--brand-accent) 7%, var(--card));
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--brand-accent) 8%, transparent), 0 1px 0
+    color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+
+.automation-builder-empty-node-action .automation-builder-empty-node-icon {
+  border-color: color-mix(in srgb, var(--brand-accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--brand-accent) 12%, var(--muted));
+  color: color-mix(in srgb, var(--brand-accent) 76%, var(--foreground));
+}
+
+.automation-builder-empty-node-delivery {
+  top: 133px;
+  right: 0;
+  opacity: 0.63;
+}
+
+.automation-builder-empty-node-delivery .automation-builder-empty-node-icon {
+  color: color-mix(in srgb, var(--brand-accent) 62%, var(--muted-foreground));
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-node {
+  animation: automation-builder-empty-node-work 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-node-trigger {
+  animation-delay: 0s;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-node-action {
+  animation-delay: 0.45s;
+}
+
+.automation-builder-empty-diagram-loading .automation-builder-empty-node-delivery {
+  animation-delay: 1.1s;
+}
+
+@keyframes automation-builder-empty-edge-trace {
+  0%,
+  14% {
+    stroke-dashoffset: 202;
+    opacity: 0;
+  }
+  24%,
+  58% {
+    stroke-dashoffset: 120;
+    opacity: 0.9;
+  }
+  68%,
+  100% {
+    stroke-dashoffset: 20;
+    opacity: 0;
+  }
+}
+
+@keyframes automation-builder-empty-idle-signal {
+  0% {
+    stroke-dashoffset: 190;
+    opacity: 0;
+  }
+  18%,
+  58% {
+    opacity: 0.32;
+  }
+  100% {
+    stroke-dashoffset: -9;
+    opacity: 0;
+  }
+}
+
+@keyframes automation-builder-empty-node-work {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--border) 82%, transparent);
+    box-shadow: 0 8px 24px color-mix(in srgb, black 16%, transparent), 0 1px 0
+      color-mix(in srgb, var(--foreground) 6%, transparent);
+  }
+  24%,
+  50% {
+    border-color: color-mix(in srgb, var(--brand-accent) 62%, var(--border));
+    box-shadow: 0 11px 30px color-mix(in srgb, var(--brand-accent) 12%, transparent), 0 1px 0
+      color-mix(in srgb, var(--foreground) 8%, transparent);
+  }
+}
+
+@keyframes automation-builder-empty-node-compose {
+  0%,
+  12%,
+  100% {
+    border-color: color-mix(in srgb, var(--border) 82%, transparent);
+    box-shadow: 0 8px 24px color-mix(in srgb, black 16%, transparent), 0 1px 0
+      color-mix(in srgb, var(--foreground) 6%, transparent);
+    transform: translateY(0);
+  }
+  24%,
+  42% {
+    border-color: color-mix(in srgb, var(--brand-accent) 48%, var(--border));
+    box-shadow: 0 10px 30px color-mix(in srgb, var(--brand-accent) 10%, transparent), 0 1px 0
+      color-mix(in srgb, var(--foreground) 6%, transparent);
+    transform: translateY(-2px);
+  }
+  54%,
+  78% {
+    border-color: color-mix(in srgb, var(--border) 82%, transparent);
+    box-shadow: 0 8px 24px color-mix(in srgb, black 16%, transparent), 0 1px 0
+      color-mix(in srgb, var(--foreground) 6%, transparent);
+    transform: translateY(0);
+  }
+}
+
+.automation-builder-typewriter {
+  overflow: hidden;
+  white-space: nowrap;
+  animation: automation-builder-typewriter-in 1.6s steps(32, end) both;
+}
+
+@keyframes automation-builder-typewriter-in {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+.automation-builder-flow-ready {
+  animation: automation-builder-flow-ready-in 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes automation-builder-flow-ready-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
 }
 
 .automation-builder-drawer-enter {
@@ -708,11 +1029,19 @@
   [data-question-flow-step],
   [data-question-option-id],
   .automation-builder-loading,
+  .automation-builder-scribble-status-dot,
+  .automation-builder-source-context-dot,
+  .automation-builder-empty-edge-track,
+  .automation-builder-empty-edge-junction,
+  .automation-builder-empty-node-action,
+  .automation-builder-empty-edge-progress,
+  .automation-builder-empty-diagram-loading .automation-builder-empty-node,
   .automation-builder-sidecar-enter,
   .automation-builder-canvas-enter,
   .automation-builder-toolbar-enter,
   .automation-builder-empty-state > div,
-  .automation-builder-question-dock,
+  .automation-builder-typewriter,
+  .automation-builder-flow-ready,
   .automation-builder-drawer-enter,
   .automation-builder-enter .automation-node-shell {
     animation: none !important;

@@ -345,6 +345,7 @@ export function buildSystemContext(params: {
   agentInstructions?: string | null;
   visionAnalysisEnabled?: boolean;
   automationAuthoringEnabled?: boolean;
+  automationBuilderChat?: boolean;
 }): string {
   const sections: string[] = [];
 
@@ -389,22 +390,28 @@ export function buildSystemContext(params: {
   );
 
   sections.push(
-    "",
-    "## Scheduled Tasks",
-    "",
-    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
-    "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
-    params.automationAuthoringEnabled
-      ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
-      : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
-    "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
-    "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
-    "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
-    "Automations have three user-facing execution modes: Fixed recipe runs action steps exactly as saved and has no AI steps; Recipe + AI combines deterministic action steps with bounded agent steps; Agent-led uses AI steps only and has no code or action steps. A mode recommendation is advisory, not a forced choice. Preserve an explicit mode request, and let save validation explain when a selected mode does not fit the current steps.",
-    "For a new automation that needs setup questions, ask the user to choose the execution mode before asking about cadence, behavior, delivery, or any other setup detail unless the user already chose a mode. Execution mode must be the first question in a batch, with Fixed recipe, Recipe + AI, and Agent-led as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow.",
-    params.automationAuthoringEnabled
-      ? "For external app events handled by semantic automation authoring, use only the admitted schedule, webhook, or Slack channel-message trigger types. Do not invent a Canvas-managed app trigger or component key; if polling versus a native event is unclear, ask the user to choose."
-      : "For generic inbound webhook events, use Sketch's native webhook trigger: set triggerConfig.type='webhook', schedule_type='external', and schedule_value='webhook'. Never use the Canvas componentKey='webhook-trigger' or canvasEndpoint. Canvas-managed triggers are reserved for explicitly requested provider app events with a selected Canvas component; otherwise use a native webhook or a normal scheduled cron/interval/once trigger.",
+    ...[
+      "",
+      "## Scheduled Tasks",
+      "",
+      "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
+      "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
+      params.automationAuthoringEnabled
+        ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
+        : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
+      "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
+      "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
+      "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
+      "Automations have three user-facing execution modes: Deterministic is code-only with no agent; Hybrid combines code and agent steps; Agent is agent-only, Sketch handles the work, and it has no code steps. A mode recommendation is advisory, not a forced choice. Preserve an explicit mode request, and let save validation explain when a selected mode does not fit the current steps.",
+      params.automationBuilderChat
+        ? "For a new automation that needs setup questions, first ask the user to describe what the automation should do in their own words. After they provide that description, ask them to choose the execution mode before asking about cadence, delivery, or any other setup detail unless they already chose a mode. Execution mode must be the first bounded choice, with Deterministic, Hybrid, and Agent as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow."
+        : params.platform !== "web"
+          ? "For a new automation that needs setup questions, ask the user to choose the execution mode before asking about cadence, delivery, or any other setup detail unless the user already chose a mode. Execution mode must be the first question in a batch, with Deterministic, Hybrid, and Agent as the choices and a concise recommendation in each option description. Do not ask this for a simple reminder that can be created directly without a setup flow."
+          : null,
+      params.automationAuthoringEnabled
+        ? "For external app events handled by semantic automation authoring, use only the admitted schedule, webhook, or Slack channel-message trigger types. Do not invent a Canvas-managed app trigger or component key; if polling versus a native event is unclear, ask the user to choose."
+        : "For generic inbound webhook events, use Sketch's native webhook trigger: set triggerConfig.type='webhook', schedule_type='external', and schedule_value='webhook'. Never use the Canvas componentKey='webhook-trigger' or canvasEndpoint. Canvas-managed triggers are reserved for explicitly requested provider app events with a selected Canvas component; otherwise use a native webhook or a normal scheduled cron/interval/once trigger.",
+    ].filter((entry): entry is string => entry !== null),
   );
 
   if (!params.automationAuthoringEnabled) {
@@ -420,20 +427,32 @@ export function buildSystemContext(params: {
 
   if (params.automationAuthoringEnabled) {
     sections.push(
-      "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
-      "When the user names a Slack channel as the source for a native Slack channel-message trigger, call SearchDeliveryTargets with platform='slack' and targetType='channel' first. Pass the matched channel's targetId and label in the natural-language authoring request; never invent a channel ID. If there is no unique match, ask the user to clarify.",
-      "Do not construct or pass automation definition fields such as schedules, timezones, delivery, titles, descriptions, steps, edges, prompts, scripts, apps, modes, skills, MCP servers, or models. The automation authoring model owns the complete definition.",
-      "Never use updateStepContent. Prompt, script, app, mode, skill, MCP, schedule, delivery, and structural changes must use a full ManageScheduledTasks update with the user's natural-language request.",
+      ...[
+        params.platform === "web" && !params.automationBuilderChat
+          ? "In web chat outside the builder, route automation work instead of authoring it. For a new automation request, do not call ManageScheduledTasks with action 'add' or 'update', do not ask setup questions, and do not author from the web chat; the web-chat route creates a paused draft and emits a builder handoff. For an existing automation request, call ManageScheduledTasks with action 'list' first, inspect the returned task IDs and titles, and when exactly one match is clear call action 'open' with that task_id. Do not call 'get', 'update', or 'updateStepContent' after resolving the target. If no match or multiple plausible matches remain, ask only which automation the user means. The builder conversation owns all setup questions and edits. Operational actions such as list, inspect, pause, resume, run, delete, and share remain in web chat and must not open the builder unless the user is asking to create or edit."
+          : "Use your own judgment to determine whether the user wants to create or edit an automation. For an unambiguous new automation request, call ManageScheduledTasks with action 'add' and pass the user's request naturally; do not rely on invoking create-automation to open the builder. For any request that could refer to an existing automation, do not invoke create-automation, ask setup questions, or open the builder yet. First call ManageScheduledTasks with action 'list', inspect the returned task IDs and titles, and match the user's name. If exactly one automation matches, call ManageScheduledTasks with action 'get' using that task_id, then call ManageScheduledTasks with action 'update' using that task_id and the user's requested change; only ask the user when there is no match or multiple plausible matches. The builder may open only after the successful add or update result. Listing, inspecting, pausing, resuming, running, deleting, or sharing automations must never invoke create-automation or open the builder.",
+        params.platform === "web" && !params.automationBuilderChat
+          ? null
+          : "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
+        "When the user names a Slack channel as the source for a native Slack channel-message trigger, call SearchDeliveryTargets with platform='slack' and targetType='channel' first. Pass the matched channel's targetId and label in the natural-language authoring request; never invent a channel ID. If there is no unique match, ask the user to clarify.",
+        "Do not construct or pass automation definition fields such as schedules, timezones, delivery, titles, descriptions, steps, edges, prompts, scripts, apps, modes, skills, MCP servers, or models. The automation authoring model owns the complete definition.",
+        "Never use updateStepContent. Prompt, script, app, mode, skill, MCP, schedule, delivery, and structural changes must use a full ManageScheduledTasks update with the user's natural-language request.",
+      ].filter((entry): entry is string => entry !== null),
     );
   }
 
   if (params.platform === "web") {
+    if (!params.automationBuilderChat && !params.automationAuthoringEnabled) {
+      sections.push(
+        "In web chat outside the builder, route automation work instead of authoring it. For a new automation request, do not call ManageScheduledTasks with action 'add' or 'update', do not ask setup questions, and do not author from the web chat; the web-chat route creates a paused draft and emits a builder handoff. For an existing automation request, call ManageScheduledTasks with action 'list' first, inspect the returned task IDs and titles, and when exactly one match is clear call action 'open' with that task_id. Do not call 'get', 'update', or 'updateStepContent' after resolving the target. If no match or multiple plausible matches remain, ask only which automation the user means. The builder conversation owns all setup questions and edits.",
+      );
+    }
     sections.push(
       "When a web-chat request cannot be completed safely without a user decision, use AskUserQuestion with two to four concrete options. Ask only one bounded question at a time, mark the best option in the option wording when there is a clear recommendation, and stop after the tool call so the user can choose.",
       "",
       "## Web Chat Automations",
       "",
-      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste an automation link unless the user explicitly asks for the literal URL. If they do, provide it as an automation link and avoid internal product terminology in the user-facing response.",
+      "When web chat emits an automation handoff or opens an automation, the client renders the builder-opening card separately. Briefly introduce the handoff, but do not paste an automation link unless the user explicitly asks for the literal URL. If they do, provide it as an automation link and avoid internal product terminology in the user-facing response.",
     );
   }
 
