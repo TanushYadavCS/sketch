@@ -84,6 +84,10 @@ export const configSchema = z.object({
       .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
       .optional(),
   ),
+  CONTAINER_CLASSIFICATION_ENABLED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),

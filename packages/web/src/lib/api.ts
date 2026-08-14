@@ -1185,6 +1185,21 @@ export type BrowseResult =
   | { type: "tree"; items: BrowseTreeItem[]; groups?: BrowseNestedGroup[] };
 
 export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+export type ContainerTarget =
+  | "team"
+  | "project"
+  | "program"
+  | "cycle"
+  | "register"
+  | "person_queue"
+  | "status"
+  | "archive"
+  | "ignore";
+
+export interface HierarchyMappingConfig {
+  levels: Record<string, HierarchyTarget>;
+  containers: Record<string, ContainerTarget>;
+}
 
 export interface HierarchyLevel {
   key: string;
@@ -1200,6 +1215,7 @@ export interface ConnectorConfig {
   credentialSource?: "local" | "canvas";
   scopeConfig: Record<string, unknown>;
   hierarchyLevels?: HierarchyLevel[] | null;
+  containerClassificationEnabled?: boolean;
 
   syncStatus: "active" | "syncing" | "error" | "paused" | "pending" | "disabled";
   lastSyncedAt: string | null;

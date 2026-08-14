@@ -1,7 +1,13 @@
 import type { Logger } from "pino";
-import type { HierarchyLevelDeclaration, HierarchyTarget } from "./types";
+import type { ContainerTarget, HierarchyLevelDeclaration, HierarchyTarget } from "./types";
 
 export type HierarchyMapping = Record<string, HierarchyTarget>;
+export type ContainerMapping = Record<string, ContainerTarget>;
+
+export interface HierarchyMappingConfig {
+  levels: HierarchyMapping;
+  containers: ContainerMapping;
+}
 
 export interface HierarchyNode {
   levelKey: string;
@@ -21,6 +27,17 @@ interface StructureAwareDefaultInput {
 }
 
 const REAL_TARGETS = new Set<HierarchyTarget>(["team", "project", "sprint"]);
+const CONTAINER_TARGETS = new Set<ContainerTarget>([
+  "team",
+  "project",
+  "program",
+  "cycle",
+  "register",
+  "person_queue",
+  "status",
+  "archive",
+  "ignore",
+]);
 const CHAIN_INDEX: Record<Exclude<HierarchyTarget, "ignore">, number> = {
   team: 0,
   project: 1,
@@ -29,6 +46,59 @@ const CHAIN_INDEX: Record<Exclude<HierarchyTarget, "ignore">, number> = {
 
 function isHierarchyTarget(value: unknown): value is HierarchyTarget {
   return value === "team" || value === "project" || value === "sprint" || value === "ignore";
+}
+
+function isContainerTarget(value: unknown): value is ContainerTarget {
+  return CONTAINER_TARGETS.has(value as ContainerTarget);
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+export function readHierarchyMappingConfig(stored: unknown): HierarchyMappingConfig {
+  const storedRecord = readRecord(stored);
+  const rawLevels = readRecord(storedRecord.levels);
+  const rawContainers = readRecord(storedRecord.containers);
+  const hasV2Shape = "levels" in storedRecord || "containers" in storedRecord;
+  const levelSource = hasV2Shape ? rawLevels : storedRecord;
+  const levels: HierarchyMapping = {};
+  const containers: ContainerMapping = {};
+
+  for (const [levelKey, target] of Object.entries(levelSource)) {
+    if (isHierarchyTarget(target)) levels[levelKey] = target;
+  }
+
+  for (const [containerId, target] of Object.entries(rawContainers)) {
+    if (isContainerTarget(target)) containers[containerId] = target;
+  }
+
+  return { levels, containers };
+}
+
+export function hasStoredHierarchyMapping(stored: unknown, levelKeys?: ReadonlySet<string>): boolean {
+  const mapping = readHierarchyMappingConfig(stored);
+  return Object.entries(mapping.levels).some(([levelKey, target]) => {
+    return (levelKeys ? levelKeys.has(levelKey) : true) && isHierarchyTarget(target);
+  });
+}
+
+export function resolveContainerTarget(
+  mapping: HierarchyMappingConfig | unknown,
+  _levelKey: string,
+  containerId: string,
+  levelTarget: HierarchyTarget,
+): ContainerTarget {
+  const config =
+    "levels" in readRecord(mapping) || "containers" in readRecord(mapping)
+      ? readHierarchyMappingConfig(mapping)
+      : mapping;
+  if (config && typeof config === "object" && "containers" in config) {
+    const target = (config as HierarchyMappingConfig).containers[containerId];
+    if (target) return target;
+  }
+  if (levelTarget === "sprint") return "cycle";
+  return levelTarget;
 }
 
 function levelHasDates(level: HierarchyLevelDeclaration, context?: HierarchyLevelContext): boolean {
@@ -49,8 +119,7 @@ export function resolveHierarchyMapping(
   stored: unknown,
   opts: { levelContexts?: HierarchyLevelContext[]; logger?: Pick<Logger, "warn"> } = {},
 ): HierarchyMapping {
-  const storedRecord =
-    stored && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, unknown>) : {};
+  const storedRecord = readHierarchyMappingConfig(stored).levels;
   const levelContexts = opts.levelContexts ?? [];
   const mapping: HierarchyMapping = {};
 
