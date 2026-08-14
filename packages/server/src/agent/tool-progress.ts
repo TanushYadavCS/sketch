@@ -355,10 +355,6 @@ function genericThinkingItem(): WebProgressItem {
   return progressItem("reasoning", "Thinking…", { type: "generic", name: "reasoning" }, null);
 }
 
-function genericToolItem(): WebProgressItem {
-  return progressItem("tool", "Using tool", { type: "tool" }, null);
-}
-
 function friendlyLabelFromPrefix(prefix: string): string {
   return prefix.replace(/:\s*$/, "").replace(/\s+(for|matching)$/, "");
 }
@@ -388,7 +384,10 @@ function getCanvasStructuredItem(invocation: CanvasInvocation, technical: boolea
 }
 
 function getFriendlyWebCanvasItem(invocation: CanvasInvocation): WebProgressItem {
-  return progressItem("integration", "Running integration", canvasIcon(invocation), null);
+  const label = invocation.subcommand
+    ? (CANVAS_FRIENDLY_FALLBACK[invocation.subcommand] ?? `Running Canvas ${humanizeIdentifier(invocation.subcommand)}`)
+    : "Running Canvas";
+  return progressItem("canvas", label, canvasIcon(invocation), null, "Bash");
 }
 
 function getTechnicalProgressItem(toolName: string, input: Record<string, unknown>): WebProgressItem {
@@ -459,19 +458,32 @@ function webProgressModeFromSettings(settings: ProgressDisplaySettings): WebChat
 function getFriendlyWebProgressItem(toolName: string, input: Record<string, unknown>): WebProgressItem {
   const mcpTool = parseMcpToolName(toolName);
   const display = mcpTool?.toolName ?? toolName;
+  const safeToolName = clipValue((mcpTool ? display : toolName).trim()) || "tool";
 
   if (display === "Skill") {
     const skillName = findInputValue(input, ["skill", "name"]);
     if (skillName && isIntegrationSkillName(skillName)) {
-      return progressItem("integration", "Running integration", genericIcon("integration"), null);
+      return progressItem("integration", "Running integration", genericIcon("integration"), null, safeToolName);
     }
-    return progressItem("skill", "Running skill", { type: "skill", name: "Skill" }, null);
+    return progressItem("skill", "Running skill", { type: "skill", name: "Skill" }, null, safeToolName);
   }
 
   if (display === "Bash") {
     const command = findInputValue(input, ["command"]);
     const canvasInvocation = command ? parseCanvasInvocation(command) : null;
-    return canvasInvocation ? getFriendlyWebCanvasItem(canvasInvocation) : genericToolItem();
+    if (canvasInvocation) return getFriendlyWebCanvasItem(canvasInvocation);
+    return progressItem("shell", "Running command", toolIcon(display), null, safeToolName);
+  }
+
+  const targetLine = FRIENDLY_TARGET_LINES[display];
+  if (targetLine) {
+    return progressItem(
+      TOOL_KIND[display] ?? "tool",
+      friendlyLabelFromPrefix(targetLine.prefix),
+      TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
+      null,
+      safeToolName,
+    );
   }
 
   const label = FRIENDLY_WEB_LABELS[display];
@@ -481,14 +493,27 @@ function getFriendlyWebProgressItem(toolName: string, input: Record<string, unkn
       label,
       TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
       null,
+      safeToolName,
     );
   }
 
   if (mcpTool) {
-    return progressItem("integration", friendlyIntegrationLabel(mcpTool.serverName), genericIcon("integration"), null);
+    return progressItem(
+      "integration",
+      friendlyIntegrationLabel(mcpTool.serverName),
+      genericIcon("integration"),
+      null,
+      safeToolName,
+    );
   }
 
-  return genericToolItem();
+  return progressItem(
+    TOOL_KIND[display] ?? "tool",
+    humanizeIdentifier(display),
+    genericIcon(display),
+    null,
+    safeToolName,
+  );
 }
 
 function progressLineFromItem(item: WebProgressItem): string {

@@ -47,12 +47,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
-import { type QuestionFlowAnswer, QuestionFlowCard, type QuestionFlowSubmission } from "./question-flow-card";
+import { QuestionFlowCard, type QuestionFlowSubmission } from "./question-flow-card";
 
 export interface ChatThreadFile {
   name: string;
@@ -73,6 +72,7 @@ export interface ChatThreadIntegrationConnection {
   requestId: string;
   appId: string;
   appName: string;
+  executionMode?: "canvas" | "cli" | "api";
   state?: "connect" | "connected";
   icon?: string;
   reason?: string;
@@ -164,7 +164,7 @@ export interface ChatThreadProps {
   onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
   onAnswerQuestion?: (question: ChatThreadQuestion, answer: ChatThreadQuestionAnswer) => void;
   onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
-  questionPortalTarget?: Element | null;
+  autoOpenAutomation?: boolean;
   conversationId?: string;
 }
 
@@ -472,6 +472,18 @@ function hasProgressToken(item: ChatThreadProgressItem, pattern: RegExp): boolea
   return progressIconTokens(item).some((token) => pattern.test(token));
 }
 
+function isAutomationBuilderOpeningItem(item: ChatThreadProgressItem): boolean {
+  return hasProgressToken(item, /automation builder|opening automation/);
+}
+
+function isAutomationBuilderOpeningBlock(block: TimelineRenderBlock | undefined): boolean {
+  if (block?.type !== "progress") return false;
+  const latestEntry = block.entries.at(-1)?.entry;
+  if (!latestEntry || latestEntry.type !== "progress") return false;
+  const latestItem = progressItemsForParts(latestEntry.progressItems, latestEntry.progressLines)[0];
+  return latestItem ? isAutomationBuilderOpeningItem(latestItem) : false;
+}
+
 const PROGRESS_KIND_ICONS: Record<string, ProgressIconComponent> = {
   reasoning: BrainIcon,
   file: FileMagnifyingGlassIcon,
@@ -493,6 +505,8 @@ const PROGRESS_KIND_ICONS: Record<string, ProgressIconComponent> = {
 };
 
 function progressIconForItem(item: ChatThreadProgressItem): ProgressIconComponent {
+  if (hasProgressToken(item, /automation builder|opening automation/)) return SpinnerGapIcon;
+
   const byKind = PROGRESS_KIND_ICONS[item.kind.toLowerCase()];
   if (byKind) return byKind;
 
@@ -678,7 +692,7 @@ export function ChatThread({
   onSelectQuestion,
   onAnswerQuestion,
   onSubmitQuestionBatch,
-  questionPortalTarget,
+  autoOpenAutomation,
   conversationId,
 }: ChatThreadProps) {
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
@@ -712,44 +726,11 @@ export function ChatThread({
             onSubmitQuestionBatch={onSubmitQuestionBatch}
             onInteractionAnswered={() => setAnsweredInteractionKey(interactionKey)}
             questionAnswerable={questionAnswerable}
+            autoOpenAutomation={index === messages.length - 1 ? autoOpenAutomation : false}
             conversationId={conversationId}
-            renderQuestions={!questionPortalTarget}
           />
         );
       })}
-      {questionPortalTarget && activeQuestionInteractionKey
-        ? (() => {
-            const message = [...messages]
-              .reverse()
-              .find((item) => questionInteractionKey(item) === activeQuestionInteractionKey);
-            if (!message) return null;
-            const canSubmit = message.questionBatch
-              ? Boolean(onSubmitQuestionBatch)
-              : Boolean(onAnswerQuestion || onSelectQuestion);
-            const disabled = answeredInteractionKey === activeQuestionInteractionKey || busy || !canSubmit;
-            return createPortal(
-              <QuestionFlowCard
-                key={activeQuestionInteractionKey}
-                question={message.question}
-                batch={message.questionBatch}
-                disabled={disabled}
-                onSubmit={(interaction, answer) => {
-                  setAnsweredInteractionKey(activeQuestionInteractionKey);
-                  if ("batchId" in interaction) {
-                    onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
-                  } else if (onAnswerQuestion) {
-                    onAnswerQuestion(interaction, answer as QuestionFlowAnswer);
-                  } else if ("optionId" in answer) {
-                    const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
-                    if (option) onSelectQuestion?.(interaction, option);
-                  }
-                }}
-              />,
-              questionPortalTarget,
-            );
-          })()
-        : null}
-
       {showBusy ? (
         <SketchMessage streaming>
           <span className="sketch-shimmer-text text-[13px] font-medium">Thinking…</span>
@@ -778,8 +759,8 @@ function MessageRow({
   onSubmitQuestionBatch,
   onInteractionAnswered,
   questionAnswerable,
+  autoOpenAutomation,
   conversationId,
-  renderQuestions,
 }: {
   message: ChatThreadMessage;
   active: boolean;
@@ -790,8 +771,8 @@ function MessageRow({
   onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
   onInteractionAnswered: () => void;
   questionAnswerable: boolean;
+  autoOpenAutomation?: boolean;
   conversationId?: string;
-  renderQuestions: boolean;
 }) {
   const submitQuestion = (
     interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
@@ -817,22 +798,25 @@ function MessageRow({
 
   const assistantMessage = hasTimeline(message) ? (
     <SketchMessage streaming={active} footer={<AssistantMessageFooter message={message} active={active} />}>
-      <TimelineMessage
-        message={message}
-        active={active}
-        integrationConnectionStatuses={integrationConnectionStatuses}
-        onConnectIntegration={onConnectIntegration}
-        conversationId={conversationId}
-      />
-      {renderQuestions && (message.question || message.questionBatch) ? (
-        <QuestionFlowCard
-          key={message.questionBatch?.batchId ?? message.question?.id}
-          question={message.question}
-          batch={message.questionBatch}
-          disabled={!questionAnswerable}
-          onSubmit={submitQuestion}
+      <div className="space-y-[8px]">
+        <TimelineMessage
+          message={message}
+          active={active}
+          integrationConnectionStatuses={integrationConnectionStatuses}
+          onConnectIntegration={onConnectIntegration}
+          autoOpenAutomation={autoOpenAutomation}
+          conversationId={conversationId}
         />
-      ) : null}
+        {message.question || message.questionBatch ? (
+          <QuestionFlowCard
+            key={message.questionBatch?.batchId ?? message.question?.id}
+            question={message.question}
+            batch={message.questionBatch}
+            disabled={!questionAnswerable}
+            onSubmit={submitQuestion}
+          />
+        ) : null}
+      </div>
     </SketchMessage>
   ) : message.text ||
     message.files?.length ||
@@ -846,9 +830,9 @@ function MessageRow({
         inProgress={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
-        renderQuestions={renderQuestions}
         onQuestionSubmit={submitQuestion}
         questionAnswerable={questionAnswerable}
+        autoOpenAutomation={autoOpenAutomation}
         conversationId={conversationId}
       />
     </SketchMessage>
@@ -934,21 +918,21 @@ function MessageContent({
   inProgress = false,
   integrationConnectionStatuses = {},
   onConnectIntegration,
-  renderQuestions,
   onQuestionSubmit,
   questionAnswerable = false,
+  autoOpenAutomation,
   conversationId,
 }: {
   message: ChatThreadMessage;
   inProgress?: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
-  renderQuestions?: boolean;
   onQuestionSubmit?: (
     interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
     answer: QuestionFlowSubmission,
   ) => void;
   questionAnswerable?: boolean;
+  autoOpenAutomation?: boolean;
   conversationId?: string;
 }) {
   const copyBlocks = message.role === "assistant";
@@ -966,7 +950,12 @@ function MessageContent({
       {message.text ? <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} /> : null}
       {message.files?.length ? <FileAttachments files={message.files} /> : null}
       {message.automations?.length ? (
-        <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
+        <AutomationArtifactCards
+          automations={message.automations}
+          autoOpenAutomation={autoOpenAutomation}
+          autoOpenKey={message.id}
+          conversationId={conversationId}
+        />
       ) : null}
       {message.integrationConnections?.length ? (
         <IntegrationConnectionCards
@@ -975,7 +964,7 @@ function MessageContent({
           onConnect={onConnectIntegration}
         />
       ) : null}
-      {renderQuestions && (message.question || message.questionBatch) ? (
+      {message.question || message.questionBatch ? (
         <QuestionFlowCard
           key={message.questionBatch?.batchId ?? message.question?.id}
           question={message.question}
@@ -990,18 +979,24 @@ function MessageContent({
 
 function AutomationArtifactCards({
   automations,
+  autoOpenAutomation,
+  autoOpenKey,
   conversationId,
 }: {
   automations: AutomationArtifact[];
+  autoOpenAutomation?: boolean;
+  autoOpenKey?: string;
   conversationId?: string;
 }) {
   return (
     <div className="flex max-w-[640px] flex-col gap-[8px]">
-      {automations.map((artifact) => (
+      {automations.map((artifact, index) => (
         <AutomationArtifactCard
           key={artifact.taskId}
           artifact={artifact}
           conversationId={conversationId}
+          autoOpen={autoOpenAutomation === true && index === automations.length - 1}
+          autoOpenKey={autoOpenKey}
           className="mt-0 max-w-none"
         />
       ))}
@@ -1198,17 +1193,36 @@ function integrationConnectionState(status: ChatThreadIntegrationConnectionStatu
   }
 }
 
+function AutomationBuilderLoadingState() {
+  return (
+    <div
+      data-automation-builder-loading
+      className="flex max-w-[560px] items-center gap-3 rounded-[12px] border border-brand-accent/35 bg-brand-accent/10 px-4 py-4 shadow-sm"
+    >
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] bg-brand-accent/20 text-brand-accent">
+        <SpinnerGapIcon size={20} className="animate-spin" aria-hidden />
+      </span>
+      <div className="min-w-0">
+        <div className="text-[14px] font-semibold leading-[1.4] text-foreground">Opening automation builder</div>
+        <div className="mt-1 text-[12px] leading-[1.5] text-muted-foreground">Taking you there now…</div>
+      </div>
+    </div>
+  );
+}
+
 function TimelineMessage({
   message,
   active,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  autoOpenAutomation,
   conversationId,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  autoOpenAutomation?: boolean;
   conversationId?: string;
 }) {
   const entries = useMemo(() => timelineRenderEntriesForMessage(message), [message]);
@@ -1216,6 +1230,7 @@ function TimelineMessage({
   const collapseProgress = shouldCollapseProgressBlocks(blocks, active);
   const activeProgressEntryKey = active ? latestActiveProgressEntryKey(blocks) : undefined;
   const completedSegments = useMemo(() => completedTimelineSegments(entries), [entries]);
+  const openingAutomationBuilder = active && isAutomationBuilderOpeningBlock(blocks.at(-1));
 
   if (!active) {
     return (
@@ -1235,7 +1250,12 @@ function TimelineMessage({
         ) : null}
         {message.automations?.length ? (
           <div className="mt-[10px]">
-            <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
+            <AutomationArtifactCards
+              automations={message.automations}
+              autoOpenAutomation={autoOpenAutomation}
+              autoOpenKey={message.id}
+              conversationId={conversationId}
+            />
           </div>
         ) : null}
         {message.integrationConnections?.length ? (
@@ -1256,6 +1276,8 @@ function TimelineMessage({
       {blocks.map((block) =>
         block.type === "text" ? (
           <TimelineEntryRow key={block.key} entry={block.entry.entry} active={false} exiting={false} last />
+        ) : openingAutomationBuilder && block === blocks.at(-1) ? (
+          <AutomationBuilderLoadingState key={block.key} />
         ) : collapseProgress ? (
           <CollapsibleTimelineHistory key={block.key} entries={block.entries} />
         ) : (
@@ -1269,7 +1291,12 @@ function TimelineMessage({
       ) : null}
       {message.automations?.length ? (
         <div className="mt-[10px] pl-[30px]">
-          <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
+          <AutomationArtifactCards
+            automations={message.automations}
+            autoOpenAutomation={autoOpenAutomation}
+            autoOpenKey={message.id}
+            conversationId={conversationId}
+          />
         </div>
       ) : null}
       {message.integrationConnections?.length ? (
@@ -1322,7 +1349,7 @@ function CollapsibleTimelineHistory({ entries }: { entries: TimelineRenderEntry[
   const countLabel = timelineHistoryCountLabel(entries);
 
   return (
-    <CollapsiblePrimitive.Root open={expanded} onOpenChange={setExpanded} className="pb-[10px] last:pb-0">
+    <CollapsiblePrimitive.Root open={expanded} onOpenChange={setExpanded}>
       <CollapsiblePrimitive.Trigger asChild>
         <button
           type="button"
@@ -1468,7 +1495,7 @@ function ProgressTimelineEntry({ items, active }: { items: ChatThreadProgressIte
   return (
     <>
       <span className="relative z-[1] flex size-[20px] shrink-0 items-center justify-center rounded-[6px] bg-muted/60 text-muted-foreground/90">
-        <ProgressItemIcon item={iconItem} />
+        <ProgressItemIcon item={iconItem} active={active} />
       </span>
       <div className="min-w-0">
         {items.map((item, index) => (
@@ -1501,9 +1528,10 @@ function ProgressItemSummary({ item, active }: { item: ChatThreadProgressItem; a
   );
 }
 
-function ProgressItemIcon({ item }: { item: ChatThreadProgressItem }) {
+function ProgressItemIcon({ item, active }: { item: ChatThreadProgressItem; active: boolean }) {
   const Icon = progressIconForItem(item);
-  return <Icon size={13} weight="duotone" className="shrink-0" aria-hidden />;
+  const loading = Icon === SpinnerGapIcon && active;
+  return <Icon size={13} weight="duotone" className={cn("shrink-0", loading && "animate-spin")} aria-hidden />;
 }
 
 function copyableCodeText(children: ReactNode): string | null {

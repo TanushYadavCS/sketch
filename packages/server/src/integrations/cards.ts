@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+import {
+  type CliIntegrationCatalogApp,
+  type CliIntegrationConnection,
+  isCanvasBlockedCliAppId,
+  isCanvasBlockedCliComponentKey,
+} from "@sketch/shared";
 import type { WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { IntegrationApp, IntegrationConnection, IntegrationProvider } from "./types";
 
@@ -9,6 +15,14 @@ export interface IntegrationCardCollector {
 export interface IntegrationLookup {
   query: string;
   reason?: string;
+}
+
+export interface CliIntegrationCardResolver {
+  listCatalog(query?: string): CliIntegrationCatalogApp[];
+  listConnections(
+    viewerUserId: string,
+    context?: { platform?: "slack" | "whatsapp"; deliveryTarget?: string },
+  ): Promise<CliIntegrationConnection[]>;
 }
 
 export interface IntegrationLookupResult {
@@ -82,6 +96,7 @@ export function connectedCardFromConnection(connection: IntegrationConnection): 
     requestId: cardId("integration-connected", connection.appId),
     appId: connection.appId,
     appName: connection.appName,
+    ...(connection.executionMode ? { executionMode: connection.executionMode } : {}),
     state: "connected",
     ...(connection.icon ? { icon: connection.icon } : {}),
     ...(connection.accountName ? { accountName: connection.accountName } : {}),
@@ -99,6 +114,7 @@ export function cardFromApp(
       requestId: cardId("integration-connected", app.id),
       appId: app.id,
       appName: app.name,
+      ...(app.executionMode ? { executionMode: app.executionMode } : {}),
       state: "connected",
       ...(app.icon ? { icon: app.icon } : {}),
       ...(connection.accountName ? { accountName: connection.accountName } : {}),
@@ -110,8 +126,12 @@ export function cardFromApp(
     requestId: cardId("integration-connect", app.id),
     appId: app.id,
     appName: app.name,
+    ...(app.executionMode ? { executionMode: app.executionMode } : {}),
     state: "connect",
     ...(app.icon ? { icon: app.icon } : {}),
+    ...(app.executionMode === "cli" || app.executionMode === "api"
+      ? { connectUrl: `/integrations?connect=${encodeURIComponent(app.id)}` }
+      : {}),
     ...(reason?.trim() ? { reason: reason.trim() } : {}),
   };
 }
@@ -154,7 +174,11 @@ export async function resolveIntegrationLookup(
   limit = 5,
 ): Promise<IntegrationLookupResult> {
   const result = await provider.listApps(lookup.query, limit, undefined);
-  const apps = result.apps.map((app) => {
+  const safeApps =
+    provider.type === "canvas"
+      ? result.apps.filter((app) => !isCanvasBlockedCliAppId(app.id) && !isCanvasBlockedCliAppId(app.name))
+      : result.apps;
+  const apps = safeApps.map((app) => {
     const connection = connectionForApp(connections, app);
     return {
       ...app,
@@ -164,7 +188,7 @@ export async function resolveIntegrationLookup(
       ...(connection?.accountName ? { accountName: connection.accountName } : {}),
     };
   });
-  const cards = bestRenderableApps(result.apps, lookup.query).map((app) =>
+  const cards = bestRenderableApps(safeApps, lookup.query).map((app) =>
     cardFromApp(app, connectionForApp(connections, app), lookup.reason),
   );
   return { apps, cards };
@@ -174,7 +198,11 @@ export function connectedIntegrationCards(
   connections: IntegrationConnection[],
   limit = 20,
 ): WebChatIntegrationConnectionData[] {
-  return connections.filter(isActiveIntegrationConnection).slice(0, limit).map(connectedCardFromConnection);
+  return connections
+    .filter((connection) => !isCanvasBlockedCliAppId(connection.appId) && !isCanvasBlockedCliAppId(connection.appName))
+    .filter(isActiveIntegrationConnection)
+    .slice(0, limit)
+    .map(connectedCardFromConnection);
 }
 
 function shellFlagValue(command: string, flag: string): string | null {
@@ -504,7 +532,14 @@ export function extractIntegrationLookupsFromProgressEvent(
   }
 
   let lookup: ExtractedIntegrationLookups;
-  if (event.toolName === "Bash") {
+  if (event.toolName === "Skill") {
+    const skillId = firstStringValue(event.input, ["skill"]);
+    lookup = {
+      queries: event.kind === "tool_result" && skillId ? [skillId] : [],
+      componentKeys: [],
+      listConnected: false,
+    };
+  } else if (event.toolName === "Bash") {
     const command = typeof event.input?.command === "string" ? event.input.command : "";
     lookup = extractCanvasIntegrationLookups(command);
   } else {
@@ -558,7 +593,9 @@ async function resolveComponentKeyCard(
   appCache: Map<string, Promise<IntegrationApp | null>>,
   loadAppCatalog: () => Promise<IntegrationApp[]>,
 ): Promise<WebChatIntegrationConnectionData | null> {
+  if (provider.type === "canvas" && isCanvasBlockedCliComponentKey(componentKey)) return null;
   for (const candidate of componentKeyPrefixes(componentKey)) {
+    if (provider.type === "canvas" && isCanvasBlockedCliAppId(candidate)) continue;
     const exactConnections = connections.filter((connection) => connectionMatchesCandidateSlug(connection, candidate));
     if (exactConnections.length > 0) {
       const healthyConnection = exactConnections.find(isActiveIntegrationConnection);
@@ -589,14 +626,62 @@ async function resolveComponentKeyCard(
   return null;
 }
 
+function cliConnectionCard(connection: CliIntegrationConnection): WebChatIntegrationConnectionData {
+  return {
+    requestId: cardId("integration-connected", connection.appId),
+    appId: connection.appId,
+    appName: connection.appName,
+    executionMode: connection.executionMode,
+    state: "connected",
+    ...(connection.accountAvatarUrl ? { icon: connection.accountAvatarUrl } : {}),
+    accountName: `@${connection.accountLogin}`,
+    connectionId: connection.id,
+  };
+}
+
+function cliCardForApp(
+  app: CliIntegrationCatalogApp,
+  connections: CliIntegrationConnection[],
+): WebChatIntegrationConnectionData | null {
+  const connection = connections.find(
+    (item) => item.appId === app.id && item.status === "active" && item.canUse !== false,
+  );
+  if (connection) return null;
+  return cardFromApp({ ...app, executionMode: app.executionMode }, null, `Connect ${app.name} in Sketch Integrations.`);
+}
+
+function cliAppForQuery(resolver: CliIntegrationCardResolver, query: string): CliIntegrationCatalogApp | null {
+  const queryKey = normalizeIntegrationLookup(query);
+  return (
+    resolver.listCatalog().find((candidate) => {
+      const candidateKeys = [candidate.id, candidate.name].map(normalizeIntegrationLookup);
+      return candidateKeys.some((candidateKey) => candidateKey === queryKey || queryKey.includes(candidateKey));
+    }) ?? null
+  );
+}
+
+function cliCardForComponentKey(
+  resolver: CliIntegrationCardResolver,
+  connections: CliIntegrationConnection[],
+  componentKey: string,
+): WebChatIntegrationConnectionData | null {
+  const app = resolver
+    .listCatalog()
+    .find((item) => normalizeIntegrationLookup(componentKey).startsWith(normalizeIntegrationLookup(item.id)));
+  return app ? cliCardForApp(app, connections) : null;
+}
+
 export async function collectIntegrationCardsFromProgressEvents(params: {
   events: IntegrationProgressEventLike[];
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: CliIntegrationCardResolver;
+  currentUserId?: string | null;
+  runtimeContext?: { platform?: "slack" | "whatsapp"; deliveryTarget?: string };
   collector?: IntegrationCardCollector;
   userEmail?: string | null;
   userName?: string | null;
 }): Promise<void> {
-  if (!params.loadIntegrationProvider || !params.collector || !params.userEmail) return;
+  if (!params.collector) return;
 
   const queries = new Set<string>();
   const componentKeys = new Set<string>();
@@ -610,27 +695,75 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
 
   if (queries.size === 0 && componentKeys.size === 0 && !listConnected) return;
 
-  const provider = await params.loadIntegrationProvider();
-  if (!provider) return;
+  const cliConnections =
+    params.cliIntegrations && params.currentUserId
+      ? await params.cliIntegrations.listConnections(params.currentUserId, params.runtimeContext)
+      : [];
+  const cards: WebChatIntegrationConnectionData[] = [];
+  const canvasQueries = new Set<string>();
+  for (const query of queries) {
+    const cliApp = params.cliIntegrations ? cliAppForQuery(params.cliIntegrations, query) : null;
+    if (cliApp) {
+      const card = cliCardForApp(cliApp, cliConnections);
+      if (card) cards.push(card);
+    } else {
+      canvasQueries.add(query);
+    }
+  }
+  const cliComponentKeys = new Set<string>();
+  const canvasComponentKeys = new Set<string>();
+  for (const componentKey of componentKeys) {
+    if (
+      params.cliIntegrations
+        ?.listCatalog()
+        .some((app) => normalizeIntegrationLookup(componentKey).startsWith(normalizeIntegrationLookup(app.id)))
+    ) {
+      cliComponentKeys.add(componentKey);
+    } else {
+      canvasComponentKeys.add(componentKey);
+    }
+  }
 
   const userEmail = params.userEmail;
-  const connections = await provider.listConnections(userEmail, params.userName ?? undefined);
-  const cards: WebChatIntegrationConnectionData[] = [];
-  if (listConnected) cards.push(...connectedIntegrationCards(connections));
-  for (const query of queries) {
-    const result = await resolveIntegrationLookup(provider, connections, { query });
-    cards.push(...result.cards.filter((card) => (card.state ?? "connect") === "connect"));
+  const needsCanvas =
+    (listConnected || canvasQueries.size > 0 || canvasComponentKeys.size > 0) && Boolean(params.userEmail);
+  const provider =
+    needsCanvas && userEmail && params.loadIntegrationProvider ? await params.loadIntegrationProvider() : null;
+  const connections =
+    provider && userEmail ? await provider.listConnections(userEmail, params.userName ?? undefined) : [];
+
+  if (listConnected) {
+    cards.push(...connectedIntegrationCards(connections));
+    cards.push(
+      ...cliConnections
+        .filter((connection) => connection.status === "active" && connection.canUse !== false)
+        .map(cliConnectionCard),
+    );
   }
-  const appCache = new Map<string, Promise<IntegrationApp | null>>();
-  let appCatalogRequest: Promise<IntegrationApp[]> | null = null;
-  const loadAppCatalog = () => {
-    appCatalogRequest ??= provider.listApps(undefined, 20, undefined).then((result) => result.apps);
-    return appCatalogRequest;
-  };
-  for (const componentKey of componentKeys) {
-    const card = await resolveComponentKeyCard(provider, connections, componentKey, appCache, loadAppCatalog);
-    if (card) cards.push(card);
+
+  if (provider) {
+    for (const query of canvasQueries) {
+      const result = await resolveIntegrationLookup(provider, connections, { query });
+      cards.push(...result.cards.filter((card) => (card.state ?? "connect") === "connect"));
+    }
+    const appCache = new Map<string, Promise<IntegrationApp | null>>();
+    let appCatalogRequest: Promise<IntegrationApp[]> | null = null;
+    const loadAppCatalog = () => {
+      appCatalogRequest ??= provider.listApps(undefined, 20, undefined).then((result) => result.apps);
+      return appCatalogRequest;
+    };
+    for (const componentKey of canvasComponentKeys) {
+      const card = await resolveComponentKeyCard(provider, connections, componentKey, appCache, loadAppCatalog);
+      if (card) cards.push(card);
+    }
   }
+  if (params.cliIntegrations) {
+    for (const componentKey of cliComponentKeys) {
+      const card = cliCardForComponentKey(params.cliIntegrations, cliConnections, componentKey);
+      if (card) cards.push(card);
+    }
+  }
+
   for (const card of dedupeIntegrationCards(cards)) {
     params.collector.collect(card);
   }
@@ -638,13 +771,27 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
 
 export async function connectedAccountCardsForUser(params: {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: CliIntegrationCardResolver;
+  currentUserId?: string | null;
   userEmail?: string | null;
   userName?: string | null;
   limit?: number;
 }): Promise<WebChatIntegrationConnectionData[]> {
-  if (!params.loadIntegrationProvider || !params.userEmail) return [];
-  const provider = await params.loadIntegrationProvider();
-  if (!provider) return [];
-  const connections = await provider.listConnections(params.userEmail, params.userName ?? undefined);
-  return connectedIntegrationCards(connections, params.limit);
+  const cards: WebChatIntegrationConnectionData[] = [];
+  if (params.cliIntegrations && params.currentUserId) {
+    const cliConnections = await params.cliIntegrations.listConnections(params.currentUserId);
+    cards.push(
+      ...cliConnections
+        .filter((connection) => connection.status === "active" && connection.canUse !== false)
+        .map(cliConnectionCard),
+    );
+  }
+  if (params.loadIntegrationProvider && params.userEmail) {
+    const provider = await params.loadIntegrationProvider();
+    if (provider) {
+      const connections = await provider.listConnections(params.userEmail, params.userName ?? undefined);
+      cards.push(...connectedIntegrationCards(connections, params.limit));
+    }
+  }
+  return dedupeIntegrationCards(cards).slice(0, params.limit ?? 20);
 }

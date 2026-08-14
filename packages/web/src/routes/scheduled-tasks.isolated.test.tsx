@@ -1,6 +1,6 @@
 import type { AutomationRunItem, ScheduledTaskListItem } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
-import { server } from "@/test/msw";
+import { seedAdminScheduledTaskListFixture, server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -77,6 +77,11 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     },
     lastRunStatus: null,
     runCount: 0,
+    shareCount: 0,
+    sharedWithMe: false,
+    canShare: true,
+    canEdit: true,
+    isOwner: true,
     ...overrides,
   };
 }
@@ -110,6 +115,11 @@ function installTaskHandlers(initialTasks: ScheduledTaskListItem[]) {
       return HttpResponse.json({ success: true });
     }),
   );
+}
+
+function ownershipTabBar(): HTMLElement {
+  const mineTab = screen.getByRole("button", { name: /Mine \d+/i });
+  return mineTab.closest("div") as HTMLElement;
 }
 
 describe("ScheduledTasksPage", () => {
@@ -165,6 +175,40 @@ describe("ScheduledTasksPage", () => {
         "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
       ),
     ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
+  });
+
+  it("creates an admin draft and navigates to its fresh builder conversation", async () => {
+    installTaskHandlers([]);
+    server.use(
+      http.post("/api/scheduled-tasks", () =>
+        HttpResponse.json({ automationId: "draft-1", conversationId: "builder-draft-1" }, { status: 201 }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
+    await user.click(screen.getAllByRole("button", { name: "Create with Sketch" })[0]);
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: "draft-1" },
+        search: { conversationId: "builder-draft-1" },
+      });
+    });
+  });
+
+  it("keeps create automation actions hidden for members", async () => {
+    setMockAuth({ role: "member", userId: "member-1" });
+    installTaskHandlers([]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Create with Sketch" })).not.toBeInTheDocument();
   });
 
   it("refreshes the list graph and run history after an external run starts", async () => {
@@ -329,7 +373,33 @@ describe("ScheduledTasksPage", () => {
     expect(screen.getByLabelText("5 recent run signals")).toBeInTheDocument();
   });
 
-  it("filters admin tasks by owner, status, and search", async () => {
+  it("shows the Share action for owned tasks when the backend omits the new capability fields (legacy fallback)", async () => {
+    setMockAuth({ role: "member", userId: "member-1" });
+    installTaskHandlers([
+      buildTask({
+        id: "task-legacy-owned",
+        title: "Legacy owned task",
+        createdBy: "member-1",
+        creatorName: "Member One",
+        isOwner: undefined,
+        sharedWithMe: undefined,
+        canShare: undefined,
+        canEdit: undefined,
+        shareCount: 0,
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Legacy owned task")).toBeInTheDocument();
+    });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Actions for Legacy owned task/i }));
+    expect(screen.getByText(/^Share$/)).toBeInTheDocument();
+  });
+
+  it("groups tasks into Mine and Shared with me for everyone", async () => {
     setMockAuth({ role: "admin", userId: "admin-1" });
     installTaskHandlers([
       buildTask({
@@ -337,6 +407,8 @@ describe("ScheduledTasksPage", () => {
         title: "Owned workflow",
         createdBy: "admin-1",
         creatorName: "Admin User",
+        isOwner: true,
+        sharedWithMe: false,
         steps: JSON.stringify([
           { id: "trigger", type: "trigger", label: "Schedule", icon: "clock" },
           { id: "agent", type: "agent", label: "Analyze", icon: "robot" },
@@ -344,20 +416,26 @@ describe("ScheduledTasksPage", () => {
         stepCount: 2,
       }),
       buildTask({
-        id: "task-system",
-        title: "System digest",
-        createdBy: null,
-        creatorName: null,
+        id: "task-shared",
+        title: "Shared digest",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        isOwner: false,
+        sharedWithMe: true,
+        canShare: false,
+        canDelete: false,
         status: "paused",
         canPause: false,
         canResume: true,
+        lastRunStatus: "failed",
       }),
       buildTask({
-        id: "task-attention",
-        title: "Failing campaign",
+        id: "task-invisible",
+        title: "Unshared task",
         createdBy: "user-2",
         creatorName: "Beta User",
-        lastRunStatus: "failed",
+        isOwner: false,
+        sharedWithMe: false,
       }),
     ]);
 
@@ -367,29 +445,230 @@ describe("ScheduledTasksPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Owned workflow")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: /All tasks 3/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /My tasks 1/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /System tasks 1/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Mine 1/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Shared with me 1/i })).toBeInTheDocument();
+    expect(screen.queryByText("Shared digest")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unshared task")).not.toBeInTheDocument();
     expect(screen.getByText(/by Admin User/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "Filter by team member" }));
-    await user.click(screen.getByRole("option", { name: /Beta User/i }));
-    expect(screen.getByText("Failing campaign")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Shared with me/i }));
+    expect(screen.getByText("Shared digest")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shared with you")).toBeInTheDocument();
     expect(screen.queryByText("Owned workflow")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unshared task")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Needs attention 1/i }));
-    expect(screen.getByText("Failing campaign")).toBeInTheDocument();
-    expect(screen.queryByText("Owned workflow")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("combobox", { name: "Filter by team member" }));
-    await user.click(screen.getByRole("option", { name: /All creators/i }));
-    await user.click(screen.getByRole("button", { name: /All 3/i }));
-    await user.click(screen.getByRole("button", { name: /System tasks 1/i }));
-    expect(screen.getByText("System digest")).toBeInTheDocument();
-    expect(screen.queryByText("Failing campaign")).not.toBeInTheDocument();
+    expect(screen.getByText("Shared digest")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Search tasks"), "owned");
     expect(screen.getByText("No tasks match these filters")).toBeInTheDocument();
+  });
+
+  it("shows an All tab with every workspace task for admins", async () => {
+    setMockAuth({ role: "admin", userId: "admin-1" });
+    seedAdminScheduledTaskListFixture([
+      buildTask({
+        id: "task-owned",
+        title: "My automation",
+        createdBy: "admin-1",
+        creatorName: "Admin User",
+        isOwner: true,
+        sharedWithMe: false,
+      }),
+      buildTask({
+        id: "task-foreign",
+        title: "Foreign workflow",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        isOwner: false,
+        sharedWithMe: false,
+        canShare: false,
+        canDelete: true,
+      }),
+      buildTask({
+        id: "task-shared",
+        title: "Shared digest",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        isOwner: false,
+        sharedWithMe: true,
+        canShare: false,
+        canDelete: false,
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("My automation")).toBeInTheDocument();
+    });
+    const tabBar = ownershipTabBar();
+    expect(within(tabBar).getByRole("button", { name: /All 3/i })).toBeInTheDocument();
+    expect(within(tabBar).getByRole("button", { name: /Mine 1/i })).toBeInTheDocument();
+    expect(within(tabBar).getByRole("button", { name: /Shared with me 1/i })).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
+
+    await user.click(within(tabBar).getByRole("button", { name: /All/i }));
+    expect(screen.getByText("My automation")).toBeInTheDocument();
+    expect(screen.getByText("Foreign workflow")).toBeInTheDocument();
+    expect(screen.getByText("Shared digest")).toBeInTheDocument();
+    expect(screen.getAllByText(/by Beta User/).length).toBeGreaterThanOrEqual(2);
+
+    // No admin share UI: share stays owner-only, so the foreign row has no share action.
+    await user.click(screen.getByRole("button", { name: /Actions for Foreign workflow/i }));
+    expect(screen.queryByRole("menuitem", { name: /share/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /open builder/i })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(within(tabBar).getByRole("button", { name: /Mine/i }));
+    expect(screen.getByText("My automation")).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
+  });
+
+  it("hides the All tab from members", async () => {
+    setMockAuth({ role: "member", userId: "u1" });
+    seedAdminScheduledTaskListFixture([
+      buildTask({
+        id: "task-owned",
+        title: "My automation",
+        createdBy: "u1",
+        creatorName: "Alice Member",
+        isOwner: true,
+      }),
+      buildTask({
+        id: "task-foreign",
+        title: "Foreign workflow",
+        createdBy: "u2",
+        creatorName: "Bob Jones",
+        isOwner: false,
+        sharedWithMe: false,
+        canShare: false,
+        canDelete: false,
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("My automation")).toBeInTheDocument();
+    });
+    expect(within(ownershipTabBar()).queryByRole("button", { name: /^All /i })).not.toBeInTheDocument();
+    expect(within(ownershipTabBar()).getByRole("button", { name: /Mine 1/i })).toBeInTheDocument();
+    expect(within(ownershipTabBar()).getByRole("button", { name: /Shared with me 0/i })).toBeInTheDocument();
+    expect(screen.queryByText("Foreign workflow")).not.toBeInTheDocument();
+  });
+
+  it("shows a member only their own and shared-with-me tasks", async () => {
+    setMockAuth({ role: "member", userId: "u1" });
+    installTaskHandlers([
+      buildTask({
+        id: "task-owned",
+        title: "My automation",
+        createdBy: "u1",
+        creatorName: "Alice Member",
+        isOwner: true,
+        sharedWithMe: false,
+      }),
+      buildTask({
+        id: "task-shared",
+        title: "Team automation",
+        createdBy: "u2",
+        creatorName: "Bob Jones",
+        isOwner: false,
+        sharedWithMe: true,
+        canShare: false,
+      }),
+      buildTask({
+        id: "task-other",
+        title: "Someone else's automation",
+        createdBy: "u2",
+        creatorName: "Bob Jones",
+        isOwner: false,
+        sharedWithMe: false,
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("My automation")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Team automation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Someone else's automation")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Shared with me/i }));
+    expect(screen.getByText("Team automation")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shared with you")).toBeInTheDocument();
+    expect(screen.queryByText("My automation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Someone else's automation")).not.toBeInTheDocument();
+  });
+
+  it("renders member capabilities without delete or share", async () => {
+    setMockAuth({ role: "member", userId: "u1" });
+    installTaskHandlers([
+      buildTask({
+        id: "task-shared",
+        title: "Shared workflow",
+        createdBy: "u2",
+        creatorName: "Bob Jones",
+        isOwner: false,
+        sharedWithMe: true,
+        canShare: false,
+        canEdit: true,
+        canDelete: false,
+        canPause: false,
+        canResume: true,
+        status: "paused",
+        shareCount: 1,
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Shared with me 1/i })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /Shared with me/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Task status: paused")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Shared workflow")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shared with you")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Actions for Shared workflow/i }));
+    expect(screen.queryByRole("menuitem", { name: /share/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /resume/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /open builder/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: /resume/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Task status: active")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /Actions for Shared workflow/i }));
+    expect(screen.getByRole("menuitem", { name: /run now/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /pause/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /share/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a share menu item with the share count on owned tasks", async () => {
+    setMockAuth({ role: "member", userId: "u1" });
+    installTaskHandlers([buildTask({ id: "task-owned", title: "Owned task", createdBy: "u1", shareCount: 2 })]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Owned task")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /Actions for Owned task/i }));
+    expect(screen.getByRole("menuitem", { name: /Share · 2/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
   });
 
   it("mutes paused workflow icons", async () => {

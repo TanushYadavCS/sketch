@@ -1,11 +1,15 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { Hono } from "hono";
+import { sql } from "kysely";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { acquireOrRenewLock } from "../automation/lock-service";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import * as automationRunsModule from "../db/repositories/automation-runs";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
@@ -15,7 +19,9 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb } from "../test-utils";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { scheduledTaskRoutes } from "./scheduled-tasks";
 
 const config = createTestConfig();
@@ -124,6 +130,93 @@ describe("Scheduled Tasks API", () => {
     }
   });
 
+  it("creates an admin placeholder draft and a fresh builder conversation atomically", async () => {
+    const admin = await seedAdmin(db);
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await loginAdmin(app) },
+    });
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toEqual({ automationId: expect.any(String), conversationId: expect.stringMatching(/^builder-/) });
+    await expect(createScheduledTaskRepository(db).getById(body.automationId)).resolves.toMatchObject({
+      id: body.automationId,
+      status: "paused",
+      title: "New automation",
+      prompt: "Describe the automation.",
+      created_by: admin.id,
+      origin_platform: "web",
+      origin_conversation_id: body.conversationId,
+      revision: 0,
+    });
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversationForTranscriptUser(
+        body.automationId,
+        body.conversationId,
+        admin.id,
+      ),
+    ).resolves.toEqual([expect.objectContaining({ kind: "builder", archived_at: null })]);
+  });
+
+  it("requires an admin to create a placeholder draft", async () => {
+    await seedAdmin(db);
+    const member = await createUserRepository(db).create({ name: "Member", email: "member-create@test.com" });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await getMemberCookie(db, member.id) },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "FORBIDDEN", message: "Admin role required" },
+    });
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
+  it("rolls back the placeholder when the builder conversation association fails", async () => {
+    await seedAdmin(db);
+    await sql`
+      CREATE TRIGGER reject_admin_builder_association
+      BEFORE INSERT ON scheduled_task_conversations
+      BEGIN
+        SELECT RAISE(FAIL, 'builder association rejected');
+      END
+    `.execute(db);
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const response = await app.request("/api/scheduled-tasks", {
+      method: "POST",
+      headers: { Cookie: await loginAdmin(app) },
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "CREATION_FAILED", message: "Automation could not be created" },
+    });
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
   it("reserves a manual run before enqueueing and preserves its failure identity", async () => {
     const admin = await seedAdmin(db);
     const tasks = createScheduledTaskRepository(db);
@@ -163,6 +256,7 @@ describe("Scheduled Tasks API", () => {
       preserveTaskState: true,
       runMode: "manual",
       runId: body.runId,
+      triggeredByUserId: admin.id,
     });
 
     await vi.waitFor(async () => {
@@ -171,17 +265,17 @@ describe("Scheduled Tasks API", () => {
         task_id: "manual-task",
         status: "failed",
         error_message: "queue full",
+        triggered_by_user_id: admin.id,
       });
     });
   });
 
-  it("returns all tasks for admins with resolved labels", async () => {
-    await seedAdmin(db);
+  it("returns the caller's tasks with resolved labels", async () => {
+    const admin = await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const groups = createWhatsAppGroupRepository(db);
 
-    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
     const recipient = await users.create({
       name: "Recipient Person",
       email: "recipient@test.com",
@@ -216,7 +310,7 @@ describe("Scheduled Tasks API", () => {
       schedule_value: "0 9 * * 1",
       timezone: "Asia/Kolkata",
       session_mode: "fresh",
-      created_by: member.id,
+      created_by: admin.id,
       status: "active",
       next_run_at: null,
       output_target: recipient.slack_user_id,
@@ -235,7 +329,7 @@ describe("Scheduled Tasks API", () => {
       schedule_value: "7200",
       timezone: "UTC",
       session_mode: "fresh",
-      created_by: member.id,
+      created_by: admin.id,
       status: "paused",
       next_run_at: null,
     });
@@ -260,7 +354,7 @@ describe("Scheduled Tasks API", () => {
 
     const slackTask = body.tasks.find((task: { id: string }) => task.id === "task-channel");
     const whatsappTask = body.tasks.find((task: { id: string }) => task.id === "task-group");
-    expect(slackTask.creatorName).toBe("Alice Member");
+    expect(slackTask.creatorName).toBe("admin");
     expect(slackTask.targetKindLabel).toBe("Slack channel");
     expect(slackTask.delivery.label).toBe("Recipient Person");
     expect(slackTask.originChat).toEqual({
@@ -358,7 +452,7 @@ describe("Scheduled Tasks API", () => {
         executeTaskById: vi.fn(),
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, member.id);
 
     const res = await app.request("/api/scheduled-tasks/task-origin/origin-chat/messages", {
       headers: { Cookie: cookie },
@@ -379,10 +473,8 @@ describe("Scheduled Tasks API", () => {
   });
 
   it("returns Canvas-managed trigger metadata for external workflows", async () => {
-    await seedAdmin(db);
-    const users = createUserRepository(db);
+    const admin = await seedAdmin(db);
     const tasks = createScheduledTaskRepository(db);
-    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
 
     await tasks.add({
       id: "task-canvas",
@@ -395,7 +487,7 @@ describe("Scheduled Tasks API", () => {
       schedule_value: "canvas",
       timezone: "UTC",
       session_mode: "fresh",
-      created_by: member.id,
+      created_by: admin.id,
       status: "active",
       next_run_at: null,
       steps: JSON.stringify([
@@ -454,10 +546,8 @@ describe("Scheduled Tasks API", () => {
   });
 
   it("returns schedule trigger metadata from canonical schedule columns", async () => {
-    await seedAdmin(db);
-    const users = createUserRepository(db);
+    const admin = await seedAdmin(db);
     const tasks = createScheduledTaskRepository(db);
-    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
 
     await tasks.add({
       id: "task-stale-trigger",
@@ -470,7 +560,7 @@ describe("Scheduled Tasks API", () => {
       schedule_value: "*/10 * * * *",
       timezone: "UTC",
       session_mode: "fresh",
-      created_by: member.id,
+      created_by: admin.id,
       status: "active",
       next_run_at: null,
       steps: JSON.stringify([
@@ -526,7 +616,7 @@ describe("Scheduled Tasks API", () => {
     expect(steps[0].triggerConfig.scheduleValue).toBe("*/10 * * * *");
   });
 
-  it("members see only their own tasks; admins see all", async () => {
+  it("members see only their own tasks and admins see every task", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -582,15 +672,14 @@ describe("Scheduled Tasks API", () => {
 
     const adminCookie = await loginAdmin(app);
     const adminRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: adminCookie } });
+    // Admins see every task in the workspace (pre-sharing-feature behavior).
     const adminBody = await adminRes.json();
     expect(adminBody.tasks.map((t: { id: string }) => t.id).sort()).toEqual(["task-alice", "task-bob"]);
   });
 
   it("falls back to raw delivery targets when metadata is missing", async () => {
-    await seedAdmin(db);
-    const users = createUserRepository(db);
+    const admin = await seedAdmin(db);
     const tasks = createScheduledTaskRepository(db);
-    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
 
     await tasks.add({
       id: "task-missing-group",
@@ -603,7 +692,7 @@ describe("Scheduled Tasks API", () => {
       schedule_value: "0 9 * * *",
       timezone: "UTC",
       session_mode: "fresh",
-      created_by: alice.id,
+      created_by: admin.id,
       status: "active",
       next_run_at: null,
     });
@@ -658,7 +747,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const pauseRes = await app.request("/api/scheduled-tasks/task-1/pause", {
       method: "POST",
@@ -717,6 +806,10 @@ describe("Scheduled Tasks API", () => {
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs/some-run-id" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/step-content" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock" },
+      { method: "DELETE", path: "/api/scheduled-tasks/task-bob/lock" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock/steal" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/lock/steal/response" },
     ];
     for (const { method, path } of routes) {
       const res = await app.request(path, { method, headers: { Cookie: cookie } });
@@ -730,11 +823,12 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
-  it("admins can access any task via any route", async () => {
+  it("grants an admin automatic access to a foreign task but keeps shares owner-only", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+    const stranger = await users.create({ name: "Stranger", email: "stranger@test.com" });
 
     await tasks.add({
       id: "task-bob",
@@ -763,19 +857,43 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const adminCookie = await loginAdmin(app);
 
-    const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: cookie } });
+    const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: adminCookie } });
     expect(runsRes.status).toBe(200);
 
-    const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", { headers: { Cookie: cookie } });
+    const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", {
+      headers: { Cookie: adminCookie },
+    });
     expect(stepRes.status).toBe(200);
 
     const pauseRes = await app.request("/api/scheduled-tasks/task-bob/pause", {
       method: "POST",
-      headers: { Cookie: cookie },
+      headers: { Cookie: adminCookie },
     });
     expect(pauseRes.status).toBe(200);
+    expect((await pauseRes.json()).task.status).toBe("paused");
+    expect(scheduler.pauseTask).toHaveBeenCalledWith("task-bob");
+
+    // Share grant/revoke stays owner-only, admins included.
+    for (const { method, path } of [
+      { method: "GET", path: "/api/scheduled-tasks/task-bob/shares" },
+      { method: "PUT", path: `/api/scheduled-tasks/task-bob/shares/${stranger.id}` },
+      { method: "DELETE", path: `/api/scheduled-tasks/task-bob/shares/${stranger.id}` },
+    ]) {
+      const res = await app.request(path, { method, headers: { Cookie: adminCookie } });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+
+    // A member without a grant is still denied on every route.
+    const strangerCookie = await getMemberCookie(db, stranger.id);
+    const denied = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: strangerCookie } });
+    expect(denied.status).toBe(404);
+
+    const ownerRes = await app.request("/api/scheduled-tasks/task-bob/runs", {
+      headers: { Cookie: await getMemberCookie(db, bob.id) },
+    });
+    expect(ownerRes.status).toBe(200);
   });
 
   it("fails closed when an admin context has no user in this tenant", async () => {
@@ -908,10 +1026,8 @@ describe("Scheduled Tasks API", () => {
   });
 
   it("list endpoint calls getRunSummaries exactly once regardless of row count", async () => {
-    await seedAdmin(db);
-    const users = createUserRepository(db);
+    const admin = await seedAdmin(db);
     const tasks = createScheduledTaskRepository(db);
-    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
 
     for (let i = 0; i < 5; i++) {
       await tasks.add({
@@ -925,7 +1041,7 @@ describe("Scheduled Tasks API", () => {
         schedule_value: "3600",
         timezone: "UTC",
         session_mode: "fresh",
-        created_by: alice.id,
+        created_by: admin.id,
         status: "active",
         next_run_at: null,
       });
@@ -959,6 +1075,553 @@ describe("Scheduled Tasks API", () => {
     } finally {
       factorySpy.mockRestore();
     }
+  });
+
+  it("owners can grant and revoke per-person access idempotently without touching revisions", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-share@test.com" });
+    const member = await users.create({ name: "Member", email: "member-share@test.com" });
+
+    await tasks.add({
+      id: "task-share",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Shared task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const ownerCookie = await getMemberCookie(db, owner.id);
+    const memberCookie = await getMemberCookie(db, member.id);
+
+    const grant = await app.request(`/api/scheduled-tasks/task-share/shares/${member.id}`, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(grant.status).toBe(200);
+    await expect(grant.json()).resolves.toEqual({ success: true });
+
+    const repeatGrant = await app.request(`/api/scheduled-tasks/task-share/shares/${member.id}`, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(repeatGrant.status).toBe(200);
+    await expect(tasks.getById("task-share")).resolves.toMatchObject({ revision: 0 });
+
+    const sharesRes = await app.request("/api/scheduled-tasks/task-share/shares", {
+      headers: { Cookie: ownerCookie },
+    });
+    expect(sharesRes.status).toBe(200);
+    const sharesBody = await sharesRes.json();
+    expect(sharesBody.shares).toEqual([
+      expect.objectContaining({
+        userId: member.id,
+        name: "Member",
+        email: "member-share@test.com",
+        grantedByUserId: owner.id,
+        grantedAt: expect.any(String),
+      }),
+    ]);
+
+    const memberDetail = await app.request("/api/scheduled-tasks/task-share", { headers: { Cookie: memberCookie } });
+    expect(memberDetail.status).toBe(200);
+
+    const revoke = await app.request(`/api/scheduled-tasks/task-share/shares/${member.id}`, {
+      method: "DELETE",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(revoke.status).toBe(200);
+    await expect(revoke.json()).resolves.toEqual({ success: true });
+
+    const repeatRevoke = await app.request(`/api/scheduled-tasks/task-share/shares/${member.id}`, {
+      method: "DELETE",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(repeatRevoke.status).toBe(200);
+
+    const deniedDetail = await app.request("/api/scheduled-tasks/task-share", { headers: { Cookie: memberCookie } });
+    expect(deniedDetail.status).toBe(404);
+    await expect(tasks.getById("task-share")).resolves.toMatchObject({ revision: 0 });
+  });
+
+  it("rejects self-grants and unknown grant targets with INVALID_TARGET", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-invalid@test.com" });
+
+    await tasks.add({
+      id: "task-invalid-target",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Invalid target task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const ownerCookie = await getMemberCookie(db, owner.id);
+
+    const selfGrant = await app.request(`/api/scheduled-tasks/task-invalid-target/shares/${owner.id}`, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(selfGrant.status).toBe(400);
+    await expect(selfGrant.json()).resolves.toMatchObject({ error: { code: "INVALID_TARGET" } });
+
+    const unknownGrant = await app.request("/api/scheduled-tasks/task-invalid-target/shares/unknown-user", {
+      method: "PUT",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(unknownGrant.status).toBe(400);
+    await expect(unknownGrant.json()).resolves.toMatchObject({ error: { code: "INVALID_TARGET" } });
+  });
+
+  it("keeps share endpoints and owner-only actions opaque to non-owners", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-opaque@test.com" });
+    const member = await users.create({ name: "Member", email: "member-opaque@test.com" });
+
+    await tasks.add({
+      id: "task-opaque",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Opaque task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "task-opaque", userId: member.id, grantedByUserId: owner.id });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const memberCookie = await getMemberCookie(db, member.id);
+    const stranger = await users.create({ name: "Stranger", email: "stranger-opaque@test.com" });
+    const strangerCookie = await getMemberCookie(db, stranger.id);
+
+    for (const cookie of [memberCookie, strangerCookie]) {
+      for (const { method, path } of [
+        { method: "GET", path: "/api/scheduled-tasks/task-opaque/shares" },
+        { method: "PUT", path: `/api/scheduled-tasks/task-opaque/shares/${stranger.id}` },
+        { method: "DELETE", path: `/api/scheduled-tasks/task-opaque/shares/${stranger.id}` },
+        { method: "DELETE", path: "/api/scheduled-tasks/task-opaque" },
+        { method: "PATCH", path: "/api/scheduled-tasks/task-opaque/execution-mode" },
+      ]) {
+        const res = await app.request(path, { method, headers: { Cookie: cookie } });
+        expect(res.status, `${method} ${path}`).toBe(404);
+      }
+    }
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+  });
+
+  it("surfaces capability fields and share counts in owner and grantee lists", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-list@test.com" });
+    const member = await users.create({ name: "Member", email: "member-list@test.com" });
+
+    await tasks.add({
+      id: "task-list-shared",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "List task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-list-shared",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const ownerCookie = await getMemberCookie(db, owner.id);
+    const memberCookie = await getMemberCookie(db, member.id);
+
+    const ownerList = await app.request("/api/scheduled-tasks", { headers: { Cookie: ownerCookie } });
+    const ownerBody = await ownerList.json();
+    expect(ownerBody.tasks[0]).toMatchObject({
+      id: "task-list-shared",
+      isOwner: true,
+      sharedWithMe: false,
+      canShare: true,
+      canEdit: true,
+      canDelete: true,
+      shareCount: 1,
+    });
+
+    const memberList = await app.request("/api/scheduled-tasks", { headers: { Cookie: memberCookie } });
+    const memberBody = await memberList.json();
+    expect(memberBody.tasks).toHaveLength(1);
+    expect(memberBody.tasks[0]).toMatchObject({
+      id: "task-list-shared",
+      isOwner: false,
+      sharedWithMe: true,
+      canShare: false,
+      canEdit: true,
+      canDelete: false,
+      shareCount: 1,
+    });
+  });
+
+  it("admins list every task with edit/delete capability and no share capability on foreign tasks", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-admin-list@test.com" });
+
+    await tasks.add({
+      id: "task-foreign-list",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Foreign list task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const adminCookie = await loginAdmin(app);
+
+    const listRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: adminCookie } });
+    expect(listRes.status).toBe(200);
+    const body = await listRes.json();
+    expect(body.tasks).toHaveLength(1);
+    expect(body.tasks[0]).toMatchObject({
+      id: "task-foreign-list",
+      isOwner: false,
+      sharedWithMe: false,
+      canShare: false,
+      canEdit: true,
+      canDelete: true,
+      shareCount: 0,
+    });
+
+    // The detail view mirrors the same capability fields and keeps the shares roster owner-only.
+    const detailRes = await app.request("/api/scheduled-tasks/task-foreign-list", { headers: { Cookie: adminCookie } });
+    expect(detailRes.status).toBe(200);
+    await expect(detailRes.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-foreign-list",
+        isOwner: false,
+        canShare: false,
+        canEdit: true,
+        shares: [],
+      },
+    });
+
+    // Admins can edit foreign-owned automations through the builder save route.
+    const editRes = await app.request("/api/scheduled-tasks/task-foreign-list", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Admin-edited brief" })),
+    });
+    expect(editRes.status).toBe(200);
+    await expect(editRes.json()).resolves.toMatchObject({
+      automation: { id: "task-foreign-list", revision: 1, isOwner: false, canEdit: true },
+    });
+    expect(refreshTaskSchedule).toHaveBeenCalledWith("task-foreign-list");
+    await expect(tasks.getById("task-foreign-list")).resolves.toMatchObject({
+      title: "Admin-edited brief",
+      revision: 1,
+      last_edited_by: expect.any(String),
+    });
+  });
+
+  it("populates the shares roster and capability fields on the definition detail", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-detail@test.com" });
+    const member = await users.create({ name: "Member", email: "member-detail@test.com" });
+
+    await tasks.add({
+      id: "task-detail-shared",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Detail task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-detail-shared",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const ownerCookie = await getMemberCookie(db, owner.id);
+    const memberCookie = await getMemberCookie(db, member.id);
+
+    const ownerDetail = await app.request("/api/scheduled-tasks/task-detail-shared", {
+      headers: { Cookie: ownerCookie },
+    });
+    expect(ownerDetail.status).toBe(200);
+    await expect(ownerDetail.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-detail-shared",
+        isOwner: true,
+        canShare: true,
+        canEdit: true,
+        shares: [
+          expect.objectContaining({
+            userId: member.id,
+            name: "Member",
+            email: "member-detail@test.com",
+          }),
+        ],
+      },
+    });
+
+    const memberDetail = await app.request("/api/scheduled-tasks/task-detail-shared", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(memberDetail.status).toBe(200);
+    await expect(memberDetail.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-detail-shared",
+        isOwner: false,
+        canShare: false,
+        canEdit: true,
+        shares: [],
+      },
+    });
+  });
+
+  it("lets grantees run, edit, pause, resume and inspect a shared automation", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-grantee@test.com" });
+    const member = await users.create({ name: "Member", email: "member-grantee@test.com" });
+
+    await tasks.add({
+      id: "task-grantee",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Grantee task",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-grantee",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(async (id: string) => {
+        await tasks.updateStatus(id, "paused");
+      }),
+      resumeTask: vi.fn(async (id: string) => {
+        await tasks.updateStatus(id, "active");
+      }),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn().mockResolvedValue({ status: "completed" }),
+      refreshTaskSchedule: vi.fn(async () => null),
+    };
+    const app = createApp(db, config, { scheduler });
+    const memberCookie = await getMemberCookie(db, member.id);
+
+    const runRes = await app.request("/api/scheduled-tasks/task-grantee/runs", {
+      method: "POST",
+      headers: { Cookie: memberCookie },
+    });
+    expect(runRes.status).toBe(200);
+    await expect(runRes.json()).resolves.toMatchObject({ status: "triggered", runId: expect.any(String) });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith(
+      "task-grantee",
+      expect.objectContaining({ runMode: "manual", triggeredByUserId: member.id }),
+    );
+
+    const runsRes = await app.request("/api/scheduled-tasks/task-grantee/runs", { headers: { Cookie: memberCookie } });
+    expect(runsRes.status).toBe(200);
+    const runsBody = await runsRes.json();
+    expect(runsBody.runs[0]).toMatchObject({ task_id: "task-grantee", triggered_by_user_id: member.id });
+
+    const pauseRes = await app.request("/api/scheduled-tasks/task-grantee/pause", {
+      method: "POST",
+      headers: { Cookie: memberCookie },
+    });
+    expect(pauseRes.status).toBe(200);
+    expect((await pauseRes.json()).task.status).toBe("paused");
+
+    const resumeRes = await app.request("/api/scheduled-tasks/task-grantee/resume", {
+      method: "POST",
+      headers: { Cookie: memberCookie },
+    });
+    expect(resumeRes.status).toBe(200);
+    expect((await resumeRes.json()).task.status).toBe("active");
+
+    const stepContentRes = await app.request("/api/scheduled-tasks/task-grantee/step-content", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(stepContentRes.status).toBe(200);
+
+    const originRes = await app.request("/api/scheduled-tasks/task-grantee/origin-chat/messages", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(originRes.status).toBe(200);
+    await expect(originRes.json()).resolves.toEqual({ messages: [] });
+
+    const editRes = await app.request("/api/scheduled-tasks/task-grantee", {
+      method: "PUT",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+    });
+    expect(editRes.status).toBe(200);
+    await expect(editRes.json()).resolves.toMatchObject({
+      automation: { id: "task-grantee", revision: 1, isOwner: false, canEdit: true },
+    });
+  });
+
+  it("keeps the revision-conflict 409 protocol for grantee edits", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-conflict@test.com" });
+    const member = await users.create({ name: "Member", email: "member-conflict@test.com" });
+
+    await tasks.add({
+      id: "task-grantee-conflict",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Conflict task",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-grantee-conflict",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+    await db.updateTable("scheduled_tasks").set({ revision: 3 }).where("id", "=", "task-grantee-conflict").execute();
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const memberCookie = await getMemberCookie(db, member.id);
+
+    const res = await app.request("/api/scheduled-tasks/task-grantee-conflict", {
+      method: "PUT",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+    });
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "REVISION_CONFLICT", currentRevision: 3 },
+    });
+    expect(refreshTaskSchedule).not.toHaveBeenCalled();
   });
 
   it("saves builder definitions atomically and asks the scheduler to reschedule", async () => {
@@ -1015,7 +1678,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1029,8 +1692,8 @@ describe("Scheduled Tasks API", () => {
       id: "task-builder",
       createdBy: alice.id,
       createdByName: "Alice",
-      lastEditedBy: admin.id,
-      lastEditedByName: "admin",
+      lastEditedBy: alice.id,
+      lastEditedByName: "Alice",
       title: "Daily account brief",
       revision: 1,
       scheduleType: "interval",
@@ -1048,7 +1711,7 @@ describe("Scheduled Tasks API", () => {
       prompt: "Summarize account activity.",
       schedule_type: "interval",
       schedule_value: "120",
-      last_edited_by: admin.id,
+      last_edited_by: alice.id,
       revision: 1,
     });
     expect(row?.steps).not.toContain("Check account activity");
@@ -1097,7 +1760,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1172,7 +1835,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1246,7 +1909,7 @@ describe("Scheduled Tasks API", () => {
         refreshTaskSchedule,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
@@ -1305,7 +1968,7 @@ describe("Scheduled Tasks API", () => {
         executeStepById,
       },
     });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-builder/steps/agent-1/runs", {
       method: "POST",
@@ -1358,7 +2021,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const res = await app.request("/api/scheduled-tasks/task-delete", {
       method: "DELETE",
@@ -1374,12 +2037,13 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-delete");
   });
 
-  it("allows an admin to delete a foreign-owned task without detaching scheduler cleanup", async () => {
+  it("lets the owner and an admin delete a foreign-owned task and denies members and grantees", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner-delete@test.com" });
     const member = await users.create({ name: "Member", email: "member-delete@test.com" });
+    const grantee = await users.create({ name: "Grantee", email: "grantee-delete@test.com" });
 
     await tasks.add({
       id: "task-delete-foreign",
@@ -1395,6 +2059,11 @@ describe("Scheduled Tasks API", () => {
       created_by: owner.id,
       status: "active",
       next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-delete-foreign",
+      userId: grantee.id,
+      grantedByUserId: owner.id,
     });
 
     class InstanceBoundScheduler {
@@ -1417,8 +2086,12 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: await getMemberCookie(db, member.id) },
     });
     expect(memberResponse.status).toBe(404);
-    expect(scheduler.removedTaskIds).toEqual([]);
-    await expect(tasks.getById("task-delete-foreign")).resolves.toBeDefined();
+
+    const granteeResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
+      method: "DELETE",
+      headers: { Cookie: await getMemberCookie(db, grantee.id) },
+    });
+    expect(granteeResponse.status).toBe(404);
 
     const adminResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
       method: "DELETE",
@@ -1461,7 +2134,7 @@ describe("Scheduled Tasks API", () => {
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
-    const cookie = await loginAdmin(app);
+    const cookie = await getMemberCookie(db, alice.id);
 
     const falseResponse = await app.request("/api/scheduled-tasks/task-delete-false", {
       method: "DELETE",
@@ -1482,5 +2155,499 @@ describe("Scheduled Tasks API", () => {
       error: { code: "SCHEDULER_INCONSISTENT" },
     });
     await expect(tasks.getById("task-delete-throw")).resolves.toBeUndefined();
+  });
+
+  it("acquires, renews, conflicts, steals, and hands over edit locks", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+    const charlie = await users.create({ name: "Charlie", email: "charlie@test.com" });
+    await tasks.add({
+      id: "task-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "task-lock", userId: bob.id, grantedByUserId: alice.id });
+    await shares.grant({ taskId: "task-lock", userId: charlie.id, grantedByUserId: alice.id });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+    const charlieCookie = await getMemberCookie(db, charlie.id);
+
+    // No lock before anyone acquires.
+    const emptyDetail = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: aliceCookie } });
+    const emptyBody = await emptyDetail.json();
+    expect(emptyBody).toMatchObject({ automation: { id: "task-lock" } });
+    expect(emptyBody.automation).not.toHaveProperty("lock");
+
+    // Acquire + renew by the same user.
+    const firstAcquire = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(firstAcquire.status).toBe(200);
+    const firstLock = (await firstAcquire.json()).lock;
+    expect(firstLock).toMatchObject({
+      heldByUserId: alice.id,
+      heldByName: "Alice",
+      heldByPlatform: "web",
+      heldBySurface: "builder",
+      isHeldByMe: true,
+      stealPending: null,
+    });
+    expect(firstLock.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const renew = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(renew.status).toBe(200);
+    const renewedLock = (await renew.json()).lock;
+    expect(renewedLock.expiresAt >= firstLock.expiresAt).toBe(true);
+
+    // A second editor sees the lock and cannot acquire.
+    const conflict = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      error: { code: "LOCKED", lock: { heldByUserId: alice.id, isHeldByMe: false } },
+    });
+
+    // Bob requests a steal; repeats are idempotent; a second requester is blocked.
+    const steal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(steal.status).toBe(200);
+    await expect(steal.json()).resolves.toMatchObject({
+      status: "pending",
+      lock: {
+        heldByUserId: alice.id,
+        stealPending: { requesterName: "Bob", expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+      },
+    });
+
+    const repeatSteal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(repeatSteal.status).toBe(200);
+    await expect(repeatSteal.json()).resolves.toMatchObject({ status: "pending" });
+
+    const secondSteal = await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: charlieCookie },
+    });
+    expect(secondSteal.status).toBe(409);
+    await expect(secondSteal.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    // The detail view exposes the lock and the pending steal to all editors.
+    const detail = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: bobCookie } });
+    await expect(detail.json()).resolves.toMatchObject({
+      automation: {
+        lock: {
+          heldByUserId: alice.id,
+          heldByName: "Alice",
+          isHeldByMe: false,
+          stealPending: { requesterName: "Bob", expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+        },
+      },
+    });
+
+    // Deny first, then approve.
+    const deny = await app.request("/api/scheduled-tasks/task-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: false }),
+    });
+    expect(deny.status).toBe(200);
+    await expect(deny.json()).resolves.toMatchObject({ status: "denied", lock: { stealPending: null } });
+
+    await app.request("/api/scheduled-tasks/task-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    const approve = await app.request("/api/scheduled-tasks/task-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: true }),
+    });
+    expect(approve.status).toBe(200);
+    await expect(approve.json()).resolves.toMatchObject({
+      status: "approved",
+      lock: { heldByUserId: bob.id, isHeldByMe: false, stealPending: null },
+    });
+
+    // Bob (now holder) can save; then releases.
+    const save = await app.request("/api/scheduled-tasks/task-lock", {
+      method: "PUT",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Bob's edit" })),
+    });
+    expect(save.status).toBe(200);
+    await expect(save.json()).resolves.toMatchObject({ automation: { id: "task-lock", revision: 1 } });
+
+    const release = await app.request("/api/scheduled-tasks/task-lock/lock", {
+      method: "DELETE",
+      headers: { Cookie: bobCookie },
+    });
+    expect(release.status).toBe(200);
+    await expect(release.json()).resolves.toEqual({ success: true });
+    const afterRelease = await app.request("/api/scheduled-tasks/task-lock", { headers: { Cookie: aliceCookie } });
+    const afterReleaseBody = await afterRelease.json();
+    expect(afterReleaseBody).toMatchObject({ automation: { id: "task-lock" } });
+    expect(afterReleaseBody.automation).not.toHaveProperty("lock");
+  });
+
+  it("notifies a Slack holder when a web member requests a steal", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-slack-hold@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob-slack-steal@test.com" });
+    await tasks.add({
+      id: "task-slack-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D9",
+      thread_ts: null,
+      prompt: "Slack-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-slack-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "task-slack-lock",
+      holder: { userId: alice.id, platform: "slack", surface: "slack_dm", conversationId: "D9" },
+    });
+
+    const postLockStealRequestMessage = vi.fn().mockResolvedValue(undefined);
+    const postMessage = vi.fn().mockResolvedValue(undefined);
+    const getSlack = () => ({ postLockStealRequestMessage, postMessage }) as unknown as SlackBot;
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler, getSlack });
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    const res = await app.request("/api/scheduled-tasks/task-slack-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(postLockStealRequestMessage).toHaveBeenCalled();
+    });
+    expect(postLockStealRequestMessage).toHaveBeenCalledWith(
+      "D9",
+      expect.objectContaining({ taskId: "task-slack-lock", requesterName: "Bob" }),
+    );
+  });
+
+  it("delivers a steal request to a Slack-identified holder acquired through the production lock route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice-route-hold@test.com",
+      slackUserId: "USLACKROUTE",
+    });
+    const bob = await users.create({ name: "Bob", email: "bob-route-steal@test.com" });
+    await tasks.add({
+      id: "task-route-slack-lock",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D9",
+      thread_ts: null,
+      prompt: "Route-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-route-slack-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
+
+    const postLockStealRequestMessage = vi.fn().mockResolvedValue(undefined);
+    const postMessage = vi.fn().mockResolvedValue(undefined);
+    const getSlack = () => ({ postLockStealRequestMessage, postMessage }) as unknown as SlackBot;
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler, getSlack });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    // Production acquire: the holder row records the Slack DM surface.
+    const acquired = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(acquired.status).toBe(200);
+    await expect(createAutomationLocksRepository(db).getByTaskId("task-route-slack-lock")).resolves.toMatchObject({
+      holder_user_id: alice.id,
+      holder_platform: "slack",
+      holder_surface: "dm",
+      holder_conversation_id: "USLACKROUTE",
+    });
+
+    const res = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(postLockStealRequestMessage).toHaveBeenCalled();
+    });
+    expect(postLockStealRequestMessage).toHaveBeenCalledWith(
+      "USLACKROUTE",
+      expect.objectContaining({ taskId: "task-route-slack-lock", requesterName: "Bob" }),
+    );
+  });
+
+  it("delivers a steal request to a WhatsApp-identified holder acquired through the production lock route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice-wa-route@test.com",
+      whatsappNumber: "+15550001111",
+    });
+    const bob = await users.create({ name: "Bob", email: "bob-wa-route@test.com" });
+    await tasks.add({
+      id: "task-route-wa-lock",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "15550001111@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Route-locked automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-route-wa-lock",
+      userId: bob.id,
+      grantedByUserId: alice.id,
+    });
+
+    const sendText = vi.fn().mockResolvedValue(null);
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, {
+      scheduler,
+      whatsappRuntime: { sendText } as unknown as WhatsAppRuntime,
+    });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    const acquired = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    expect(acquired.status).toBe(200);
+    await expect(createAutomationLocksRepository(db).getByTaskId("task-route-wa-lock")).resolves.toMatchObject({
+      holder_user_id: alice.id,
+      holder_platform: "whatsapp",
+      holder_surface: "dm",
+      holder_conversation_id: "15550001111@s.whatsapp.net",
+    });
+
+    const res = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(sendText).toHaveBeenCalled();
+    });
+    expect(sendText).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15550001111", providerConversationId: "15550001111@s.whatsapp.net" },
+      expect.stringContaining("CONFIRM-STEAL task-route-wa-lock"),
+    );
+  });
+
+  it("returns 409 LOCKED on PUT and steal edge cases without a valid holder", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-put@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob-put@test.com" });
+    await tasks.add({
+      id: "task-lock-put",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Locked save target",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+      title: "Locked save target",
+    });
+    const shares = createAutomationSharesRepository(db);
+    await shares.grant({ taskId: "task-lock-put", userId: bob.id, grantedByUserId: alice.id });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const bobCookie = await getMemberCookie(db, bob.id);
+
+    // Steal on an unlocked task.
+    const notLocked = await app.request("/api/scheduled-tasks/task-lock-put/lock/steal", {
+      method: "POST",
+      headers: { Cookie: bobCookie },
+    });
+    expect(notLocked.status).toBe(409);
+    await expect(notLocked.json()).resolves.toMatchObject({ error: { code: "NOT_LOCKED" } });
+
+    // Steal response from a non-holder is opaque.
+    await app.request("/api/scheduled-tasks/task-lock-put/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    const nonHolderResponse = await app.request("/api/scheduled-tasks/task-lock-put/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: true }),
+    });
+    expect(nonHolderResponse.status).toBe(404);
+
+    // PUT by a non-holder returns the LOCKED envelope with the lock view.
+    const put = await app.request("/api/scheduled-tasks/task-lock-put", {
+      method: "PUT",
+      headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Should be locked" })),
+    });
+    expect(put.status).toBe(409);
+    await expect(put.json()).resolves.toMatchObject({
+      error: { code: "LOCKED", lock: { heldByUserId: alice.id, isHeldByMe: false } },
+    });
+    expect(scheduler.refreshTaskSchedule).not.toHaveBeenCalled();
+    await expect(tasks.getById("task-lock-put")).resolves.toMatchObject({ title: "Locked save target", revision: 0 });
+
+    // Releasing a lock held by someone else is an idempotent no-op.
+    const foreignRelease = await app.request("/api/scheduled-tasks/task-lock-put/lock", {
+      method: "DELETE",
+      headers: { Cookie: bobCookie },
+    });
+    expect(foreignRelease.status).toBe(200);
+    const stillHeld = await app.request("/api/scheduled-tasks/task-lock-put", { headers: { Cookie: bobCookie } });
+    await expect(stillHeld.json()).resolves.toMatchObject({
+      automation: { lock: { heldByUserId: alice.id } },
+    });
+  });
+
+  it("hides an expired lock from the detail view (lazy expiry)", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-expired@test.com" });
+    await tasks.add({
+      id: "task-lock-expired",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Expired lock",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      refreshTaskSchedule: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const aliceCookie = await getMemberCookie(db, alice.id);
+
+    await app.request("/api/scheduled-tasks/task-lock-expired/lock", {
+      method: "POST",
+      headers: { Cookie: aliceCookie },
+    });
+    await db
+      .updateTable("automation_task_locks")
+      .set({ expires_at: "2020-01-01T00:00:00.000Z" })
+      .where("task_id", "=", "task-lock-expired")
+      .execute();
+
+    const detail = await app.request("/api/scheduled-tasks/task-lock-expired", { headers: { Cookie: aliceCookie } });
+    const body = await detail.json();
+    expect(body.automation).not.toHaveProperty("lock");
   });
 });

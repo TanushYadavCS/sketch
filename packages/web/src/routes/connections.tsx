@@ -25,20 +25,28 @@ import {
   EnvironmentVariablesSection,
   ShareEnvironmentVariableDialog,
 } from "@/components/connections/environment-variables-section";
+import { GithubIntegrationDialog } from "@/components/connections/github-integration-dialog";
 import { IntegrationsSection } from "@/components/connections/integrations-section";
+import { LinearIntegrationDialog } from "@/components/connections/linear-integration-dialog";
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
 import { CheckCircleIcon, MagnifyingGlassIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
-import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
+import {
+  type AgentEnvironmentVariableRecord,
+  type CliIntegrationConnection,
+  type IntegrationConnection,
+  type McpServerRecord,
+  managedCliIntegrationAppId,
+} from "@sketch/shared";
 import { Button } from "@sketch/ui/components/button";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 import { useDashboardAuth } from "./dashboard";
@@ -334,32 +342,57 @@ export function ConnectionsPage() {
     enabled: !!provider,
   });
 
+  const cliCatalogQuery = useQuery({
+    queryKey: ["cli-integration-apps"],
+    queryFn: () => api.cliIntegrations.list(),
+    enabled: activeTab === "applications",
+  });
+
+  const cliConnectionsQuery = useQuery({
+    queryKey: ["cli-integration-connections"],
+    queryFn: () => api.cliIntegrations.connections(),
+    enabled: activeTab === "applications",
+  });
+
   const connections = connectionsQuery.data ?? [];
+  const cliConnections = cliConnectionsQuery.data?.connections ?? [];
+  const cliCatalog = useMemo(
+    () =>
+      (cliCatalogQuery.data?.apps ?? []).filter(
+        (app): app is import("@sketch/shared").CliIntegrationCatalogApp =>
+          app.executionMode === "cli" || app.executionMode === "api",
+      ),
+    [cliCatalogQuery.data?.apps],
+  );
+  const githubConnection: CliIntegrationConnection | null =
+    cliConnections.find((connection) => connection.appId === "github") ?? null;
+  const linearConnection: CliIntegrationConnection | null =
+    cliConnections.find((connection) => connection.appId === "linear") ?? null;
 
   const envVarsQuery = useQuery({
     queryKey: ["agent-environment-variables"],
     queryFn: () => api.agentEnvironmentVariables.list(),
-    enabled: activeTab === "environment",
+    enabled: activeTab === "environment" || activeTab === "applications",
   });
   const envVars = envVarsQuery.data ?? [];
 
   const usersQuery = useQuery({
     queryKey: ["users"],
     queryFn: () => api.users.list(),
-    enabled: activeTab === "environment",
+    enabled: activeTab === "environment" || activeTab === "applications",
   });
 
   const slackChannelsQuery = useQuery({
     queryKey: ["slack-channels"],
     queryFn: () => api.channels.listSlack(),
-    enabled: activeTab === "environment",
+    enabled: activeTab === "environment" || activeTab === "applications",
     retry: false,
   });
 
   const whatsappGroupsQuery = useQuery({
     queryKey: ["whatsapp-groups"],
     queryFn: () => api.channels.listWhatsAppGroups(),
-    enabled: activeTab === "environment",
+    enabled: activeTab === "environment" || activeTab === "applications",
   });
 
   const [showAddMcpDialog, setShowAddMcpDialog] = useState(false);
@@ -371,6 +404,8 @@ export function ConnectionsPage() {
   const [deletingEnvVar, setDeletingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
   const [sharingEnvVar, setSharingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
   const [showAddIntegrationDialog, setShowAddIntegrationDialog] = useState(false);
+  const [showGithubSetup, setShowGithubSetup] = useState(false);
+  const [showLinearSetup, setShowLinearSetup] = useState(false);
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [connectorNudge, setConnectorNudge] = useState<ConnectorNudgeSuggestion | null>(null);
@@ -488,6 +523,16 @@ export function ConnectionsPage() {
 
     if (!requestedAppSearch) return;
     setActiveTab("applications");
+    const managedSearchApp = managedCliIntegrationAppId(requestedAppSearch);
+    if (managedSearchApp) {
+      if (cliCatalogQuery.isLoading) return;
+      setShowAddIntegrationDialog(false);
+      if (managedSearchApp === "linear") setShowLinearSetup(true);
+      else setShowGithubSetup(true);
+      setRequestedAppSearch(null);
+      removeSearchParams(["app"]);
+      return;
+    }
     if (!provider) return;
     setShowAddIntegrationDialog(true);
     removeSearchParams(["app"]);
@@ -500,6 +545,7 @@ export function ConnectionsPage() {
     connectionsQuery.isLoading,
     connectionsQuery.data,
     connectionsQuery.refetch,
+    cliCatalogQuery.isLoading,
     invalidateConnections,
     maybeShowConnectorNudge,
   ]);
@@ -507,6 +553,26 @@ export function ConnectionsPage() {
   useEffect(() => {
     if (!requestedAppConnect) return;
     setActiveTab("applications");
+
+    const managedConnectApp = managedCliIntegrationAppId(requestedAppConnect);
+    if (managedConnectApp) {
+      if (cliCatalogQuery.isLoading || cliConnectionsQuery.isLoading) {
+        setDirectConnectState({ kind: "starting", appId: managedConnectApp });
+        return;
+      }
+      const managedAppId = managedConnectApp;
+      removeSearchParams(["connect"]);
+      setRequestedAppConnect(null);
+      const connection = managedAppId === "linear" ? linearConnection : githubConnection;
+      if (connection?.status === "active") {
+        setDirectConnectState({ kind: "already_connected", appId: managedAppId, appName: connection.appName });
+      } else {
+        setDirectConnectState({ kind: "idle" });
+        if (managedAppId === "linear") setShowLinearSetup(true);
+        else setShowGithubSetup(true);
+      }
+      return;
+    }
 
     if (serversQuery.isLoading) {
       setDirectConnectState({ kind: "starting", appId: requestedAppConnect });
@@ -568,12 +634,24 @@ export function ConnectionsPage() {
     return () => {
       cancelled = true;
     };
-  }, [provider, requestedAppConnect, serversQuery.isLoading, connectionsQuery.isLoading, connectionsQuery.data]);
+  }, [
+    provider,
+    requestedAppConnect,
+    serversQuery.isLoading,
+    connectionsQuery.isLoading,
+    connectionsQuery.data,
+    cliCatalogQuery.isLoading,
+    cliConnectionsQuery.isLoading,
+    githubConnection,
+    linearConnection,
+  ]);
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
     queryClient.invalidateQueries({ queryKey: ["connections"] });
     queryClient.invalidateQueries({ queryKey: ["agent-environment-variables"] });
+    queryClient.invalidateQueries({ queryKey: ["cli-integration-apps"] });
+    queryClient.invalidateQueries({ queryKey: ["cli-integration-connections"] });
   }, [queryClient]);
 
   const isLoading = serversQuery.isLoading;
@@ -619,7 +697,7 @@ export function ConnectionsPage() {
               <ConnectionsBanner onConnect={() => setShowProviderSelector(true)} />
             ) : (
               <>
-                {connections.length > 0 && (
+                {(connections.length > 0 || githubConnection || linearConnection) && (
                   <div className="flex items-center justify-between">
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#FEED01]/10 px-2.5 py-1 text-xs text-muted-foreground">
                       <span className="inline-block size-1.5 rounded-full bg-[#FEED01]" />
@@ -638,7 +716,19 @@ export function ConnectionsPage() {
                 )}
                 <IntegrationsSection
                   connections={connections}
-                  isLoadingConnections={connectionsQuery.isLoading}
+                  isLoadingConnections={connectionsQuery.isLoading || cliConnectionsQuery.isLoading}
+                  githubConnection={githubConnection}
+                  githubUsers={usersQuery.data?.users ?? []}
+                  linearConnection={linearConnection}
+                  linearUsers={usersQuery.data?.users ?? []}
+                  linearSlackChannels={slackChannelsQuery.data?.channels ?? []}
+                  linearWhatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+                  linearCurrentUserId={auth.userId ?? ""}
+                  linearIsAdmin={auth.role === "admin"}
+                  githubSlackChannels={slackChannelsQuery.data?.channels ?? []}
+                  githubWhatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+                  githubCurrentUserId={auth.userId ?? ""}
+                  githubIsAdmin={auth.role === "admin"}
                   onAdd={() => {
                     setRequestedAppConnect(null);
                     setRequestedAppSearch(null);
@@ -764,12 +854,48 @@ export function ConnectionsPage() {
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
           initialAppId={null}
           initialSearch={requestedAppSearch}
+          cliCatalog={cliCatalog}
+          cliConnections={cliConnections}
+          onOpenGithubSetup={() => {
+            setShowAddIntegrationDialog(false);
+            setRequestedAppConnect(null);
+            setRequestedAppSearch(null);
+            setShowGithubSetup(true);
+          }}
+          onOpenLinearSetup={() => {
+            setShowAddIntegrationDialog(false);
+            setRequestedAppConnect(null);
+            setRequestedAppSearch(null);
+            setShowLinearSetup(true);
+          }}
           onSuccess={(_app, connection) => {
             invalidateAll();
             if (connection) void maybeShowConnectorNudge(connection);
           }}
         />
       )}
+
+      <GithubIntegrationDialog
+        open={showGithubSetup}
+        onOpenChange={setShowGithubSetup}
+        users={usersQuery.data?.users ?? []}
+        slackChannels={slackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={auth.userId ?? ""}
+        isAdmin={auth.role === "admin"}
+        onSuccess={invalidateAll}
+      />
+
+      <LinearIntegrationDialog
+        open={showLinearSetup}
+        onOpenChange={setShowLinearSetup}
+        users={usersQuery.data?.users ?? []}
+        slackChannels={slackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={auth.userId ?? ""}
+        isAdmin={auth.role === "admin"}
+        onSuccess={invalidateAll}
+      />
 
       <ConnectorNudgeDialog
         suggestion={connectorNudge}

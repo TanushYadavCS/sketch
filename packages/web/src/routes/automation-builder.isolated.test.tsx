@@ -8,7 +8,7 @@ import type {
 import { ApiRequestError } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   listConversations: vi.fn(),
   webChatConversations: vi.fn(),
   loadMessages: vi.fn(),
+  conversationMessages: vi.fn(),
+  releaseLock: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
   createConversation: vi.fn(),
@@ -62,6 +64,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         selectConversation: mocks.selectConversation,
         archiveConversation: mocks.archiveConversation,
         originChatMessages: mocks.originChatMessages,
+        conversationMessages: mocks.conversationMessages,
+        releaseLock: mocks.releaseLock,
         run: mocks.runTask,
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
@@ -103,6 +107,12 @@ vi.mock("@tanstack/react-router", async () => {
 
 vi.mock("./dashboard", () => ({
   dashboardRoute: { id: "__root__/dashboard" },
+  useDashboardAuth: () => ({
+    userId: "user-1",
+    role: "member",
+    displayName: "Owner Member",
+    displayIdentifier: "owner@example.com",
+  }),
 }));
 
 vi.mock("sonner", () => ({
@@ -381,6 +391,10 @@ describe("AutomationBuilderPage", () => {
     });
     mocks.loadMessages.mockClear();
     mocks.loadMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.conversationMessages.mockClear();
+    mocks.conversationMessages.mockResolvedValue({ messages: [], updatedAt: null });
+    mocks.releaseLock.mockClear();
+    mocks.releaseLock.mockResolvedValue({ success: true });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
     mocks.createConversation.mockClear();
     mocks.createConversation.mockResolvedValue({
@@ -451,27 +465,136 @@ describe("AutomationBuilderPage", () => {
     mocks.chatMessages = [];
   });
 
-  it("keeps a strict placeholder empty and leaves its compatibility mode unanswered until selection", async () => {
-    const user = userEvent.setup();
+  it("keeps a strict placeholder empty and greets setup with the description prompt", async () => {
     const placeholder = { ...automation, isPlaceholderDraft: true };
-    const updatedPlaceholder = { ...placeholder, executionMode: "deterministic" as const };
     mocks.getAutomation.mockReset().mockResolvedValue(placeholder);
-    mocks.selectSetupExecutionMode.mockImplementation(async () => {
-      mocks.getAutomation.mockResolvedValue(updatedPlaceholder);
-      return updatedPlaceholder;
-    });
 
     renderBuilder();
 
     expect(await screen.findByTestId("automation-builder-empty-canvas")).toBeInTheDocument();
-    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
+    expect(document.querySelector(".automation-builder-empty-grid")).toBeInTheDocument();
+    expect(screen.getByText("Workflow preview")).toBeInTheDocument();
+    expect(screen.getByText("Trigger")).toBeInTheDocument();
+    expect(screen.getByText("Action")).toBeInTheDocument();
+    expect(screen.getByText("Delivery")).toBeInTheDocument();
+    expect(document.querySelectorAll(".automation-builder-empty-edge-track")).toHaveLength(2);
+    expect(screen.getByTestId("automation-builder-graph-loading")).toHaveTextContent("Workflow canvas");
+    expect(await screen.findByText("What should this automation do?")).toBeInTheDocument();
+    expect(screen.queryByTestId("automation-setup-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("automation-builder-question-dock")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Exact steps with smart help" })).not.toBeChecked();
+  });
 
-    await user.click(screen.getByRole("radio", { name: "Follow exact steps" }));
-    await waitFor(() => expect(mocks.selectSetupExecutionMode).toHaveBeenCalledWith("task-123", "deterministic"));
-    expect(mocks.saveAutomation).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
+  it("carries the originating web-chat request into setup and asks for execution mode next", async () => {
+    const placeholder = {
+      ...automation,
+      isPlaceholderDraft: true,
+      originChat: {
+        platform: "web" as const,
+        conversationId: "chat-alpha",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    };
+    mocks.getAutomation.mockResolvedValue(placeholder);
+    mocks.search = { conversationId: "builder-alpha" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-alpha",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.loadMessages.mockImplementation(async (conversationId: string) =>
+      conversationId === "chat-alpha"
+        ? {
+            messages: [
+              {
+                id: "source-user",
+                role: "user",
+                parts: [{ type: "text", text: "Create a daily ClickUp summary and send it to Slack." }],
+              },
+            ],
+            updatedAt: "2026-06-01T00:00:00.000Z",
+          }
+        : { messages: [], updatedAt: null },
+    );
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-source-context")).toHaveTextContent(
+      "Create a daily ClickUp summary and send it to Slack.",
+    );
+    expect(screen.getByTestId("automation-setup-card")).toBeInTheDocument();
+    expect(screen.getByText("How should Sketch run this automation?")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Hybrid" })).not.toBeChecked();
+    expect(screen.queryByText("What should this automation do?")).not.toBeInTheDocument();
+  });
+
+  it("keeps the originating request visible after the execution-mode message is added", async () => {
+    const placeholder = {
+      ...automation,
+      isPlaceholderDraft: true,
+      originChat: {
+        platform: "web" as const,
+        conversationId: "chat-alpha",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    };
+    mocks.getAutomation.mockResolvedValue(placeholder);
+    mocks.search = { conversationId: "builder-alpha" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-alpha",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.chatMessages = [
+      {
+        id: "mode-selection",
+        role: "user",
+        parts: [{ type: "text", text: "Deterministic selected." }],
+      },
+    ];
+    mocks.loadMessages.mockImplementation(async (conversationId: string) =>
+      conversationId === "chat-alpha"
+        ? {
+            messages: [
+              {
+                id: "source-user",
+                role: "user",
+                parts: [{ type: "text", text: "Create a daily ClickUp summary and send it to Slack." }],
+              },
+            ],
+            updatedAt: "2026-06-01T00:00:00.000Z",
+          }
+        : { messages: [], updatedAt: null },
+    );
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-source-context")).toHaveTextContent(
+      "Create a daily ClickUp summary and send it to Slack.",
+    );
+    expect(screen.getByText("Deterministic selected.")).toBeInTheDocument();
   });
 
   it("discards an untouched setup only after deletion succeeds", async () => {
@@ -496,6 +619,62 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
     await user.click(await screen.findByRole("button", { name: "Close" }));
     expect(mocks.removeAutomation).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns from an automation thread to its thread list and can delete a saved automation", async () => {
+    renderBuilder();
+    const user = userEvent.setup();
+
+    await screen.findByRole("button", { name: "Back to chats" });
+    expect(
+      within(screen.getByTestId("automation-builder-chat-sidecar")).getByRole("button", {
+        name: "Back to chats",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("automation-builder-chat-sidecar")).queryByRole("button", {
+        name: "Back to automations",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("automation-builder-canvas")).queryByRole("button", {
+        name: "Back to automations",
+      }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Back to chats" }));
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: "task-123" },
+        search: {},
+      }),
+    );
+
+    mocks.navigate.mockClear();
+    await user.click(screen.getByRole("button", { name: "Delete automation" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Daily account brief");
+    await user.click(within(dialog).getByRole("button", { name: "Delete automation" }));
+
+    await waitFor(() => expect(mocks.removeAutomation).toHaveBeenCalledWith("task-123"));
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" }));
+  });
+
+  it("uses the automation-list nav only from the automation thread list", async () => {
+    mocks.search = {};
+    renderBuilder();
+
+    const user = userEvent.setup();
+    const sidecar = await screen.findByTestId("automation-builder-chat-sidecar");
+    await within(sidecar).findByText("Chats");
+    expect(within(sidecar).getByRole("button", { name: "Back to automations" })).toBeInTheDocument();
+    expect(within(sidecar).queryByRole("button", { name: "Back to chats" })).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("automation-builder-canvas")).queryByRole("button", { name: "Back to automations" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(within(sidecar).getByRole("button", { name: "Back to automations" }));
+    expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" });
   });
 
   it("resolves an old run by exact ID without falling back to latest", async () => {
@@ -563,14 +742,15 @@ describe("AutomationBuilderPage", () => {
 
   it("shows the three execution modes and leaves the recommendation advisory", async () => {
     const user = userEvent.setup();
+    mocks.chatMessages = [];
 
     renderBuilder();
 
     expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
-    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Follow exact steps");
-    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Exact steps with smart help");
-    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Let Sketch handle the details");
-    expect(screen.getByText(/Sketch recommended Let Sketch handle the details/)).toBeVisible();
+    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Deterministic");
+    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Hybrid");
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent");
+    expect(screen.getByText(/Sketch recommended Agent/)).toBeVisible();
 
     await user.click(screen.getByTestId("automation-mode-deterministic"));
 
@@ -583,7 +763,7 @@ describe("AutomationBuilderPage", () => {
     await waitFor(() =>
       expect(mocks.sendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Follow exact steps) for this automation. Please continue by asking the next relevant automation questions.',
+          text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Deterministic) for this automation. Please continue by asking the next relevant automation questions.',
         }),
         { body: { automationTaskId: "task-123" } },
       ),
@@ -592,11 +772,12 @@ describe("AutomationBuilderPage", () => {
   });
 
   it.each([
-    ["hybrid", "Exact steps with smart help"],
-    ["agent-led", "Let Sketch handle the details"],
+    ["hybrid", "Hybrid"],
+    ["agent-led", "Agent"],
   ] as const)("saves and sends the %s execution mode choice", async (mode, label) => {
     const user = userEvent.setup();
     mocks.getAutomation.mockResolvedValue({ ...automation, executionMode: "deterministic" });
+    mocks.chatMessages = [];
 
     renderBuilder();
 
@@ -622,7 +803,7 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByText("Chats")).toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: "Let Sketch handle the details" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Agent" })).not.toBeInTheDocument();
     expect(mocks.saveAutomation).not.toHaveBeenCalled();
     expect(mocks.sendMessage).not.toHaveBeenCalled();
   });
@@ -851,7 +1032,7 @@ describe("AutomationBuilderPage", () => {
 
     const input = await screen.findByLabelText("Message Sketch");
     await waitFor(() => expect(input).not.toBeDisabled());
-    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha");
 
     await user.type(input, "Make it daily");
     await user.click(screen.getByLabelText("Send message"));
@@ -873,13 +1054,17 @@ describe("AutomationBuilderPage", () => {
 
     renderBuilder();
 
-    await screen.findByLabelText("Message Sketch");
-    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha"));
-    mocks.loadMessages.mockClear();
+    const input = await screen.findByLabelText("Message Sketch");
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("placeholder", "");
+    await waitFor(() => expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha"));
+    mocks.conversationMessages.mockClear();
 
     document.dispatchEvent(new Event("visibilitychange"));
 
-    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(Object)));
+    await waitFor(() =>
+      expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha", expect.any(Object)),
+    );
   });
 
   it("refreshes the graph and latest run after an external automation update", async () => {
@@ -933,23 +1118,15 @@ describe("AutomationBuilderPage", () => {
     expect(viewingButton.querySelector("span")).toHaveClass("min-w-0", "max-w-full", "truncate");
   });
 
-  it("shows an automation-aware empty state for an associated empty chat", async () => {
-    const user = userEvent.setup();
+  it("shows the execution-mode setup card in an empty chat for a saved automation", async () => {
     renderBuilder();
 
-    await screen.findByLabelText("Message Sketch");
+    expect(await screen.findByLabelText("Message Sketch")).toBeInTheDocument();
     expect(screen.getByText("Create an automation")).toBeInTheDocument();
-    expect(await screen.findByText("Source")).toBeInTheDocument();
-    expect(await screen.findByText("What should change?")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
-
-    expect(mocks.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ text: "Add one useful step to this automation." }),
-      {
-        body: { automationTaskId: "task-123" },
-      },
-    );
+    expect(screen.queryByTestId("automation-builder-empty-canvas")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Hybrid" })).toBeChecked();
+    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
   });
 
   it.each([403, 404])("shows an actionable access state for a %s builder response", async (status) => {
@@ -1166,8 +1343,11 @@ describe("AutomationBuilderPage", () => {
     await screen.findByLabelText("Message Sketch");
     expect(screen.getByText("Create an automation")).toBeInTheDocument();
     expect(screen.queryByText("chat-alpha")).not.toBeInTheDocument();
-    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
-    expect(mocks.loadMessages).not.toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
+    expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha");
+    expect(mocks.conversationMessages).not.toHaveBeenCalledWith(
+      "task-123",
+      expect.stringMatching(/^builder-task-123-/),
+    );
   });
 
   it("hydrates batched builder questions and preserves the ordered outgoing answer", () => {
@@ -1254,7 +1434,7 @@ describe("AutomationBuilderPage", () => {
           ],
         },
       ]),
-    ).toMatchObject([{ role: "user", text: "Exact steps with smart help selected." }]);
+    ).toMatchObject([{ role: "user", text: "Hybrid selected." }]);
   });
 
   it("auto-arranges generated vertical workflow positions", async () => {
@@ -1279,7 +1459,7 @@ describe("AutomationBuilderPage", () => {
 
     expect(await screen.findByText("Chats")).toBeInTheDocument();
     expect(screen.queryByLabelText("Message Sketch")).not.toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "New chat" }));
@@ -1344,6 +1524,67 @@ describe("AutomationBuilderPage", () => {
     expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
     expect(screen.getAllByText("Automation").length).toBeGreaterThan(0);
     expect(screen.getByText(/(?:Jun 4|4 Jun)/)).toBeInTheDocument();
+  });
+
+  it("labels conversations with the transcript user name in owner/admin views", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-maya",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Maya Chen",
+        },
+        {
+          conversationId: "chat-owner",
+          kinds: ["builder"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-02T00:00:00.000Z",
+          lastActiveAt: "2026-06-02T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Alice Smith",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    expect(await screen.findByText("by Maya Chen")).toBeInTheDocument();
+    expect(screen.getByText("by Alice Smith")).toBeInTheDocument();
+  });
+
+  it("omits the transcript user label for viewer-scoped lists", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-own",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    expect(await screen.findByText("Automation chat")).toBeInTheDocument();
+    expect(screen.queryByText(/by /)).not.toBeInTheDocument();
   });
 
   it("uses a generic title and subdued diagnostic ID when a transcript summary is missing", async () => {
@@ -1443,7 +1684,7 @@ describe("AutomationBuilderPage", () => {
 
     await waitFor(() => expect(mocks.selectConversation).toHaveBeenCalledWith("task-123", "chat-beta", "builder"));
     expect(mocks.navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { conversationId: "chat-beta" } }));
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
   });
 
   it("archives the current chat from the sidechat and returns to history", async () => {
@@ -1480,7 +1721,7 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByTestId("automation-builder-chat-archived")).toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    expect(mocks.conversationMessages).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Restore chat" }));
     await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-archived", false));
 
@@ -1492,7 +1733,7 @@ describe("AutomationBuilderPage", () => {
     });
     renderBuilder();
     expect(await screen.findByTestId("automation-builder-chat-unavailable")).toBeInTheDocument();
-    expect(mocks.loadMessages).not.toHaveBeenCalledWith("not-associated");
+    expect(mocks.conversationMessages).not.toHaveBeenCalledWith("task-123", "not-associated");
   });
 
   it("can stop a stuck builder chat run", async () => {
@@ -1518,6 +1759,35 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.interruptChat).not.toHaveBeenCalledWith("42");
   });
 
+  it("renders a pending setup question in the side chat transcript", async () => {
+    mocks.chatMessages = [
+      {
+        id: "a-question",
+        role: "assistant",
+        parts: [
+          {
+            type: "data-question",
+            data: {
+              id: "source",
+              prompt: "Where should I look?",
+              options: [
+                { id: "gmail", label: "Gmail" },
+                { id: "drive", label: "Google Drive" },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    renderBuilder();
+
+    const questionCard = await screen.findByTestId("question-card");
+    expect(questionCard).toHaveTextContent("Where should I look?");
+    expect(questionCard.closest('[aria-label="Chat thread"]')).toContainElement(questionCard);
+    expect(screen.queryByTestId("automation-builder-question-dock")).not.toBeInTheDocument();
+  });
+
   it("shows a stopped builder chat notice after reload", async () => {
     mocks.search = { conversationId: "chat-alpha" };
     mocks.getAutomation.mockResolvedValue({
@@ -1531,7 +1801,7 @@ describe("AutomationBuilderPage", () => {
         parts: [
           {
             type: "data-interruption",
-            data: { detail: "Sketch paused.", label: "Tell Sketch what to do differently." },
+            data: { detail: "Sketch paused.", label: "What should Sketch do differently?" },
           },
         ],
       },
@@ -1540,7 +1810,7 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByText("Sketch paused.")).toBeInTheDocument();
-    expect(screen.getByText("Tell Sketch what to do differently.")).toBeInTheDocument();
+    expect(screen.getByText("What should Sketch do differently?")).toBeInTheDocument();
   });
 
   it("returns the step-test button to idle and renders the latest output after success", async () => {

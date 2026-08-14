@@ -3,6 +3,8 @@ import {
   isOwnedOrPersonalAppConnection,
 } from "@/components/connections/connection-status";
 import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
+import { GithubIntegrationDialog } from "@/components/connections/github-integration-dialog";
+import { LinearIntegrationDialog } from "@/components/connections/linear-integration-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
 import {
@@ -48,14 +50,19 @@ import {
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY, buildWebChatRecents } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
+import {
+  type CliIntegrationConnection,
+  type IntegrationApp,
+  type IntegrationConnection,
+  managedCliIntegrationAppId,
+} from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type CreateUIMessage, DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { dashboardRoute } from "./dashboard";
+import { dashboardRoute, useDashboardAuth } from "./dashboard";
 
 export { buildWebChatRecents };
 
@@ -84,6 +91,7 @@ type WebChatDataParts = {
     requestId: string;
     appId: string;
     appName: string;
+    executionMode?: "canvas" | "cli" | "api";
     state?: "connect" | "connected";
     icon?: string;
     reason?: string;
@@ -372,20 +380,31 @@ function automationsFromParts(parts: WebChatPart[]): AutomationArtifact[] {
 }
 
 export function automationArtifactFromDraftHandoff(handoff: AutomationDraftHandoff): AutomationArtifact {
-  const builderConversationId = handoff.builderConversationId ?? handoff.sourceConversationId;
-  const builderUrl = automationBuilderUrlWithConversationId(handoff.builderUrl, builderConversationId);
+  const builderUrl = handoff.builderConversationId
+    ? automationBuilderUrlWithConversationId(handoff.builderUrl, handoff.builderConversationId)
+    : builderUrlWithoutConversationId(handoff.builderUrl);
   return {
     taskId: handoff.taskId,
     requiresBuilder: true,
-    kind: "Automation setup",
-    title: "Set up automation",
-    description: "Continue configuring this automation in the automation builder.",
-    tags: ["Setup"],
+    kind: "New automation",
+    title: "Create automation",
+    description: "This seems like a new automation. You can go to the builder to create it.",
+    tags: ["Recommended: builder"],
     scheduleLabel: "Not configured",
     deliveryLabel: "Not configured",
     builderUrl,
     status: handoff.status,
   };
+}
+
+function builderUrlWithoutConversationId(builderUrl: string): string {
+  try {
+    const url = new URL(builderUrl, "http://sketch.local");
+    url.searchParams.delete("conversationId");
+    return builderUrl.startsWith("/") ? `${url.pathname}${url.search}${url.hash}` : url.toString();
+  } catch {
+    return builderUrl;
+  }
 }
 
 function automationBuilderUrlWithConversationId(builderUrl: string, conversationId: string): string {
@@ -402,40 +421,16 @@ function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
   return automationsFromParts(visibleMessageParts(message));
 }
 
-export const AUTOMATION_BUILDER_NAVIGATION_DELAY_MS = 3_000;
+export { AUTOMATION_BUILDER_AUTO_OPEN_DELAY_MS as AUTOMATION_BUILDER_NAVIGATION_DELAY_MS } from "@/components/sketch/automation-artifact-card";
 
-type AutomationBuilderNavigation = {
-  key: string;
-  taskId: string;
-  conversationId?: string;
-  createConversation: boolean;
-};
-
-function automationBuilderNavigationFromMessage(
-  message: WebChatMessage | undefined,
-): AutomationBuilderNavigation | null {
-  if (!message || message.role !== "assistant") return null;
+function hasActionableAutomationArtifact(message: WebChatMessage | undefined): boolean {
+  if (!message || message.role !== "assistant") return false;
   const parts = visibleMessageParts(message);
-  const handoffIndex = findLastPartIndex(parts, (part) => part.type === "data-automation-handoff");
-  const handoffPart = handoffIndex === -1 ? undefined : parts[handoffIndex];
-  if (handoffPart?.type === "data-automation-handoff") {
-    const conversationId = handoffPart.data.builderConversationId ?? handoffPart.data.sourceConversationId;
-    return {
-      key: `${message.id}:${handoffPart.data.taskId}:${conversationId}`,
-      taskId: handoffPart.data.taskId,
-      conversationId,
-      createConversation: false,
-    };
-  }
-
+  if (findLastPartIndex(parts, (part) => part.type === "data-automation-handoff") !== -1) return true;
   const automationIndex = findLastPartIndex(parts, (part) => part.type === "data-automation");
-  const automationPart = automationIndex === -1 ? undefined : parts[automationIndex];
-  if (automationPart?.type !== "data-automation" || automationPart.data.requiresBuilder === false) return null;
-  return {
-    key: `${message.id}:${automationPart.data.taskId}`,
-    taskId: automationPart.data.taskId,
-    createConversation: true,
-  };
+  if (automationIndex === -1) return false;
+  const automationPart = parts[automationIndex];
+  return automationPart.type === "data-automation" && automationPart.data.requiresBuilder !== false;
 }
 
 function integrationConnectionsFromParts(parts: WebChatPart[]): ChatThreadIntegrationConnection[] {
@@ -1008,6 +1003,7 @@ function ChatIndexPage() {
 
 export function ChatPage() {
   const navigate = useNavigate();
+  const dashboardAuth = useDashboardAuth();
   const { conversationId } = useParams({ from: chatRoute.id });
   const search = useSearch({ from: chatRoute.id }) as ChatSearch;
   const sentInitialMessage = useRef<string | null>(null);
@@ -1031,6 +1027,10 @@ export function ChatPage() {
   const [activeIntegrationConnection, setActiveIntegrationConnection] = useState<ActiveIntegrationConnection | null>(
     null,
   );
+  const [githubSetupOpen, setGithubSetupOpen] = useState(false);
+  const [githubRetryText, setGithubRetryText] = useState<string | null>(null);
+  const [linearSetupOpen, setLinearSetupOpen] = useState(false);
+  const [linearRetryText, setLinearRetryText] = useState<string | null>(null);
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
@@ -1094,67 +1094,52 @@ export function ChatPage() {
     lastAutomationRefreshKey.current = latestAutomationRefresh.key;
     void invalidateAutomationQueries(queryClient, latestAutomationRefresh.taskIds);
   }, [historyReady, latestAutomationRefresh, queryClient]);
-  const latestAutomationNavigation = useMemo(
-    () => automationBuilderNavigationFromMessage(chat.messages.at(-1)),
+  const latestActionableAutomation = useMemo(
+    () => hasActionableAutomationArtifact(chat.messages.at(-1)),
     [chat.messages],
   );
-  const automationNavigationBaselineConversationId = useRef<string | null>(null);
-  const lastAutomationNavigationKey = useRef<string | null>(null);
-  useEffect(() => {
-    if (!historyReady || automationNavigationBaselineConversationId.current === conversationId) return;
-    automationNavigationBaselineConversationId.current = conversationId;
-    lastAutomationNavigationKey.current = latestAutomationNavigation?.key ?? "";
-  }, [conversationId, historyReady, latestAutomationNavigation]);
-  useEffect(() => {
-    if (!historyReady || !latestAutomationNavigation) return;
-    if (lastAutomationNavigationKey.current === latestAutomationNavigation.key) return;
-    lastAutomationNavigationKey.current = latestAutomationNavigation.key;
-    let cancelled = false;
-    const openBuilder = (builderConversationId: string) => {
-      if (cancelled) return;
-      void navigate({
-        to: "/scheduled-tasks/$taskId/edit",
-        params: { taskId: latestAutomationNavigation.taskId },
-        search: { conversationId: builderConversationId },
-        viewTransition: shouldUseChatViewTransition(),
-      });
-    };
-    const timeoutId = window.setTimeout(() => {
-      if (!latestAutomationNavigation.createConversation && latestAutomationNavigation.conversationId) {
-        openBuilder(latestAutomationNavigation.conversationId);
-        return;
-      }
-      void api.scheduledTasks
-        .createConversation(latestAutomationNavigation.taskId, { createNew: true })
-        .then(({ conversation }) => openBuilder(conversation.conversationId))
-        .catch(() => toast.error("Could not open automation setup"));
-    }, AUTOMATION_BUILDER_NAVIGATION_DELAY_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [historyReady, latestAutomationNavigation, navigate]);
   const rawThreadMessages = useMemo(() => buildChatThreadMessages(chat.messages), [chat.messages]);
   const threadMessages = useSmoothedChatThreadMessages(rawThreadMessages, chatBusy, conversationId);
   const integrationConnectionCards = useMemo(
     () => threadMessages.flatMap((message) => message.integrationConnections ?? []),
     [threadMessages],
   );
-  const hasIntegrationConnectionCards = integrationConnectionCards.length > 0;
+  const hasCanvasIntegrationConnectionCards = integrationConnectionCards.some(
+    (connection) => connection.executionMode !== "cli" && connection.executionMode !== "api",
+  );
+  const hasCliIntegrationConnectionCards = integrationConnectionCards.some(
+    (connection) => connection.executionMode === "cli" || connection.executionMode === "api",
+  );
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => api.mcpServers.list(),
-    enabled: hasIntegrationConnectionCards,
+    enabled: hasCanvasIntegrationConnectionCards,
   });
   const provider = useMemo(
     () => (serversQuery.data ?? []).find((server) => server.type != null) ?? null,
     [serversQuery.data],
   );
-  const providerLoading = hasIntegrationConnectionCards && serversQuery.isLoading;
+  const providerLoading = hasCanvasIntegrationConnectionCards && serversQuery.isLoading;
   const connectionsQuery = useQuery({
     queryKey: ["connections", provider?.id],
     queryFn: () => api.mcpServers.listConnections(provider?.id ?? ""),
-    enabled: hasIntegrationConnectionCards && !!provider,
+    enabled: hasCanvasIntegrationConnectionCards && !!provider,
+  });
+  const cliUsersQuery = useQuery({
+    queryKey: ["users", "chat-github"],
+    queryFn: () => api.users.list(),
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
+  });
+  const cliSlackChannelsQuery = useQuery({
+    queryKey: ["slack-channels", "chat-github"],
+    queryFn: () => api.channels.listSlack(),
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
+    retry: false,
+  });
+  const cliWhatsappGroupsQuery = useQuery({
+    queryKey: ["whatsapp-groups", "chat-github"],
+    queryFn: () => api.channels.listWhatsAppGroups(),
+    enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
   });
   const connectedAppIds = useMemo(
     () =>
@@ -1168,9 +1153,16 @@ export function ChatPage() {
   const integrationConnectionStatuses = useMemo(() => {
     const statuses: Record<string, ChatThreadIntegrationConnectionStatus> = {};
     const providerUnavailable =
-      hasIntegrationConnectionCards &&
+      hasCanvasIntegrationConnectionCards &&
       (serversQuery.isError || (!serversQuery.isLoading && serversQuery.isFetched && !provider));
     for (const connection of integrationConnectionCards) {
+      if (connection.executionMode === "cli" || connection.executionMode === "api") {
+        statuses[connection.requestId] =
+          connection.state === "connected"
+            ? "connected"
+            : (localIntegrationConnectionStatuses[connection.requestId] ?? "idle");
+        continue;
+      }
       statuses[connection.requestId] =
         connection.state === "connected" || connectedAppIds.has(connection.appId)
           ? "connected"
@@ -1183,7 +1175,7 @@ export function ChatPage() {
     return statuses;
   }, [
     connectedAppIds,
-    hasIntegrationConnectionCards,
+    hasCanvasIntegrationConnectionCards,
     integrationConnectionCards,
     localIntegrationConnectionStatuses,
     provider,
@@ -1320,6 +1312,18 @@ export function ChatPage() {
 
   const handleConnectIntegration = useCallback(
     (connection: ChatThreadIntegrationConnection) => {
+      if (connection.executionMode === "cli" && connection.appId === "github") {
+        const retryMessage = [...chat.messages].reverse().find((message) => message.role === "user");
+        setGithubRetryText(retryMessage ? textFromMessage(retryMessage) : null);
+        setGithubSetupOpen(true);
+        return;
+      }
+      if (connection.executionMode === "api" && managedCliIntegrationAppId(connection.appId) === "linear") {
+        const retryMessage = [...chat.messages].reverse().find((message) => message.role === "user");
+        setLinearRetryText(retryMessage ? textFromMessage(retryMessage) : null);
+        setLinearSetupOpen(true);
+        return;
+      }
       if (providerLoading) return;
       if (!provider) {
         setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "unavailable" }));
@@ -1335,7 +1339,53 @@ export function ChatPage() {
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
       setActiveIntegrationConnection({ connection, popupWindow });
     },
-    [provider, providerLoading],
+    [chat.messages, provider, providerLoading],
+  );
+
+  const handleGithubIntegrationSuccess = useCallback(
+    (connection: CliIntegrationConnection) => {
+      setLocalIntegrationConnectionStatuses((current) => {
+        const next = { ...current };
+        for (const card of integrationConnectionCards) {
+          if (card.appId === connection.appId) next[card.requestId] = "connected";
+        }
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["cli-integration-connections"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+      if (githubRetryText) {
+        queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+        void Promise.resolve(chat.sendMessage(outgoingTextMessage(githubRetryText))).then(() =>
+          queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+        );
+        setGithubRetryText(null);
+      }
+    },
+    [chat.sendMessage, conversationId, githubRetryText, integrationConnectionCards, queryClient],
+  );
+
+  const handleLinearIntegrationSuccess = useCallback(
+    (connection: CliIntegrationConnection) => {
+      setLocalIntegrationConnectionStatuses((current) => {
+        const next = { ...current };
+        for (const card of integrationConnectionCards) {
+          if (card.appId === connection.appId) next[card.requestId] = "connected";
+        }
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["cli-integration-connections"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+      if (linearRetryText) {
+        queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+        void Promise.resolve(chat.sendMessage(outgoingTextMessage(linearRetryText))).then(() =>
+          queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+        );
+        setLinearRetryText(null);
+      }
+    },
+    [chat.sendMessage, conversationId, integrationConnectionCards, linearRetryText, queryClient],
   );
 
   const handleIntegrationConnected = useCallback(
@@ -1463,6 +1513,7 @@ export function ChatPage() {
               onAnswerQuestion={handleAnswerQuestion}
               onSelectQuestion={handleSelectQuestion}
               onSubmitQuestionBatch={handleSubmitQuestionBatch}
+              autoOpenAutomation={latestActionableAutomation}
               conversationId={conversationId}
             />
           ) : historyLoadFailed ? (
@@ -1521,6 +1572,28 @@ export function ChatPage() {
           />
         </div>
       </div>
+
+      <GithubIntegrationDialog
+        open={githubSetupOpen}
+        onOpenChange={setGithubSetupOpen}
+        users={cliUsersQuery.data?.users ?? []}
+        slackChannels={cliSlackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={cliWhatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={dashboardAuth.userId ?? ""}
+        isAdmin={dashboardAuth.role === "admin"}
+        onSuccess={handleGithubIntegrationSuccess}
+      />
+
+      <LinearIntegrationDialog
+        open={linearSetupOpen}
+        onOpenChange={setLinearSetupOpen}
+        users={cliUsersQuery.data?.users ?? []}
+        slackChannels={cliSlackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={cliWhatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={dashboardAuth.userId ?? ""}
+        isAdmin={dashboardAuth.role === "admin"}
+        onSuccess={handleLinearIntegrationSuccess}
+      />
 
       <ChatIntegrationConnectionFrame
         open={activeIntegrationConnection !== null}

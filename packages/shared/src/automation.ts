@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { cliIntegrationAppIdSchema } from "./cli-integrations";
 
 export const canvasWebhookEndpointSchema = z
   .object({
@@ -59,6 +60,7 @@ export const automationActionCapabilitiesSchema = z
   .object({
     sketchTools: z.array(automationSketchToolNameSchema).max(8),
     usesIntegrationActions: z.boolean(),
+    cliIntegrations: z.array(cliIntegrationAppIdSchema).max(8).optional(),
   })
   .strict();
 
@@ -131,15 +133,15 @@ export const automationRunModeSchema = z.enum(["production", "manual", "test"]);
 export type AutomationRunMode = z.infer<typeof automationRunModeSchema>;
 
 export const automationExecutionModeLabels = {
-  deterministic: "Follow exact steps",
-  hybrid: "Exact steps with smart help",
-  "agent-led": "Let Sketch handle the details",
+  deterministic: "Deterministic",
+  hybrid: "Hybrid",
+  "agent-led": "Agent",
 } as const satisfies Record<AutomationExecutionMode, string>;
 
 export const automationExecutionModeDescriptions = {
-  deterministic: "Runs the saved steps exactly as written. It will not use AI to make decisions.",
-  hybrid: "Runs the steps you choose and uses AI only for the parts you include.",
-  "agent-led": "Sketch uses AI to decide how to complete the work. It will not run code steps.",
+  deterministic: "Code-only. Runs the saved steps exactly as written with no agent.",
+  hybrid: "Code + agent. Runs saved steps and uses the agent where you include it.",
+  "agent-led": "Agent-only. Sketch handles the work; no code steps.",
 } as const satisfies Record<AutomationExecutionMode, string>;
 
 export const automationExecutionModeRecommendations = {
@@ -225,9 +227,22 @@ export const automationRunSchema = z.object({
   errorMessage: z.string().nullable(),
   startedAt: z.string(),
   completedAt: z.string().nullable(),
+  triggeredByUserId: z.string().nullable().optional(),
 });
 
 export type AutomationRun = z.infer<typeof automationRunSchema>;
+
+export const automationShareSchema = z
+  .object({
+    userId: z.string(),
+    name: z.string().nullable(),
+    email: z.string().nullable(),
+    grantedByUserId: z.string().nullable(),
+    grantedAt: z.string(),
+  })
+  .strict();
+
+export type AutomationShare = z.infer<typeof automationShareSchema>;
 
 export const automationDefinitionSchema = z.object({
   id: z.string(),
@@ -265,6 +280,10 @@ export const automationDefinitionSchema = z.object({
   stepContent: z.record(z.string(), automationStepContentSchema),
   latestRun: automationRunSchema.nullable(),
   recentRuns: z.array(automationRunSchema),
+  shares: z.array(automationShareSchema).optional(),
+  canShare: z.boolean().optional(),
+  canEdit: z.boolean().optional(),
+  isOwner: z.boolean().optional(),
 });
 
 export type AutomationDefinition = z.infer<typeof automationDefinitionSchema>;

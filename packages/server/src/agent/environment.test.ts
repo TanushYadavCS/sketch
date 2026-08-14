@@ -6,6 +6,8 @@ describe("agent environment helpers", () => {
     expect(isReservedAgentEnvName("CLAUDE_CODE_USE_BEDROCK")).toBe(true);
     expect(isReservedAgentEnvName("ANTHROPIC_API_KEY")).toBe(true);
     expect(isReservedAgentEnvName("OPENAI_API_KEY")).toBe(true);
+    expect(isReservedAgentEnvName("GH_TOKEN")).toBe(true);
+    expect(isReservedAgentEnvName("LINEAR_API_KEY")).toBe(true);
     expect(isReservedAgentEnvName("AWS_ACCESS_KEY_ID")).toBe(true);
     expect(isReservedAgentEnvName("TEST_ENV_VALUE")).toBe(false);
   });

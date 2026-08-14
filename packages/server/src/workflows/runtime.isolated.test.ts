@@ -7,7 +7,13 @@ import { withActiveRun } from "../agent/active-runs";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "../agent/runtime/pricing";
 import { MAX_AUTOMATION_OUTPUT_BYTES } from "../automation/capabilities";
-import { executeAutomation, testAutomationStep, validateRuntimeAutomationExecutionMode } from "./runtime";
+import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
+import {
+  executeAutomation,
+  resolveAutomationWorkspaceDir,
+  testAutomationStep,
+  validateRuntimeAutomationExecutionMode,
+} from "./runtime";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -463,6 +469,26 @@ describe("executeAutomation agent steps", () => {
     expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
   });
 
+  it("passes the resolved CLI environment to sketch-mode agent steps", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "managed-token" });
+    const params = makeParams({ runAgent, listAgentEnvForRuntime });
+
+    await executeAutomation(params as never);
+
+    expect(runAgent.mock.calls[0]?.[0].agentEnv).toEqual({ GH_TOKEN: "managed-token" });
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith({
+      currentUserId: "user-1",
+      contextType: "scheduled_task",
+      allowOrgSharedEnv: true,
+      taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
+    });
+  });
+
   it("keeps channel task context for creator-less sketch-mode agent steps", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
@@ -858,6 +884,104 @@ describe("executeAutomation action steps", () => {
     expect(automationCapabilityRegistry.createTools).toHaveBeenCalledWith(
       expect.objectContaining({ allowedTools: ["searchEntities"] }),
     );
+  });
+
+  it("runs a managed GitHub CLI action without a Canvas broker", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({
+      GH_TOKEN: "managed-token",
+      OTHER_SAFE_VALUE: "safe-value",
+    });
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "List GitHub pull requests",
+            icon: "github",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: "return { token: ctx.env.GH_TOKEN, safeValue: ctx.env.OTHER_SAFE_VALUE };",
+        },
+      ]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toEqual({ token: "managed-token", safeValue: "safe-value" });
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUserId: "user-1", contextType: "scheduled_task" }),
+    );
+  });
+
+  it("strips managed CLI credentials from actions that do not declare them", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(makeBrokerProvider());
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "managed-token" });
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Inspect environment",
+            icon: "code",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: true },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return Boolean(ctx.env.GH_TOKEN);" }]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toBe(false);
+    expect(loadIntegrationProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a CLI action clearly when its managed connection is unavailable", async () => {
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({});
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "List GitHub pull requests",
+            icon: "github",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'return "should not run";' }]),
+      loadIntegrationProvider,
+      listAgentEnvForRuntime,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("requires an active managed CLI integration: GitHub");
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
   });
 
   it("fails action steps that use the legacy Sketch tool namespace", async () => {
@@ -1358,3 +1482,86 @@ function makePromptStepContent(rows: Array<{ stepId: string; content: string }>)
     ),
   };
 }
+
+describe("shared-member-triggered runs execute with the owner's identity", () => {
+  it("runs a member-triggered manual automation with the owner's workspace and agent identity", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "owner result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const userRepo = {
+      list: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockImplementation(async (id: string) =>
+        id === "owner-1"
+          ? {
+              id: "owner-1",
+              name: "Owner Name",
+              email: "owner@canvasx.ai",
+              slack_user_id: "UOWN",
+              whatsapp_number: null,
+              type: "human",
+              role: null,
+              description: null,
+            }
+          : undefined,
+      ),
+      getAllEmailsForUser: vi.fn().mockResolvedValue(["owner@canvasx.ai"]),
+    };
+    const params = makeParams({
+      runAgent,
+      userRepo,
+      task: makeTask({ created_by: "owner-1" }),
+      triggerData: { type: "manual", triggeredByUserId: "member-1" },
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(userRepo.findById).toHaveBeenCalledWith("owner-1");
+    expect(userRepo.findById).not.toHaveBeenCalledWith("member-1");
+    expect(params._runsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggerData: { type: "manual", triggeredByUserId: "member-1" },
+    });
+
+    const call = runAgent.mock.calls[0]?.[0];
+    expect(call.workspaceKey).toBe("owner-1");
+    expect(call.workspaceDir).toBe("/tmp/sketch-runtime-test/workspaces/owner-1");
+    expect(call.currentUserId).toBe("owner-1");
+    expect(call.userName).toBe("Owner Name");
+    expect(call.userEmail).toBe("owner@canvasx.ai");
+    expect(call.taskContext).toEqual({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D123",
+      createdBy: "owner-1",
+    });
+    expect(call.currentUserId).not.toBe("member-1");
+    expect(call.userName).not.toBe("Member Name");
+  });
+
+  it("resolves the workspace directory from the task owner, not the triggerer", () => {
+    expect(
+      resolveAutomationWorkspaceDir("/data", makeTask({ created_by: "owner-1" }) as unknown as ScheduledTaskRow),
+    ).toBe("/data/workspaces/owner-1");
+    expect(
+      resolveAutomationWorkspaceDir(
+        "/data",
+        makeTask({ created_by: null, delivery_target: "D123" }) as unknown as ScheduledTaskRow,
+      ),
+    ).toBe("/data/workspaces/D123");
+    expect(
+      resolveAutomationWorkspaceDir(
+        "/data",
+        makeTask({ context_type: "channel", delivery_target: "C123" }) as unknown as ScheduledTaskRow,
+      ),
+    ).toBe("/data/workspaces/channel-C123");
+    expect(
+      resolveAutomationWorkspaceDir(
+        "/data",
+        makeTask({ context_type: "group", delivery_target: "120363000000@g.us" }) as unknown as ScheduledTaskRow,
+      ),
+    ).toBe("/data/workspaces/wa-group-120363000000");
+  });
+});

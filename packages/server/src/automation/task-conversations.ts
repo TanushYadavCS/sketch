@@ -30,6 +30,7 @@ export interface AutomationTaskConversationSummary {
   lastActiveAt: string;
   archivedAt: string | null;
   state: "active" | "archived";
+  transcriptUserName?: string;
 }
 
 export interface UpsertAutomationTaskConversationAssociationInput {
@@ -78,6 +79,10 @@ function summarizeRows(rows: ScheduledTaskConversationRow[]): AutomationTaskConv
           null,
         );
 
+  const transcriptUserName =
+    (rows[0] as ScheduledTaskConversationRow & { transcript_user_name?: string | null }).transcript_user_name ??
+    undefined;
+
   return {
     conversationId: rows[0].conversation_id,
     kinds,
@@ -86,6 +91,7 @@ function summarizeRows(rows: ScheduledTaskConversationRow[]): AutomationTaskConv
     lastActiveAt,
     archivedAt,
     state: activeRows.length > 0 ? "active" : "archived",
+    transcriptUserName,
   };
 }
 
@@ -185,6 +191,23 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
     ): Promise<AutomationTaskConversationSummary[]> {
       const rows = await repo.listByTaskAndTranscriptUser(taskId, transcriptUserId, options);
       return groupSummaries(rows);
+    },
+
+    async listForTask(
+      taskId: string,
+      options: { includeArchived?: boolean; kind?: ScheduledTaskConversationKind } = {},
+    ): Promise<AutomationTaskConversationSummary[]> {
+      const rows = await repo.listByTask(taskId, options);
+      return groupSummaries(rows);
+    },
+
+    async getForTask(
+      taskId: string,
+      conversationId: string,
+      options: { includeArchived?: boolean } = {},
+    ): Promise<AutomationTaskConversationSummary | undefined> {
+      const rows = await repo.listByTaskConversationForTask(taskId, conversationId, options);
+      return summarizeRows(rows);
     },
 
     async getForTranscriptUser(

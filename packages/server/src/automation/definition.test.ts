@@ -132,6 +132,41 @@ describe("automation action capability validation", () => {
     ).not.toThrow();
   });
 
+  it("allows a managed CLI action without a broker", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] });
+    request.stepContent.action.content = "return 'ok';";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).not.toThrow();
+  });
+
+  it("rejects duplicate managed CLI integrations", () => {
+    const request = requestForAction({
+      sketchTools: [],
+      usesIntegrationActions: false,
+      cliIntegrations: ["github", "github"],
+    });
+    request.stepContent.action.content = "return 'ok';";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "DUPLICATE_CLI_INTEGRATION" })]),
+      }),
+    );
+  });
+
+  it("rejects unknown managed CLI integrations in the request schema", () => {
+    const request = JSON.parse(
+      JSON.stringify(requestForAction({ sketchTools: [], usesIntegrationActions: false, cliIntegrations: ["github"] })),
+    ) as { steps: Array<Record<string, unknown>> };
+    request.steps[1].actionCapabilities = {
+      sketchTools: [],
+      usesIntegrationActions: false,
+      cliIntegrations: ["not-registered"],
+    };
+
+    expect(() => parseAutomationBuilderSaveRequest(request)).toThrow();
+  });
+
   it("keeps legacy actions broker-required", () => {
     expect(() =>
       validateAutomationBuilderSaveRequest({ request: requestForAction(), brokerCapable: false }),
@@ -199,6 +234,38 @@ describe("automation action capability validation", () => {
 });
 
 describe("automation execution mode validation", () => {
+  it("requires GitHub skill aliases to run in full Sketch mode", () => {
+    const request = requestForAction();
+    request.steps = [
+      request.steps[0],
+      {
+        id: "agent",
+        type: "agent",
+        label: "Use GitHub",
+        icon: "robot",
+        position: { x: 260, y: 0 },
+        agentMode: "light",
+        agentSkills: ["GitHub CLI"],
+      },
+    ];
+    request.edges = [{ id: "trigger-agent", from: "trigger", to: "agent" }];
+    request.stepContent = {
+      agent: {
+        taskId: "task-1",
+        stepId: "agent",
+        contentType: "prompt",
+        content: "List repositories.",
+        apps: null,
+      },
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "CLI_INTEGRATION_REQUIRES_SKETCH" })]),
+      }),
+    );
+  });
+
   it("allows a fixed recipe with deterministic action and existing agent steps", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.executionMode = "deterministic";

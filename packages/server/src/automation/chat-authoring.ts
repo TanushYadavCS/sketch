@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
@@ -83,6 +84,11 @@ export function createChatAutomationAuthoring(deps: {
   scheduler: AuthoringScheduler;
   loadIntegrationProvider: () => Promise<Pick<IntegrationProvider, "isBrokerCapable"> | null>;
   encryptionKey?: string;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   createId?: () => string;
   now?: () => Date;
 }): ChatAutomationAuthoring {
@@ -142,6 +148,24 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "clarification", message: result.question };
     }
 
+    if (deps.validateAgentSkills && input.taskContext.createdBy) {
+      const requestedSkills = result.definition.steps.flatMap((step) =>
+        step.type === "agent" ? (step.agentSkills ?? []) : [],
+      );
+      const unavailableSkills = await deps.validateAgentSkills(input.taskContext.createdBy, requestedSkills, {
+        platform: input.taskContext.platform,
+        contextType: input.taskContext.contextType,
+        deliveryTarget: input.taskContext.deliveryTarget,
+        createdBy: input.taskContext.createdBy,
+      });
+      if (unavailableSkills.length > 0) {
+        return {
+          kind: "error",
+          message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+        };
+      }
+    }
+
     try {
       await createAutomationDefinition({
         db: deps.db,
@@ -177,10 +201,19 @@ export function createChatAutomationAuthoring(deps: {
     const currentAutomation = input.currentAutomation ?? input.taskContext.currentAutomation;
     const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const row = await tasks.getById(input.taskId);
-    const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, {
-      userId: input.taskContext.createdBy,
-      role: input.taskContext.canManageAnyTask ? "admin" : undefined,
-    });
+    const shares = createAutomationSharesRepository(deps.db);
+    const hasGrant = input.taskContext.createdBy
+      ? await shares.hasGrant(input.taskId, input.taskContext.createdBy)
+      : false;
+    const accessibleRow = resolveScheduledTaskAccess(
+      row,
+      row?.created_by,
+      hasGrant ? new Set(input.taskContext.createdBy ? [input.taskContext.createdBy] : []) : new Set<string>(),
+      {
+        userId: input.taskContext.createdBy,
+        role: input.taskContext.canManageAnyTask ? "admin" : undefined,
+      },
+    );
     if (!accessibleRow) {
       return { kind: "error", message: "Automation not found." };
     }
@@ -205,6 +238,24 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "clarification", message: result.question };
     }
 
+    if (deps.validateAgentSkills && input.taskContext.createdBy) {
+      const requestedSkills = result.definition.steps.flatMap((step) =>
+        step.type === "agent" ? (step.agentSkills ?? []) : [],
+      );
+      const unavailableSkills = await deps.validateAgentSkills(input.taskContext.createdBy, requestedSkills, {
+        platform: input.taskContext.platform,
+        contextType: input.taskContext.contextType,
+        deliveryTarget: input.taskContext.deliveryTarget,
+        createdBy: input.taskContext.createdBy,
+      });
+      if (unavailableSkills.length > 0) {
+        return {
+          kind: "error",
+          message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+        };
+      }
+    }
+
     let saved: Awaited<ReturnType<typeof replaceAutomationDefinition>>;
     try {
       saved = await replaceAutomationDefinition({
@@ -213,7 +264,7 @@ export function createChatAutomationAuthoring(deps: {
         request: result.definition,
         actor: {
           userId: input.taskContext.createdBy,
-          canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
+          role: input.taskContext.canManageAnyTask ? "admin" : undefined,
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,

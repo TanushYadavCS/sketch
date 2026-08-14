@@ -12,8 +12,11 @@ import type {
   AutomationDefinition,
   AutomationDraftHandoff,
   AutomationRun,
+  AutomationShare,
   AutomationStepContent,
   CanvasWebhookEndpoint,
+  CliIntegrationCatalogApp,
+  CliIntegrationConnection,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
@@ -38,6 +41,7 @@ export type {
   AutomationBuilderSaveRequest,
   AutomationDefinition,
   AutomationRun,
+  AutomationShare,
   AutomationStepContent,
   CanvasWebhookEndpoint,
   StepOutput,
@@ -160,6 +164,11 @@ export interface ScheduledTaskListItem {
   };
   lastRunStatus: string | null;
   runCount: number;
+  shareCount?: number;
+  sharedWithMe?: boolean;
+  canShare?: boolean;
+  canEdit?: boolean;
+  isOwner?: boolean;
 }
 
 export interface ScheduledTaskOriginChatMessage {
@@ -179,6 +188,23 @@ export interface ScheduledTaskConversationLock {
   expiresAt: string | null;
 }
 
+export interface AutomationEditStealPending {
+  requesterName: string;
+  expiresAt: string;
+}
+
+export interface AutomationEditLockView {
+  heldByUserId: string | null;
+  heldByName: string | null;
+  heldByPlatform: "slack" | "web" | "whatsapp" | null;
+  heldBySurface: "builder" | "admin" | null;
+  expiresAt: string | null;
+  isHeldByMe: boolean;
+  stealPending: AutomationEditStealPending | null;
+}
+
+export type AutomationDefinitionWithLock = AutomationDefinition & { lock?: AutomationEditLockView | null };
+
 export interface ScheduledTaskConversationSummary {
   conversationId: string;
   kinds: ScheduledTaskConversationKind[];
@@ -187,13 +213,14 @@ export interface ScheduledTaskConversationSummary {
   lastActiveAt: string;
   archivedAt: string | null;
   state: "active" | "archived";
+  transcriptUserName?: string;
 }
 
 export interface ScheduledTaskConversationsResponse {
   taskId: string;
   conversations: ScheduledTaskConversationSummary[];
   builderLock: ScheduledTaskConversationLock;
-  transcriptAccess: "viewer";
+  transcriptAccess: "owner" | "admin" | "viewer";
 }
 
 export type WebhookAuthentication = "none";
@@ -232,6 +259,7 @@ export interface AutomationRunItem {
   error_message: string | null;
   started_at: string;
   completed_at: string | null;
+  triggered_by_user_id?: string | null;
 }
 
 export type AutomationRunStatus =
@@ -2543,6 +2571,11 @@ export const api = {
       const res = await request<{ tasks: ScheduledTaskListItem[] }>("/api/scheduled-tasks");
       return res.tasks;
     },
+    create() {
+      return request<{ automationId: string; conversationId: string }>("/api/scheduled-tasks", {
+        method: "POST",
+      });
+    },
     async pause(id: string) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/pause`, {
         method: "POST",
@@ -2564,6 +2597,21 @@ export const api = {
       const res = await request<{ runs: AutomationRunItem[] }>(`/api/scheduled-tasks/${taskId}/runs`);
       return res.runs;
     },
+    listShares(taskId: string) {
+      return request<{ shares: AutomationShare[] }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares`);
+    },
+    grantShare(taskId: string, userId: string) {
+      return request<{ success: boolean }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
+        { method: "PUT" },
+      );
+    },
+    revokeShare(taskId: string, userId: string) {
+      return request<{ success: boolean }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
+        { method: "DELETE" },
+      );
+    },
     async getRun(taskId: string, runId: string) {
       const res = await request<{ run: unknown }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`,
@@ -2571,12 +2619,18 @@ export const api = {
       return { run: normalizeAutomationRun(res.run, taskId) };
     },
     async get(taskId: string) {
-      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
+      const res = await request<{ automation: AutomationDefinitionWithLock }>(`/api/scheduled-tasks/${taskId}`);
       return res.automation;
     },
     originChatMessages(taskId: string) {
       return request<{ messages: ScheduledTaskOriginChatMessage[] }>(
         `/api/scheduled-tasks/${taskId}/origin-chat/messages`,
+      );
+    },
+    conversationMessages(taskId: string, conversationId: string, options?: { signal?: AbortSignal }) {
+      return request<WebChatMessagesResponse>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
+        options,
       );
     },
     conversations(taskId: string, options?: { includeArchived?: boolean }) {
@@ -2649,6 +2703,27 @@ export const api = {
         body: JSON.stringify(body),
       });
     },
+    acquireLock(taskId: string) {
+      return request<{ lock: AutomationEditLockView }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
+        method: "POST",
+      });
+    },
+    releaseLock(taskId: string) {
+      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
+        method: "DELETE",
+      });
+    },
+    requestSteal(taskId: string) {
+      return request<{ status: "pending" }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`, {
+        method: "POST",
+      });
+    },
+    respondToStealRequest(taskId: string, approve: boolean) {
+      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`, {
+        method: "POST",
+        body: JSON.stringify({ approve }),
+      });
+    },
     async getStepContent(taskId: string) {
       const res = await request<{ stepContent: AutomationStepContentItem[] }>(
         `/api/scheduled-tasks/${taskId}/step-content`,
@@ -2682,6 +2757,112 @@ export const api = {
     },
     remove(id: string) {
       return request<{ success: true }>(`/api/skills/${id}`, { method: "DELETE" });
+    },
+  },
+  cliIntegrations: {
+    list(query?: string) {
+      const params = query?.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+      return request<{ apps: Array<CliIntegrationCatalogApp | IntegrationApp> }>(`/api/integration-apps${params}`);
+    },
+    connections() {
+      return request<{ connections: CliIntegrationConnection[] }>("/api/integration-apps/connections");
+    },
+    verifyGitHubToken(token: string) {
+      return request<{
+        identity: { externalId: string; login: string; avatarUrl: string | null; accountType: string | null };
+      }>("/api/integration-apps/github/verification", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    connectGitHub(token: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>("/api/integration-apps/github/connections", {
+        method: "POST",
+        body: JSON.stringify({ token, targets }),
+      });
+    },
+    updateGitHubToken(connectionId: string, token: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token }) },
+      );
+    },
+    reverifyGitHub(connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/github/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    connectLinear(apiKey: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>("/api/integration-apps/linear/connections", {
+        method: "POST",
+        body: JSON.stringify({ token: apiKey, targets }),
+      });
+    },
+    verifyLinearApiKey(apiKey: string) {
+      return request<{
+        identity: {
+          externalId: string;
+          login: string;
+          name?: string | null;
+          email?: string | null;
+          avatarUrl: string | null;
+          accountType: string | null;
+        };
+      }>("/api/integration-apps/linear/verification", {
+        method: "POST",
+        body: JSON.stringify({ token: apiKey }),
+      });
+    },
+    updateLinearApiKey(connectionId: string, apiKey: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/linear/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token: apiKey }) },
+      );
+    },
+    reverifyLinear(connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/linear/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    verify(appId: string, token: string) {
+      return request<{
+        identity: { externalId: string; login: string; avatarUrl: string | null; accountType: string | null };
+      }>(`/api/integration-apps/${encodeURIComponent(appId)}/verification`, {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    connect(appId: string, token: string, targets: AgentEnvironmentShareTargetInput[] = []) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections`,
+        { method: "POST", body: JSON.stringify({ token, targets }) },
+      );
+    },
+    updateCredential(appId: string, connectionId: string, token: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/credential`,
+        { method: "PATCH", body: JSON.stringify({ token }) },
+      );
+    },
+    reverify(appId: string, connectionId: string) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/verification`,
+        { method: "POST" },
+      );
+    },
+    replaceShares(appId: string, connectionId: string, targets: AgentEnvironmentShareTargetInput[]) {
+      return request<{ connection: CliIntegrationConnection }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}/shares`,
+        { method: "PUT", body: JSON.stringify({ targets }) },
+      );
+    },
+    disconnect(appId: string, connectionId: string) {
+      return request<{ success: true }>(
+        `/api/integration-apps/${encodeURIComponent(appId)}/connections/${encodeURIComponent(connectionId)}`,
+        { method: "DELETE" },
+      );
     },
   },
   mcpServers: {

@@ -43,11 +43,15 @@ function runParams(params: {
   workspaceDir: string;
   claudeConfigDir?: string | null;
   agentAllowedTools?: string[] | null;
+  agentEnv?: Record<string, string>;
+  agentSkillIds?: string[] | null;
 }): RunAgentParams {
   return {
     workspaceDir: params.workspaceDir,
     claudeConfigDir: params.claudeConfigDir ?? undefined,
     agentAllowedTools: params.agentAllowedTools,
+    agentEnv: params.agentEnv,
+    agentSkillIds: params.agentSkillIds,
   } as RunAgentParams;
 }
 
@@ -227,6 +231,43 @@ describe("agent runtime skills", () => {
     expect(Object.keys(skillTool.inputSchema.shape)).toEqual(["skill"]);
     expect(skillTool.description).toContain("Available skills:");
     expect(skillTool.description).toContain("- research: Org research");
+  });
+
+  it("requires the declared environment before loading a managed skill", async () => {
+    await writeSkill(
+      orgSkillsDir,
+      "github",
+      "---\nprovider-type: cli:github\nrequires-env:\n  - GH_TOKEN\n---\nGitHub body",
+    );
+    const provider = new DefaultAgentRuntimeSkillsProvider();
+    const unavailableTools = await provider.createSkillTool(runParams({ workspaceDir, claudeConfigDir: orgClaudeDir }));
+    await expect(executeTool(unavailableTools, "Skill", { skill: "github" })).rejects.toThrow(
+      "integration is not connected",
+    );
+
+    const availableTools = await provider.createSkillTool(
+      runParams({ workspaceDir, claudeConfigDir: orgClaudeDir, agentEnv: { GH_TOKEN: "token" } }),
+    );
+    await expect(executeTool(availableTools, "Skill", { skill: "github" })).resolves.toContain("GitHub body");
+  });
+
+  it("normalizes GitHub skill aliases when selecting a light-runtime skill", async () => {
+    await writeSkill(
+      orgSkillsDir,
+      "github",
+      "---\nname: GitHub CLI\nprovider-type: cli:github\nrequires-env:\n  - GH_TOKEN\n---\nGitHub body",
+    );
+    const provider = new DefaultAgentRuntimeSkillsProvider();
+    const tools = await provider.createSkillTool(
+      runParams({
+        workspaceDir,
+        claudeConfigDir: orgClaudeDir,
+        agentSkillIds: ["GitHub CLI"],
+        agentEnv: { GH_TOKEN: "token" },
+      }),
+    );
+
+    await expect(executeTool(tools, "Skill", { skill: "GitHub CLI" })).resolves.toContain("GitHub body");
   });
 
   it("returns the selected skill body and keeps the skill directory readable", async () => {

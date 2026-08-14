@@ -1,5 +1,6 @@
 import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { parseCliSkillFrontmatter } from "@sketch/shared";
 import { type Tool, type ToolSet, tool } from "ai";
 import { z } from "zod/v4";
 import type { Logger } from "../../logger";
@@ -77,7 +78,19 @@ function parseFrontMatterBlock(raw: string): ParsedFrontMatterBlock {
     const key = line.slice(0, separator).trim();
     if (!/^[A-Za-z0-9_-]+$/.test(key)) return { behavior: "invalid", reason: "invalid_key" };
 
-    const parsed = parseFrontMatterScalar(line.slice(separator + 1).trim());
+    const rawValue = line.slice(separator + 1).trim();
+    if (key === "requires-env" && !rawValue) {
+      const required: string[] = [];
+      while (index + 1 < lines.length && /^\s+-\s*\S+/.test(lines[index + 1] ?? "")) {
+        index += 1;
+        const item = (lines[index] ?? "").replace(/^\s+-\s*/, "").trim();
+        if (item) required.push(item);
+      }
+      frontMatter[key] = required.join(",");
+      continue;
+    }
+
+    const parsed = parseFrontMatterScalar(rawValue);
     if (parsed.behavior === "invalid") return { behavior: "invalid", reason: parsed.reason };
 
     let value = parsed.value;
@@ -295,11 +308,21 @@ async function loadSkillsFromDir(params: {
     }
 
     const description = frontMatter.description ?? inferDescription(body);
+    const cliFrontMatter = parseCliSkillFrontmatter(frontMatter);
+    if ((frontMatter["provider-type"] || frontMatter["requires-env"]) && !cliFrontMatter) {
+      params.logger?.warn(
+        { skillDir: dir, scope: params.scope, reason: "invalid_cli_frontmatter" },
+        "Skipping invalid agent runtime skill",
+      );
+      continue;
+    }
 
     skills.push({
       id: entry.name,
       name: entry.name,
       ...(displayName ? { displayName } : {}),
+      ...(cliFrontMatter?.providerType ? { providerType: cliFrontMatter.providerType } : {}),
+      requiresEnv: cliFrontMatter?.requiresEnv ?? [],
       description,
       dir,
       skillFilePath: skillMarkdown.path,
@@ -395,19 +418,37 @@ export class DefaultAgentRuntimeSkillsProvider implements AgentRuntimeSkillsProv
       workspaceDir: params.workspaceDir,
       logger: params.logger,
     });
-    if (discovery.skills.length === 0) return {};
+    const requestedSkillIds = params.agentSkillIds?.map((skill) => skill.trim().toLowerCase());
+    const selectedSkills = requestedSkillIds
+      ? discovery.skills.filter((skill) => {
+          const aliases = [skill.name, skill.id, skill.displayName ?? ""].map((value) => value.trim().toLowerCase());
+          return requestedSkillIds.some((requested) => aliases.includes(requested));
+        })
+      : discovery.skills;
+    if (selectedSkills.length === 0) return {};
 
-    const byName = new Map(discovery.skills.map((skill) => [skill.name, skill]));
+    const byName = new Map<string, AgentRuntimeSkillDescriptor>();
+    for (const skill of selectedSkills) {
+      byName.set(skill.name.toLowerCase(), skill);
+      byName.set(skill.id.toLowerCase(), skill);
+      if (skill.displayName) byName.set(skill.displayName.toLowerCase(), skill);
+    }
 
     return {
       [SKILL_TOOL_NAME]: tool({
-        description: formatAgentRuntimeSkillToolDescription(discovery.skills),
+        description: formatAgentRuntimeSkillToolDescription(selectedSkills),
         inputSchema: z.object({
           skill: z.string(),
         }),
         execute: async ({ skill }: { skill: string }) => {
-          const selected = byName.get(skill);
+          const selected = byName.get(skill.trim().toLowerCase());
           if (!selected) throw new Error(`Skill not found: ${skill}`);
+          const missingEnv = selected.requiresEnv.filter((name) => !params.agentEnv?.[name]);
+          if (missingEnv.length > 0) {
+            throw new Error(
+              `Skill "${selected.name}" is unavailable because its integration is not connected. Reconnect it from Integrations in Sketch.`,
+            );
+          }
           return formatAgentRuntimeSkillPrompt(selected);
         },
         toModelOutput: skillToModelOutput,

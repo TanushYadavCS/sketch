@@ -1,7 +1,7 @@
 import { type Dirent, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { type SkillCategory, skillCategoryValueSet } from "@sketch/shared";
+import { type SkillCategory, parseCliSkillFrontmatter, skillCategoryValueSet } from "@sketch/shared";
 
 const SKILL_FILE_NAME = "SKILL.md";
 const LEGACY_SKILL_FILE_NAME = "SKILL.MD";
@@ -15,6 +15,7 @@ export interface LoadedSkill {
   body: string;
   category: LoadedSkillCategory;
   providerType?: string;
+  requiresEnv?: string[];
 }
 
 interface FrontMatter {
@@ -22,6 +23,7 @@ interface FrontMatter {
   description?: string;
   category?: LoadedSkillCategory;
   providerType?: string;
+  requiresEnv?: string[];
 }
 
 function readSkillMarkdownSync(skillDir: string): string | null {
@@ -79,6 +81,17 @@ export function parseFrontMatter(md: string): { frontMatter: FrontMatter; body: 
     if (!key) continue;
     let value = parseFrontMatterScalar(lines[i].slice(idx + 1).trim());
 
+    if (key === "requires-env" && !value) {
+      const required: string[] = [];
+      while (i + 1 < lines.length && /^\s*-\s*\S+/.test(lines[i + 1])) {
+        i++;
+        const item = lines[i].replace(/^\s*-\s*/, "").trim();
+        if (item) required.push(parseFrontMatterScalar(item));
+      }
+      fm.requiresEnv = required;
+      continue;
+    }
+
     if (value === ">" || value === "|") {
       const fold = value === ">";
       const parts: string[] = [];
@@ -93,6 +106,12 @@ export function parseFrontMatter(md: string): { frontMatter: FrontMatter; body: 
     if (key === "description") fm.description = value;
     if (key === "category" && isLoadedCategory(value)) fm.category = value;
     if (key === "provider-type") fm.providerType = value;
+    if (key === "requires-env") {
+      fm.requiresEnv = value
+        .split(/[\s,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
   }
 
   return { frontMatter: fm, body };
@@ -139,13 +158,18 @@ export function loadClaudeSkillsFromDir(dir: string): LoadedSkill[] {
 
     const { frontMatter, body } = parseFrontMatter(md);
     const inferredName = frontMatter.name ? null : inferNameFromBody(body);
+    const cliFrontMatter = parseCliSkillFrontmatter({
+      providerType: frontMatter.providerType,
+      requiresEnv: frontMatter.requiresEnv,
+    });
 
     out.push({
       id: entry,
       name: frontMatter.name ?? inferredName ?? entry,
       description: frontMatter.description ?? "",
       category: frontMatter.category ?? "productivity",
-      providerType: frontMatter.providerType,
+      ...(cliFrontMatter?.providerType ? { providerType: cliFrontMatter.providerType } : {}),
+      ...(cliFrontMatter?.requiresEnv.length ? { requiresEnv: cliFrontMatter.requiresEnv } : {}),
       body,
     });
   }
@@ -170,13 +194,18 @@ export async function loadClaudeSkillsFromDirAsync(dir: string): Promise<LoadedS
 
         const { frontMatter, body } = parseFrontMatter(md);
         const inferredName = frontMatter.name ? null : inferNameFromBody(body);
+        const cliFrontMatter = parseCliSkillFrontmatter({
+          providerType: frontMatter.providerType,
+          requiresEnv: frontMatter.requiresEnv,
+        });
 
         const skill: LoadedSkill = {
           id: entry.name,
           name: frontMatter.name ?? inferredName ?? entry.name,
           description: frontMatter.description ?? "",
           category: frontMatter.category ?? "productivity",
-          providerType: frontMatter.providerType,
+          ...(cliFrontMatter?.providerType ? { providerType: cliFrontMatter.providerType } : {}),
+          ...(cliFrontMatter?.requiresEnv.length ? { requiresEnv: cliFrontMatter.requiresEnv } : {}),
           body,
         };
         return skill;

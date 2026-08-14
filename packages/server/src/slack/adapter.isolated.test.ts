@@ -1,11 +1,14 @@
+import type { Kysely } from "kysely";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { listActiveRuns, registerActiveRun, unregisterActiveRun } from "../agent/active-runs";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { refreshSlackChannelName } from "../connectors/slack-salience";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
+import type { DB } from "../db/schema";
 import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
-import { createTestConfig, flush } from "../test-utils";
+import { createTestConfig, createTestDb, flush } from "../test-utils";
 import { transcribeEagerAttachments } from "../transcription/service";
 import type { SlackAdapterDeps } from "./adapter";
 import { createConfiguredSlackBot, validateSlackTokens } from "./adapter";
@@ -271,6 +274,7 @@ function freshMockBot() {
     onAppHomeOpened: vi.fn(),
     onHomeAction: vi.fn(),
     onQuestionAction: vi.fn(),
+    onLockStealAction: vi.fn(),
     publishHomeView: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -2320,6 +2324,107 @@ describe("slack/adapter", () => {
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.threadTs).toBeUndefined();
       expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("D1", "1", "💭 Thinking…");
+    });
+  });
+
+  describe("lock steal action wiring", () => {
+    async function seedStealFixture(db: Kysely<DB>) {
+      await db.insertInto("users").values({ id: "u1", name: "Alice" }).execute();
+      await db.insertInto("users").values({ id: "u2", name: "Bob" }).execute();
+      await db
+        .insertInto("scheduled_tasks")
+        .values({
+          id: "task-1",
+          platform: "slack",
+          context_type: "dm",
+          delivery_target: "D1",
+          prompt: "Send the report",
+          schedule_type: "cron",
+          schedule_value: "0 * * * *",
+          status: "active",
+          title: "Monthly Report",
+        })
+        .execute();
+      const locks = createAutomationLocksRepository(db);
+      const now = new Date(Date.now() - 10_000).toISOString();
+      await locks.insertIfAbsent(
+        { userId: "u1", platform: "slack", surface: "dm", conversationId: "C1" },
+        { taskId: "task-1", now, expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() },
+      );
+      await locks.requestSteal(
+        { userId: "u2", platform: "slack", surface: "dm", conversationId: "D2" },
+        { taskId: "task-1", stealRequestedAt: now, stealExpiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() },
+      );
+    }
+
+    function stealActionHandler() {
+      const handler = mockBotInstance.onLockStealAction.mock.calls[0]?.[0];
+      if (!handler) throw new Error("onLockStealAction was not registered");
+      return handler as (event: {
+        slackUserId: string;
+        channelId: string;
+        actionId: string;
+        eventId: string;
+      }) => Promise<void>;
+    }
+
+    it("approves the steal, flips the holder, and notifies the requester", async () => {
+      const db = await createTestDb();
+      try {
+        await seedStealFixture(db);
+        const deps = makeDeps({ db });
+        createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+
+        await stealActionHandler()({
+          slackUserId: "U_HOLDER",
+          channelId: "C1",
+          actionId: "automation_lock_steal:task-1:approve",
+          eventId: "slack-action:1.2:U_HOLDER:automation_lock_steal:task-1:approve",
+        });
+
+        const row = await createAutomationLocksRepository(db).getByTaskId("task-1");
+        expect(row?.holder_user_id).toBe("u2");
+        expect(row?.holder_conversation_id).toBe("D2");
+        expect(row?.steal_requester_user_id).toBeNull();
+        expect(row?.steal_expires_at).toBeNull();
+        expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+          "D2",
+          'Alice approved your request to take over editing "Monthly Report". You can now edit it.',
+        );
+        expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+          "C1",
+          "Steal request approved — the requester can now edit this automation.",
+        );
+      } finally {
+        await db.destroy();
+      }
+    });
+
+    it("denies the steal, keeps the holder, clears the request, and notifies the requester", async () => {
+      const db = await createTestDb();
+      try {
+        await seedStealFixture(db);
+        const deps = makeDeps({ db });
+        createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+
+        await stealActionHandler()({
+          slackUserId: "U_HOLDER",
+          channelId: "C1",
+          actionId: "automation_lock_steal:task-1:deny",
+          eventId: "slack-action:1.2:U_HOLDER:automation_lock_steal:task-1:deny",
+        });
+
+        const row = await createAutomationLocksRepository(db).getByTaskId("task-1");
+        expect(row?.holder_user_id).toBe("u1");
+        expect(row?.steal_requester_user_id).toBeNull();
+        expect(row?.steal_expires_at).toBeNull();
+        expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+          "D2",
+          'Alice denied your request to take over editing "Monthly Report".',
+        );
+      } finally {
+        await db.destroy();
+      }
     });
   });
 

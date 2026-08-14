@@ -853,6 +853,45 @@ describe("integration cards", () => {
     expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
   });
 
+  it("collects a missing Linear card from a managed integration lookup", async () => {
+    const cards: unknown[] = [];
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__search_apps",
+          input: { queries: ["linear"] },
+        },
+      ],
+      cliIntegrations: {
+        listCatalog: () => [
+          {
+            id: "linear",
+            name: "Linear",
+            description: "Use Linear through Sketch.",
+            icon: "https://linear.app/favicon.svg",
+            executionMode: "api",
+            connected: false,
+            connectionId: null,
+          },
+        ],
+        listConnections: async () => [],
+      },
+      currentUserId: "alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([
+      {
+        appId: "linear",
+        appName: "Linear",
+        state: "connect",
+        executionMode: "api",
+        connectUrl: "/integrations?connect=linear",
+      },
+    ]);
+  });
+
   it("collects connected account cards from observed Canvas MCP search_apps without queries", async () => {
     const cards: unknown[] = [];
     const provider = {
@@ -882,13 +921,43 @@ describe("integration cards", () => {
         },
       ],
       loadIntegrationProvider: async () => provider,
+      cliIntegrations: {
+        listCatalog: () => [
+          {
+            id: "github",
+            name: "GitHub",
+            description: "Use GitHub through Sketch.",
+            icon: "https://github.com/favicon.svg",
+            executionMode: "cli",
+            connected: true,
+            connectionId: "cli-1",
+          },
+        ],
+        listConnections: async () => [
+          {
+            id: "cli-1",
+            appId: "github",
+            appName: "GitHub",
+            executionMode: "cli",
+            ownerUserId: "alice",
+            accountExternalId: "1",
+            accountLogin: "alice",
+            status: "active",
+            verifiedAt: "2026-01-01T00:00:00Z",
+            lastVerificationError: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            shares: [],
+            canUse: true,
+          },
+        ],
+      },
+      currentUserId: "alice",
       userEmail: "alice@example.com",
       userName: "Alice",
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(cards).toMatchObject([
-      { appId: "github", appName: "GitHub", state: "connected", accountName: "Alice GitHub" },
-    ]);
+    expect(cards).toMatchObject([{ appId: "github", appName: "GitHub", state: "connected", executionMode: "cli" }]);
   });
 });

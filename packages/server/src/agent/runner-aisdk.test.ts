@@ -497,6 +497,7 @@ describe("runAgent AI SDK runtime path", () => {
       "mcp__sketch__GetTeamDirectory",
       "mcp__sketch__ListFollowups",
       "mcp__sketch__ListTasks",
+      "mcp__sketch__ManageAutomationShares",
       "mcp__sketch__ManageScheduledTasks",
       "mcp__sketch__ReadChatHistory",
       "mcp__sketch__ResolveInboxWorkflow",
@@ -542,7 +543,7 @@ describe("runAgent AI SDK runtime path", () => {
     expect(calledToolNames(model)).toEqual(["Grep", "Read"]);
   });
 
-  it("silently drops allowlisted web tools from the AI SDK runtime with no runtime note", async () => {
+  it("silently drops allowlisted web tools from the AI SDK runtime and appends runtime capabilities", async () => {
     const model = textModel();
     const capture: { systemPrompt?: string } = {};
 
@@ -556,7 +557,7 @@ describe("runAgent AI SDK runtime path", () => {
     expect(calledToolNames(model)).toEqual(["Read"]);
     expect(capture.systemPrompt).not.toContain("WebSearch");
     expect(capture.systemPrompt).not.toContain("WebFetch");
-    expect(capture.systemPrompt).not.toContain("## Runtime");
+    expect(capture.systemPrompt).toContain("## Runtime Capabilities");
   });
 
   it("does not register Bash when the persona allowlist excludes it", async () => {
@@ -721,6 +722,83 @@ describe("runAgent AI SDK runtime path", () => {
     });
   });
 
+  it("captures a missing managed Linear card from AI SDK lifecycle tool events", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: [
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              {
+                type: "tool-call",
+                toolCallId: "tool-bash",
+                toolName: "Bash",
+                input: JSON.stringify({ command: '$CANVAS_CLI search-apps --queries="linear" --output json' }),
+              },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage: usage(20, 1),
+              },
+            ],
+          }),
+        },
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "text-start", id: "text-linear-1" },
+              { type: "text-delta", id: "text-linear-1", delta: "connect linear" },
+              { type: "text-end", id: "text-linear-1" },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: usage(10, 2),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const provider = {
+      type: "canvas",
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn(),
+      initiateConnection: vi.fn(),
+      removeConnection: vi.fn(),
+      isBrokerCapable: () => false,
+      getBrokerSpec: () => null,
+    };
+
+    const result = await runAgent(
+      makeRunParams(model, {
+        userEmail: "alice@example.com",
+        currentUserId: "alice",
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+        cliIntegrations: {
+          listCatalog: () => [
+            {
+              id: "linear",
+              name: "Linear",
+              description: "Use Linear through Sketch.",
+              icon: "https://linear.app/favicon.svg",
+              executionMode: "api",
+              connected: false,
+              connectionId: null,
+            },
+          ],
+          listConnections: vi.fn().mockResolvedValue([]),
+        },
+        agentEnv: { CANVAS_CLI: "missing-canvas-cli" },
+      }),
+    );
+
+    expect(provider.listApps).not.toHaveBeenCalled();
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      { appId: "linear", appName: "Linear", state: "connect", executionMode: "api" },
+    ]);
+  });
+
   it("captures integration cards from AI SDK lifecycle tool events", async () => {
     const model = new MockLanguageModelV4({
       provider: "mock-anthropic",
@@ -775,14 +853,29 @@ describe("runAgent AI SDK runtime path", () => {
     const result = await runAgent(
       makeRunParams(model, {
         userEmail: "alice@example.com",
+        currentUserId: "alice",
         loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+        cliIntegrations: {
+          listCatalog: () => [
+            {
+              id: "github",
+              name: "GitHub",
+              description: "Use GitHub through Sketch.",
+              icon: "https://github.com/favicon.svg",
+              executionMode: "cli",
+              connected: false,
+              connectionId: null,
+            },
+          ],
+          listConnections: vi.fn().mockResolvedValue([]),
+        },
         agentEnv: { CANVAS_CLI: "missing-canvas-cli" },
       }),
     );
 
-    expect(provider.listApps).toHaveBeenCalledWith("github", 5, undefined);
+    expect(provider.listApps).not.toHaveBeenCalled();
     expect(result.pendingIntegrationConnections).toMatchObject([
-      { appId: "github", appName: "GitHub", state: "connect" },
+      { appId: "github", appName: "GitHub", state: "connect", executionMode: "cli" },
     ]);
   });
 

@@ -332,3 +332,67 @@ describe("remove()", () => {
     expect(result).toBe(false);
   });
 });
+
+describe("listAccessibleByUser()", () => {
+  async function addTask(id: string, ownerId: string, status = "active") {
+    return repo.add({ ...baseTask, id, created_by: ownerId, status });
+  }
+
+  it("returns the user's own tasks when nothing is shared", async () => {
+    await addTask("own-1", "user-1");
+    await addTask("own-2", "user-1");
+    await addTask("foreign-1", "user-2");
+
+    const rows = await repo.listAccessibleByUser("user-1");
+
+    expect(rows.map((row) => row.id)).toEqual(expect.arrayContaining(["own-1", "own-2"]));
+    expect(rows.map((row) => row.id)).not.toContain("foreign-1");
+  });
+
+  it("returns shared tasks plus own tasks and deduplicates a shared own task", async () => {
+    await addTask("own-1", "user-1");
+    await addTask("own-2", "user-1");
+    await addTask("shared-1", "user-2");
+    await addTask("shared-2", "user-3");
+    await db.insertInto("users").values({ id: "user-1", name: "user-1" }).execute();
+    await db.insertInto("users").values({ id: "user-2", name: "user-2" }).execute();
+    await db.insertInto("users").values({ id: "user-3", name: "user-3" }).execute();
+    await db
+      .insertInto("automation_task_shares")
+      .values({
+        id: "share-1",
+        task_id: "shared-1",
+        user_id: "user-1",
+        granted_by_user_id: "user-2",
+      })
+      .execute();
+    await db
+      .insertInto("automation_task_shares")
+      .values({
+        id: "share-2",
+        task_id: "shared-2",
+        user_id: "user-1",
+        granted_by_user_id: "user-3",
+      })
+      .execute();
+    await db
+      .insertInto("automation_task_shares")
+      .values({
+        id: "share-own",
+        task_id: "own-1",
+        user_id: "user-1",
+        granted_by_user_id: "user-2",
+      })
+      .execute();
+
+    const rows = await repo.listAccessibleByUser("user-1");
+
+    expect(rows.map((row) => row.id).sort()).toEqual(["own-1", "own-2", "shared-1", "shared-2"]);
+  });
+
+  it("returns an empty list for a user with no tasks and no grants", async () => {
+    await addTask("foreign-1", "user-2");
+
+    await expect(repo.listAccessibleByUser("user-1")).resolves.toEqual([]);
+  });
+});

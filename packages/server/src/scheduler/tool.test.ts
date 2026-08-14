@@ -79,6 +79,7 @@ function makeCurrentAutomation(
 function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskScheduler {
   return {
     listTasks: vi.fn().mockResolvedValue([]),
+    listTasksForUser: vi.fn().mockResolvedValue([]),
     // Default ownership check returns a task owned by the standard test creator "U123".
     // Tests that exercise the not-yours branch override this with their own mock.
     getTaskById: vi.fn().mockResolvedValue(makeTask()),
@@ -185,15 +186,7 @@ describe("ManageScheduledTasks tool contract", () => {
 
 describe("handleManageScheduledTasks — configured chat authoring", () => {
   it("routes natural-language creation through the authorer and collects the saved artifact", async () => {
-    const automaticTestRun = {
-      runId: "automatic-run-1",
-      status: "completed",
-      finalOutput: "Daily brief sent",
-      stepOutputs: {},
-    };
-    const scheduler = makeMockScheduler({
-      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
-    });
+    const scheduler = makeMockScheduler();
     const savedTask = makeTask({ id: "authored-task", title: "Daily brief", prompt: "Daily brief" });
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
@@ -246,12 +239,8 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
     });
     expect(scheduler.addTask).not.toHaveBeenCalled();
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("authored-task", {
-      preserveTaskState: true,
-      runMode: "test",
-    });
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("Automation created:");
-    expect(result.content[0].text).toContain('"runId": "automatic-run-1"');
     expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: "authored-task", title: "Daily brief", requiresBuilder: true }),
     );
@@ -343,7 +332,7 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
     );
 
     expect(result.content[0].text).toBe(
-      "Error: automation authoring could not produce a valid definition. No changes were saved.",
+      "Error: automation authoring could not produce a valid definition after three attempts. No invalid automation was saved. Please correct your request and try again.",
     );
   });
 
@@ -425,6 +414,7 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       const scheduler = makeMockScheduler();
       const chatAuthoring = { author: vi.fn() };
       const automationRunsRepo = {
+        create: vi.fn().mockResolvedValue("run-1"),
         getLatest: vi.fn().mockResolvedValue({ id: "run-1" }),
         deleteByTaskId: vi.fn().mockResolvedValue(undefined),
       } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
@@ -464,10 +454,11 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
 });
 
 describe("handleManageScheduledTasks — list", () => {
-  it("scopes by createdBy for DM context", async () => {
+  it("scopes DM listings through the grant-aware user list", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: dmContext });
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("scopes by deliveryTarget for channel context", async () => {
@@ -497,13 +488,14 @@ describe("handleManageScheduledTasks — list", () => {
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: taskContext.deliveryTarget });
   });
 
-  it("lists every automation for an admin context", async () => {
+  it("expands DM listings for an admin to every automation including inactive ones", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
     );
     expect(scheduler.listTasks).toHaveBeenCalledWith({ includeInactive: true });
+    expect(scheduler.listTasksForUser).not.toHaveBeenCalled();
   });
 
   it("keeps explicit list behavior when ambient builder context exists", async () => {
@@ -517,7 +509,8 @@ describe("handleManageScheduledTasks — list", () => {
         currentAutomation: makeCurrentAutomation(),
       },
     );
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasksForUser).toHaveBeenCalledWith("U123");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("fails closed when listing without an authenticated creator", async () => {
@@ -532,7 +525,7 @@ describe("handleManageScheduledTasks — list", () => {
 
   it("returns JSON of tasks", async () => {
     const task = makeTask();
-    const scheduler = makeMockScheduler({ listTasks: vi.fn().mockResolvedValue([task]) });
+    const scheduler = makeMockScheduler({ listTasksForUser: vi.fn().mockResolvedValue([task]) });
     const result = await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: dmContext },
@@ -680,19 +673,8 @@ describe("handleManageScheduledTasks — update", () => {
     expect(scheduler.updateTask).not.toHaveBeenCalled();
   });
 
-  it("automatically verifies every script after a natural-language automation edit", async () => {
-    const automaticTestRun = {
-      runId: "automatic-edit-run-1",
-      status: "completed",
-      finalOutput: "Verified",
-      stepOutputs: {
-        action_one: { status: "completed" },
-        action_two: { status: "completed" },
-      },
-    };
-    const scheduler = makeMockScheduler({
-      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
-    });
+  it("does not automatically execute a natural-language automation edit", async () => {
+    const scheduler = makeMockScheduler();
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
         kind: "saved",
@@ -715,13 +697,9 @@ describe("handleManageScheduledTasks — update", () => {
       { scheduler, taskContext: dmContext, chatAuthoring },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("edited-task", {
-      preserveTaskState: true,
-      runMode: "test",
-    });
-    expect(result.content[0].text).toContain("Automatic test run completed for automation edited-task");
-    expect(result.content[0].text).toContain('"action_one"');
-    expect(result.content[0].text).toContain('"action_two"');
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Automation updated:");
+    expect(result.content[0].text).not.toContain("Automatic test run");
   });
 });
 
@@ -814,7 +792,7 @@ describe("handleManageScheduledTasks — resume", () => {
 });
 
 describe("handleManageScheduledTasks — run", () => {
-  it("awaits execution and returns the run result", async () => {
+  it("reserves a manual run and returns the tracking link without inlining the result", async () => {
     const runResult = {
       runId: "run-1",
       status: "completed",
@@ -825,19 +803,40 @@ describe("handleManageScheduledTasks — run", () => {
       getTaskById: vi.fn().mockResolvedValue(makeTask({ sessionMode: "fresh" })),
       executeTaskById: vi.fn().mockResolvedValue(runResult),
     });
+    const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
 
     const result = await handleManageScheduledTasks(
       { action: "run", task_id: "task-1" },
-      { scheduler, stepContentRepo, taskContext: dmContext },
+      {
+        scheduler,
+        stepContentRepo,
+        automationRunsRepo,
+        taskContext: dmContext,
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+      },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
-    expect(result.content[0].text).toContain("Automation task-1 completed");
-    expect(result.content[0].text).toContain('"runId": "run-1"');
-    expect(result.content[0].text).toContain('"ok": true');
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
+    expect(result.content[0].text).toContain(
+      'Automation "Do a thing" run started. Track it here: https://sketch.test/scheduled-tasks/task-1/edit?runId=reserved-run-1',
+    );
+    expect(result.content[0].text).not.toContain("completed");
+    expect(result.content[0].text).not.toContain('"ok": true');
   });
 
-  it("awaits same-thread fresh runs because automation queues are isolated from chat queues", async () => {
+  it("returns the uniform run-started ACK for interactive contexts without the old enqueue branch", async () => {
     const runResult = {
       runId: "run-1",
       status: "completed",
@@ -857,28 +856,45 @@ describe("handleManageScheduledTasks — run", () => {
       executeTaskById: vi.fn().mockResolvedValue(runResult),
       enqueueTaskById: vi.fn().mockResolvedValue(undefined),
     });
+    const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
 
     const result = await handleManageScheduledTasks(
       { action: "run", task_id: "task-1" },
       {
         scheduler,
         stepContentRepo,
+        automationRunsRepo,
         taskContext: channelThreadContext,
         activeQueueKey: "C456:1234567890.123456",
       },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
     expect(scheduler.enqueueTaskById).not.toHaveBeenCalled();
-    expect(result.content[0].text).toContain("Automation task-1 completed");
+    expect(result.content[0].text).toContain('Automation "Do a thing" run started. Track it here:');
+    expect(result.content[0].text).not.toContain("completed");
+    expect(result.content[0].text).not.toContain("queued and will post back");
   });
 
-  it("returns the latest run when a completed once task is run again", async () => {
+  it("reserves a run id even for a completed once task and returns the tracking link", async () => {
     const scheduler = makeMockScheduler({
       getTaskById: vi.fn().mockResolvedValue(makeTask({ scheduleType: "once", status: "completed" })),
-      executeTaskById: vi.fn().mockResolvedValue(null),
+      executeTaskById: vi.fn().mockRejectedValue(new Error("Task task-1 is not active")),
     });
     const automationRunsRepo = {
+      create: vi.fn().mockResolvedValue("reserved-run-1"),
       getLatest: vi.fn().mockResolvedValue({
         id: "run-1",
         task_id: "task-1",
@@ -896,9 +912,20 @@ describe("handleManageScheduledTasks — run", () => {
       { scheduler, stepContentRepo, automationRunsRepo, taskContext: dmContext },
     );
 
-    expect(automationRunsRepo.getLatest).toHaveBeenCalledWith("task-1");
-    expect(result.content[0].text).toContain("already completed");
-    expect(result.content[0].text).toContain('"id": "run-1"');
+    expect(automationRunsRepo.create).toHaveBeenCalledWith({
+      taskId: "task-1",
+      triggeredByUserId: "U123",
+      triggerData: { type: "manual" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", {
+      runMode: "manual",
+      runId: "reserved-run-1",
+      preserveTaskState: true,
+      triggeredByUserId: "U123",
+    });
+    expect(result.content[0].text).toContain('Automation "Do a thing" run started. Track it here:');
+    expect(result.content[0].text).not.toContain("already completed");
+    expect(result.content[0].text).not.toContain('"id": "run-1"');
   });
 });
 
@@ -1024,7 +1051,7 @@ describe("handleManageScheduledTasks — ownership", () => {
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
-  it("returns the canonical URL for another user's automation to an admin", async () => {
+  it("denies share of another user's automation even to an admin", async () => {
     const scheduler = makeMockScheduler({
       getTaskById: vi.fn().mockResolvedValue(makeTask({ createdBy: "U_OTHER" })),
     });
@@ -1034,12 +1061,16 @@ describe("handleManageScheduledTasks — ownership", () => {
       {
         scheduler,
         stepContentRepo,
+        userRepo: makeMockUserRepo(),
         taskContext: { ...dmContext, canManageAnyTask: true },
         config: { BASE_URL: "https://sketch.test", PORT: 3000 },
       },
     );
 
-    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
+    expect(result.content[0].text).toBe('Error: You can\'t share "Do a thing" because it was created by Roopak.');
+    expect(scheduler.getTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
   });
 
   it("falls back when the task owner cannot be resolved", async () => {

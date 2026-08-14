@@ -303,6 +303,8 @@ export interface AgentRuntimeSkillDescriptor {
   skillFilePath: string;
   scope: AgentRuntimeSkillScope;
   frontMatter: Readonly<Record<string, string>>;
+  providerType?: string;
+  requiresEnv: readonly string[];
   body: string;
 }
 

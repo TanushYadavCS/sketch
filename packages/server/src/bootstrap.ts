@@ -24,6 +24,7 @@ import { createAutomationAuthoringService } from "./automation/authoring/service
 import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
 import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { createChatAutomationAuthoring } from "./automation/chat-authoring";
+import { AutomationLockSweeper } from "./automation/lock-service";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
@@ -36,7 +37,10 @@ import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
 import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
-import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
+import {
+  type AgentEnvironmentRuntimeContext,
+  createAgentEnvironmentVariableRepository,
+} from "./db/repositories/agent-environment-variables";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
@@ -66,6 +70,7 @@ import { isPersonalOrSharedDomain } from "./entities/personal-domains";
 import type { ProposeEntityType } from "./entities/propose";
 import { startQueueDrainSequence } from "./entities/queue-run";
 import { createApp } from "./http";
+import { createCliIntegrationService } from "./integrations/cli/service";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
 import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
 import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
@@ -80,6 +85,7 @@ import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/wh
 import { OperationalAlertWorker } from "./operational-alerts/worker";
 import { QueueManager } from "./queue";
 import { TaskScheduler } from "./scheduler/service";
+import { ensureBuiltinManagedSkills } from "./skills/builtin";
 import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
@@ -249,6 +255,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 2.5. Sync featured skills
   if (externalStartup) await syncFeaturedSkills(config, logger);
+  await ensureBuiltinManagedSkills(config).catch((err) => {
+    logger.warn({ err }, "Failed to install built-in managed skills");
+  });
 
   // 3. Repositories
   const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
@@ -258,6 +267,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const operationalAlertsRepo = createOperationalAlertsRepository(db);
   const operationalAlertService = createOperationalAlertService({ alerts: operationalAlertsRepo, logger });
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
+  const cliIntegrations = createCliIntegrationService({
+    db,
+    encryptionKey: config.ENCRYPTION_KEY,
+    environmentVariables: agentEnvironmentVariables,
+  });
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
   await seedSlackOrganizationDomain(db, logger);
@@ -316,11 +330,15 @@ export async function createServer(config: Config, options?: CreateServerOptions
     params: RunAgentParams,
     limitExecution: <T>(work: () => Promise<T>) => Promise<T>,
   ): Promise<RunAgentResult> => {
-    const resolvedAgentEnv = removeReservedAgentEnv(
-      await agentEnvironmentVariables.listForRuntimeContext({
-        ...params,
-        allowOrgSharedEnv: params.claudeConfigDir !== undefined,
-      }),
+    const runtimeContext = {
+      currentUserId: params.currentUserId,
+      contextType: params.contextType,
+      taskContext: params.taskContext,
+      allowOrgSharedEnv: params.claudeConfigDir !== undefined,
+    };
+    const resolvedAgentEnv = await cliIntegrations.filterRuntimeEnvironment(
+      runtimeContext,
+      removeReservedAgentEnv(await agentEnvironmentVariables.listForRuntimeContext(runtimeContext)),
     );
     const loadTranscriptionSettings = params.loadTranscriptionSettings ?? (() => settingsRepo.get());
     const transcriptionSettings =
@@ -351,11 +369,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
       automationAuthoringEnabled:
         params.contextType !== "scheduled_task" && config.AUTOMATION_AUTHORING_MODEL !== undefined,
       chatAutomationAuthoring: params.contextType !== "scheduled_task" ? chatAutomationAuthoring : undefined,
-      ...(Object.keys(resolvedAgentEnv).length > 0
-        ? {
-            agentEnv: resolvedAgentEnv,
-          }
-        : {}),
+      validateAgentSkills: cliIntegrations.validateAgentSkills,
+      cliIntegrations,
+      agentEnv: resolvedAgentEnv,
     };
     return limitExecution(() =>
       instrumentAgentRun(
@@ -392,7 +408,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     const allServers = await mcpServersRepo.listAll();
     const servers: Record<string, McpServerConfig> = {};
     for (const s of allServers) {
-      if (s.type != null && s.mode === "skill") continue;
+      if (s.type === "canvas" || (s.type != null && s.mode === "skill")) continue;
       try {
         servers[s.slug] = buildMcpConfig(s.url, s.credentials, userEmail, s.type);
       } catch (err) {
@@ -809,7 +825,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
-    listAgentEnvForRuntime: (context) => agentEnvironmentVariables.listForRuntimeContext(context),
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
+    cliIntegrations,
     automationRunsRepo,
     stepContentRepo,
     userRepo: users,
@@ -844,9 +862,15 @@ export async function createServer(config: Config, options?: CreateServerOptions
       scheduler,
       loadIntegrationProvider,
       encryptionKey: config.ENCRYPTION_KEY,
+      validateAgentSkills: cliIntegrations.validateAgentSkills,
     });
   }
   if (backgroundWork) await scheduler.start();
+
+  // Automation edit-lock hygiene: 60s stale-row sweeper. Correctness relies on
+  // lazy expiry at access time; this only prevents stale-row accumulation.
+  const automationLockSweeper = backgroundWork ? new AutomationLockSweeper({ db, logger }) : null;
+  automationLockSweeper?.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const slackIndexingFacade = createSettingsBackedSlackIndexingFacade({
@@ -960,6 +984,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
+    cliIntegrations,
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -1054,6 +1081,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
+    cliIntegrations,
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -1167,7 +1197,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
-    listAgentEnvForRuntime: (context) => agentEnvironmentVariables.listForRuntimeContext(context),
+    listAgentEnvForRuntime: async (context: AgentEnvironmentRuntimeContext) =>
+      cliIntegrations.filterRuntimeEnvironment(context, await agentEnvironmentVariables.listForRuntimeContext(context)),
+    cliIntegrations,
     stepContentRepo,
     automationRunsRepo,
     queueManager,
@@ -1309,6 +1341,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
     queueDrainSequence?.stop();
+    automationLockSweeper?.stop();
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();

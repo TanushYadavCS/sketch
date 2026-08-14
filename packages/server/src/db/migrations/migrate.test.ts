@@ -29,7 +29,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 
-const EXPECTED_MIGRATION_COUNT = 183;
+const EXPECTED_MIGRATION_COUNT = 186;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -301,6 +301,33 @@ describe("runMigrations — full sequence", () => {
     expect(names[177]).toBe("182-project-minting-states");
     expect(names[178]).toBe("183-graph-pass-runs");
     expect(names[179]).toBe("184-person-contact-point-cutover");
+    expect(names[180]).toBe("185-queue-pass-reason");
+    expect(names[181]).toBe("186-entity-merge-groups");
+    expect(names[182]).toBe("187-automation-shares");
+    expect(names[183]).toBe("187-entity-name-proposals");
+    expect(names[184]).toBe("188-automation-locks");
+    expect(names[185]).toBe("189-cli-integration-connections");
+  });
+
+  it("keeps the automation-sharing migration ledger in order", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration ORDER BY name ASC
+    `.execute(db);
+    const names = rows.rows.map((row) => row.name);
+
+    expect(names.slice(176, 185)).toEqual([
+      "181-project-minting-verdicts",
+      "182-project-minting-states",
+      "183-graph-pass-runs",
+      "184-person-contact-point-cutover",
+      "185-queue-pass-reason",
+      "186-entity-merge-groups",
+      "187-automation-shares",
+      "187-entity-name-proposals",
+      "188-automation-locks",
+    ]);
   });
 
   it("backfills only exact web origin task conversations", async () => {

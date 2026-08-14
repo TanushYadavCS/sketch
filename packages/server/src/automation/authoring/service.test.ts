@@ -168,6 +168,8 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].instructions).toContain("server-authenticated localPath");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.tools");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.sketch and ctx.sketchTools are invalid");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain('cliIntegrations: ["github"]');
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("managed gh executable");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("human-readable message string");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("JSON.stringify output");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("short headings and bullet lists");
@@ -238,6 +240,7 @@ describe("automation authoring service", () => {
     const { service, generate } = createHarness([
       { kind: "definition", definition: gmailCanvasTriggerDefinition() },
       { kind: "definition", definition: gmailCanvasTriggerDefinition() },
+      { kind: "definition", definition: gmailCanvasTriggerDefinition() },
     ]);
 
     await expect(
@@ -249,7 +252,7 @@ describe("automation authoring service", () => {
         issues: expect.arrayContaining([expect.objectContaining({ code: "UNSUPPORTED_TRIGGER" })]),
       }),
     });
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(3);
   });
 
   it("accepts an explicitly scheduled polling definition", async () => {
@@ -445,6 +448,7 @@ describe("automation authoring service", () => {
     const { service, generate } = createHarness([
       { kind: "definition", definition: renamedStep },
       { kind: "definition", definition: renamedStep },
+      { kind: "definition", definition: renamedStep },
     ]);
 
     await expect(
@@ -454,14 +458,16 @@ describe("automation authoring service", () => {
         brokerCapable: true,
       }),
     ).rejects.toBeInstanceOf(AutomationAuthoringValidationError);
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(3);
     expect(generate.mock.calls[1]?.[0].prompt).toContain("PINNED_STEP_ID_REQUIRED");
+    expect(generate.mock.calls[2]?.[0].prompt).toContain("PINNED_STEP_ID_REQUIRED");
   });
 
   it.each(poorGenerationFixtures)(
-    "retries once when generated output has $expectedIssue",
+    "retries twice when generated output has $expectedIssue",
     async ({ draft, expectedIssue }) => {
       const { service, generate, telemetry } = createHarness([
+        { kind: "definition", definition: draft },
         { kind: "definition", definition: draft },
         { kind: "definition", definition: validAuthoringDefinition },
       ]);
@@ -486,19 +492,27 @@ describe("automation authoring service", () => {
       });
 
       expect(result.kind).toBe("definition");
-      expect(generate).toHaveBeenCalledTimes(2);
+      expect(generate).toHaveBeenCalledTimes(3);
       expect(generate.mock.calls[1]?.[0]).toMatchObject({ attempt: 2, maxRetries: 0 });
+      expect(generate.mock.calls[2]?.[0]).toMatchObject({ attempt: 3, maxRetries: 0 });
       expect(generate.mock.calls[1]?.[0].prompt).toContain(expectedIssue);
       expect(generate.mock.calls[1]?.[0].prompt).toContain('"priorDraft"');
+      expect(generate.mock.calls[2]?.[0].prompt).toContain(expectedIssue);
+      expect(generate.mock.calls[2]?.[0].prompt).toContain('"priorDraft"');
       expect(telemetry.recordAttempt).toHaveBeenCalledWith(
         expect.objectContaining({ attempt: 1, validationOutcome: "invalid" }),
       );
+      expect(telemetry.recordAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: 2, validationOutcome: "invalid" }),
+      );
+      expect(telemetry.recordAttempt).toHaveBeenCalledTimes(3);
     },
   );
 
-  it("fails after one validation retry without returning an invalid definition", async () => {
+  it("fails after two validation retries without returning an invalid definition", async () => {
     const invalid = poorGenerationFixtures[0].draft;
     const { service, generate } = createHarness([
+      { kind: "definition", definition: invalid },
       { kind: "definition", definition: invalid },
       { kind: "definition", definition: invalid },
     ]);
@@ -523,7 +537,7 @@ describe("automation authoring service", () => {
         brokerCapable: true,
       }),
     ).rejects.toBeInstanceOf(AutomationAuthoringValidationError);
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry provider failures", async () => {
@@ -564,12 +578,16 @@ describe("automation authoring service", () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
-  it("shares one sixty-second deadline across the validation retry", async () => {
+  it("shares one sixty-second deadline across validation retries", async () => {
     let clock = 0;
     const generate = vi
       .fn<StructuredAutomationAuthoringGenerator["generate"]>()
       .mockImplementationOnce(async () => {
         clock = 25_000;
+        return generation({ kind: "definition", definition: poorGenerationFixtures[0].draft });
+      })
+      .mockImplementationOnce(async () => {
+        clock = 50_000;
         return generation({ kind: "definition", definition: poorGenerationFixtures[0].draft });
       })
       .mockImplementationOnce(async () => generation({ kind: "definition", definition: validAuthoringDefinition }));
@@ -606,6 +624,7 @@ describe("automation authoring service", () => {
 
     expect(generate.mock.calls[0]?.[0].timeoutMs).toBe(60_000);
     expect(generate.mock.calls[1]?.[0].timeoutMs).toBe(35_000);
+    expect(generate.mock.calls[2]?.[0].timeoutMs).toBe(10_000);
   });
 
   it("classifies provider aborts as a fail-closed timeout without retrying", async () => {
@@ -691,6 +710,7 @@ describe("automation authoring service", () => {
 
   it("uses existing graph validation before returning a generated definition", async () => {
     const { service } = createHarness([
+      { kind: "definition", definition: poorGenerationFixtures[1].draft },
       { kind: "definition", definition: poorGenerationFixtures[1].draft },
       { kind: "definition", definition: poorGenerationFixtures[1].draft },
     ]);

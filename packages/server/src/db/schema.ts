@@ -448,6 +448,22 @@ export interface AgentEnvironmentVariableSharesTable {
   created_at: Generated<string>;
 }
 
+export interface CliIntegrationConnectionsTable {
+  id: string;
+  app_id: string;
+  owner_user_id: string;
+  credential_variable_id: string;
+  account_external_id: string | null;
+  account_login: string;
+  account_avatar_url: string | null;
+  account_type: string | null;
+  status: string;
+  verified_at: string;
+  last_verification_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface McpServersTable {
   id: string;
   type: string | null;
@@ -883,6 +899,15 @@ export interface AutomationRunsTable {
   error_message: string | null;
   started_at: Generated<string>;
   completed_at: string | null;
+  triggered_by_user_id: string | null;
+}
+
+export interface AutomationTaskSharesTable {
+  id: string;
+  task_id: string;
+  user_id: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface AutomationStepContentTable {
@@ -912,6 +937,23 @@ export interface ScheduledTaskBuilderLocksTable {
   acquired_at: Generated<string>;
   renewed_at: Generated<string>;
   expires_at: number;
+}
+
+export interface AutomationTaskLocksTable {
+  task_id: string;
+  holder_user_id: string;
+  holder_platform: string;
+  holder_surface: string;
+  holder_conversation_id: string | null;
+  acquired_at: Generated<string>;
+  updated_at: Generated<string>;
+  expires_at: string;
+  steal_requester_user_id: string | null;
+  steal_requester_platform: string | null;
+  steal_requester_surface: string | null;
+  steal_requester_conversation_id: string | null;
+  steal_requested_at: string | null;
+  steal_expires_at: string | null;
 }
 
 export interface GraphPassRunsTable {
@@ -1756,6 +1798,7 @@ export interface DB {
   local_claude_session_events: LocalClaudeSessionEventsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
+  cli_integration_connections: CliIntegrationConnectionsTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   agent_messages: AgentMessagesTable;
@@ -1779,6 +1822,8 @@ export interface DB {
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
+  automation_task_shares: AutomationTaskSharesTable;
+  automation_task_locks: AutomationTaskLocksTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;

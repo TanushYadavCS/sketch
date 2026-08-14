@@ -66,6 +66,7 @@ describe("ChatThread", () => {
     const questionCard = screen.getByTestId("question-card");
     expect(questionCard).toBeInTheDocument();
     expect(questionCard).toHaveClass("max-w-[640px]");
+    expect(questionCard.querySelector("[data-question-flow-step]")).toHaveClass("min-h-0");
     expect(screen.getByLabelText("Sketch").parentElement).toContainElement(questionCard);
     expect(questionCard).toHaveAttribute("data-question-id", question.id);
 
@@ -189,7 +190,7 @@ describe("ChatThread", () => {
             role: "assistant",
             interruption: {
               detail: "Sketch paused.",
-              label: "Tell Sketch what to do differently.",
+              label: "What should Sketch do differently?",
             },
           },
         ]}
@@ -198,7 +199,7 @@ describe("ChatThread", () => {
 
     expect(screen.queryByLabelText("Sketch")).not.toBeInTheDocument();
     expect(screen.getByText("Sketch paused.").closest("[data-interruption-notice]")).toBeInTheDocument();
-    expect(screen.getByText("Tell Sketch what to do differently.").closest("[data-interruption-notice]")).toHaveClass(
+    expect(screen.getByText("What should Sketch do differently?").closest("[data-interruption-notice]")).toHaveClass(
       "border-l-2",
     );
   });
@@ -365,7 +366,7 @@ describe("ChatThread", () => {
     expect(screen.getByRole("button", { name: "Connected" })).toBeDisabled();
   });
 
-  it("renders integration connection cards while icons are still loading", () => {
+  it("renders GitHub connection cards with the white GitHub mark", () => {
     const iconUrl = "https://cdn.example.com/github.png";
 
     render(
@@ -390,9 +391,10 @@ describe("ChatThread", () => {
     );
 
     expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
-    const icon = document.querySelector("[data-integration-connection-card] img");
-    expect(icon).toHaveAttribute("src", iconUrl);
-    expect(icon?.parentElement).toHaveClass("bg-transparent");
+    const icon = document.querySelector("[data-integration-connection-card] svg");
+    expect(icon).toBeInTheDocument();
+    expect(icon?.parentElement).toHaveClass("bg-[#24292f]", "text-white");
+    expect(document.querySelector("[data-integration-connection-card] img")).not.toBeInTheDocument();
   });
 
   it("renders connected integration account cards without a connect action", () => {

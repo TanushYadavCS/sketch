@@ -1,3 +1,4 @@
+import { AutomationShareDialog } from "@/components/automations/share-dialog";
 import { type AutomationRunItem, type AutomationStepContentItem, type ScheduledTaskListItem, api } from "@/lib/api";
 import {
   AUTOMATION_QUERY_KEY,
@@ -19,7 +20,9 @@ import {
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
+  PlusIcon,
   RobotIcon,
+  ShareNetworkIcon,
   SlackLogoIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -65,14 +68,9 @@ export const scheduledTasksRoute = createRoute({
 
 const TASKS_QUERY_KEY = AUTOMATION_QUERY_KEY;
 
-type OwnershipTab = "all" | "mine" | "system";
+type OwnershipTab = "all" | "mine" | "shared";
 type StatusFilter = "all" | "active" | "attention" | "paused";
 type TaskSort = "recent" | "next" | "name" | "attention";
-type CreatorOption = {
-  value: string;
-  label: string;
-  count: number;
-};
 
 const SORT_LABELS: Record<TaskSort, string> = {
   recent: "Recent activity",
@@ -80,9 +78,6 @@ const SORT_LABELS: Record<TaskSort, string> = {
   name: "Name",
   attention: "Needs attention",
 };
-const ALL_CREATORS_FILTER = "all";
-const SYSTEM_CREATOR_FILTER = "system";
-const USER_CREATOR_PREFIX = "user:";
 const toolbarSelectTriggerClass =
   "h-8 w-full rounded-full border-border/45 bg-muted/45 px-3 text-xs font-medium text-muted-foreground shadow-none transition-colors hover:border-border/70 hover:bg-muted/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring/35 lg:w-auto [&>svg]:ml-1.5 [&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:opacity-60";
 
@@ -327,44 +322,18 @@ function getCreatorDisplayName(task: ScheduledTaskListItem): string {
   return task.creatorName ?? task.createdBy;
 }
 
-function getCreatorFilterValue(task: ScheduledTaskListItem): string {
-  return task.createdBy ? `${USER_CREATOR_PREFIX}${task.createdBy}` : SYSTEM_CREATOR_FILTER;
+function isOwnedTask(task: ScheduledTaskListItem, userId: string | undefined): boolean {
+  if (task.isOwner === true) return true;
+  if (task.isOwner != null) return false;
+  return Boolean(userId) && task.createdBy === userId;
 }
 
-function creatorFilterMatchesTask(filter: string, task: ScheduledTaskListItem): boolean {
-  if (filter === ALL_CREATORS_FILTER) return true;
-  return getCreatorFilterValue(task) === filter;
+function isSharedTask(task: ScheduledTaskListItem): boolean {
+  return task.sharedWithMe === true;
 }
 
-function buildCreatorOptions(tasks: ScheduledTaskListItem[], currentUserId: string | undefined): CreatorOption[] {
-  const optionMap = new Map<string, CreatorOption>();
-
-  for (const task of tasks) {
-    const value = getCreatorFilterValue(task);
-    const existing = optionMap.get(value);
-    if (existing) {
-      optionMap.set(value, { ...existing, count: existing.count + 1 });
-      continue;
-    }
-
-    const baseLabel = getCreatorDisplayName(task);
-    optionMap.set(value, {
-      value,
-      label: task.createdBy && task.createdBy === currentUserId ? `${baseLabel} (you)` : baseLabel,
-      count: 1,
-    });
-  }
-
-  const userOptions = [...optionMap.values()]
-    .filter((option) => option.value !== SYSTEM_CREATOR_FILTER)
-    .sort((left, right) => left.label.localeCompare(right.label));
-  const systemOption = optionMap.get(SYSTEM_CREATOR_FILTER);
-
-  return [
-    { value: ALL_CREATORS_FILTER, label: "All creators", count: tasks.length },
-    ...userOptions,
-    ...(systemOption ? [systemOption] : []),
-  ];
+function isAttentionTask(task: ScheduledTaskListItem): boolean {
+  return task.lastRunStatus === "failed" || task.triggerConfig?.status === "error";
 }
 
 function taskSearchText(task: ScheduledTaskListItem): string {
@@ -384,14 +353,6 @@ function taskSearchText(task: ScheduledTaskListItem): string {
     .filter((value): value is string => Boolean(value))
     .join(" ")
     .toLowerCase();
-}
-
-function isSystemTask(task: ScheduledTaskListItem): boolean {
-  return !task.createdBy;
-}
-
-function isAttentionTask(task: ScheduledTaskListItem): boolean {
-  return task.lastRunStatus === "failed" || task.triggerConfig?.status === "error";
 }
 
 function sortTasks(tasks: ScheduledTaskListItem[], sort: TaskSort): ScheduledTaskListItem[] {
@@ -425,9 +386,9 @@ export function ScheduledTasksPage() {
   const queryClient = useQueryClient();
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [deletingTask, setDeletingTask] = useState<ScheduledTaskListItem | null>(null);
+  const [sharingTask, setSharingTask] = useState<ScheduledTaskListItem | null>(null);
   const [query, setQuery] = useState("");
-  const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>("all");
-  const [creatorFilter, setCreatorFilter] = useState(ALL_CREATORS_FILTER);
+  const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>("mine");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<TaskSort>("recent");
 
@@ -487,30 +448,36 @@ export function ScheduledTasksPage() {
     },
   });
 
+  const createMutation = useMutation({
+    mutationFn: () => api.scheduledTasks.create(),
+    onSuccess: ({ automationId, conversationId }) => {
+      void queryClient.invalidateQueries({ queryKey: TASKS_QUERY_KEY });
+      void navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: automationId },
+        search: { conversationId },
+      });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Could not create automation");
+    },
+  });
+
   const tasks = tasksQuery.data ?? [];
   const isAdmin = auth.role === "admin";
   const normalizedQuery = query.trim().toLowerCase();
   const ownershipGroups = useMemo(
     () => ({
       all: tasks,
-      mine: auth.userId ? tasks.filter((task) => task.createdBy === auth.userId) : [],
-      system: tasks.filter(isSystemTask),
+      mine: tasks.filter((task) => isOwnedTask(task, auth.userId)),
+      shared: tasks.filter(isSharedTask),
     }),
     [auth.userId, tasks],
   );
-  const creatorOptions = useMemo(() => buildCreatorOptions(tasks, auth.userId), [auth.userId, tasks]);
-  const tabTasks = isAdmin ? ownershipGroups[ownershipTab] : tasks;
-  const creatorTasks = useMemo(
-    () =>
-      isAdmin && creatorFilter !== ALL_CREATORS_FILTER
-        ? tabTasks.filter((task) => creatorFilterMatchesTask(creatorFilter, task))
-        : tabTasks,
-    [creatorFilter, isAdmin, tabTasks],
-  );
+  const tabTasks = ownershipGroups[ownershipTab];
   const searchedTasks = useMemo(
-    () =>
-      normalizedQuery ? creatorTasks.filter((task) => taskSearchText(task).includes(normalizedQuery)) : creatorTasks,
-    [creatorTasks, normalizedQuery],
+    () => (normalizedQuery ? tabTasks.filter((task) => taskSearchText(task).includes(normalizedQuery)) : tabTasks),
+    [normalizedQuery, tabTasks],
   );
   const statusCounts = useMemo(
     () => ({
@@ -530,26 +497,40 @@ export function ScheduledTasksPage() {
           : searchedTasks.filter((task) => task.status === statusFilter);
     return sortTasks(byStatus, sort);
   }, [searchedTasks, sort, statusFilter]);
-  const hasFilters =
-    Boolean(normalizedQuery) ||
-    statusFilter !== "all" ||
-    (isAdmin && ownershipTab !== "all") ||
-    (isAdmin && creatorFilter !== ALL_CREATORS_FILTER);
+  const hasFilters = Boolean(normalizedQuery) || statusFilter !== "all" || ownershipTab !== "mine";
   const handleOwnershipTabChange = (value: OwnershipTab) => {
     setOwnershipTab(value);
-    setCreatorFilter(ALL_CREATORS_FILTER);
-  };
-  const handleCreatorFilterChange = (value: string) => {
-    setCreatorFilter(value);
-    if (value !== ALL_CREATORS_FILTER) setOwnershipTab("all");
   };
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
-      <div>
-        <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+        </div>
+        {isAdmin ? (
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-[0_8px_24px_-12px_rgba(234,208,0,0.9)] transition-all hover:-translate-y-0.5 hover:bg-brand-accent/90 hover:shadow-[0_12px_28px_-12px_rgba(234,208,0,1)]"
+            onClick={() => createMutation.mutate()}
+            disabled={createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <SpinnerGapIcon size={14} className="animate-spin" />
+            ) : (
+              <PlusIcon size={14} weight="bold" />
+            )}
+            {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
+          </Button>
+        ) : null}
       </div>
+      {isAdmin && createMutation.isError ? (
+        <p role="alert" className="mt-3 text-sm text-destructive">
+          {createMutation.error instanceof Error ? createMutation.error.message : "Could not create automation"}
+        </p>
+      ) : null}
 
       <div className="mt-6">
         {tasksQuery.isLoading ? (
@@ -557,7 +538,11 @@ export function ScheduledTasksPage() {
         ) : tasksQuery.isError ? (
           <ErrorState />
         ) : tasks.length === 0 ? (
-          <EmptyState />
+          <EmptyState
+            isAdmin={isAdmin}
+            isCreating={createMutation.isPending}
+            onCreate={() => createMutation.mutate()}
+          />
         ) : (
           <>
             <AutomationToolbar
@@ -565,17 +550,14 @@ export function ScheduledTasksPage() {
               onQueryChange={setQuery}
               sort={sort}
               onSortChange={setSort}
-              isAdmin={isAdmin}
               ownershipTab={ownershipTab}
               onOwnershipTabChange={handleOwnershipTabChange}
+              isAdmin={isAdmin}
               ownershipCounts={{
                 all: ownershipGroups.all.length,
                 mine: ownershipGroups.mine.length,
-                system: ownershipGroups.system.length,
+                shared: ownershipGroups.shared.length,
               }}
-              creatorFilter={creatorFilter}
-              onCreatorFilterChange={handleCreatorFilterChange}
-              creatorOptions={creatorOptions}
               statusFilter={statusFilter}
               onStatusFilterChange={setStatusFilter}
               statusCounts={statusCounts}
@@ -600,6 +582,8 @@ export function ScheduledTasksPage() {
                     onResume={() => resumeMutation.mutate(task.id)}
                     onDelete={() => setDeletingTask(task)}
                     onTrigger={() => triggerMutation.mutate(task.id)}
+                    onShare={() => setSharingTask(task)}
+                    userId={auth.userId}
                     onOpenBuilder={() =>
                       navigate({ to: "/scheduled-tasks/$taskId/edit", params: { taskId: task.id }, search: {} })
                     }
@@ -625,6 +609,20 @@ export function ScheduledTasksPage() {
           }
         }}
       />
+
+      <AutomationShareDialog
+        taskId={sharingTask?.id ?? ""}
+        taskName={sharingTask ? (sharingTask.title ?? sharingTask.prompt) : ""}
+        ownerUserId={sharingTask?.createdBy ?? auth.userId}
+        canShare={
+          sharingTask?.canShare === true ||
+          (sharingTask != null && sharingTask.canShare == null && isOwnedTask(sharingTask, auth.userId))
+        }
+        open={Boolean(sharingTask)}
+        onOpenChange={(open) => {
+          if (!open) setSharingTask(null);
+        }}
+      />
     </div>
   );
 }
@@ -634,13 +632,10 @@ function AutomationToolbar({
   onQueryChange,
   sort,
   onSortChange,
-  isAdmin,
   ownershipTab,
   onOwnershipTabChange,
+  isAdmin,
   ownershipCounts,
-  creatorFilter,
-  onCreatorFilterChange,
-  creatorOptions,
   statusFilter,
   onStatusFilterChange,
   statusCounts,
@@ -649,19 +644,14 @@ function AutomationToolbar({
   onQueryChange: (value: string) => void;
   sort: TaskSort;
   onSortChange: (value: TaskSort) => void;
-  isAdmin: boolean;
   ownershipTab: OwnershipTab;
   onOwnershipTabChange: (value: OwnershipTab) => void;
+  isAdmin: boolean;
   ownershipCounts: Record<OwnershipTab, number>;
-  creatorFilter: string;
-  onCreatorFilterChange: (value: string) => void;
-  creatorOptions: CreatorOption[];
   statusFilter: StatusFilter;
   onStatusFilterChange: (value: StatusFilter) => void;
   statusCounts: Record<StatusFilter, number>;
 }) {
-  const selectedCreatorLabel = creatorOptions.find((option) => option.value === creatorFilter)?.label ?? "All creators";
-
   return (
     <div className="mb-3 space-y-4">
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
@@ -678,26 +668,6 @@ function AutomationToolbar({
             className="h-9 rounded-[8px] pl-8 text-sm"
           />
         </div>
-        {isAdmin ? (
-          <Select value={creatorFilter} onValueChange={onCreatorFilterChange}>
-            <SelectTrigger
-              className={cn(toolbarSelectTriggerClass, "lg:min-w-[148px]")}
-              aria-label="Filter by team member"
-            >
-              <span className="min-w-0 flex-1 truncate text-left">{selectedCreatorLabel}</span>
-            </SelectTrigger>
-            <SelectContent>
-              {creatorOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  <span className="flex min-w-0 items-center gap-3">
-                    <span className="truncate">{option.label}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{option.count}</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : null}
         <Select value={sort} onValueChange={(value) => onSortChange(value as TaskSort)}>
           <SelectTrigger
             className={cn(toolbarSelectTriggerClass, "lg:min-w-[136px]")}
@@ -715,28 +685,28 @@ function AutomationToolbar({
         </Select>
       </div>
 
-      {isAdmin ? (
-        <div className="flex items-center gap-1 border-b border-border">
+      <div className="flex items-center gap-1 border-b border-border">
+        {isAdmin ? (
           <OwnershipTabButton
-            label="All tasks"
+            label="All"
             count={ownershipCounts.all}
             active={ownershipTab === "all"}
             onClick={() => onOwnershipTabChange("all")}
           />
-          <OwnershipTabButton
-            label="My tasks"
-            count={ownershipCounts.mine}
-            active={ownershipTab === "mine"}
-            onClick={() => onOwnershipTabChange("mine")}
-          />
-          <OwnershipTabButton
-            label="System tasks"
-            count={ownershipCounts.system}
-            active={ownershipTab === "system"}
-            onClick={() => onOwnershipTabChange("system")}
-          />
-        </div>
-      ) : null}
+        ) : null}
+        <OwnershipTabButton
+          label="Mine"
+          count={ownershipCounts.mine}
+          active={ownershipTab === "mine"}
+          onClick={() => onOwnershipTabChange("mine")}
+        />
+        <OwnershipTabButton
+          label="Shared with me"
+          count={ownershipCounts.shared}
+          active={ownershipTab === "shared"}
+          onClick={() => onOwnershipTabChange("shared")}
+        />
+      </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
         <StatusFilterChip
@@ -964,10 +934,13 @@ function TaskRow({
   onResume,
   onDelete,
   onTrigger,
+  onShare,
   onOpenBuilder,
+  userId,
 }: {
   task: ScheduledTaskListItem;
   isAdmin: boolean;
+  userId: string | undefined;
   isExpanded: boolean;
   isLast: boolean;
   isMutating: boolean;
@@ -976,11 +949,13 @@ function TaskRow({
   onResume: () => void;
   onDelete: () => void;
   onTrigger: () => void;
+  onShare: () => void;
   onOpenBuilder: () => void;
 }) {
   const workflow = isWorkflowTask(task);
   const displayName = task.title ?? task.prompt;
-  const hasActions = true;
+  const canShare = task.canShare === true || (task.canShare == null && isOwnedTask(task, userId));
+  const shareCount = task.shareCount ?? 0;
 
   return (
     <div className={cn(!isLast && "border-b border-border")}>
@@ -995,16 +970,26 @@ function TaskRow({
           aria-label={isExpanded ? `Hide details for ${displayName}` : `Show details for ${displayName}`}
         >
           <div className="min-w-0">
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <p className="truncate text-sm font-medium text-foreground">{displayName}</p>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-xs">
-                  {displayName}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <div className="flex min-w-0 items-center gap-2">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <p className="truncate text-sm font-medium text-foreground">{displayName}</p>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="max-w-xs">
+                    {displayName}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              {isSharedTask(task) ? (
+                <Badge
+                  aria-label="Shared with you"
+                  className="shrink-0 rounded-full bg-brand-accent/12 px-2 py-0 text-[10px] font-medium text-brand-accent"
+                >
+                  Shared with you
+                </Badge>
+              ) : null}
+            </div>
 
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {workflow ? `workflow · ${workflowStepCount(task)} steps` : "reminder"}
@@ -1030,50 +1015,52 @@ function TaskRow({
           <CaretRightIcon size={14} className={cn("transition-transform", isExpanded && "rotate-90")} />
         </button>
 
-        {hasActions ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="size-7 shrink-0" aria-label={`Actions for ${displayName}`}>
-                <DotsThreeIcon size={16} />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {task.status === "active" ? (
-                <DropdownMenuItem disabled={isMutating} onClick={onTrigger}>
-                  <PlayIcon size={16} />
-                  Run now
-                </DropdownMenuItem>
-              ) : null}
-              <DropdownMenuItem onClick={onOpenBuilder}>
-                <LightningIcon size={16} />
-                Open Builder
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="size-7 shrink-0" aria-label={`Actions for ${displayName}`}>
+              <DotsThreeIcon size={16} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {task.status === "active" ? (
+              <DropdownMenuItem disabled={isMutating} onClick={onTrigger}>
+                <PlayIcon size={16} />
+                Run now
               </DropdownMenuItem>
-              {task.canPause ? (
-                <DropdownMenuItem disabled={isMutating} onClick={onPause}>
-                  <PauseIcon size={16} />
-                  Pause
+            ) : null}
+            <DropdownMenuItem onClick={onOpenBuilder}>
+              <LightningIcon size={16} />
+              Open Builder
+            </DropdownMenuItem>
+            {canShare ? (
+              <DropdownMenuItem onClick={onShare}>
+                <ShareNetworkIcon size={16} />
+                Share{shareCount > 0 ? ` · ${shareCount}` : ""}
+              </DropdownMenuItem>
+            ) : null}
+            {task.canPause ? (
+              <DropdownMenuItem disabled={isMutating} onClick={onPause}>
+                <PauseIcon size={16} />
+                Pause
+              </DropdownMenuItem>
+            ) : null}
+            {task.canResume ? (
+              <DropdownMenuItem disabled={isMutating} onClick={onResume}>
+                <PlayIcon size={16} />
+                Resume
+              </DropdownMenuItem>
+            ) : null}
+            {task.canDelete ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" disabled={isMutating} onClick={onDelete}>
+                  <TrashIcon size={16} />
+                  Delete
                 </DropdownMenuItem>
-              ) : null}
-              {task.canResume ? (
-                <DropdownMenuItem disabled={isMutating} onClick={onResume}>
-                  <PlayIcon size={16} />
-                  Resume
-                </DropdownMenuItem>
-              ) : null}
-              {task.canDelete ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" disabled={isMutating} onClick={onDelete}>
-                    <TrashIcon size={16} />
-                    Delete
-                  </DropdownMenuItem>
-                </>
-              ) : null}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : (
-          <div className="size-7 shrink-0" />
-        )}
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {isExpanded ? <TaskExpandedDetail task={task} isAdmin={isAdmin} /> : null}
@@ -1237,6 +1224,22 @@ function RunHistory({ taskId }: { taskId: string }) {
   });
 
   const runs = runsQuery.data ?? [];
+  const hasAttributedRuns = runs.some((run) => Boolean(run.triggered_by_user_id));
+
+  const usersQuery = useQuery({
+    queryKey: ["automation-run-attribution-users"],
+    queryFn: () => api.users.list(),
+    enabled: hasAttributedRuns,
+    staleTime: 60_000,
+  });
+
+  const memberNameById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const user of usersQuery.data?.users ?? []) {
+      names.set(user.id, user.name);
+    }
+    return names;
+  }, [usersQuery.data]);
 
   if (runsQuery.isLoading) {
     return (
@@ -1265,6 +1268,11 @@ function RunHistory({ taskId }: { taskId: string }) {
               {run.completed_at && run.started_at ? (
                 <span className="text-xs text-muted-foreground">
                   {((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000).toFixed(1)}s
+                </span>
+              ) : null}
+              {run.triggered_by_user_id ? (
+                <span className="truncate text-xs text-muted-foreground">
+                  · by {memberNameById.get(run.triggered_by_user_id) ?? "a member"}
                 </span>
               ) : null}
               {run.status === "running" ? (
@@ -1504,7 +1512,15 @@ function DeleteTaskDialog({
   );
 }
 
-function EmptyState() {
+function EmptyState({
+  isAdmin,
+  isCreating,
+  onCreate,
+}: {
+  isAdmin: boolean;
+  isCreating: boolean;
+  onCreate: () => void;
+}) {
   return (
     <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
       <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
@@ -1514,6 +1530,19 @@ function EmptyState() {
       <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
+      {isAdmin ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-4 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-none hover:bg-brand-accent/90"
+          onClick={onCreate}
+          disabled={isCreating}
+        >
+          {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
+          {isCreating ? "Opening builder…" : "Create with Sketch"}{" "}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -1539,7 +1568,7 @@ function FilteredEmptyState({ hasFilters }: { hasFilters: boolean }) {
         {hasFilters ? "No tasks match these filters" : "No tasks here yet"}
       </p>
       <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-        {hasFilters ? "Try a different search, creator, status, or sort." : "Tasks will appear here once they exist."}
+        {hasFilters ? "Try a different search, status, or sort." : "Tasks will appear here once they exist."}
       </p>
     </div>
   );

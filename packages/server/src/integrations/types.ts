@@ -18,6 +18,8 @@ export interface BrokerSpec {
   credentialEnv: Record<string, string>;
   /** Name of the env var the agent sees pointing at the launcher (e.g. "CANVAS_CLI"). */
   launcherEnvName: string;
+  /** Rejects reserved app/component arguments before the provider CLI is spawned. */
+  argvPolicy?: (argv: readonly string[]) => { allowed: true } | { allowed: false; message: string };
 }
 
 export interface IntegrationActionRequest {

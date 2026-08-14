@@ -130,6 +130,11 @@ export interface SketchMcpDeps {
   workspaceDir: string;
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   taskContext?: TaskContext;
   currentAutomation?: CurrentAutomation;
   getSlack?: () => SlackBot | null;

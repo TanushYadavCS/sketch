@@ -1,8 +1,11 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { acquireOrRenewLock } from "../../automation/lock-service";
 import { createAutomationDefinition, getAutomationDefinition } from "../../automation/persistence";
+import { createAutomationLocksRepository } from "../../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
@@ -154,6 +157,18 @@ function normalWebChatContext(conversationId: string, createdBy = "owner-1") {
   return {
     ...taskContextFor("web-chat-task", createdBy),
     conversationKind: "web_chat" as const,
+    origin: {
+      platform: "web" as const,
+      conversationId,
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  };
+}
+
+function legacyWebChatContext(conversationId: string, createdBy = "owner-1") {
+  return {
+    ...taskContextFor("web-chat-task", createdBy),
     origin: {
       platform: "web" as const,
       conversationId,
@@ -391,11 +406,60 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
 
   beforeEach(async () => {
     db = await createTestDb();
+    // Chat edits acquire the automation edit lock as the acting user, and the
+    // lock row references users.id — seed the users the tests act as.
+    for (const id of ["owner-1", "member-1", "admin-1", "owner-2"]) {
+      await db.insertInto("users").values({ id, name: id }).execute();
+    }
   });
 
   afterEach(async () => {
     await db.destroy();
   });
+
+  it("opens an existing automation in its builder without authoring or mutating it", async () => {
+    const scheduler = schedulerFor("existing-task");
+    const automationArtifactCollector = new AutomationArtifactCollector();
+    const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
+
+    const result = await handleManageScheduledTasks(
+      { action: "open", task_id: "existing-task" },
+      {
+        db,
+        scheduler,
+        config: { PORT: 5174 },
+        automationArtifactCollector,
+        taskContext: normalWebChatContext("web-chat-update"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("ready to edit in the builder");
+    expect(collectArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "existing-task",
+        kind: "Updated automation",
+        builderUrl: "http://localhost:5174/scheduled-tasks/existing-task/edit",
+      }),
+    );
+    expect((scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule).not.toHaveBeenCalled();
+    expect((scheduler as { updateTask: ReturnType<typeof vi.fn> }).updateTask).not.toHaveBeenCalled();
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
+  it.each(["add", "update", "updateStepContent"] as const)(
+    "blocks %s authoring in web chat before any automation mutation",
+    async (action) => {
+      const scheduler = schedulerFor("existing-task");
+      const result = await handleManageScheduledTasks(
+        { action, ...(action === "update" || action === "updateStepContent" ? { task_id: "existing-task" } : {}) },
+        { db, scheduler, taskContext: normalWebChatContext("web-chat-update") },
+      );
+
+      expect(result.content[0].text).toContain("builder");
+      expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).not.toHaveBeenCalled();
+      await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+    },
+  );
 
   it("creates the complete definition atomically and refreshes scheduler state after commit", async () => {
     const scheduler = schedulerFor("new-task");
@@ -1267,6 +1331,43 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     ]);
   });
 
+  it("surfaces the lock holder instead of saving when another editor holds the edit lock", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("locked-tool-task"),
+      brokerCapable: true,
+    });
+    await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
+    await acquireOrRenewLock(db, {
+      taskId: "locked-tool-task",
+      holder: { userId: "holder-1", platform: "web", surface: "builder", conversationId: null },
+    });
+    const scheduler = schedulerFor("locked-tool-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "locked-tool-task", prompt: "Locked edit", expected_revision: 0 },
+      {
+        db,
+        scheduler,
+        taskContext: taskContextFor("locked-tool-task"),
+        userRepo: {
+          list: async () => [],
+          getAllEmailsForUser: async () => [],
+          findById: async (id: string) =>
+            id === "holder-1" ? ({ id: "holder-1", name: "Holder Person" } as never) : undefined,
+        },
+      },
+    );
+
+    expect(result.content[0].text).toContain("Holder Person is editing this automation right now");
+    expect(result.content[0].text).toContain('Reply "take over" to request the edit lock.');
+    await expect(createScheduledTaskRepository(db).getById("locked-tool-task")).resolves.toMatchObject({
+      prompt: "Summarize account activity.",
+      revision: 0,
+    });
+  });
+
   it("leaves both tables unchanged when the merged definition fails validation", async () => {
     await createAutomationDefinition({
       db,
@@ -1297,27 +1398,30 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     ]);
   });
 
-  it("keeps ownership on the owner while allowing an admin editor and denying a member", async () => {
+  it("keeps ownership on the owner while denying a member; an admin mutation succeeds", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
       context: context("ownership-task"),
       brokerCapable: true,
     });
-    const adminScheduler = schedulerFor("ownership-task", "owner-1");
     const adminResult = await handleManageScheduledTasks(
       { action: "update", task_id: "ownership-task", prompt: "Admin edit", expected_revision: 0 },
       {
         db,
-        scheduler: adminScheduler,
+        scheduler: schedulerFor("ownership-task", "owner-1"),
         taskContext: { ...taskContextFor("ownership-task", "admin-1"), canManageAnyTask: true },
       },
     );
+    // Admins pass the tool guard and persistence re-grants the mutation; the
+    // task stays owned by the original owner.
     expect(adminResult.content[0].text).toContain("Automation updated:");
+    expect(adminResult.content[0].text).not.toContain("created by");
+    expect(adminResult.content[0].text).not.toContain("you do not have permission");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
       created_by: "owner-1",
-      last_edited_by: "admin-1",
       revision: 1,
+      last_edited_by: "admin-1",
     });
 
     const memberResult = await handleManageScheduledTasks(
@@ -1330,7 +1434,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     );
     expect(memberResult.content[0].text).toContain("created by");
     await expect(createScheduledTaskRepository(db).getById("ownership-task")).resolves.toMatchObject({
-      prompt: "Admin edit",
+      created_by: "owner-1",
       revision: 1,
       last_edited_by: "admin-1",
     });
@@ -1359,7 +1463,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(stale.content[0].text).toContain("revision conflict");
   });
 
-  it("records normal web-chat create provenance and embeds the source conversation in the artifact URL", async () => {
+  it("records normal web-chat create provenance and keeps the artifact URL free of the source conversation", async () => {
     const automationArtifactCollector = new AutomationArtifactCollector();
     const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
     const result = await handleManageScheduledTasks(
@@ -1372,7 +1476,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       {
         db,
         scheduler: schedulerFor("created-task"),
-        taskContext: normalWebChatContext("normal-chat-1"),
+        taskContext: legacyWebChatContext("normal-chat-1"),
         config: { BASE_URL: "https://sketch.example", PORT: 3000 },
         automationArtifactCollector,
       },
@@ -1390,7 +1494,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       expect.objectContaining({
         taskId: task.id,
         requiresBuilder: true,
-        builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit?conversationId=normal-chat-1`,
+        builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit`,
       }),
     );
   });
@@ -1411,19 +1515,19 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
 
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "First chat edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-b", prompt: "First chat edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("many-task-b"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-b"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "Second chat edit", expected_revision: 1 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-two") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-two") },
     );
     await handleManageScheduledTasks(
       { action: "update", task_id: "many-task-a", prompt: "Repeat first chat edit", expected_revision: 2 },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-one") },
     );
     await handleManageScheduledTasks(
       {
@@ -1433,7 +1537,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         step_content: "Apply the third chat's wording.",
         expected_revision: 3,
       },
-      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-three") },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: legacyWebChatContext("chat-three") },
     );
 
     const conversations = createScheduledTaskConversationRepository(db);
@@ -1474,7 +1578,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         schedule_value: "30",
         expected_revision: 0,
       },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("invalid-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("invalid-chat") },
     );
     expect(invalid.content[0].text).toContain("automation definition is invalid");
 
@@ -1483,19 +1587,19 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       {
         db,
         scheduler: schedulerFor("failure-task"),
-        taskContext: normalWebChatContext("denied-chat", "member-1"),
+        taskContext: legacyWebChatContext("denied-chat", "member-1"),
       },
     );
     expect(denied.content[0].text).toContain("created by");
 
     const saved = await handleManageScheduledTasks(
       { action: "update", task_id: "failure-task", prompt: "First edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("successful-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("successful-chat") },
     );
     expect(saved.content[0].text).toContain("Automation updated:");
     const conflict = await handleManageScheduledTasks(
       { action: "update", task_id: "failure-task", prompt: "Stale edit", expected_revision: 0 },
-      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("stale-chat") },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: legacyWebChatContext("stale-chat") },
     );
     expect(conflict.content[0].text).toContain("revision conflict");
 
@@ -1524,7 +1628,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         {
           db,
           scheduler: schedulerFor("failed-provenance-task"),
-          taskContext: normalWebChatContext("failing-chat"),
+          taskContext: legacyWebChatContext("failing-chat"),
           automationArtifactCollector,
         },
       ),
@@ -1756,5 +1860,667 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(result.content[0].text).toContain("Runtime state is inconsistent");
     await expect(createScheduledTaskRepository(db).getById("remove-runtime-failure")).resolves.toBeUndefined();
     expect(removeTaskRuntime).toHaveBeenCalledWith("remove-runtime-failure");
+  });
+});
+
+describe("ManageScheduledTasks grant-aware access", () => {
+  let db: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function grant(taskId: string, userId: string, grantedByUserId = "owner-1") {
+    await db
+      .insertInto("users")
+      .values({ id: userId, name: userId })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("users")
+      .values({ id: grantedByUserId, name: grantedByUserId })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await createAutomationSharesRepository(db).grant({ taskId, userId, grantedByUserId });
+  }
+
+  it("lets a granted member edit a shared automation while preserving owner metadata", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-edit-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-edit-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "granted-edit-task", prompt: "Member edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("granted-edit-task"),
+        taskContext: taskContextFor("granted-edit-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("granted-edit-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+      last_edited_by: "member-1",
+      revision: 1,
+    });
+  });
+
+  it("lets a granted member update step content on a shared automation", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-content-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-content-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "granted-content-task",
+        step_id: "agent",
+        step_content: "Member wording.",
+        expected_revision: 0,
+      },
+      {
+        db,
+        scheduler: schedulerFor("granted-content-task"),
+        taskContext: taskContextFor("granted-content-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("content updated at revision 1");
+    await expect(createAutomationStepContentRepository(db).getByTask("granted-content-task")).resolves.toEqual([
+      expect.objectContaining({ content: "Member wording." }),
+    ]);
+  });
+
+  it("lets a granted member inspect a shared automation definition", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-get-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-get-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "get", task_id: "granted-get-task" },
+      { db, scheduler: schedulerFor("granted-get-task"), taskContext: taskContextFor("granted-get-task", "member-1") },
+    );
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      id: "granted-get-task",
+      prompt: definition().prompt,
+    });
+  });
+
+  it("lets a granted member run a shared automation with manual-run attribution", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-run-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-run-task", "member-1");
+    const scheduler = schedulerFor("granted-run-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "granted-run-task" },
+      {
+        db,
+        scheduler,
+        automationRunsRepo: createAutomationRunsRepository(db),
+        taskContext: taskContextFor("granted-run-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain('Automation "Daily account brief" run started. Track it here:');
+    expect(result.content[0].text).toContain("/scheduled-tasks/granted-run-task/edit?runId=");
+    expect(result.content[0].text).not.toContain("completed:");
+    expect((scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById).toHaveBeenCalledWith(
+      "granted-run-task",
+      expect.objectContaining({ runMode: "manual", preserveTaskState: true, triggeredByUserId: "member-1" }),
+    );
+    const runId = result.content[0].text.match(/runId=([^\s]+)$/)?.[1];
+    await expect(createAutomationRunsRepository(db).getById(runId ?? "missing")).resolves.toMatchObject({
+      task_id: "granted-run-task",
+      triggered_by_user_id: "member-1",
+      status: "running",
+    });
+  });
+
+  it("lists shared automations for a member through the grant-aware list", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-list-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-list-task", "member-1");
+    const sharedTask = taskFor("granted-list-task", "owner-1");
+    const scheduler = {
+      listTasks: vi.fn().mockResolvedValue([]),
+      listTasksForUser: vi.fn().mockResolvedValue([sharedTask]),
+    } as never;
+
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      { db, scheduler, taskContext: taskContextFor("granted-list-task", "member-1") },
+    );
+
+    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).toHaveBeenCalledWith(
+      "member-1",
+    );
+    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toEqual([expect.objectContaining({ id: "granted-list-task" })]);
+  });
+
+  it("expands DM listings for an admin to every automation including inactive ones", async () => {
+    const scheduler = {
+      listTasks: vi.fn().mockResolvedValue([]),
+      listTasksForUser: vi.fn().mockResolvedValue([]),
+    } as never;
+
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      {
+        db,
+        scheduler,
+        taskContext: { ...taskContextFor("admin-list-task", "admin-1"), canManageAnyTask: true },
+      },
+    );
+
+    expect((scheduler as { listTasks: ReturnType<typeof vi.fn> }).listTasks).toHaveBeenCalledWith({
+      includeInactive: true,
+    });
+    expect((scheduler as { listTasksForUser: ReturnType<typeof vi.fn> }).listTasksForUser).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toEqual([]);
+  });
+
+  it("keeps deletion owner-only even for a granted member", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-remove-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-remove-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "remove", task_id: "granted-remove-task" },
+      {
+        db,
+        scheduler: schedulerFor("granted-remove-task"),
+        taskContext: taskContextFor("granted-remove-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("You can't delete");
+    await expect(createScheduledTaskRepository(db).getById("granted-remove-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+    });
+  });
+
+  it("keeps share owner-only even for a granted member", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-share-task"),
+      brokerCapable: true,
+    });
+    await grant("granted-share-task", "member-1");
+
+    const result = await handleManageScheduledTasks(
+      { action: "share", task_id: "granted-share-task" },
+      {
+        db,
+        scheduler: schedulerFor("granted-share-task"),
+        taskContext: taskContextFor("granted-share-task", "member-1"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("You can't share");
+  });
+
+  it("denies a granted member another user's task that was not shared with them", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("granted-own-task"),
+      brokerCapable: true,
+    });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("foreign-task", "owner-2"),
+      brokerCapable: true,
+    });
+    await grant("granted-own-task", "member-1");
+
+    const foreign = await handleManageScheduledTasks(
+      { action: "update", task_id: "foreign-task", prompt: "Foreign edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("foreign-task", "owner-2"),
+        taskContext: taskContextFor("foreign-task", "member-1"),
+      },
+    );
+    expect(foreign.content[0].text).toContain("created by");
+    await expect(createScheduledTaskRepository(db).getById("foreign-task")).resolves.toMatchObject({
+      created_by: "owner-2",
+      revision: 0,
+    });
+
+    const shared = await handleManageScheduledTasks(
+      { action: "update", task_id: "granted-own-task", prompt: "Shared edit", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("granted-own-task", "owner-1"),
+        taskContext: taskContextFor("granted-own-task", "member-1"),
+      },
+    );
+    expect(shared.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("granted-own-task")).resolves.toMatchObject({
+      created_by: "owner-1",
+      revision: 1,
+    });
+  });
+});
+
+describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () => {
+  let db: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    for (const id of ["owner-1", "member-1", "admin-1"]) {
+      await db.insertInto("users").values({ id, name: id }).execute();
+    }
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function createTask(id: string) {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context(id),
+      brokerCapable: true,
+    });
+  }
+
+  function matrixScheduler(taskId: string, createdBy = "owner-1") {
+    const task = taskFor(taskId, createdBy);
+    return {
+      getTaskById: vi.fn().mockResolvedValue(task),
+      refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({ ...task, id })),
+      executeTaskById: vi.fn().mockResolvedValue({
+        runId: `run-${taskId}`,
+        status: "completed",
+        finalOutput: "Verified",
+        stepOutputs: {},
+      }),
+      pauseTask: vi.fn().mockResolvedValue(undefined),
+      resumeTask: vi.fn().mockResolvedValue(undefined),
+      removeTaskRuntime: vi.fn().mockResolvedValue(true),
+    } as never;
+  }
+
+  const holder = { userId: "holder-1", platform: "web", surface: "builder", conversationId: null } as const;
+
+  it("acquires and releases the edit lock around a successful update", async () => {
+    await createTask("lock-release-task");
+    const scheduler = schedulerFor("lock-release-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "lock-release-task", prompt: "Locked edit", expected_revision: 0 },
+      { db, scheduler, taskContext: taskContextFor("lock-release-task") },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createAutomationLocksRepository(db).getByTaskId("lock-release-task")).resolves.toBeUndefined();
+  });
+
+  it("acquires and releases the edit lock around a successful step-content update", async () => {
+    await createTask("lock-release-content-task");
+    const scheduler = schedulerFor("lock-release-content-task");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "lock-release-content-task",
+        step_id: "agent",
+        step_content: "Locked wording.",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("lock-release-content-task") },
+    );
+
+    expect(result.content[0].text).toContain("content updated at revision 1");
+    await expect(createAutomationLocksRepository(db).getByTaskId("lock-release-content-task")).resolves.toBeUndefined();
+  });
+
+  it("lockStatus reports the holder and expiry while another editor holds the lock", async () => {
+    await createTask("lock-status-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
+    await acquireOrRenewLock(db, { taskId: "lock-status-task", holder });
+    const scheduler = schedulerFor("lock-status-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "lockStatus", task_id: "lock-status-task" },
+      {
+        db,
+        scheduler,
+        taskContext: taskContextFor("lock-status-task"),
+        userRepo: {
+          list: async () => [],
+          getAllEmailsForUser: async () => [],
+          findById: async (id: string) =>
+            id === "holder-1" ? ({ id: "holder-1", name: "Holder Person" } as never) : undefined,
+        },
+      },
+    );
+
+    expect(result.content[0].text).toContain('Automation "Daily account brief" is locked by Holder Person.');
+    expect(result.content[0].text).toContain("The lock expires at");
+    expect(result.content[0].text).toContain('Reply "take over" to request the edit lock.');
+  });
+
+  it("lockStatus reports an unlocked automation", async () => {
+    await createTask("lock-free-task");
+    const scheduler = schedulerFor("lock-free-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "lockStatus", task_id: "lock-free-task" },
+      { db, scheduler, taskContext: taskContextFor("lock-free-task") },
+    );
+
+    expect(result.content[0].text).toBe('Automation "Daily account brief" is not locked.');
+  });
+
+  it("steal requests the edit lock from the holder and reports the waiting state", async () => {
+    await createTask("steal-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
+    await acquireOrRenewLock(db, { taskId: "steal-task", holder });
+    const scheduler = schedulerFor("steal-task");
+    const notifyStealRequest = vi.fn().mockResolvedValue(undefined);
+
+    const result = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-task" },
+      {
+        db,
+        scheduler,
+        taskContext: taskContextFor("steal-task"),
+        notifyStealRequest,
+        userRepo: {
+          list: async () => [],
+          getAllEmailsForUser: async () => [],
+          findById: async (id: string) =>
+            id === "holder-1" ? ({ id: "holder-1", name: "Holder Person" } as never) : undefined,
+        },
+      },
+    );
+
+    expect(result.content[0].text).toBe(
+      "Waiting for Holder Person to approve your request to take over this automation.",
+    );
+    expect(notifyStealRequest).toHaveBeenCalledWith("steal-task");
+    await expect(createAutomationLocksRepository(db).getByTaskId("steal-task")).resolves.toMatchObject({
+      holder_user_id: "holder-1",
+      steal_requester_user_id: "owner-1",
+    });
+  });
+
+  it("records the requester's chat conversation surface on a production-path steal request", async () => {
+    await createTask("steal-surface-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "holder-1" }).execute();
+    await acquireOrRenewLock(db, { taskId: "steal-surface-task", holder });
+    const scheduler = schedulerFor("steal-surface-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-surface-task" },
+      {
+        db,
+        scheduler,
+        taskContext: {
+          ...taskContextFor("steal-surface-task", "owner-1"),
+          platform: "whatsapp",
+          contextType: "group",
+          deliveryTarget: "group-1@g.us",
+        },
+      },
+    );
+
+    expect(result.content[0].text).toBe("Waiting for holder-1 to approve your request to take over this automation.");
+    await expect(createAutomationLocksRepository(db).getByTaskId("steal-surface-task")).resolves.toMatchObject({
+      holder_user_id: "holder-1",
+      steal_requester_user_id: "owner-1",
+      steal_requester_platform: "whatsapp",
+      steal_requester_surface: "chat",
+      steal_requester_conversation_id: "group-1@g.us",
+    });
+  });
+
+  it("steal reports not locked when the automation is free or the caller holds the lock", async () => {
+    await createTask("steal-free-task");
+    const scheduler = schedulerFor("steal-free-task");
+
+    const free = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-free-task" },
+      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+    );
+    expect(free.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
+
+    await acquireOrRenewLock(db, { taskId: "steal-free-task", holder: { ...holder, userId: "owner-1" } });
+    const self = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-free-task" },
+      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+    );
+    expect(self.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
+  });
+
+  it("steal reports another pending take-over request", async () => {
+    await createTask("steal-pending-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "holder-1" }).execute();
+    await acquireOrRenewLock(db, { taskId: "steal-pending-task", holder });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "steal-pending-task",
+      userId: "member-1",
+      grantedByUserId: "owner-1",
+    });
+    await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-pending-task" },
+      {
+        db,
+        scheduler: schedulerFor("steal-pending-task"),
+        taskContext: taskContextFor("steal-pending-task", "member-1"),
+      },
+    );
+
+    const result = await handleManageScheduledTasks(
+      { action: "steal", task_id: "steal-pending-task" },
+      { db, scheduler: schedulerFor("steal-pending-task"), taskContext: taskContextFor("steal-pending-task") },
+    );
+
+    expect(result.content[0].text).toBe(
+      "Another user has already asked to take over this automation. Waiting for holder-1 to respond.",
+    );
+  });
+
+  it("blocks the chat-authoring edit path while another editor holds the lock", async () => {
+    await createTask("authoring-locked-task");
+    await db.insertInto("users").values({ id: "holder-1", name: "Holder Person" }).execute();
+    await acquireOrRenewLock(db, { taskId: "authoring-locked-task", holder });
+    const scheduler = schedulerFor("authoring-locked-task");
+    const author = vi.fn();
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "authoring-locked-task", request: "Rewrite the brief" },
+      {
+        db,
+        scheduler,
+        chatAuthoring: { author } as never,
+        userRepo: {
+          list: async () => [],
+          getAllEmailsForUser: async () => [],
+          findById: async (id: string) =>
+            id === "holder-1" ? ({ id: "holder-1", name: "Holder Person" } as never) : undefined,
+        },
+        taskContext: taskContextFor("authoring-locked-task"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Holder Person is editing this automation right now");
+    expect(author).not.toHaveBeenCalled();
+    await expect(createAutomationLocksRepository(db).getByTaskId("authoring-locked-task")).resolves.toMatchObject({
+      holder_user_id: "holder-1",
+    });
+  });
+
+  it("releases the edit lock after a successful chat-authoring edit", async () => {
+    await createTask("authoring-edit-task");
+    const scheduler = schedulerFor("authoring-edit-task");
+    const author = vi.fn().mockResolvedValue({
+      kind: "saved",
+      task: taskFor("authoring-edit-task"),
+      artifact: { steps: definition().steps, scheduleType: "interval", scheduleValue: "120", timezone: "UTC" },
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "authoring-edit-task", request: "Rewrite the brief" },
+      {
+        db,
+        scheduler,
+        chatAuthoring: { author } as never,
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+        encryptionKey: ENCRYPTION_KEY,
+        taskContext: taskContextFor("authoring-edit-task"),
+      },
+    );
+
+    expect(author).toHaveBeenCalledOnce();
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createAutomationLocksRepository(db).getByTaskId("authoring-edit-task")).resolves.toBeUndefined();
+  });
+
+  it("reserves a manual run id, fires the run without awaiting it, and returns only the tracking link", async () => {
+    await createTask("run-ack-task");
+    const scheduler = schedulerFor("run-ack-task");
+    const executeTaskById = vi.fn().mockReturnValue(new Promise(() => {}));
+    (scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById = executeTaskById;
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "run-ack-task" },
+      {
+        db,
+        scheduler,
+        automationRunsRepo: createAutomationRunsRepository(db),
+        config: { BASE_URL: "https://sketch.example", PORT: 3000 },
+        taskContext: taskContextFor("run-ack-task"),
+      },
+    );
+
+    expect(result.content[0].text).toContain(
+      'Automation "Daily account brief" run started. Track it here: https://sketch.example/scheduled-tasks/run-ack-task/edit?runId=',
+    );
+    expect(result.content[0].text).not.toContain("completed:");
+    const runId = result.content[0].text.match(/runId=([^\s]+)$/)?.[1];
+    expect(runId).toBeDefined();
+    expect(executeTaskById).toHaveBeenCalledWith(
+      "run-ack-task",
+      expect.objectContaining({
+        runMode: "manual",
+        runId,
+        preserveTaskState: true,
+        triggeredByUserId: "owner-1",
+      }),
+    );
+    await expect(createAutomationRunsRepository(db).getById(runId ?? "missing")).resolves.toMatchObject({
+      task_id: "run-ack-task",
+      triggered_by_user_id: "owner-1",
+      status: "running",
+    });
+    const run = await createAutomationRunsRepository(db).getById(runId ?? "missing");
+    expect(JSON.parse(run?.trigger_data ?? "null")).toEqual({ type: "manual" });
+  });
+
+  const GUARDED_ACTIONS = [
+    "update",
+    "get",
+    "remove",
+    "pause",
+    "resume",
+    "run",
+    "getRun",
+    "share",
+    "updateStepContent",
+    "lockStatus",
+    "steal",
+  ] as const;
+
+  it.each([
+    ["owner", "owner-1", false, false],
+    ["grantee", "member-1", false, true],
+    ["admin", "admin-1", true, false],
+    ["member", "member-1", false, false],
+  ] as const)("guard matrix: %s can only reach their actions", async (role, userId, isAdmin, granted) => {
+    for (const action of GUARDED_ACTIONS) {
+      const taskId = `matrix-${role}-${action}`;
+      await createTask(taskId);
+      if (granted) {
+        await createAutomationSharesRepository(db).grant({
+          taskId,
+          userId: "member-1",
+          grantedByUserId: "owner-1",
+        });
+      }
+      const params: Parameters<typeof handleManageScheduledTasks>[0] = {
+        action,
+        task_id: taskId,
+        ...(action === "update" ? { prompt: "Matrix edit", expected_revision: 0 } : {}),
+        ...(action === "updateStepContent" ? { step_id: "agent", step_content: "Matrix wording." } : {}),
+      };
+      const result = await handleManageScheduledTasks(params, {
+        db,
+        scheduler: matrixScheduler(taskId),
+        automationRunsRepo: createAutomationRunsRepository(db),
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+        taskContext: { ...taskContextFor(taskId, userId), canManageAnyTask: isAdmin },
+      });
+      const text = result.content[0].text;
+
+      if (role === "member") {
+        expect(text, `${role} ${action}`).toContain("created by");
+      } else if (role === "grantee" && action === "share") {
+        expect(text, `${role} ${action}`).toContain("You can't share");
+      } else if (role === "grantee" && action === "remove") {
+        expect(text, `${role} ${action}`).toContain("You can't delete");
+      } else if (role === "admin" && action === "share") {
+        expect(text, `${role} ${action}`).toContain("You can't share");
+      } else {
+        expect(text, `${role} ${action}`).not.toContain("created by");
+        // Admins pass the tool guard and persistence re-grants the mutation.
+        if (role === "admin" && action === "update") {
+          expect(text, `${role} ${action}`).toContain("Automation updated:");
+        }
+        if (role === "admin" && action === "updateStepContent") {
+          expect(text, `${role} ${action}`).toContain("content updated at revision");
+        }
+        if (role === "admin" && action === "remove") {
+          expect(text, `${role} ${action}`).toContain("removed.");
+        }
+      }
+    }
   });
 });

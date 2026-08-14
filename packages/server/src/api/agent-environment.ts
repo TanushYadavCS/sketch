@@ -14,12 +14,15 @@ type UserRepo = ReturnType<typeof createUserRepository>;
 type ChannelRepo = ReturnType<typeof createChannelRepository>;
 type WhatsAppGroupsRepo = ReturnType<typeof createWhatsAppGroupRepository>;
 
-interface AgentEnvironmentRouteDeps {
+export interface AgentEnvironmentRouteDeps {
   users: UserRepo;
   channels: ChannelRepo;
   whatsappGroups: WhatsAppGroupsRepo;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
+  isManagedVariable?: (id: string, ownerUserId: string) => Promise<boolean>;
+  isManagedVariableName?: (name: string, ownerUserId: string) => Promise<boolean>;
+  getManagedVariableApp?: (id: string, ownerUserId: string) => Promise<string | null>;
 }
 
 const envNameSchema = z
@@ -73,7 +76,7 @@ async function ensureSlackChannelExists(
   }
 }
 
-async function validateShareTargets(
+export async function validateShareTargets(
   targets: AgentEnvironmentShareTargetInput[],
   deps: AgentEnvironmentRouteDeps,
   role: string | undefined,
@@ -115,7 +118,15 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
 
   routes.get("/", async (c) => {
     const userId = c.get("sub");
-    return c.json({ variables: await envVars.list(userId) });
+    const variables = await envVars.list(userId);
+    if (!deps.getManagedVariableApp) return c.json({ variables });
+    const annotated = await Promise.all(
+      variables.map(async (variable) => {
+        const managedBy = await deps.getManagedVariableApp?.(variable.id, userId);
+        return managedBy ? { ...variable, managedBy } : variable;
+      }),
+    );
+    return c.json({ variables: annotated });
   });
 
   routes.post("/", async (c) => {
@@ -127,6 +138,12 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
     }
     if (isReservedAgentEnvName(parsed.data.name)) {
       return c.json(validationError("This environment variable name is reserved by Sketch."), 400);
+    }
+    if (await deps.isManagedVariableName?.(parsed.data.name, c.get("sub"))) {
+      return c.json(
+        { error: { code: "MANAGED_ENVIRONMENT_VARIABLE", message: "This variable is managed by its integration." } },
+        409,
+      );
     }
 
     try {
@@ -144,6 +161,12 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
   });
 
   routes.patch("/:id", async (c) => {
+    if (await deps.isManagedVariable?.(c.req.param("id"), c.get("sub"))) {
+      return c.json(
+        { error: { code: "MANAGED_ENVIRONMENT_VARIABLE", message: "This variable is managed by its integration." } },
+        409,
+      );
+    }
     const body = await c.req.json().catch(() => ({}));
     const parsed = updateVariableSchema.safeParse(body);
     if (!parsed.success) {
@@ -159,6 +182,12 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
   });
 
   routes.post("/:id/shares", async (c) => {
+    if (await deps.isManagedVariable?.(c.req.param("id"), c.get("sub"))) {
+      return c.json(
+        { error: { code: "MANAGED_ENVIRONMENT_VARIABLE", message: "Manage access from the integration settings." } },
+        409,
+      );
+    }
     const body = await c.req.json().catch(() => ({}));
     const parsed = replaceSharesSchema.safeParse(body);
     if (!parsed.success) {
@@ -194,6 +223,12 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
   });
 
   routes.delete("/:id/shares/:shareId", async (c) => {
+    if (await deps.isManagedVariable?.(c.req.param("id"), c.get("sub"))) {
+      return c.json(
+        { error: { code: "MANAGED_ENVIRONMENT_VARIABLE", message: "Manage access from the integration settings." } },
+        409,
+      );
+    }
     const removed = await envVars.deleteShare(c.req.param("id"), c.get("sub"), c.req.param("shareId"));
     if (!removed) {
       return c.json({ error: { code: "NOT_FOUND", message: "Environment variable share not found" } }, 404);
@@ -202,6 +237,17 @@ export function agentEnvironmentRoutes(envVars: AgentEnvironmentRepo, deps: Agen
   });
 
   routes.delete("/:id", async (c) => {
+    if (await deps.isManagedVariable?.(c.req.param("id"), c.get("sub"))) {
+      return c.json(
+        {
+          error: {
+            code: "MANAGED_ENVIRONMENT_VARIABLE",
+            message: "Disconnect the integration to remove this variable.",
+          },
+        },
+        409,
+      );
+    }
     const removed = await envVars.remove(c.req.param("id"), c.get("sub"));
     if (!removed) {
       return c.json({ error: { code: "NOT_FOUND", message: "Environment variable not found" } }, 404);

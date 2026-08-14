@@ -104,18 +104,18 @@ describe("Agent environment variables API", () => {
     const secret = await app.request("/api/agent-environment-variables", {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: memberCookie },
-      body: JSON.stringify({ name: "GH_TOKEN", value: "ghp_secret", isSecret: true }),
+      body: JSON.stringify({ name: "TEST_SECRET", value: "secret-value", isSecret: true }),
     });
     expect(secret.status).toBe(201);
-    expect((await secret.json()).variable).toMatchObject({ name: "GH_TOKEN", value: null, isSecret: true });
+    expect((await secret.json()).variable).toMatchObject({ name: "TEST_SECRET", value: null, isSecret: true });
 
     const list = await app.request("/api/agent-environment-variables", {
       headers: { Cookie: memberCookie },
     });
     expect(list.status).toBe(200);
     expect((await list.json()).variables).toEqual([
-      expect.objectContaining({ name: "GH_TOKEN", value: null, isSecret: true }),
       expect.objectContaining({ name: "TEST_REGION", value: "us-east-1", isSecret: false }),
+      expect.objectContaining({ name: "TEST_SECRET", value: null, isSecret: true }),
     ]);
   });
 

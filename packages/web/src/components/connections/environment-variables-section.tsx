@@ -121,6 +121,7 @@ function EnvironmentVariableRow({
   const directShareCount = countDirectShareTargets(variable.shares);
   const directShareLabel = `${directShareCount} direct ${directShareCount === 1 ? "share" : "shares"}`;
   const shareBadgeLabel = isSharedWithOrg ? "All" : formatDirectShareCountBadge(directShareCount);
+  const isManaged = Boolean(variable.managedBy);
 
   const handleCopy = async () => {
     try {
@@ -141,6 +142,7 @@ function EnvironmentVariableRow({
     >
       <div className="min-w-0">
         <span className="block truncate font-mono text-sm font-medium text-muted-foreground">{variable.name}</span>
+        {isManaged && <span className="mt-1 block text-xs text-muted-foreground">Managed by {variable.managedBy}</span>}
       </div>
 
       <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 text-left transition-colors hover:bg-muted">
@@ -155,19 +157,58 @@ function EnvironmentVariableRow({
           </span>
         )}
         <span className="flex items-center gap-1 text-muted-foreground">
-          {!variable.isSecret && (
+          {isManaged ? (
+            <span className="px-1 text-xs">Read-only</span>
+          ) : (
             <>
+              {!variable.isSecret && (
+                <>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRevealed((current) => !current);
+                    }}
+                    aria-label={revealed ? `Hide ${variable.name}` : `Reveal ${variable.name}`}
+                  >
+                    {revealed ? <EyeSlashIcon size={14} /> : <EyeIcon size={14} />}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCopy();
+                    }}
+                    aria-label={`Copy ${variable.name}`}
+                  >
+                    {copied ? <span className="text-[10px] font-medium">OK</span> : <CopySimpleIcon size={14} />}
+                  </Button>
+                </>
+              )}
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
+                className="relative"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setRevealed((current) => !current);
+                  onShare();
                 }}
-                aria-label={revealed ? `Hide ${variable.name}` : `Reveal ${variable.name}`}
+                aria-label={getShareButtonLabel(variable.name, isSharedWithOrg, directShareCount, directShareLabel)}
               >
-                {revealed ? <EyeSlashIcon size={14} /> : <EyeIcon size={14} />}
+                <ShareNetworkIcon size={14} />
+                {(isSharedWithOrg || directShareCount > 0) && (
+                  <span
+                    aria-hidden="true"
+                    className="-top-1 -right-1 pointer-events-none absolute flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none font-semibold text-primary-foreground shadow-xs ring-2 ring-background"
+                  >
+                    {shareBadgeLabel}
+                  </span>
+                )}
               </Button>
               <Button
                 type="button"
@@ -175,60 +216,27 @@ function EnvironmentVariableRow({
                 size="icon-xs"
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleCopy();
+                  onEdit();
                 }}
-                aria-label={`Copy ${variable.name}`}
+                aria-label={`Edit ${variable.name}`}
               >
-                {copied ? <span className="text-[10px] font-medium">OK</span> : <CopySimpleIcon size={14} />}
+                <PencilSimpleIcon size={14} />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="hover:text-destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete();
+                }}
+                aria-label={`Delete ${variable.name}`}
+              >
+                <TrashIcon size={14} />
               </Button>
             </>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className="relative"
-            onClick={(e) => {
-              e.stopPropagation();
-              onShare();
-            }}
-            aria-label={getShareButtonLabel(variable.name, isSharedWithOrg, directShareCount, directShareLabel)}
-          >
-            <ShareNetworkIcon size={14} />
-            {(isSharedWithOrg || directShareCount > 0) && (
-              <span
-                aria-hidden="true"
-                className="-top-1 -right-1 pointer-events-none absolute flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none font-semibold text-primary-foreground shadow-xs ring-2 ring-background"
-              >
-                {shareBadgeLabel}
-              </span>
-            )}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={(e) => {
-              e.stopPropagation();
-              onEdit();
-            }}
-            aria-label={`Edit ${variable.name}`}
-          >
-            <PencilSimpleIcon size={14} />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className="hover:text-destructive"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-            aria-label={`Delete ${variable.name}`}
-          >
-            <TrashIcon size={14} />
-          </Button>
         </span>
       </div>
     </div>

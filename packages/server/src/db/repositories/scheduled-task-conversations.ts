@@ -5,6 +5,10 @@ import type { DB, ScheduledTaskBuilderLocksTable, ScheduledTaskConversationsTabl
 export type ScheduledTaskConversationRow = Selectable<ScheduledTaskConversationsTable>;
 export type ScheduledTaskBuilderLockRow = Selectable<ScheduledTaskBuilderLocksTable>;
 
+export interface ScheduledTaskConversationWithUserNameRow extends ScheduledTaskConversationRow {
+  transcript_user_name: string | null;
+}
+
 export type ScheduledTaskConversationKind = "builder" | "web_chat";
 
 export interface UpsertScheduledTaskConversationInput {
@@ -86,6 +90,67 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
         .orderBy("transcript_user_id", "asc")
         .orderBy("kind", "asc")
         .execute();
+    },
+
+    /**
+     * Task-scoped listing joins the transcript user's name so owners and
+     * admins can attribute transcripts without any viewer-scope filter.
+     */
+    async listByTask(
+      taskId: string,
+      options: ListScheduledTaskConversationOptions = {},
+    ): Promise<ScheduledTaskConversationWithUserNameRow[]> {
+      let query = db
+        .selectFrom("scheduled_task_conversations")
+        .leftJoin("users", "users.id", "scheduled_task_conversations.transcript_user_id")
+        .select([
+          "scheduled_task_conversations.task_id",
+          "scheduled_task_conversations.conversation_id",
+          "scheduled_task_conversations.transcript_user_id",
+          "scheduled_task_conversations.kind",
+          "scheduled_task_conversations.created_at",
+          "scheduled_task_conversations.updated_at",
+          "scheduled_task_conversations.last_active_at",
+          "scheduled_task_conversations.archived_at",
+          "users.name as transcript_user_name",
+        ])
+        .where("scheduled_task_conversations.task_id", "=", taskId);
+
+      if (!options.includeArchived) query = query.where("scheduled_task_conversations.archived_at", "is", null);
+      if (options.kind) query = query.where("scheduled_task_conversations.kind", "=", options.kind);
+
+      return query
+        .orderBy("scheduled_task_conversations.last_active_at", "desc")
+        .orderBy("scheduled_task_conversations.created_at", "desc")
+        .orderBy("scheduled_task_conversations.kind", "asc")
+        .execute();
+    },
+
+    async listByTaskConversationForTask(
+      taskId: string,
+      conversationId: string,
+      options: ListScheduledTaskConversationOptions = {},
+    ): Promise<ScheduledTaskConversationWithUserNameRow[]> {
+      let query = db
+        .selectFrom("scheduled_task_conversations")
+        .leftJoin("users", "users.id", "scheduled_task_conversations.transcript_user_id")
+        .select([
+          "scheduled_task_conversations.task_id",
+          "scheduled_task_conversations.conversation_id",
+          "scheduled_task_conversations.transcript_user_id",
+          "scheduled_task_conversations.kind",
+          "scheduled_task_conversations.created_at",
+          "scheduled_task_conversations.updated_at",
+          "scheduled_task_conversations.last_active_at",
+          "scheduled_task_conversations.archived_at",
+          "users.name as transcript_user_name",
+        ])
+        .where("scheduled_task_conversations.task_id", "=", taskId)
+        .where("scheduled_task_conversations.conversation_id", "=", conversationId);
+
+      if (!options.includeArchived) query = query.where("scheduled_task_conversations.archived_at", "is", null);
+
+      return query.orderBy("scheduled_task_conversations.kind", "asc").execute();
     },
 
     async listByTaskConversationForTranscriptUser(

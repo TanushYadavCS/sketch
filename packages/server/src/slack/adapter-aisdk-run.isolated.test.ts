@@ -113,6 +113,7 @@ function freshMockBot() {
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
     onHomeAction: vi.fn(),
+    onLockStealAction: vi.fn(),
     publishHomeView: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),

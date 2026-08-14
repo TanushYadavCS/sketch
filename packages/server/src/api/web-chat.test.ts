@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WebChatQuestion, WebChatQuestionBatch } from "@sketch/shared";
+import type { CliIntegrationConnection, WebChatQuestion, WebChatQuestionBatch } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import type { RunAgentParams } from "../agent/runner";
 import { getSessionId, saveSessionId } from "../agent/sessions";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -16,6 +17,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import type { createCliIntegrationService } from "../integrations/cli/service";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
 function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string[] = []) {
@@ -95,40 +97,51 @@ function webChatTranscriptPath(dataDir: string, userId: string, conversationId =
   return join(dataDir, "web-chat", userId, `${conversationId}.json`);
 }
 
-function makeBuilderScheduler(taskId: string, createdBy: string) {
+function makeBuilderScheduler(
+  taskId: string,
+  createdBy: string,
+  title = "Builder brief",
+  listedTaskTitles: string[] = [],
+) {
+  const task = {
+    id: taskId,
+    platform: "slack",
+    contextType: "dm",
+    deliveryTarget: "D_BUILDER",
+    threadTs: null,
+    prompt: "Send a builder brief",
+    scheduleType: "cron",
+    scheduleValue: "0 9 * * 1",
+    timezone: "UTC",
+    sessionMode: "fresh",
+    nextRunAt: null,
+    lastRunAt: null,
+    status: "active",
+    createdBy,
+    createdAt: "2026-06-01T00:00:00.000Z",
+    revision: 0,
+    title,
+    description: null,
+    originChat: null,
+    steps: null,
+    edges: null,
+    outputTarget: null,
+    outputPlatform: null,
+    outputThreadTs: null,
+    outputMode: "deliver",
+    delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
+  };
+  const listedTasks = [
+    task,
+    ...listedTaskTitles.map((listedTitle, index) => ({ ...task, id: `listed-task-${index}`, title: listedTitle })),
+  ];
   return {
     pauseTask: vi.fn(),
     resumeTask: vi.fn(),
     removeTask: vi.fn(),
     executeTaskById: vi.fn(),
-    getTaskById: vi.fn().mockResolvedValue({
-      id: taskId,
-      platform: "slack",
-      contextType: "dm",
-      deliveryTarget: "D_BUILDER",
-      threadTs: null,
-      prompt: "Send a builder brief",
-      scheduleType: "cron",
-      scheduleValue: "0 9 * * 1",
-      timezone: "UTC",
-      sessionMode: "fresh",
-      nextRunAt: null,
-      lastRunAt: null,
-      status: "active",
-      createdBy,
-      createdAt: "2026-06-01T00:00:00.000Z",
-      revision: 0,
-      title: "Builder brief",
-      description: null,
-      originChat: null,
-      steps: null,
-      edges: null,
-      outputTarget: null,
-      outputPlatform: null,
-      outputThreadTs: null,
-      outputMode: "deliver",
-      delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
-    }),
+    getTaskById: vi.fn().mockResolvedValue(task),
+    listTasks: vi.fn().mockResolvedValue(listedTasks),
   } as never;
 }
 
@@ -189,16 +202,17 @@ describe("web chat API", () => {
     const text = await res.text();
     expect(text).toContain('"messageMetadata":{"createdAt":"');
     expect(text).toContain('"type":"data-progress"');
-    expect(text).toContain("Using tool");
+    expect(text).toContain("Reading");
     expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-progress")).toMatchObject({
       type: "data-progress",
       data: {
-        lines: ["Using tool"],
+        lines: ["Reading"],
         items: [
           {
-            kind: "tool",
-            label: "Using tool",
-            icon: { type: "tool" },
+            kind: "file",
+            label: "Reading",
+            icon: { type: "tool", name: "Read" },
+            toolName: "Read",
           },
         ],
       },
@@ -237,7 +251,7 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=chat-empty-response", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Create a reminder" }),
+      body: JSON.stringify({ message: "Summarize my open tasks" }),
     });
 
     expect(res.status).toBe(200);
@@ -284,7 +298,7 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=chat-skill-handoff", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Please make an automation for my daily brief" }),
+      body: JSON.stringify({ message: "Please configure this draft for my daily brief" }),
     });
 
     expect(res.status).toBe(200);
@@ -338,6 +352,278 @@ describe("web chat API", () => {
       id: "automation-handoff-0",
       data: handoff,
     });
+  });
+
+  it("creates a setup draft from the user's create intent even without a skill invocation", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("I can help with that."),
+      rawUsage: { toolCalls: [] },
+      trace: {
+        progressEvents: [],
+        finalText: "I can help with that.",
+        automationArtifacts: [],
+      },
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-intent-handoff", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "I want to create an automation that sends a daily brief" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    const handoff = webChatStreamChunks(stream).find((chunk) => chunk.type === "data-automation-handoff")?.data as {
+      kind: string;
+      taskId: string;
+      sourceConversationId: string;
+      builderConversationId: string;
+      status: string;
+    };
+    expect(handoff).toMatchObject({
+      kind: "automation-draft",
+      sourceConversationId: "chat-intent-handoff",
+      status: "paused",
+    });
+    expect(handoff.builderConversationId).toMatch(/^builder-[0-9a-f-]{36}$/);
+    expect(stream).not.toContain('"type":"data-automation"');
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not create a setup draft when the message expresses update intent", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("I can update that for you."),
+      rawUsage: {
+        toolCalls: [
+          {
+            toolName: "Skill",
+            skillName: "create-automation",
+            startedAt: 0,
+            endedAt: 1,
+            success: true,
+          },
+        ],
+      },
+      trace: {
+        progressEvents: [{ kind: "tool_use", toolName: "Skill", input: { skill: "create-automation" } }],
+        finalText: "I can update that for you.",
+        automationArtifacts: [],
+      },
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-update-intent", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Update my daily brief automation to run twice a day" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(stream).not.toContain('"type":"data-automation-handoff"');
+    expect(stream).toContain("I can update that for you.");
+  });
+
+  it("offers existing automations for generic update intent and opens the selected one", async () => {
+    const admin = await seedAdmin(db);
+    const scheduler = makeBuilderScheduler("task-daily-brief", admin.id, "Daily brief");
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I will create a new automation."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-generic-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "I want to update an automation" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(stream).toContain("Which automation should I open in the builder?");
+    expect(stream).toContain("No changes were made");
+    expect(stream).not.toContain('"type":"data-automation-handoff"');
+    expect(await createScheduledTaskRepository(db).listByCreatedBy(admin.id)).toHaveLength(0);
+
+    const question = webChatStreamChunks(stream).find((chunk) => chunk.type === "data-question")?.data as {
+      id: string;
+      options: Array<{ id: string; label: string }>;
+    };
+    const dailyBrief = question.options.find((option) => option.label === "Daily brief");
+    if (!dailyBrief) throw new Error("Expected Daily brief option");
+
+    const selection = await app.request("/api/web-chat?conversationId=chat-generic-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "msg-select-daily-brief",
+          role: "user",
+          parts: [
+            { type: "text", text: dailyBrief.label },
+            {
+              type: "data-question-answer",
+              id: `question-answer-${question.id}`,
+              data: { questionId: question.id, optionId: dailyBrief.id },
+            },
+          ],
+        },
+      }),
+    });
+
+    const selectionStream = await selection.text();
+    expect(selection.status, selectionStream).toBe(200);
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(webChatStreamChunks(selectionStream).find((chunk) => chunk.type === "data-automation")?.data).toMatchObject({
+      taskId: "task-daily-brief",
+      kind: "Updated automation",
+    });
+    expect(selectionStream).not.toContain('"type":"data-automation-handoff"');
+  });
+
+  it("routes an explicitly named existing automation to its builder before running the agent", async () => {
+    const admin = await seedAdmin(db);
+    const taskId = "task-weekday-calendar-summary";
+    const scheduler = makeBuilderScheduler(taskId, admin.id, "Weekday Morning Calendar Summary");
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("The update is ready."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-explicit-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Update my Weekday Morning Calendar Summary automation to call out meetings with external attendees.",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    const artifact = webChatStreamChunks(stream).find((chunk) => chunk.type === "data-automation")?.data;
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(artifact).toMatchObject({
+      taskId,
+      kind: "Updated automation",
+      builderUrl: `http://localhost:3000/scheduled-tasks/${taskId}/edit`,
+    });
+    expect(stream).not.toContain('"type":"data-automation-handoff"');
+  });
+
+  it("asks the user to choose when an update request matches multiple automations", async () => {
+    const admin = await seedAdmin(db);
+    const scheduler = makeBuilderScheduler("task-gmail-triage", admin.id, "Triage Gmail inbox", [
+      "Hourly Gmail inbox triage",
+      "Weekday Gmail inbox triage",
+      "Weekday Gmail inbox triage",
+    ]);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("The update is ready."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-ambiguous-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "I want to update my gmail automation" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(stream).toContain("I found multiple automations matching “gmail”");
+    expect(stream).toContain("Triage Gmail inbox");
+    expect(stream).toContain("Hourly Gmail inbox triage");
+    expect(stream).toContain("Weekday Gmail inbox triage");
+    expect(webChatStreamChunks(stream).find((chunk) => chunk.type === "data-question")?.data).toMatchObject({
+      prompt: "Which automation should I open in the builder?",
+    });
+    expect(stream).not.toContain('"type":"data-automation"');
+    expect(stream).not.toContain('"type":"data-automation-handoff"');
+  });
+
+  it("opens the selected automation builder after an ambiguous update question", async () => {
+    const admin = await seedAdmin(db);
+    const scheduler = makeBuilderScheduler("task-gmail-triage", admin.id, "Triage Gmail inbox", [
+      "Hourly Gmail inbox triage",
+      "Weekday Gmail inbox triage",
+      "Weekday Gmail inbox triage",
+    ]);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("The update is ready."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const questionResponse = await app.request("/api/web-chat?conversationId=chat-selected-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "I want to update my gmail automation" }),
+    });
+    const questionStream = await questionResponse.text();
+    const question = webChatStreamChunks(questionStream).find((chunk) => chunk.type === "data-question")?.data as {
+      id: string;
+      options: Array<{ id: string; label: string }>;
+    };
+    const selectedOption = question.options.find((option) => option.label === "Triage Gmail inbox");
+    if (!selectedOption) throw new Error("Expected Triage Gmail inbox option");
+
+    const builderResponse = await app.request("/api/web-chat?conversationId=chat-selected-update", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "msg-select-gmail",
+          role: "user",
+          parts: [
+            { type: "text", text: selectedOption.label },
+            {
+              type: "data-question-answer",
+              id: `question-answer-${question.id}`,
+              data: { questionId: question.id, optionId: selectedOption.id },
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(builderResponse.status).toBe(200);
+    const builderStream = await builderResponse.text();
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(webChatStreamChunks(builderStream).find((chunk) => chunk.type === "data-automation")?.data).toMatchObject({
+      taskId: "task-gmail-triage",
+      kind: "Updated automation",
+    });
+    expect(builderStream).toContain("I’ll open the existing automation in the builder");
   });
 
   it("emits the automation artifact after the agent creates a natural-language automation", async () => {
@@ -408,6 +694,58 @@ describe("web chat API", () => {
       id: "automation-0",
       data: artifact,
     });
+  });
+
+  it("streams an existing automation builder artifact after the agent opens it", async () => {
+    await seedAdmin(db);
+    const artifact = {
+      taskId: "task-existing-automation",
+      requiresBuilder: true,
+      kind: "Updated automation",
+      title: "Weekday Morning Calendar Summary",
+      description: "Sends a quick summary of the day's calendar every weekday morning.",
+      tags: ["Scheduled", "Slack"],
+      scheduleLabel: "Cron: 0 9 * * 1-5 (Asia/Kolkata)",
+      deliveryLabel: "Slack DM",
+      builderUrl: "/scheduled-tasks/task-existing-automation/edit?conversationId=builder-existing",
+      status: "active" as const,
+    };
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "ManageScheduledTasks",
+        input: { action: "open", task_id: "task-existing-automation" },
+      });
+      return {
+        ...makeAgentResult("Opening the automation builder."),
+        trace: {
+          progressEvents: [],
+          finalText: "Opening the automation builder.",
+          automationArtifacts: [artifact],
+        },
+      };
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-existing-automation", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Update my daily brief automation" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(webChatStreamChunks(stream).find((chunk) => chunk.type === "data-automation")).toMatchObject({
+      type: "data-automation",
+      data: { taskId: artifact.taskId, kind: "Updated automation", builderUrl: artifact.builderUrl },
+    });
+    expect(stream).not.toContain('"type":"data-automation-handoff"');
   });
 
   it("streams assistant text deltas before the web chat agent run finishes", async () => {
@@ -1313,6 +1651,86 @@ describe("web chat API", () => {
     ]);
   });
 
+  it("passes builder channel context to CLI environment resolution", async () => {
+    const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-cli-context",
+      conversationId: "builder-cli-context",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "ghp_shared" });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-cli-context",
+        platform: "slack",
+        contextType: "channel",
+        deliveryTarget: "C123",
+        threadTs: "1700.1",
+        prompt: "Post design wins",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: admin.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 0,
+        title: "Post design wins",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: {
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C123",
+          threadTs: "1700.1",
+          mode: "deliver",
+        },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      listAgentEnvForRuntime,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=builder-cli-context", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Use GitHub", automationTaskId: "task-cli-context" }),
+    });
+    await res.text();
+
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentUserId: admin.id,
+        contextType: "channel_mention",
+        taskContext: expect.objectContaining({
+          platform: "slack",
+          contextType: "channel",
+          deliveryTarget: "C123",
+        }),
+      }),
+    );
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ agentEnv: { GH_TOKEN: "ghp_shared" } }));
+  });
+
   it("starts builder replies without originating Slack conversation context", async () => {
     const admin = await seedAdmin(db);
     await createScheduledTaskConversationRepository(db).upsert({
@@ -1438,7 +1856,100 @@ describe("web chat API", () => {
     expect(builderAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
   });
 
-  it("does not grant an admin access to the owner transcript", async () => {
+  it("preserves the original web-chat requirements when trimming builder history", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-web-origin",
+      conversationId: "builder-web-origin",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await mkdir(join(dataDir, "web-chat", admin.id), { recursive: true });
+    await writeFile(
+      webChatTranscriptPath(dataDir, admin.id, "source-web-origin"),
+      JSON.stringify({
+        messages: [
+          {
+            id: "source-requirements",
+            role: "user",
+            parts: [
+              {
+                type: "text",
+                text: "Create a daily GitHub PR digest for my open pull requests and send it to Slack.",
+              },
+            ],
+          },
+          ...Array.from({ length: 14 }, (_, index) => ({
+            id: `source-follow-up-${index}`,
+            role: index % 2 === 0 ? "assistant" : "user",
+            parts: [{ type: "text", text: `Source chat follow-up ${index}` }],
+          })),
+        ],
+      }),
+    );
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I found the source requirements."));
+    const scheduler = makeBuilderScheduler("task-web-origin", admin.id);
+    const getTaskById = (scheduler as unknown as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById;
+    getTaskById.mockResolvedValue({
+      id: "task-web-origin",
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_BUILDER",
+      threadTs: null,
+      prompt: "Automation setup",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      timezone: "UTC",
+      sessionMode: "fresh",
+      nextRunAt: null,
+      lastRunAt: null,
+      status: "active",
+      createdBy: admin.id,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      revision: 0,
+      title: "GitHub PR digest",
+      description: null,
+      originChat: {
+        platform: "web",
+        conversationId: "source-web-origin",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+      steps: null,
+      edges: null,
+      outputTarget: null,
+      outputPlatform: null,
+      outputThreadTs: null,
+      outputMode: "deliver",
+      delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=builder-web-origin", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Deterministic).',
+        automationTaskId: "task-web-origin",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(runAgent.mock.calls[0]?.[0].userMessage).toContain(
+      "Create a daily GitHub PR digest for my open pull requests and send it to Slack.",
+    );
+  });
+
+  it("re-grants an admin task access but keeps the owner transcript viewer-scoped", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
     const conversations = createScheduledTaskConversationRepository(db);
@@ -1497,6 +2008,8 @@ describe("web chat API", () => {
       body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign" }),
     });
 
+    // The admin passes the task access gate (re-granted) but the owner's
+    // transcript conversation stays out of the admin's view.
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
     expect(runAgent).not.toHaveBeenCalled();
@@ -1510,6 +2023,84 @@ describe("web chat API", () => {
       conversations.listByTaskConversationForTranscriptUser("task-foreign", "owner-builder", admin.id),
     ).resolves.toHaveLength(0);
     expect(scheduler.getTaskById).toHaveBeenCalledWith("task-foreign");
+  });
+
+  it("opens the builder context to an admin on a foreign-owned task", async () => {
+    const admin = await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-admin-wc@test.com" });
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-foreign-admin",
+      conversationId: "admin-builder",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-foreign-admin",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D_OWNER",
+        threadTs: null,
+        prompt: "Send the owner a brief",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: owner.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 2,
+        title: "Owner brief",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: { platform: "slack", targetType: "dm", targetId: "D_OWNER", threadTs: null, mode: "deliver" },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=admin-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign-admin" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).toContain("task_id: task-foreign-admin");
+    expect(call.taskContext).toMatchObject({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_OWNER",
+      createdBy: admin.id,
+      canManageAnyTask: true,
+      origin: {
+        platform: "web",
+        conversationId: "admin-builder",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    });
   });
 
   it("rejects inaccessible automation ids before running or mutating the transcript", async () => {
@@ -1575,7 +2166,46 @@ describe("web chat API", () => {
     });
   });
 
-  it("streams connected account cards from provider state for account enquiries", async () => {
+  it("opens the builder context to an explicit grantee of a shared automation", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-grantee-wc@test.com" });
+    const member = await users.create({ name: "Member", email: "member-grantee-wc@test.com" });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = makeBuilderScheduler("task-granted-builder", owner.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await getMemberCookie(db, member.id);
+
+    const denied = await app.request("/api/web-chat?conversationId=granted-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+    });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
+
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-granted-builder",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const allowed = await app.request("/api/web-chat?conversationId=granted-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+    });
+    expect(allowed.status).toBe(404);
+    expect(await allowed.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("streams connected CLI account cards before filtering Canvas GitHub connections", async () => {
     const admin = await seedAdmin(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult("You have GitHub connected."));
     const loadIntegrationProvider = vi.fn().mockResolvedValue({
@@ -1593,11 +2223,36 @@ describe("web chat API", () => {
         },
       ]),
     });
+    const cliConnection: CliIntegrationConnection = {
+      id: "cli-1",
+      appId: "github",
+      appName: "GitHub",
+      executionMode: "cli",
+      ownerUserId: admin.id,
+      accountExternalId: "123",
+      accountLogin: "karan",
+      accountAvatarUrl: null,
+      accountType: "User",
+      status: "active",
+      verifiedAt: "2026-01-01T00:00:00Z",
+      lastVerificationError: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isOwnedByViewer: true,
+      canUse: true,
+      canManage: true,
+      shares: [],
+    };
+    const cliIntegrations = {
+      listCatalog: () => [],
+      listConnections: vi.fn().mockResolvedValue([cliConnection]),
+    } as unknown as ReturnType<typeof createCliIntegrationService>;
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       runAgent,
       buildMcpServers: vi.fn().mockResolvedValue({}),
       loadIntegrationProvider,
+      cliIntegrations,
     });
     const cookie = await login(app);
 
@@ -1615,8 +2270,9 @@ describe("web chat API", () => {
         appId: "github",
         appName: "GitHub",
         state: "connected",
-        accountName: "Karan GitHub",
-        connectionId: "conn-1",
+        accountName: "@karan",
+        connectionId: "cli-1",
+        executionMode: "cli",
       },
     });
     const transcript = JSON.parse(
@@ -1628,7 +2284,7 @@ describe("web chat API", () => {
         data: expect.objectContaining({
           appId: "github",
           state: "connected",
-          accountName: "Karan GitHub",
+          accountName: "@karan",
         }),
       }),
     );
@@ -2611,12 +3267,13 @@ describe("web chat API", () => {
               type: "data-progress",
               id: "progress",
               data: {
-                lines: ["Using tool"],
+                lines: ["Reading"],
                 items: [
                   {
-                    kind: "tool",
-                    label: "Using tool",
-                    icon: { type: "tool" },
+                    kind: "file",
+                    label: "Reading",
+                    icon: { type: "tool", name: "Read" },
+                    toolName: "Read",
                   },
                 ],
               },
@@ -2723,7 +3380,7 @@ describe("web chat API", () => {
       type: "data-interruption",
       data: {
         detail: "Sketch paused.",
-        label: "Tell Sketch what to do differently.",
+        label: "What should Sketch do differently?",
       },
     });
 
@@ -2739,7 +3396,7 @@ describe("web chat API", () => {
           id: "interruption",
           data: {
             detail: "Sketch paused.",
-            label: "Tell Sketch what to do differently.",
+            label: "What should Sketch do differently?",
           },
         },
       },
@@ -2795,7 +3452,7 @@ describe("web chat API", () => {
           id: "interruption",
           data: {
             detail: "Sketch paused.",
-            label: "Tell Sketch what to do differently.",
+            label: "What should Sketch do differently?",
           },
         },
       ],
@@ -2992,6 +3649,36 @@ describe("web chat API", () => {
       contextType: "dm",
       deliveryTarget: "919999999999@s.whatsapp.net",
       createdBy: admin.id,
+    });
+  });
+
+  it("uses the current user's id as a task-context delivery fallback when no outbound DM is available", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler: makeBuilderScheduler("unused-task", admin.id),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Give me a summary of my workspace" }),
+    });
+    await res.text();
+
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.platform).toBe("slack");
+    expect(call.contextType).toBe("dm");
+    expect(call.taskContext).toMatchObject({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: admin.id,
+      createdBy: admin.id,
+      conversationKind: "web_chat",
     });
   });
 

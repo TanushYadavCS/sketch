@@ -49,6 +49,11 @@ export function ChatIntegrationConnectionFrame({
       return;
     }
 
+    if (connection.executionMode !== undefined && connection.executionMode !== "canvas") {
+      onOpenChange(false);
+      return;
+    }
+
     if (!providerId) {
       latestStatusRef.current = "unavailable";
       onStatusChange(connection.requestId, "unavailable");

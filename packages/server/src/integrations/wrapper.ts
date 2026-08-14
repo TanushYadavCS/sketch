@@ -76,6 +76,7 @@ export async function startIntegrationAccess(params: {
       token,
       cliPath: spec.cliPath,
       credentialEnv: spec.credentialEnv,
+      argvPolicy: spec.argvPolicy,
       workspaceDir,
       logger,
     });
@@ -204,6 +205,7 @@ async function startBroker(params: {
   token: string;
   cliPath: string;
   credentialEnv: Record<string, string>;
+  argvPolicy?: (argv: readonly string[]) => { allowed: true } | { allowed: false; message: string };
   workspaceDir: string;
   logger: Logger;
 }): Promise<() => Promise<void>> {
@@ -244,6 +246,12 @@ async function startBroker(params: {
       }
       if (!Array.isArray(message.argv) || !message.argv.every((v) => typeof v === "string")) {
         send({ type: "error", message: "Integration broker received invalid argv" });
+        socket.end();
+        return;
+      }
+      const argvDecision = params.argvPolicy?.(message.argv);
+      if (argvDecision?.allowed === false) {
+        send({ type: "error", message: argvDecision.message });
         socket.end();
         return;
       }

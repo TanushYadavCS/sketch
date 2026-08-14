@@ -16,6 +16,7 @@ import {
   addWebhookEndpointMetadata,
   isCanvasWebhookTrigger,
 } from "../../automation/definition";
+import { type LockHolderFields, acquireOrRenewLock, releaseLock, requestSteal } from "../../automation/lock-service";
 import {
   type AutomationDefinitionPatch,
   createAutomationDefinition,
@@ -24,13 +25,15 @@ import {
   updateAutomationDefinition,
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
+import { createAutomationLocksRepository } from "../../db/repositories/automation-locks";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createWebhookEndpointRepository } from "../../db/repositories/webhook-endpoints";
 import type { DB } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
-import { getActiveTaskContextQueueKey, getScheduledTaskQueueKey } from "../../scheduler/queue-key";
 import type { TaskScheduler } from "../../scheduler/service";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../../scheduler/trigger-metadata";
 import type { CurrentAutomation, ScheduledTask, TaskContext } from "../../scheduler/types";
@@ -72,7 +75,9 @@ const workflowStepSchema = z.object({
     .optional()
     .describe("MCP servers available to an agent step. Not used by action steps."),
   actionCapabilities: automationActionCapabilitiesSchema
-    .describe("Capabilities available to action scripts. Sketch tools are creator-scoped and read-only.")
+    .describe(
+      "Capabilities available to action scripts. Sketch tools are creator-scoped and read-only. For managed GitHub CLI access, declare cliIntegrations: ['github'] with usesIntegrationActions: false; any gh subcommand, including write operations, is allowed once declared.",
+    )
     .optional(),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
@@ -82,7 +87,7 @@ const workflowStepSchema = z.object({
       scheduleType: z.enum(["cron", "interval", "once"]).optional(),
       scheduleValue: z.string().optional(),
       timezone: z.string().optional(),
-      app: z.string().optional().describe("Source app for Canvas-managed triggers, e.g. 'clickup' or 'linear'."),
+      app: z.string().optional().describe("Source app for Canvas-managed triggers, e.g. 'clickup'."),
       eventDescription: z.string().optional().describe("Human-readable event description, e.g. 'new issue created'."),
       componentKey: z.string().optional().describe("Canvas trigger component ID/key found through search_components."),
       configuredProps: z.record(z.string(), z.unknown()).optional(),
@@ -109,12 +114,28 @@ const deliverySchema = z.object({
 
 const manageScheduledTasksSchema = {
   action: z
-    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share", "updateStepContent"])
+    .enum([
+      "list",
+      "add",
+      "update",
+      "remove",
+      "pause",
+      "resume",
+      "run",
+      "get",
+      "getRun",
+      "open",
+      "share",
+      "updateStepContent",
+      "lockStatus",
+      "steal",
+    ])
     .describe(
       `Action to perform.
-- 'add': create an automation (legacy agent form: prompt + schedule_type + schedule_value; deterministic form: title + steps with action scripts)
-- 'list': list automations in this context
-- 'update': modify an automation (requires task_id unless the current builder automation is implicit)
+- 'add': create an automation (legacy agent form: prompt + schedule_type + schedule_value; deterministic form: title + steps with action scripts). Successful add emits the builder-opening artifact.
+- 'list': list automations in this context. Always use this before editing by name; inspect each returned task ID and title. Never ask setup questions or invoke create-automation before resolving the task ID.
+- 'update': modify an automation (requires task_id unless the current builder automation is implicit). Successful update emits the builder-opening artifact.
+- 'open': open an existing automation in its builder (requires task_id). This is a read-only routing action; it does not change the automation.
 - 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
@@ -122,7 +143,9 @@ const manageScheduledTasksSchema = {
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
 - 'share': return the canonical URL for an automation (requires task_id)
-- 'updateStepContent': update a single step's prompt or script (requires task_id, step_id, step_content)`,
+- 'updateStepContent': update a single step's prompt or script (requires task_id, step_id, step_content)
+- 'lockStatus': report who currently holds the edit lock on an automation and when it expires (requires task_id)
+- 'steal': request the edit lock on an automation another editor is holding (requires task_id)`,
     ),
   prompt: z
     .string()
@@ -133,7 +156,7 @@ const manageScheduledTasksSchema = {
   execution_mode: automationExecutionModeSchema
     .optional()
     .describe(
-      "How the automation runs: 'Follow exact steps' (deterministic) allows action steps but no agent steps; 'Exact steps with smart help' (hybrid) allows both; 'Let Sketch handle the details' (agent-led) allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
+      "How the automation runs: 'Deterministic' is code-only with no agent; 'Hybrid' combines code and agent steps; 'Agent' is agent-only, Sketch handles the work, and it has no code steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
     .enum(["cron", "interval", "once", "external"])
@@ -218,10 +241,27 @@ For external: use 'webhook' or 'slack_channel_message' as described above.`,
 };
 
 const authoredScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share"]).describe(
-    `Action to perform.
+  action: z
+    .enum([
+      "list",
+      "add",
+      "update",
+      "remove",
+      "pause",
+      "resume",
+      "run",
+      "get",
+      "getRun",
+      "open",
+      "share",
+      "lockStatus",
+      "steal",
+    ])
+    .describe(
+      `Action to perform.
 - 'add': create an automation from the user's natural-language request
 - 'update': edit an automation from the user's natural-language request (requires task_id)
+- 'open': open an existing automation in its builder (requires task_id); this does not change the automation
 - 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'list': list automations in this context
 - 'remove': delete an automation (requires task_id)
@@ -229,8 +269,10 @@ const authoredScheduledTasksSchema = {
 - 'resume': resume a paused automation (requires task_id)
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
-- 'share': return the canonical URL for an automation (requires task_id)`,
-  ),
+- 'share': return the canonical URL for an automation (requires task_id)
+- 'lockStatus': report who currently holds the edit lock on an automation and when it expires (requires task_id)
+- 'steal': request the edit lock on an automation another editor is holding (requires task_id)`,
+    ),
   request: z
     .string()
     .optional()
@@ -259,8 +301,11 @@ type ManageScheduledTasksParams = {
     | "run"
     | "get"
     | "getRun"
+    | "open"
     | "share"
-    | "updateStepContent";
+    | "updateStepContent"
+    | "lockStatus"
+    | "steal";
   request?: string;
   prompt?: string;
   execution_mode?: AutomationExecutionMode;
@@ -300,6 +345,11 @@ export interface ManageScheduledTasksDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo?: SearchableUserRepo;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: Pick<TaskContext, "platform" | "contextType" | "deliveryTarget" | "createdBy">,
+  ) => Promise<string[]>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
   config?: { BASE_URL?: string; PORT: number };
@@ -308,6 +358,48 @@ export interface ManageScheduledTasksDeps {
   chatAuthoring?: ChatAutomationAuthoring;
   currentAutomation?: CurrentAutomation;
   db?: Kysely<DB>;
+  notifyStealRequest?: (taskId: string) => Promise<void>;
+}
+
+async function lockedAutomationMessage(
+  deps: Pick<ManageScheduledTasksDeps, "userRepo">,
+  lock: { holder_user_id: string },
+): Promise<string> {
+  const holderName = (await deps.userRepo?.findById(lock.holder_user_id))?.name ?? null;
+  const holder = holderName ?? lock.holder_user_id;
+  return `Error: ${holder} is editing this automation right now. Reply "take over" to request the edit lock.`;
+}
+
+/** Lock holder identity for chat-driven lock acquire/steal calls. */
+function lockHolderFor(ctx: TaskContext): LockHolderFields {
+  return {
+    userId: ctx.createdBy as string,
+    platform: ctx.origin?.platform === "web" ? "web" : ctx.platform,
+    surface: ctx.origin?.platform === "web" ? "builder" : "chat",
+    conversationId: lockHolderConversationId(ctx),
+  };
+}
+
+/**
+ * Deliverable conversation surface for the lock holder row. Chat contexts use
+ * the delivery target (Slack DM/channel id, WhatsApp group jid) so steal
+ * notifications can reach the holder; web-chat contexts carry the origin
+ * conversation id as attribution for the web UI, with the web platform
+ * keeping steal-notification delivery a deliberate no-op (the web builder's
+ * polling owns web approval).
+ */
+function lockHolderConversationId(ctx: TaskContext): string | null {
+  if (ctx.origin?.platform === "web") return ctx.origin.conversationId || null;
+  return ctx.deliveryTarget || null;
+}
+
+/** Resolves a holder user id to a display name, falling back to the raw id. */
+async function holderDisplayName(
+  deps: Pick<ManageScheduledTasksDeps, "userRepo">,
+  holderUserId: string,
+): Promise<string> {
+  const holderName = (await deps.userRepo?.findById(holderUserId))?.name ?? null;
+  return holderName ?? holderUserId;
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
@@ -493,8 +585,9 @@ function guardedActionLabel(action: ManageScheduledTasksParams["action"]): strin
   if (action === "resume") return "resume";
   if (action === "pause") return "pause";
   if (action === "run") return "run";
-  if (action === "getRun" || action === "get") return "inspect";
+  if (action === "getRun" || action === "get" || action === "lockStatus") return "inspect";
   if (action === "share") return "share";
+  if (action === "steal") return "edit";
   return "update";
 }
 
@@ -507,6 +600,16 @@ async function resolveTaskOwnerName(task: ScheduledTask, userRepo: SearchableUse
     formatDisplayName(owner?.email) ??
     "another user"
   );
+}
+
+/**
+ * Owner-or-grantee access for agent-managed automations. The grant set lives
+ * in automation_task_shares; without a db handle the check fails closed so
+ * non-owners are never granted access by omission.
+ */
+async function taskIsSharedWith(deps: ManageScheduledTasksDeps, taskId: string, userId: string): Promise<boolean> {
+  if (!deps.db) return false;
+  return createAutomationSharesRepository(deps.db).hasGrant(taskId, userId);
 }
 
 async function taskPermissionError(
@@ -724,17 +827,30 @@ function withStepContent(
   });
 }
 
-function collectAutomationArtifact(params: {
+async function collectAutomationArtifact(params: {
   deps: ManageScheduledTasksDeps;
   task: ScheduledTask;
   steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
-}): string {
-  const sourceConversationId =
-    params.deps.taskContext.origin?.platform === "web" ? params.deps.taskContext.origin.conversationId : undefined;
-  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config, sourceConversationId);
+  kind: "New automation" | "Updated automation";
+}): Promise<string> {
+  const existingBuilderConversationId =
+    params.kind === "Updated automation" && params.deps.db && params.deps.taskContext.createdBy
+      ? (
+          await createScheduledTaskConversationRepository(params.deps.db).listByTaskAndTranscriptUser(
+            params.task.id,
+            params.deps.taskContext.createdBy,
+            { kind: "builder" },
+          )
+        ).find((row) => row.archived_at === null)?.conversation_id
+      : undefined;
+  const builderUrl = buildBuilderUrl(
+    params.task.id,
+    params.deps.config,
+    params.kind === "Updated automation" ? existingBuilderConversationId : undefined,
+  );
   const delivery = params.task.delivery;
   const deliveryLabel =
     delivery.mode === "silent"
@@ -743,8 +859,8 @@ function collectAutomationArtifact(params: {
 
   params.deps.automationArtifactCollector?.collect({
     taskId: params.task.id,
-    requiresBuilder: requiresAutomationBuilder(params),
-    kind: "New automation",
+    requiresBuilder: true,
+    kind: params.kind,
     title: params.task.title ?? params.task.prompt,
     description: params.task.description ?? `${buildArtifactScheduleLabel(params)}. Delivery: ${deliveryLabel}.`,
     tags: buildArtifactTags({
@@ -822,7 +938,19 @@ async function handleConfiguredChatAuthoring(
   }
 
   let result: ChatAutomationAuthoringResult;
+  const db = deps.db;
+  const createdBy = deps.taskContext.createdBy;
   try {
+    // The authoring edit path is lock-guarded like the structured update path:
+    // acquire before the edit (so persistence's in-transaction lock check passes
+    // for us) and release after, with the shared locked message when another
+    // editor holds the lock.
+    if (params.action === "update" && targetTaskId && db && createdBy) {
+      const acquired = await acquireOrRenewLock(db, { taskId: targetTaskId, holder: lockHolderFor(deps.taskContext) });
+      if (acquired.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, acquired.lock));
+      }
+    }
     result = await chatAuthoring.author({
       action: params.action === "add" ? "create" : "edit",
       request,
@@ -832,30 +960,36 @@ async function handleConfiguredChatAuthoring(
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {
-      return text("Error: automation authoring could not produce a valid definition. No changes were saved.");
+      return text(
+        "Error: automation authoring could not produce a valid definition after three attempts. No invalid automation was saved. Please correct your request and try again.",
+      );
     }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
+  } finally {
+    if (params.action === "update" && targetTaskId && db && createdBy) {
+      await releaseLock(db, { taskId: targetTaskId, userId: createdBy });
+    }
   }
 
   if (result.kind === "clarification") return text(result.message);
   if (result.kind === "error") return text(`Error: ${result.message}`);
 
   if (params.action === "add" || params.action === "update") {
-    collectAutomationArtifact({
+    await collectAutomationArtifact({
       deps,
       task: result.task,
       steps: result.artifact.steps,
       scheduleType: result.artifact.scheduleType,
       scheduleValue: result.artifact.scheduleValue,
       timezone: result.artifact.timezone,
+      kind: params.action === "add" ? "New automation" : "Updated automation",
     });
   }
   const verb = params.action === "add" ? "created" : "updated";
   const triggerConfig = result.artifact.steps.find((step) => step.type === "trigger")?.triggerConfig;
   const webhookMetadata = await webhookResponseMetadata(deps, result.task.id, triggerConfig);
   const response = { ...result.task, ...(webhookMetadata ?? {}) };
-  const testRun = await automaticAutomationTestRun(deps.scheduler, result.task.id);
-  return text([`Automation ${verb}:`, JSON.stringify(response, null, 2), testRun].join("\n"));
+  return text([`Automation ${verb}:`, JSON.stringify(response, null, 2)].join("\n"));
 }
 
 export async function handleManageScheduledTasks(
@@ -868,7 +1002,10 @@ export async function handleManageScheduledTasks(
   const taskConversationAssociation = webChatTaskConversationAssociation(ctx);
   const explicitTaskId = params.task_id?.trim() || undefined;
   const task_id =
-    explicitTaskId ?? (action === "update" || action === "updateStepContent" ? currentAutomation?.taskId : undefined);
+    explicitTaskId ??
+    (action === "update" || action === "updateStepContent" || action === "open"
+      ? currentAutomation?.taskId
+      : undefined);
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
@@ -876,6 +1013,15 @@ export async function handleManageScheduledTasks(
     "Error: Integration-backed action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use a read-only Sketch tool action.";
   const FRESH_SESSION_ONLY_MSG =
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
+
+  if (
+    ctx.conversationKind === "web_chat" &&
+    (action === "add" || action === "update" || action === "updateStepContent")
+  ) {
+    return text(
+      "Automation setup and edits happen in the builder. In web chat, use list to resolve an existing automation, then use open with its task_id. No changes were made.",
+    );
+  }
 
   if (deps.chatAuthoring && (action === "add" || action === "update" || action === "updateStepContent")) {
     return handleConfiguredChatAuthoring(params, deps);
@@ -898,6 +1044,24 @@ export async function handleManageScheduledTasks(
     return null;
   };
 
+  const ensureAgentSkillsAvailable = async (
+    candidateSteps: WorkflowStepInput[] | undefined,
+  ): Promise<ReturnType<typeof text> | null> => {
+    if (!deps.validateAgentSkills || !ctx.createdBy || !candidateSteps) return null;
+    const requestedSkills = candidateSteps.flatMap((step) => (step.type === "agent" ? (step.agentSkills ?? []) : []));
+    if (requestedSkills.length === 0) return null;
+    const unavailableSkills = await deps.validateAgentSkills(ctx.createdBy, requestedSkills, {
+      platform: ctx.platform,
+      contextType: ctx.contextType,
+      deliveryTarget: ctx.deliveryTarget,
+      createdBy: ctx.createdBy,
+    });
+    if (unavailableSkills.length === 0) return null;
+    return text(
+      `Error: connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+    );
+  };
+
   const OWNERSHIP_GUARDED_ACTIONS = [
     "update",
     "get",
@@ -906,17 +1070,37 @@ export async function handleManageScheduledTasks(
     "resume",
     "run",
     "getRun",
+    "open",
     "share",
     "updateStepContent",
+    "lockStatus",
+    "steal",
   ];
+  // Share is owner-only (admins denied). Remove is owner-or-admin. Every other
+  // guarded action passes for owner, grantee, or admin. Persistence still
+  // enforces owner-or-grantee inside its own transactions, so admin mutations
+  // of a foreign task are denied there (L5 admin restore resolves this).
+  const OWNER_ONLY_ACTIONS = new Set<ManageScheduledTasksParams["action"]>(["share"]);
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
     if (!ctx.createdBy || !task) {
       return text("Error: task not found.");
     }
-    if (!ctx.canManageAnyTask && task.createdBy !== ctx.createdBy) {
-      return text(await taskPermissionError(task, action, deps.userRepo));
+    const isOwner = task.createdBy === ctx.createdBy;
+    const isAdmin = ctx.canManageAnyTask === true;
+    if (action === "remove") {
+      if (!isOwner && !isAdmin) {
+        return text(await taskPermissionError(task, action, deps.userRepo));
+      }
+    } else {
+      const isGrantee = !isOwner && (await taskIsSharedWith(deps, task.id, ctx.createdBy));
+      if (!isOwner && !isGrantee && !isAdmin) {
+        return text(await taskPermissionError(task, action, deps.userRepo));
+      }
+      if (OWNER_ONLY_ACTIONS.has(action) && !isOwner) {
+        return text(await taskPermissionError(task, action, deps.userRepo));
+      }
     }
     guardedTask = task;
   }
@@ -930,15 +1114,23 @@ export async function handleManageScheduledTasks(
       if (!ctx.createdBy) {
         return text("Error: scheduled task creator is not available in this context.");
       }
-      if (ctx.contextType === "dm" && ctx.canManageAnyTask) {
+      if (ctx.contextType !== "dm") {
+        // Channel/group context: tasks whose delivery target is this channel,
+        // plus tasks the member owns or has been granted, deduplicated by id.
+        const [deliveryTasks, accessibleTasks] = await Promise.all([
+          deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget }),
+          deps.scheduler.listTasksForUser(ctx.createdBy),
+        ]);
+        const tasksById = new Map<string, ScheduledTask>();
+        for (const task of [...deliveryTasks, ...accessibleTasks]) tasksById.set(task.id, task);
+        return text(JSON.stringify([...tasksById.values()], null, 2));
+      }
+      if (ctx.canManageAnyTask) {
+        // Admin DM context: every automation, active or not.
         const tasks = await deps.scheduler.listTasks({ includeInactive: true });
         return text(JSON.stringify(tasks, null, 2));
       }
-      if (ctx.contextType !== "dm") {
-        const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
-        return text(JSON.stringify(tasks, null, 2));
-      }
-      const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
+      const tasks = await deps.scheduler.listTasksForUser(ctx.createdBy);
       return text(JSON.stringify(tasks, null, 2));
     }
 
@@ -1041,6 +1233,9 @@ export async function handleManageScheduledTasks(
           }
         }
       }
+
+      const agentSkillError = await ensureAgentSkillsAvailable(params.steps);
+      if (agentSkillError) return agentSkillError;
 
       // Schedule validation
       if (params.schedule_type === "interval") {
@@ -1169,13 +1364,14 @@ export async function handleManageScheduledTasks(
       const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
       const webhookMetadata = await webhookResponseMetadata(deps, refreshedTask.id, triggerStep?.triggerConfig);
 
-      collectAutomationArtifact({
+      await collectAutomationArtifact({
         deps,
         task: refreshedTask,
         steps: withStepContent(stepsForDb, stepContentForDefinition("new-task", steps)),
         scheduleType,
         scheduleValue,
         timezone: resolvedTimezone,
+        kind: "New automation",
       });
 
       const response: Record<string, unknown> = {
@@ -1198,6 +1394,8 @@ export async function handleManageScheduledTasks(
           "Error: Canvas-managed webhook triggers are not supported; use the Sketch-native webhook trigger instead.",
         );
       }
+      const agentSkillError = await ensureAgentSkillsAvailable(params.steps);
+      if (agentSkillError) return agentSkillError;
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
@@ -1210,6 +1408,7 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
+      const db = deps.db;
 
       const expectedRevision =
         params.expected_revision ??
@@ -1220,13 +1419,19 @@ export async function handleManageScheduledTasks(
 
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
       try {
+        if (ctx.createdBy) {
+          const acquired = await acquireOrRenewLock(db, { taskId: task_id, holder: lockHolderFor(ctx) });
+          if (acquired.kind === "locked") {
+            return text(await lockedAutomationMessage(deps, acquired.lock));
+          }
+        }
         saved = await updateAutomationDefinition({
-          db: deps.db,
+          db,
           taskId: task_id,
           patch,
           actor: {
             userId: ctx.createdBy,
-            canManageAnyTask: ctx.canManageAnyTask ?? false,
+            role: ctx.canManageAnyTask ? "admin" : undefined,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
@@ -1236,6 +1441,10 @@ export async function handleManageScheduledTasks(
         const message = automationPersistenceError(error);
         if (message) return text(message);
         throw error;
+      } finally {
+        if (ctx.createdBy) {
+          await releaseLock(db, { taskId: task_id, userId: ctx.createdBy });
+        }
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
       if (saved.kind === "access_denied") return text(`Error: you do not have permission to update task ${task_id}.`);
@@ -1244,23 +1453,46 @@ export async function handleManageScheduledTasks(
           `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
         );
       }
+      if (saved.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
+      }
 
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
-      collectAutomationArtifact({
+      await collectAutomationArtifact({
         deps,
         task: updated,
         steps: withStepContent(saved.request.steps, saved.request.stepContent),
         scheduleType: saved.request.scheduleType,
         scheduleValue: saved.request.scheduleValue,
         timezone: saved.request.timezone,
+        kind: "Updated automation",
       });
       const updatedTrigger = saved.request.steps.find((step) => step.type === "trigger")?.triggerConfig;
       const webhookMetadata = await webhookResponseMetadata(deps, updated.id, updatedTrigger);
       const response = { ...updated, ...(webhookMetadata ?? {}) };
       const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
       return text(["Automation updated:", JSON.stringify(response, null, 2), testRun].join("\n"));
+    }
+
+    case "open": {
+      if (!task_id) {
+        return text("Error: task_id is required for open action.");
+      }
+      if (!guardedTask) {
+        return text("Error: task not found.");
+      }
+      const builderUrl = await collectAutomationArtifact({
+        deps,
+        task: guardedTask,
+        steps: parseWorkflowStepsJson(guardedTask.steps) ?? [],
+        scheduleType: guardedTask.scheduleType,
+        scheduleValue: guardedTask.scheduleValue,
+        timezone: guardedTask.timezone,
+        kind: "Updated automation",
+      });
+      return text(`Automation ${task_id} is ready to edit in the builder: ${builderUrl}`);
     }
 
     case "share": {
@@ -1301,7 +1533,7 @@ export async function handleManageScheduledTasks(
         taskId: task_id,
         actor: {
           userId: ctx.createdBy,
-          canManageAnyTask: ctx.canManageAnyTask ?? false,
+          role: ctx.canManageAnyTask ? "admin" : undefined,
         },
         scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
         encryptionKey: deps.encryptionKey,
@@ -1337,31 +1569,31 @@ export async function handleManageScheduledTasks(
       if (!task_id) {
         return text("Error: task_id is required for run action.");
       }
-      try {
-        const activeQueueKey = deps.activeQueueKey ?? getActiveTaskContextQueueKey(ctx);
-        if (
-          guardedTask?.status === "active" &&
-          activeQueueKey &&
-          getScheduledTaskQueueKey(guardedTask) === activeQueueKey
-        ) {
-          await deps.scheduler.enqueueTaskById(task_id);
-          return text(`Automation ${task_id} manual run queued and will post back here shortly.`);
-        }
-
-        const result = await deps.scheduler.executeTaskById(task_id, { runMode: "manual" });
-        if (!result) {
-          const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
-          return text(
-            latestRun
-              ? `Automation ${task_id} is already completed. Latest run:\n${JSON.stringify(latestRun, null, 2)}`
-              : `Automation ${task_id} is already completed and has no run history.`,
-          );
-        }
-        return text(`Automation ${task_id} completed:\n${JSON.stringify(result, null, 2)}`);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return text(`Error: ${message}`);
+      if (!deps.automationRunsRepo) {
+        return text("Error: run history is not available in this context.");
       }
+      const runId = await deps.automationRunsRepo.create({
+        taskId: task_id,
+        triggeredByUserId: ctx.createdBy,
+        triggerData: { type: "manual" },
+      });
+      // Fire the run without awaiting it: results deliver to the owner's
+      // destinations through the normal scheduler path, and failures are
+      // recorded + notified by the scheduler (failReservedManualRun). This
+      // catch only prevents an unhandled rejection in the chat tool call.
+      void deps.scheduler
+        .executeTaskById(task_id, {
+          runMode: "manual",
+          runId,
+          preserveTaskState: true,
+          triggeredByUserId: ctx.createdBy,
+        })
+        .catch(() => undefined);
+      const base = deps.config?.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${deps.config?.PORT ?? 3000}`;
+      const displayName = guardedTask ? taskDisplayName(guardedTask) : task_id;
+      return text(
+        `Automation "${displayName}" run started. Track it here: ${base}/scheduled-tasks/${encodeURIComponent(task_id)}/edit?runId=${runId}`,
+      );
     }
 
     case "getRun": {
@@ -1380,6 +1612,49 @@ export async function handleManageScheduledTasks(
       return text(JSON.stringify(run, null, 2));
     }
 
+    case "lockStatus": {
+      if (!task_id) {
+        return text("Error: task_id is required for lockStatus action.");
+      }
+      if (!deps.db) {
+        return text("Error: automation lock state is not available in this context.");
+      }
+      const lock = await createAutomationLocksRepository(deps.db).getByTaskId(task_id);
+      const displayName = guardedTask ? taskDisplayName(guardedTask) : task_id;
+      if (!lock) {
+        return text(`Automation "${displayName}" is not locked.`);
+      }
+      const holder = await holderDisplayName(deps, lock.holder_user_id);
+      return text(
+        `Automation "${displayName}" is locked by ${holder}. The lock expires at ${lock.expires_at}. Reply "take over" to request the edit lock.`,
+      );
+    }
+
+    case "steal": {
+      if (!task_id) {
+        return text("Error: task_id is required for steal action.");
+      }
+      if (!ctx.createdBy) {
+        return text("Error: your identity is not available to request the edit lock.");
+      }
+      if (!deps.db) {
+        return text("Error: automation lock state is not available in this context.");
+      }
+      const stolen = await requestSteal(deps.db, { taskId: task_id, requester: lockHolderFor(ctx) });
+      const displayName = guardedTask ? taskDisplayName(guardedTask) : task_id;
+      if (stolen.kind === "not_locked") {
+        return text(`Automation "${displayName}" is not locked by another editor right now.`);
+      }
+      const holder = await holderDisplayName(deps, stolen.lock.holder_user_id);
+      if (stolen.kind === "locked") {
+        return text(`Another user has already asked to take over this automation. Waiting for ${holder} to respond.`);
+      }
+      if (deps.notifyStealRequest) {
+        void deps.notifyStealRequest(task_id).catch(() => {});
+      }
+      return text(`Waiting for ${holder} to approve your request to take over this automation.`);
+    }
+
     case "updateStepContent": {
       if (!task_id) {
         return text("Error: task_id is required for updateStepContent action.");
@@ -1390,9 +1665,10 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
+      const db = deps.db;
 
       const currentDefinition = await getAutomationDefinition({
-        db: deps.db,
+        db,
         taskId: task_id,
         encryptionKey: deps.encryptionKey,
       });
@@ -1408,8 +1684,14 @@ export async function handleManageScheduledTasks(
         (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
       try {
+        if (ctx.createdBy) {
+          const acquired = await acquireOrRenewLock(db, { taskId: task_id, holder: lockHolderFor(ctx) });
+          if (acquired.kind === "locked") {
+            return text(await lockedAutomationMessage(deps, acquired.lock));
+          }
+        }
         saved = await updateAutomationDefinition({
-          db: deps.db,
+          db,
           taskId: task_id,
           patch: {
             expectedRevision,
@@ -1423,7 +1705,7 @@ export async function handleManageScheduledTasks(
           },
           actor: {
             userId: ctx.createdBy,
-            canManageAnyTask: ctx.canManageAnyTask ?? false,
+            role: ctx.canManageAnyTask ? "admin" : undefined,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
@@ -1433,6 +1715,10 @@ export async function handleManageScheduledTasks(
         const message = automationPersistenceError(error);
         if (message) return text(message);
         throw error;
+      } finally {
+        if (ctx.createdBy) {
+          await releaseLock(db, { taskId: task_id, userId: ctx.createdBy });
+        }
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
       if (saved.kind === "access_denied") return text(`Error: you do not have permission to update task ${task_id}.`);
@@ -1440,6 +1726,9 @@ export async function handleManageScheduledTasks(
         return text(
           `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
         );
+      }
+      if (saved.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
       }
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)

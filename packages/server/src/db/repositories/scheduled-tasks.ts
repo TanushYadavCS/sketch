@@ -76,6 +76,33 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    /**
+     * Own tasks plus tasks explicitly shared with the user, deduplicated.
+     * Two indexed queries: shares by user_id, then tasks by created_by or by
+     * the shared task ids — no N+1 over per-task grant lookups.
+     */
+    async listAccessibleByUser(userId: string): Promise<ScheduledTaskRow[]> {
+      const sharedTaskIds = await db
+        .selectFrom("automation_task_shares")
+        .select("task_id")
+        .where("user_id", "=", userId)
+        .execute();
+      const taskIds = sharedTaskIds.map((row) => row.task_id);
+      const base = db.selectFrom("scheduled_tasks").selectAll().orderBy("created_at", "desc");
+      const rows =
+        taskIds.length === 0
+          ? await base.where("created_by", "=", userId).execute()
+          : await base.where((eb) => eb.or([eb("created_by", "=", userId), eb("id", "in", taskIds)])).execute();
+      const seen = new Set<string>();
+      const unique: ScheduledTaskRow[] = [];
+      for (const row of rows) {
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        unique.push(row);
+      }
+      return unique;
+    },
+
     async listActive(): Promise<ScheduledTaskRow[]> {
       return db
         .selectFrom("scheduled_tasks")

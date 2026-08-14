@@ -11,14 +11,19 @@ import {
   isStrictAutomationPlaceholderRow,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
+import { acquireOrRenewLock, approveSteal, denySteal, releaseLock, requestSteal } from "../automation/lock-service";
 import {
+  createAutomationDraft,
   deleteAutomation,
   replaceAutomationDefinition,
   selectAutomationSetupExecutionMode,
 } from "../automation/persistence";
 import { parseAutomationTriggerConfig } from "../automation/webhook";
+import type { AutomationTaskLockRow, LockHolderFields } from "../db/repositories/automation-locks";
 
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
 import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
@@ -30,8 +35,13 @@ import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
+import type { SlackBot } from "../slack/bot";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
+import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
@@ -43,7 +53,12 @@ interface ScheduledTaskMutationDeps {
   removeTaskRuntime?: (id: string) => Promise<boolean>;
   executeTaskById: (
     id: string,
-    options?: { preserveTaskState?: boolean; runMode?: "production" | "manual" | "test"; runId?: string },
+    options?: {
+      preserveTaskState?: boolean;
+      runMode?: "production" | "manual" | "test";
+      runId?: string;
+      triggeredByUserId?: string | null;
+    },
   ) => Promise<unknown>;
   refreshTaskSchedule?: (id: string) => Promise<unknown>;
   executeStepById?: (
@@ -59,6 +74,18 @@ interface ScheduledTaskRouteOptions {
   baseUrl?: string | null;
   port?: number;
   encryptionKey?: string;
+  getSlack?: () => SlackBot | null;
+  whatsappRuntime?: WhatsAppRuntime;
+  validateAgentSkills?: (
+    ownerUserId: string,
+    skillIds: string[],
+    taskContext?: {
+      platform: "slack" | "whatsapp";
+      contextType: "dm" | "channel" | "group";
+      deliveryTarget: string;
+      createdBy?: string | null;
+    },
+  ) => Promise<string[]>;
 }
 
 interface ScheduledTaskListItem {
@@ -84,6 +111,11 @@ interface ScheduledTaskListItem {
   canPause: boolean;
   canResume: boolean;
   canDelete: boolean;
+  isOwner: boolean;
+  sharedWithMe: boolean;
+  canShare: boolean;
+  canEdit: boolean;
+  shareCount: number;
   title: string | null;
   description: string | null;
   originChat: {
@@ -104,12 +136,30 @@ interface ScheduledTaskListItem {
   runCount: number;
 }
 
+interface AutomationShareSummary {
+  userId: string;
+  name: string | null;
+  email: string | null;
+  grantedByUserId: string;
+  grantedAt: string;
+}
+
 interface ScheduledTaskOriginChatMessage {
   id: string;
   role: "user" | "assistant";
   senderName: string;
   text: string;
   createdAt: string;
+}
+
+interface AutomationLockView {
+  heldByUserId: string;
+  heldByName: string | null;
+  heldByPlatform: string;
+  heldBySurface: string;
+  expiresAt: string;
+  isHeldByMe: boolean;
+  stealPending: { requesterName: string | null; expiresAt: string } | null;
 }
 
 function compareNewestFirst(a: ScheduledTaskRow, b: ScheduledTaskRow): number {
@@ -191,7 +241,9 @@ function toOriginChatMessage(message: StoredConversationMessage): ScheduledTaskO
 async function buildTaskListItems(
   db: Kysely<DB>,
   rows: ScheduledTaskRow[],
-  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> = {},
+  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> & {
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string>; role?: string };
+  },
 ): Promise<ScheduledTaskListItem[]> {
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
@@ -271,6 +323,11 @@ async function buildTaskListItems(
   const slackUserNames = new Map(slackUserEntries);
   const groupNames = new Map(groupEntries);
 
+  const shareCounts = await loadShareCounts(
+    db,
+    rows.map((row) => row.id),
+  );
+
   // Single grouped query — avoids N+1 per task.
   const runData = await runsRepo.getRunSummaries(rows.map((r) => r.id));
 
@@ -315,6 +372,9 @@ async function buildTaskListItems(
         })
       : triggerConfig;
 
+    const isOwner = options.viewer.userId !== null && row.created_by === options.viewer.userId;
+    const isAdmin = options.viewer.role === "admin";
+    const sharedWithMe = !isOwner && options.viewer.grantedTaskIds.has(row.id);
     const rd = runData.get(row.id);
     const delivery = resolveWorkflowDelivery(row);
     let deliveryLabel = delivery.targetId;
@@ -353,7 +413,12 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
-      canDelete: true,
+      canDelete: isOwner || isAdmin,
+      isOwner,
+      sharedWithMe,
+      canShare: isOwner,
+      canEdit: isOwner || isAdmin || options.viewer.grantedTaskIds.has(row.id),
+      shareCount: shareCounts.get(row.id) ?? 0,
       title: row.title,
       description: row.description,
       originChat:
@@ -380,6 +445,64 @@ async function buildTaskListItems(
   });
 }
 
+async function loadShareCounts(db: Kysely<DB>, taskIds: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (taskIds.length === 0) return counts;
+  const rows = await db
+    .selectFrom("automation_task_shares")
+    .select(({ fn }) => ["task_id", fn.count("id").as("share_count")])
+    .where("task_id", "in", taskIds)
+    .groupBy("task_id")
+    .execute();
+  for (const row of rows) counts.set(row.task_id, Number(row.share_count));
+  return counts;
+}
+
+async function listSharesWithNames(db: Kysely<DB>, taskId: string): Promise<AutomationShareSummary[]> {
+  const rows = await db.selectFrom("automation_task_shares").selectAll().where("task_id", "=", taskId).execute();
+  if (rows.length === 0) return [];
+  const userIds = [...new Set(rows.map((row) => row.user_id))];
+  const users = await db.selectFrom("users").select(["id", "name", "email"]).where("id", "in", userIds).execute();
+  const userById = new Map(users.map((user) => [user.id, user]));
+  return rows.map((row) => ({
+    userId: row.user_id,
+    name: userById.get(row.user_id)?.name ?? null,
+    email: userById.get(row.user_id)?.email ?? null,
+    grantedByUserId: row.granted_by_user_id,
+    grantedAt: row.granted_at,
+  }));
+}
+
+/**
+ * Lock view for the web builder contract. An expired pending steal is hidden
+ * (stealPending null) so the UI never renders a stale request.
+ */
+async function toLockView(
+  row: AutomationTaskLockRow,
+  viewerUserId: string | null,
+  usersRepo: ReturnType<typeof createUserRepository>,
+): Promise<AutomationLockView> {
+  const [holder, requester] = await Promise.all([
+    usersRepo.findById(row.holder_user_id),
+    row.steal_requester_user_id ? usersRepo.findById(row.steal_requester_user_id) : Promise.resolve(undefined),
+  ]);
+  const stealPending =
+    row.steal_requester_user_id !== null &&
+    row.steal_expires_at !== null &&
+    row.steal_expires_at > new Date().toISOString()
+      ? { requesterName: requester?.name ?? null, expiresAt: row.steal_expires_at }
+      : null;
+  return {
+    heldByUserId: row.holder_user_id,
+    heldByName: holder?.name ?? null,
+    heldByPlatform: row.holder_platform,
+    heldBySurface: row.holder_surface,
+    expiresAt: row.expires_at,
+    isHeldByMe: viewerUserId !== null && row.holder_user_id === viewerUserId,
+    stealPending,
+  };
+}
+
 export function scheduledTaskRoutes(
   db: Kysely<DB>,
   scheduler: ScheduledTaskMutationDeps,
@@ -387,6 +510,7 @@ export function scheduledTaskRoutes(
 ) {
   const routes = new Hono();
   const repo = createScheduledTaskRepository(db);
+  const sharesRepo = createAutomationSharesRepository(db);
   const users = createUserRepository(db);
   const logger = options.logger;
   const runsRepo = createAutomationRunsRepository(db);
@@ -401,10 +525,15 @@ export function scheduledTaskRoutes(
     });
   }
 
-  async function reserveManualRun(taskId: string): Promise<string | null> {
+  async function reserveManualRun(taskId: string, triggeredByUserId?: string | null): Promise<string | null> {
     const runId = randomUUID();
     try {
-      await runsRepo.create({ id: runId, taskId, triggerData: { type: "manual" } });
+      await runsRepo.create({
+        id: runId,
+        taskId,
+        triggerData: { type: "manual" },
+        triggeredByUserId: triggeredByUserId ?? null,
+      });
       return runId;
     } catch (error) {
       logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to reserve manual run");
@@ -412,12 +541,17 @@ export function scheduledTaskRoutes(
     }
   }
 
-  async function enqueueReservedManualRun(taskId: string, runId: string): Promise<boolean> {
+  async function enqueueReservedManualRun(
+    taskId: string,
+    runId: string,
+    triggeredByUserId?: string | null,
+  ): Promise<boolean> {
     try {
       const execution = scheduler.executeTaskById(taskId, {
         preserveTaskState: true,
         runMode: "manual",
         runId,
+        triggeredByUserId: triggeredByUserId ?? null,
       });
       void Promise.resolve(execution)
         .then((run) => {
@@ -451,7 +585,15 @@ export function scheduledTaskRoutes(
     return user?.id ?? null;
   }
 
-  async function loadAccessibleTask(c: Context, id: string) {
+  async function loadGrantedTaskIds(userId: string | null): Promise<Set<string>> {
+    if (!userId) return new Set<string>();
+    return new Set(await sharesRepo.listTaskIdsForUser(userId));
+  }
+
+  async function loadAccessibleTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string | null; grantedTaskIds: Set<string> }> {
     const row = await repo.getById(id);
     if (!row) {
       return {
@@ -459,7 +601,9 @@ export function scheduledTaskRoutes(
       };
     }
     const userId = await resolveUserId(c.get("sub"));
-    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, {
+    const hasGrant = userId ? await sharesRepo.hasGrant(id, userId) : false;
+    const grantedUserIds = hasGrant && userId ? new Set([userId]) : new Set<string>();
+    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, grantedUserIds, {
       userId,
       role: c.get("role"),
     });
@@ -472,20 +616,64 @@ export function scheduledTaskRoutes(
         response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
       };
     }
-    return { row: accessibleRow };
+    return {
+      row: accessibleRow,
+      userId,
+      grantedTaskIds: hasGrant && userId ? new Set([id]) : new Set<string>(),
+    };
   }
 
-  async function loadFullDefinition(row: ScheduledTaskRow) {
+  async function loadOwnedTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result;
+    if (!result.userId || result.userId !== result.row.created_by) {
+      logger?.warn(
+        { userId: result.userId, taskId: id, ownerUserId: result.row.created_by },
+        "scheduled-tasks: non-owner denied ownership operation",
+      );
+      return {
+        response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
+      };
+    }
+    return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
+  }
+
+  async function loadDeletableTask(
+    c: Context,
+    id: string,
+  ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result;
+    if (!result.userId || (result.userId !== result.row.created_by && c.get("role") !== "admin")) {
+      logger?.warn(
+        { userId: result.userId, taskId: id, ownerUserId: result.row.created_by },
+        "scheduled-tasks: non-owner non-admin denied deletion",
+      );
+      return {
+        response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
+      };
+    }
+    return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
+  }
+
+  async function loadFullDefinition(
+    row: ScheduledTaskRow,
+    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string>; role?: string },
+  ) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
-    const [stepContentRows, runRows, owner, editor, webhookEndpoint] = await Promise.all([
+    const [stepContentRows, runRows, owner, editor, webhookEndpoint, lockRow] = await Promise.all([
       stepContentRepo.getByTask(row.id),
       runsRepo.list(row.id),
       row.created_by ? users.findById(row.created_by) : Promise.resolve(undefined),
       row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
       createWebhookEndpointRepository(db, options.encryptionKey).getByTaskId(row.id),
+      createAutomationLocksRepository(db).getByTaskId(row.id),
     ]);
-    return buildAutomationDefinition({
+    const definition = await buildAutomationDefinition({
       row,
       stepContentRows,
       runRows,
@@ -495,6 +683,19 @@ export function scheduledTaskRoutes(
       webhookPort: options.port,
       webhookEndpoint,
     });
+    const isOwner = viewer.userId !== null && row.created_by === viewer.userId;
+    const isAdmin = viewer.role === "admin";
+    return {
+      ...definition,
+      isOwner,
+      canShare: isOwner,
+      canEdit: isOwner || isAdmin || viewer.grantedTaskIds.has(row.id),
+      shares: isOwner ? await listSharesWithNames(db, row.id) : [],
+      // Lazy expiry on access: an expired lock is not a lock — hide it from the view.
+      ...(lockRow && lockRow.expires_at > new Date().toISOString()
+        ? { lock: await toLockView(lockRow, viewer.userId, users) }
+        : {}),
+    };
   }
 
   async function hasBrokerCapableProvider(): Promise<boolean> {
@@ -503,18 +704,55 @@ export function scheduledTaskRoutes(
     return Boolean(provider?.isBrokerCapable());
   }
 
-  routes.get("/", async (c) => {
-    const role = c.get("role");
-    const userId = await resolveUserId(c.get("sub"));
+  routes.post("/", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
 
-    let rows: ScheduledTaskRow[];
-    if (role === "admin" && userId) {
-      rows = await repo.listAll();
-    } else if (userId) {
-      rows = await repo.listByCreatedBy(userId);
-    } else {
-      rows = [];
+    const userId = await resolveUserId(c.get("sub"));
+    const currentUser = userId ? await users.findById(userId) : undefined;
+    if (!currentUser) {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Admin identity could not be resolved" } }, 401);
     }
+
+    const builderConversationId = `builder-${randomUUID()}`;
+    try {
+      const result = await createAutomationDraft({
+        db,
+        context: {
+          platform: "slack",
+          contextType: "dm",
+          deliveryTarget: currentUser.slack_user_id ?? currentUser.id,
+          threadTs: null,
+          createdBy: currentUser.id,
+          originPlatform: "web",
+          originConversationId: builderConversationId,
+          originProviderThreadId: null,
+          originMessageId: null,
+        },
+        timezone: currentUser.timezone ?? "UTC",
+        taskConversationAssociation: {
+          conversationId: builderConversationId,
+          transcriptUserId: currentUser.id,
+          kind: "builder",
+        },
+      });
+
+      return c.json({ automationId: result.row.id, conversationId: builderConversationId }, 201);
+    } catch (error) {
+      logger?.error({ err: error, userId: currentUser.id }, "scheduled-tasks: failed to create admin draft");
+      return c.json({ error: { code: "CREATION_FAILED", message: "Automation could not be created" } }, 500);
+    }
+  });
+
+  routes.get("/", async (c) => {
+    const userId = await resolveUserId(c.get("sub"));
+    if (!userId) {
+      return c.json({ tasks: [] });
+    }
+    const grantedTaskIds = await loadGrantedTaskIds(userId);
+    const isAdmin = c.get("role") === "admin";
+
+    let rows: ScheduledTaskRow[] = isAdmin ? await repo.listAll() : await repo.listAccessibleByUser(userId);
 
     const stepContentRepo = createAutomationStepContentRepository(db);
     rows = (
@@ -537,6 +775,7 @@ export function scheduledTaskRoutes(
         baseUrl: options.baseUrl,
         port: options.port,
         encryptionKey: options.encryptionKey,
+        viewer: { userId, grantedTaskIds, role: c.get("role") },
       }),
     });
   });
@@ -572,12 +811,193 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
-    return c.json({ automation: await loadFullDefinition(result.row) });
+    return c.json({
+      automation: await loadFullDefinition(result.row, {
+        userId: result.userId,
+        grantedTaskIds: result.grantedTaskIds,
+        role: c.get("role"),
+      }),
+    });
+  });
+
+  // --- Edit-lock endpoints (pessimistic whole-automation locks) ---
+  // Lock holders carry their known chat surface when they have one so steal
+  // notifications can be delivered; pure web builders stay on the builder
+  // surface, whose polling owns approval.
+
+  /**
+   * Lock-holder surface for web API lock acquisition. Web users with a chat
+   * identity record that surface (so steal notifications and outcomes can be
+   * delivered); pure web users stay on the builder surface, whose polling owns
+   * approval.
+   */
+  async function webLockHolderFor(userId: string): Promise<LockHolderFields> {
+    const user = await users.findById(userId);
+    if (user?.slack_user_id) {
+      return { userId, platform: "slack", surface: "dm", conversationId: user.slack_user_id };
+    }
+    if (user?.whatsapp_number) {
+      return {
+        userId,
+        platform: "whatsapp",
+        surface: "dm",
+        conversationId: phoneE164ToWhatsAppJid(user.whatsapp_number),
+      };
+    }
+    return { userId, platform: "web", surface: "builder", conversationId: null };
+  }
+
+  routes.post("/:id/lock", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const acquired = await acquireOrRenewLock(db, {
+      taskId: id,
+      holder: await webLockHolderFor(result.userId),
+    });
+    const lock = await toLockView(acquired.lock, result.userId, users);
+    if (acquired.kind === "locked") {
+      return c.json({ error: { code: "LOCKED", message: "Automation is locked by another editor", lock } }, 409);
+    }
+    return c.json({ lock });
+  });
+
+  routes.delete("/:id/lock", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    await releaseLock(db, { taskId: id, userId: result.userId });
+    return c.json({ success: true });
+  });
+
+  routes.post("/:id/lock/steal", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const stolen = await requestSteal(db, {
+      taskId: id,
+      requester: await webLockHolderFor(result.userId),
+    });
+    if (stolen.kind === "not_locked") {
+      return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);
+    }
+    const lock = await toLockView(stolen.lock, result.userId, users);
+    if (stolen.kind === "locked") {
+      return c.json({ error: { code: "LOCKED", message: "A steal request is already pending", lock } }, 409);
+    }
+    if (logger) {
+      void notifyStealRequested({
+        db,
+        logger,
+        taskId: id,
+        senders: {
+          ...(options.getSlack
+            ? {
+                slack: {
+                  postLockStealRequest: async (p: {
+                    channelId: string;
+                    taskId: string;
+                    requesterName: string;
+                    taskTitle: string;
+                  }) => {
+                    const slack = options.getSlack?.();
+                    if (!slack) return;
+                    return slack.postLockStealRequestMessage(p.channelId, p);
+                  },
+                  sendText: async (channelId: string, text: string) => {
+                    const slack = options.getSlack?.();
+                    if (!slack) return;
+                    return slack.postMessage(channelId, text);
+                  },
+                },
+              }
+            : {}),
+          ...(options.whatsappRuntime
+            ? {
+                whatsapp: {
+                  sendText: async (target: Parameters<WhatsAppRuntime["sendText"]>[0], text: string) =>
+                    options.whatsappRuntime?.sendText(target, text),
+                },
+              }
+            : {}),
+        },
+      }).catch((err) => {
+        logger.warn({ err, taskId: id }, "Steal request notification delivery failed");
+      });
+    }
+    return c.json({ status: "pending", lock });
+  });
+
+  routes.post("/:id/lock/steal/response", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!result.userId) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    const body = await c.req.json().catch(() => null);
+    const approve =
+      body && typeof body === "object" && typeof (body as { approve?: unknown }).approve === "boolean"
+        ? (body as { approve: boolean }).approve
+        : null;
+    if (approve === null) {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "approve must be a boolean" } }, 400);
+    }
+    const responded = approve
+      ? await approveSteal(db, { taskId: id, approverUserId: result.userId })
+      : await denySteal(db, { taskId: id, holderUserId: result.userId });
+    if (responded.kind === "not_found" || responded.kind === "not_holder") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (responded.kind === "no_pending_steal") {
+      return c.json({ error: { code: "NO_PENDING_STEAL", message: "There is no pending steal request" } }, 409);
+    }
+    return c.json({ status: responded.kind, lock: await toLockView(responded.lock, result.userId, users) });
+  });
+
+  routes.get("/:id/shares", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    return c.json({ shares: await listSharesWithNames(db, id) });
+  });
+
+  routes.put("/:id/shares/:userId", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    const targetUserId = c.req.param("userId");
+    if (targetUserId === result.userId) {
+      return c.json({ error: { code: "INVALID_TARGET", message: "Cannot share an automation with yourself" } }, 400);
+    }
+    const target = await users.findById(targetUserId);
+    if (!target) {
+      return c.json({ error: { code: "INVALID_TARGET", message: "Target user not found" } }, 400);
+    }
+    await sharesRepo.grant({ taskId: id, userId: targetUserId, grantedByUserId: result.userId });
+    return c.json({ success: true });
+  });
+
+  routes.delete("/:id/shares/:userId", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnedTask(c, id);
+    if ("response" in result) return result.response;
+    await sharesRepo.revoke({ taskId: id, userId: c.req.param("userId") });
+    return c.json({ success: true });
   });
 
   routes.patch("/:id/execution-mode", async (c) => {
     const id = c.req.param("id");
-    const accessible = await loadAccessibleTask(c, id);
+    const accessible = await loadOwnedTask(c, id);
     if ("response" in accessible) return accessible.response;
     const body = await c.req.json().catch(() => null);
     const executionMode =
@@ -592,10 +1012,22 @@ export function scheduledTaskRoutes(
       db,
       taskId: id,
       executionMode: executionMode.data,
-      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      actor: { userId },
     });
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (saveResult.kind === "locked") {
+      return c.json(
+        {
+          error: {
+            code: "LOCKED",
+            message: "Automation is locked by another editor",
+            lock: await toLockView(saveResult.lock, accessible.userId, users),
+          },
+        },
+        409,
+      );
     }
     if (saveResult.kind === "not_placeholder") {
       return c.json(
@@ -608,7 +1040,13 @@ export function scheduledTaskRoutes(
         409,
       );
     }
-    return c.json({ automation: await loadFullDefinition(saveResult.row) });
+    return c.json({
+      automation: await loadFullDefinition(saveResult.row, {
+        userId: accessible.userId,
+        grantedTaskIds: accessible.grantedTaskIds,
+        role: c.get("role"),
+      }),
+    });
   });
 
   routes.put("/:id", async (c) => {
@@ -631,13 +1069,35 @@ export function scheduledTaskRoutes(
       ? await hasBrokerCapableProvider()
       : true;
     const userId = await resolveUserId(c.get("sub"));
+    if (options.validateAgentSkills && result.row.created_by) {
+      const requestedSkills = request.steps.flatMap((step) => (step.type === "agent" ? (step.agentSkills ?? []) : []));
+      const unavailableSkills = await options.validateAgentSkills(result.row.created_by, requestedSkills, {
+        platform: result.row.platform === "whatsapp" ? "whatsapp" : "slack",
+        contextType:
+          result.row.context_type === "group" ? "group" : result.row.context_type === "channel" ? "channel" : "dm",
+        deliveryTarget: result.row.delivery_target,
+        createdBy: result.row.created_by,
+      });
+      if (unavailableSkills.length > 0) {
+        return c.json(
+          {
+            error: {
+              code: "CLI_INTEGRATION_REQUIRED",
+              message: `Connect or share the required integration before saving this automation: ${unavailableSkills.join(", ")}.`,
+              skills: unavailableSkills,
+            },
+          },
+          409,
+        );
+      }
+    }
     let saveResult: Awaited<ReturnType<typeof replaceAutomationDefinition>>;
     try {
       saveResult = await replaceAutomationDefinition({
         db,
         taskId: id,
         request,
-        actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+        actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
         brokerCapable,
         encryptionKey: options.encryptionKey,
       });
@@ -658,6 +1118,18 @@ export function scheduledTaskRoutes(
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
+    if (saveResult.kind === "locked") {
+      return c.json(
+        {
+          error: {
+            code: "LOCKED",
+            message: "Automation is locked by another editor",
+            lock: await toLockView(saveResult.lock, result.userId, users),
+          },
+        },
+        409,
+      );
+    }
     if (saveResult.kind === "revision_conflict") {
       return c.json(
         {
@@ -673,7 +1145,13 @@ export function scheduledTaskRoutes(
 
     await scheduler.refreshTaskSchedule(id);
     const refreshed = (await repo.getById(id)) ?? saveResult.row;
-    return c.json({ automation: await loadFullDefinition(refreshed) });
+    return c.json({
+      automation: await loadFullDefinition(refreshed, {
+        userId: result.userId,
+        grantedTaskIds: result.grantedTaskIds,
+        role: c.get("role"),
+      }),
+    });
   });
 
   routes.post("/:id/runs", async (c) => {
@@ -685,14 +1163,14 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id);
+    const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId))) {
+    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 
@@ -745,6 +1223,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
         })
       )[0],
     });
@@ -770,6 +1249,7 @@ export function scheduledTaskRoutes(
           baseUrl: options.baseUrl,
           port: options.port,
           encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
         })
       )[0],
     });
@@ -777,7 +1257,7 @@ export function scheduledTaskRoutes(
 
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadAccessibleTask(c, id);
+    const access = await loadDeletableTask(c, id);
     if ("response" in access) return access.response;
     const removeTaskRuntime = scheduler.removeTaskRuntime;
     if (!removeTaskRuntime) {
@@ -790,7 +1270,7 @@ export function scheduledTaskRoutes(
     const deletion = await deleteAutomation({
       db,
       taskId: id,
-      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
       scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
       encryptionKey: options.encryptionKey,
     });
@@ -860,14 +1340,14 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id);
+    const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId))) {
+    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 

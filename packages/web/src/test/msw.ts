@@ -1,5 +1,68 @@
+import type { AutomationEditLockView } from "@/lib/api";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
+
+/**
+ * Whole-automation edit lock fixtures for the lock routes (the backend lane
+ * implements them later). State is per task id and simulates one "current
+ * viewer", so `isHeldByMe` is derived consistently. Tests that rely on these
+ * fixtures must call `resetAutomationLockFixtures()` (typically in
+ * `beforeEach`) because the state is module-level and survives
+ * `server.resetHandlers()`.
+ */
+interface MockAutomationLockState {
+  heldByUserId: string | null;
+  heldByName: string | null;
+  heldByPlatform: "slack" | "web" | "whatsapp" | null;
+  heldBySurface: "builder" | "admin" | null;
+  expiresAt: string | null;
+  stealPending: { requesterName: string; expiresAt: string } | null;
+}
+
+const AUTOMATION_LOCK_FIXTURE_VIEWER_ID = "u-current";
+const AUTOMATION_LOCK_FIXTURE_VIEWER_NAME = "Test Viewer";
+const AUTOMATION_LOCK_FIXTURE_TTL_MS = 15 * 60 * 1000;
+const AUTOMATION_LOCK_FIXTURE_STEAL_TTL_MS = 5 * 60 * 1000;
+
+const automationLockFixtureState = new Map<string, MockAutomationLockState>();
+
+function emptyAutomationLockFixture(): MockAutomationLockState {
+  return {
+    heldByUserId: null,
+    heldByName: null,
+    heldByPlatform: null,
+    heldBySurface: null,
+    expiresAt: null,
+    stealPending: null,
+  };
+}
+
+function automationLockFixtureView(taskId: string): AutomationEditLockView {
+  const state = automationLockFixtureState.get(taskId) ?? emptyAutomationLockFixture();
+  return { ...state, isHeldByMe: state.heldByUserId === AUTOMATION_LOCK_FIXTURE_VIEWER_ID };
+}
+
+function automationLockFixtureError(code: string, taskId: string, message: string) {
+  return HttpResponse.json({ error: { code, message, lock: automationLockFixtureView(taskId) } }, { status: 409 });
+}
+
+export function resetAutomationLockFixtures() {
+  automationLockFixtureState.clear();
+}
+
+export function seedAutomationLockFixture(taskId: string, state: Partial<MockAutomationLockState>) {
+  automationLockFixtureState.set(taskId, { ...emptyAutomationLockFixture(), ...state });
+}
+
+/**
+ * Admin-tab list fixture: installs a handler for GET /api/scheduled-tasks
+ * returning the given task payloads (e.g. foreign-owned tasks an admin sees
+ * through the backend list-all path). Overrides the default handler for the
+ * duration of the test.
+ */
+export function seedAdminScheduledTaskListFixture(tasks: unknown[]) {
+  server.use(http.get("/api/scheduled-tasks", () => HttpResponse.json({ tasks })));
+}
 
 /**
  * Default MSW handlers — happy-path responses for all API endpoints.
@@ -154,6 +217,18 @@ export const handlers = [
     return HttpResponse.json({ connections: [] });
   }),
 
+  http.get("/api/integration-apps", () => {
+    return HttpResponse.json({ apps: [], executionMode: "cli" });
+  }),
+
+  http.get("/api/integration-apps/connections", () => {
+    return HttpResponse.json({ connections: [] });
+  }),
+
+  http.get("/api/agent-environment-variables", () => {
+    return HttpResponse.json({ variables: [] });
+  }),
+
   http.get("/api/users", () => {
     return HttpResponse.json({
       users: [
@@ -192,6 +267,42 @@ export const handlers = [
           whatsapp_group_jids: [],
           is_whatsapp_fallback: false,
           created_at: "2026-01-02T00:00:00Z",
+        },
+        {
+          id: "u3",
+          name: "Carol Davis",
+          email: "carol@example.com",
+          email_verified_at: "2026-01-03T00:00:00Z",
+          auth_role: "member",
+          slack_user_id: null,
+          whatsapp_number: "+14155550103",
+          description: null,
+          type: "human",
+          role: null,
+          reports_to: null,
+          allowed_tools: null,
+          slack_channel_ids: [],
+          whatsapp_group_jids: [],
+          is_whatsapp_fallback: false,
+          created_at: "2026-01-03T00:00:00Z",
+        },
+        {
+          id: "u4",
+          name: "Dave Evans",
+          email: "dave@example.com",
+          email_verified_at: "2026-01-04T00:00:00Z",
+          auth_role: "member",
+          slack_user_id: null,
+          whatsapp_number: "+14155550104",
+          description: null,
+          type: "human",
+          role: null,
+          reports_to: null,
+          allowed_tools: null,
+          slack_channel_ids: [],
+          whatsapp_group_jids: [],
+          is_whatsapp_fallback: false,
+          created_at: "2026-01-04T00:00:00Z",
         },
       ],
     });
@@ -460,6 +571,221 @@ export const handlers = [
 
   http.get("/api/web-chat/conversations", () => {
     return HttpResponse.json({ conversations: [] });
+  }),
+
+  http.get("/api/scheduled-tasks/:id/shares", () => {
+    return HttpResponse.json({ shares: [] });
+  }),
+
+  http.put("/api/scheduled-tasks/:id/shares/:userId", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.delete("/api/scheduled-tasks/:id/shares/:userId", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.get("/api/scheduled-tasks/:id", ({ params }) => {
+    const taskId = String(params.id);
+    return HttpResponse.json({
+      automation: {
+        id: taskId,
+        platform: "slack",
+        contextType: "channel",
+        deliveryTarget: "C123",
+        threadTs: null,
+        prompt: "Post the Monday revenue summary",
+        executionMode: "hybrid",
+        executionModeRecommendation: {
+          mode: "deterministic",
+          reason: "Best when the workflow is fixed and should run the same way every time.",
+        },
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "Asia/Kolkata",
+        sessionMode: "fresh",
+        nextRunAt: "2026-03-20T03:30:00.000Z",
+        lastRunAt: "2026-03-13T03:30:00.000Z",
+        status: "active",
+        isPlaceholderDraft: false,
+        createdBy: "u1",
+        createdByName: "Alice Smith",
+        createdAt: "2026-03-10T09:15:00.000Z",
+        updatedAt: "2026-03-13T03:30:00.000Z",
+        revision: 1,
+        lastEditedBy: "u1",
+        lastEditedByName: "Alice Smith",
+        title: "Monday revenue summary",
+        description: null,
+        originChat: null,
+        delivery: {
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C123",
+          threadTs: null,
+          mode: "deliver",
+          label: "#ops",
+        },
+        steps: [],
+        edges: [],
+        stepContent: {},
+        latestRun: null,
+        recentRuns: [],
+        shares: [],
+        canShare: true,
+        canEdit: true,
+        isOwner: true,
+        lock: automationLockFixtureView(taskId),
+      },
+    });
+  }),
+
+  http.get("/api/scheduled-tasks/:taskId/conversations/:conversationId/messages", () => {
+    return HttpResponse.json({
+      messages: [
+        {
+          id: "fixture-message-1",
+          role: "user",
+          parts: [{ type: "text", text: "Build the weekly digest" }],
+          createdAt: "2026-06-02T09:00:00.000Z",
+        },
+        {
+          id: "fixture-message-2",
+          role: "assistant",
+          parts: [{ type: "text", text: "Done — it runs Mondays at 9." }],
+          createdAt: "2026-06-02T09:00:05.000Z",
+        },
+      ],
+      updatedAt: "2026-06-03T00:00:00.000Z",
+    });
+  }),
+
+  http.post("/api/scheduled-tasks/:id/lock", ({ params }) => {
+    const taskId = String(params.id);
+    const current = automationLockFixtureState.get(taskId) ?? emptyAutomationLockFixture();
+    if (current.heldByUserId && current.heldByUserId !== AUTOMATION_LOCK_FIXTURE_VIEWER_ID) {
+      return automationLockFixtureError("LOCKED", taskId, "This automation is being edited by another user.");
+    }
+    const lock: MockAutomationLockState = {
+      heldByUserId: AUTOMATION_LOCK_FIXTURE_VIEWER_ID,
+      heldByName: AUTOMATION_LOCK_FIXTURE_VIEWER_NAME,
+      heldByPlatform: "web",
+      heldBySurface: "builder",
+      expiresAt: new Date(Date.now() + AUTOMATION_LOCK_FIXTURE_TTL_MS).toISOString(),
+      stealPending: current.stealPending,
+    };
+    automationLockFixtureState.set(taskId, lock);
+    return HttpResponse.json({ lock: { ...lock, isHeldByMe: true } });
+  }),
+
+  http.delete("/api/scheduled-tasks/:id/lock", ({ params }) => {
+    const taskId = String(params.id);
+    const current = automationLockFixtureState.get(taskId) ?? emptyAutomationLockFixture();
+    if (current.heldByUserId === AUTOMATION_LOCK_FIXTURE_VIEWER_ID) {
+      automationLockFixtureState.set(taskId, emptyAutomationLockFixture());
+    }
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post("/api/scheduled-tasks/:id/lock/steal", ({ params }) => {
+    const taskId = String(params.id);
+    const current = automationLockFixtureState.get(taskId) ?? emptyAutomationLockFixture();
+    if (!current.heldByUserId) {
+      return automationLockFixtureError("NOT_LOCKED", taskId, "No one is currently editing this automation.");
+    }
+    if (current.heldByUserId === AUTOMATION_LOCK_FIXTURE_VIEWER_ID) {
+      return automationLockFixtureError("LOCKED", taskId, "You already hold the editing lock.");
+    }
+    const stealPending = {
+      requesterName: AUTOMATION_LOCK_FIXTURE_VIEWER_NAME,
+      expiresAt: new Date(Date.now() + AUTOMATION_LOCK_FIXTURE_STEAL_TTL_MS).toISOString(),
+    };
+    automationLockFixtureState.set(taskId, { ...current, stealPending });
+    return HttpResponse.json({ status: "pending" });
+  }),
+
+  http.post("/api/scheduled-tasks/:id/lock/steal/response", async ({ params, request }) => {
+    const taskId = String(params.id);
+    const body = (await request.json()) as { approve?: boolean };
+    const current = automationLockFixtureState.get(taskId) ?? emptyAutomationLockFixture();
+    if (current.heldByUserId !== AUTOMATION_LOCK_FIXTURE_VIEWER_ID) {
+      return HttpResponse.json(
+        { error: { code: "FORBIDDEN", message: "Only the current editor can respond to a takeover request." } },
+        { status: 403 },
+      );
+    }
+    if (!current.stealPending) {
+      return automationLockFixtureError("NOT_PENDING", taskId, "No takeover request is pending.");
+    }
+    if (body.approve) {
+      automationLockFixtureState.set(taskId, {
+        heldByUserId: "u-requester",
+        heldByName: current.stealPending.requesterName,
+        heldByPlatform: "web",
+        heldBySurface: "builder",
+        expiresAt: new Date(Date.now() + AUTOMATION_LOCK_FIXTURE_TTL_MS).toISOString(),
+        stealPending: null,
+      });
+    } else {
+      automationLockFixtureState.set(taskId, { ...current, stealPending: null });
+    }
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.get("/api/scheduled-tasks", () => {
+    return HttpResponse.json({
+      tasks: [
+        {
+          id: "task-1",
+          platform: "slack",
+          contextType: "channel",
+          deliveryTarget: "C123",
+          threadTs: null,
+          prompt: "Post the Monday revenue summary",
+          scheduleType: "cron",
+          scheduleValue: "0 9 * * 1",
+          timezone: "Asia/Kolkata",
+          sessionMode: "fresh",
+          nextRunAt: "2026-03-20T03:30:00.000Z",
+          lastRunAt: "2026-03-13T03:30:00.000Z",
+          status: "active",
+          createdBy: "u1",
+          createdAt: "2026-03-10T09:15:00.000Z",
+          targetLabel: "#ops",
+          targetKindLabel: "Slack channel",
+          creatorName: "Alice Smith",
+          scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
+          canPause: true,
+          canResume: false,
+          canDelete: true,
+          title: null,
+          description: null,
+          originChat: null,
+          steps: null,
+          stepCount: 0,
+          triggerConfig: null,
+          outputTarget: null,
+          outputPlatform: null,
+          outputThreadTs: null,
+          outputMode: "deliver",
+          delivery: {
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C123",
+            threadTs: null,
+            mode: "deliver",
+            label: "#ops",
+          },
+          lastRunStatus: null,
+          runCount: 0,
+          shareCount: 0,
+          sharedWithMe: false,
+          canShare: true,
+          canEdit: true,
+          isOwner: true,
+        },
+      ],
+    });
   }),
 
   http.post("/api/scheduled-tasks/:taskId/runs", ({ params }) => {

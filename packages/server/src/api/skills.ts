@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import type { Config } from "../config";
 import { type LoadedSkill, loadClaudeSkillsFromDirAsync } from "../skills/loader";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 function getOrgSkillsDir(claudeConfigDir: string): string {
   return join(claudeConfigDir, "skills");
@@ -16,6 +17,10 @@ function loadOrgSkills(claudeConfigDir: string): Promise<LoadedSkill[]> {
 interface WorkspaceSkill {
   workspaceId: string;
   skill: LoadedSkill;
+}
+
+interface SkillsRouteDeps {
+  listRuntimeEnv?: (userId: string) => Promise<Record<string, string>>;
 }
 
 function workspaceRoot(dataDir: string): string {
@@ -43,6 +48,11 @@ async function loadWorkspaceSkills(dataDir: string): Promise<WorkspaceSkill[]> {
   );
 
   return skillsByWorkspace.flat();
+}
+
+function isImmutableManagedSkill(id: string): boolean {
+  const normalizedId = id.trim().toLowerCase();
+  return normalizedId === "github" || normalizedId === "linear";
 }
 
 function assertSkillId(id: string): string | null {
@@ -93,8 +103,14 @@ function renderSkillMd(data: { name: string; description: string; category: stri
   return fm + body + (body.endsWith("\n") || body === "" ? "" : "\n");
 }
 
-export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DIR">) {
+export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DIR">, deps: SkillsRouteDeps = {}) {
   const routes = new Hono();
+
+  async function filterAvailable(skills: LoadedSkill[], userId: string): Promise<LoadedSkill[]> {
+    if (!deps.listRuntimeEnv) return skills;
+    const env = await deps.listRuntimeEnv(userId);
+    return skills.filter((skill) => (skill.requiresEnv ?? []).every((name) => Boolean(env[name])));
+  }
 
   routes.get("/", async (c) => {
     const orgSkills = await loadOrgSkills(config.CLAUDE_CONFIG_DIR);
@@ -112,7 +128,7 @@ export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DI
       }
     }
 
-    return c.json({ skills: Array.from(byId.values()) });
+    return c.json({ skills: await filterAvailable(Array.from(byId.values()), c.get("sub")) });
   });
 
   routes.get("/:id", async (c) => {
@@ -130,12 +146,14 @@ export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DI
         .map(({ skill }) => skill),
     ];
 
-    const skill = all.find((s) => s.id === id);
+    const skill = (await filterAvailable(all, c.get("sub"))).find((s) => s.id === id);
     if (!skill) return c.json({ error: { code: "NOT_FOUND", message: "Skill not found" } }, 404);
     return c.json({ skill });
   });
 
   routes.post("/", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const body = (await c.req.json().catch(() => null)) as {
       name?: string;
       description?: string;
@@ -150,6 +168,9 @@ export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DI
 
     const baseId = typeof body.id === "string" && body.id.trim() ? body.id.trim() : slugify(body.name);
     const normalizedBase = assertSkillId(baseId);
+    if (normalizedBase && isImmutableManagedSkill(normalizedBase)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Managed provider skills cannot be edited." } }, 403);
+    }
     if (!normalizedBase) return c.json({ error: { code: "BAD_REQUEST", message: "Invalid skill id" } }, 400);
 
     const existingOrg = new Set((await loadOrgSkills(config.CLAUDE_CONFIG_DIR)).map((s) => s.id));
@@ -174,8 +195,13 @@ export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DI
   });
 
   routes.put("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const id = assertSkillId(c.req.param("id"));
     if (!id) return c.json({ error: { code: "BAD_REQUEST", message: "Invalid skill id" } }, 400);
+    if (isImmutableManagedSkill(id)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Managed provider skills cannot be edited." } }, 403);
+    }
 
     const body = (await c.req.json().catch(() => null)) as {
       name?: string;
@@ -226,8 +252,13 @@ export function skillsRoutes(config: Pick<Config, "DATA_DIR" | "CLAUDE_CONFIG_DI
   });
 
   routes.delete("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const id = assertSkillId(c.req.param("id"));
     if (!id) return c.json({ error: { code: "BAD_REQUEST", message: "Invalid skill id" } }, 400);
+    if (isImmutableManagedSkill(id)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Managed provider skills cannot be edited." } }, 403);
+    }
 
     const orgSkills = await loadOrgSkills(config.CLAUDE_CONFIG_DIR);
     const workspaceSkills = await loadWorkspaceSkills(config.DATA_DIR);

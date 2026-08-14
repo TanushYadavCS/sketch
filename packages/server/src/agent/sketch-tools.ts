@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 import { createWriteAgentOutputTool } from "./tools/agent-output";
+import { createManageAutomationSharesTool } from "./tools/automation-shares";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { ChatHistoryAccessResolver } from "./tools/chat-search";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
@@ -29,6 +31,7 @@ import { createVisualAnalysisTool } from "./tools/visual-analysis";
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
+export { handleManageAutomationShares } from "./tools/automation-shares";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
 export { IntegrationConnectionCollector };
@@ -62,11 +65,43 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       automationRunsRepo: deps.automationRunsRepo,
       userRepo: deps.userRepo,
       loadIntegrationProvider: deps.loadIntegrationProvider,
+      validateAgentSkills: deps.validateAgentSkills,
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
       config: deps.toolConfig,
       encryptionKey: deps.settingsEncryptionKey,
       automationArtifactCollector: deps.automationArtifactCollector,
+      notifyStealRequest:
+        deps.getSlack && deps.logger && deps.db
+          ? (
+              (stealSlack, stealLogger, stealDb) => (taskId: string) =>
+                notifyStealRequested({
+                  db: stealDb,
+                  logger: stealLogger,
+                  taskId,
+                  senders: {
+                    slack: {
+                      postLockStealRequest: async (p) => {
+                        const slack = stealSlack();
+                        if (!slack) return;
+                        return slack.postLockStealRequestMessage(p.channelId, p);
+                      },
+                      sendText: async (channelId, text) => {
+                        const slack = stealSlack();
+                        if (!slack) return;
+                        return slack.postMessage(channelId, text);
+                      },
+                    },
+                  },
+                })
+            )(deps.getSlack, deps.logger, deps.db)
+          : undefined,
+    }),
+    createManageAutomationSharesTool({
+      scheduler: deps.scheduler,
+      taskContext: deps.taskContext,
+      db: deps.db,
+      userRepo: deps.userRepo,
     }),
     ...createTeamTools(deps),
     ...createMessagingTools(deps),

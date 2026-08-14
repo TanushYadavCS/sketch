@@ -18,11 +18,17 @@ export type AutomationRunRow = {
   error_message: string | null;
   started_at: string;
   completed_at: string | null;
+  triggered_by_user_id: string | null;
 };
 
 export function createAutomationRunsRepository(db: Kysely<DB>) {
   return {
-    async create(data: { id?: string; taskId: string; triggerData?: unknown }): Promise<string> {
+    async create(data: {
+      id?: string;
+      taskId: string;
+      triggerData?: unknown;
+      triggeredByUserId?: string | null;
+    }): Promise<string> {
       const id = data.id ?? randomUUID();
       await db
         .insertInto("automation_runs")
@@ -33,6 +39,7 @@ export function createAutomationRunsRepository(db: Kysely<DB>) {
           status: "running",
           step_outputs: "{}",
           started_at: new Date().toISOString(),
+          triggered_by_user_id: data.triggeredByUserId ?? null,
         })
         .execute();
       return id;

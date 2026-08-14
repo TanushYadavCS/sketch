@@ -75,8 +75,15 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
+import { handleStealResponse, renderStealResponseConfirmation } from "../whatsapp/lock-confirmations";
 import { slackApiCall } from "./api";
-import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import {
+  SlackBot,
+  type SlackFile,
+  type SlackMessage,
+  type SlackMessageHandler,
+  parseSlackLockStealAction,
+} from "./bot";
 import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
@@ -190,6 +197,13 @@ export interface SlackAdapterDeps {
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  cliIntegrations?: RunAgentParams["cliIntegrations"];
+  listAgentEnvForRuntime?: (context: {
+    currentUserId?: string | null;
+    contextType?: "dm" | "channel_mention" | "scheduled_task";
+    allowOrgSharedEnv?: boolean;
+    taskContext?: RunAgentParams["taskContext"];
+  }) => Promise<Record<string, string>>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -511,6 +525,33 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     });
   }
 
+  slackBot.onLockStealAction(async (event) => {
+    const parsed = parseSlackLockStealAction(event.actionId);
+    if (!parsed) return;
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(event.slackUserId);
+    } catch (err) {
+      logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring lock steal action from unresolved Slack user");
+      return;
+    }
+    const outcome = await handleStealResponse({
+      db,
+      logger,
+      taskId: parsed.taskId,
+      responderUserId: user.id,
+      responderName: user.name,
+      approve: parsed.action === "approve",
+      senders: {
+        slack: {
+          postLockStealRequest: (params) => slackBot.postLockStealRequestMessage(params.channelId, params),
+          sendText: (channelId, text) => slackBot.postMessage(channelId, text),
+        },
+      },
+    });
+    await slackBot.postMessage(event.channelId, renderStealResponseConfirmation(outcome));
+  });
+
   const processSlackTextQuestionAnswer = async (
     message: SlackMessage,
     user: Awaited<ReturnType<typeof resolveUser>>,
@@ -734,6 +775,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       botName: settingsRow?.bot_name,
       integrationMcpServers: await buildMcpServers(requester.email),
       loadIntegrationProvider,
+      cliIntegrations: deps.cliIntegrations,
+      agentEnv: await (deps.listAgentEnvForRuntime?.({
+        currentUserId: requester.id,
+        contextType: isDm ? "dm" : "channel_mention",
+        allowOrgSharedEnv: true,
+        taskContext: {
+          platform: "slack",
+          contextType: isDm ? "dm" : "channel",
+          deliveryTarget: resumeWork.context.conversationId,
+          createdBy: requester.id,
+        },
+      }) ?? Promise.resolve(undefined)),
       contextType: isDm ? "dm" : "channel_mention",
       currentUserId: requester.id,
       ...(boundAgent?.description ? { agentInstructions: boundAgent.description } : {}),
@@ -1238,6 +1291,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               attachments: attachments.length > 0 ? attachments : undefined,
               integrationMcpServers,
               loadIntegrationProvider,
+              cliIntegrations: deps.cliIntegrations,
+              agentEnv: await (deps.listAgentEnvForRuntime?.({
+                currentUserId: user.id,
+                contextType: "dm",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "slack",
+                  contextType: "dm",
+                  deliveryTarget: message.channelId,
+                  createdBy: user.id,
+                },
+              }) ?? Promise.resolve(undefined)),
               contextType: "dm",
               taskContext: {
                 platform: "slack" as const,
@@ -1750,6 +1815,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               attachments: attachments.length > 0 ? attachments : undefined,
               integrationMcpServers,
               loadIntegrationProvider,
+              cliIntegrations: deps.cliIntegrations,
+              agentEnv: await (deps.listAgentEnvForRuntime?.({
+                currentUserId: activeUser.id,
+                contextType: "channel_mention",
+                allowOrgSharedEnv: true,
+                taskContext: {
+                  platform: "slack",
+                  contextType: "channel",
+                  deliveryTarget: message.channelId,
+                  createdBy: activeUser.id,
+                },
+              }) ?? Promise.resolve(undefined)),
               contextType: "channel_mention",
               currentUserId: activeUser.id,
               taskContext: {

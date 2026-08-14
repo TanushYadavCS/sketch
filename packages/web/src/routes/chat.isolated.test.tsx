@@ -11,6 +11,7 @@ import {
   AUTOMATION_BUILDER_NAVIGATION_DELAY_MS,
   ChatPage,
   SMOOTH_TEXT_STREAM_DELAY_MS,
+  automationArtifactFromDraftHandoff,
   buildChatThreadMessages,
   chatIndexRoute,
   hasPendingAssistantProgress,
@@ -454,7 +455,7 @@ describe("chat route", () => {
             tags: ["Scheduled"],
             scheduleLabel: "Daily at 9:00 AM",
             deliveryLabel: "Slack DM",
-            builderUrl: "/scheduled-tasks/task-123/edit?conversationId=chat-alpha",
+            builderUrl: "/scheduled-tasks/task-123/edit",
             status: "active",
           },
         },
@@ -538,7 +539,7 @@ describe("chat route", () => {
             tags: ["Scheduled"],
             scheduleLabel: "Daily",
             deliveryLabel: "Slack DM",
-            builderUrl: "/scheduled-tasks/task-complex/edit?conversationId=chat-alpha",
+            builderUrl: "/scheduled-tasks/task-complex/edit",
             status: "active",
           },
         },
@@ -556,12 +557,10 @@ describe("chat route", () => {
         timeout: AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 1000,
       },
     );
-    expect(mocks.navigate).not.toHaveBeenCalledWith(
-      expect.objectContaining({ search: { conversationId: "chat-alpha" } }),
-    );
+    expect(mocks.navigate).not.toHaveBeenCalledWith(expect.objectContaining({ to: "/scheduled-tasks/$taskId/edit" }));
   });
 
-  it("turns a typed automation handoff into a builder continuation card", () => {
+  it("does not render a typed automation handoff as an actionable card", () => {
     const messages = buildChatThreadMessages([
       {
         id: "a-draft",
@@ -593,10 +592,10 @@ describe("chat route", () => {
           {
             taskId: "task-draft-1",
             requiresBuilder: true,
-            kind: "Automation setup",
-            title: "Set up automation",
-            description: "Continue configuring this automation in the automation builder.",
-            tags: ["Setup"],
+            kind: "New automation",
+            title: "Create automation",
+            description: "This seems like a new automation. You can go to the builder to create it.",
+            tags: ["Recommended: builder"],
             scheduleLabel: "Not configured",
             deliveryLabel: "Not configured",
             builderUrl: "/scheduled-tasks/task-draft-1/edit?conversationId=chat-builder-1",
@@ -607,7 +606,7 @@ describe("chat route", () => {
     ]);
   });
 
-  it("uses the source conversation as the fallback for older automation handoffs", () => {
+  it("does not map an older automation handoff to the source chat conversation", () => {
     const messages = buildChatThreadMessages([
       {
         id: "a-legacy-handoff",
@@ -628,9 +627,16 @@ describe("chat route", () => {
       },
     ]);
 
-    expect(messages[0]?.automations?.[0]?.builderUrl).toBe(
-      "/scheduled-tasks/task-legacy-1/edit?conversationId=chat-source-legacy",
-    );
+    expect(
+      automationArtifactFromDraftHandoff({
+        kind: "automation-draft",
+        taskId: "task-legacy-1",
+        sourceConversationId: "chat-source-legacy",
+        builderUrl: "/scheduled-tasks/task-legacy-1/edit?conversationId=outdated",
+        status: "paused",
+      }).builderUrl,
+    ).toBe("/scheduled-tasks/task-legacy-1/edit");
+    expect(messages[0]?.automations?.[0]?.builderUrl).toBe("/scheduled-tasks/task-legacy-1/edit");
   });
 
   it("invalidates automation caches when a streamed automation card arrives", async () => {
@@ -765,7 +771,7 @@ describe("chat route", () => {
           {
             type: "data-interruption" as const,
             id: "interruption",
-            data: { detail: "Sketch paused.", label: "Tell Sketch what to do differently." },
+            data: { detail: "Sketch paused.", label: "What should Sketch do differently?" },
           },
         ],
       },
@@ -778,7 +784,7 @@ describe("chat route", () => {
         role: "assistant",
         interruption: {
           detail: "Sketch paused.",
-          label: "Tell Sketch what to do differently.",
+          label: "What should Sketch do differently?",
         },
       },
     ]);

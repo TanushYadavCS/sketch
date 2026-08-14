@@ -214,4 +214,60 @@ describe("scheduled task conversation repository", () => {
       service.acquireBuilderConversationLock("task-source-lock", "admin-source-chat", "admin-source"),
     ).resolves.toMatchObject({ kind: "active", lock: { owner: "self" } });
   });
+
+  it("joins transcript user names for task-scoped reads only", async () => {
+    await db
+      .insertInto("users")
+      .values([
+        { id: "owner-task", name: "Owner Task", email: "owner-task@test.com" },
+        { id: "member-task", name: "Maya Task", email: "maya-task@test.com" },
+      ])
+      .execute();
+
+    const service = createAutomationTaskConversationService(db);
+    await service.associate({
+      taskId: "task-names",
+      conversationId: "owner-named-chat",
+      transcriptUserId: "owner-task",
+      kind: "builder",
+    });
+    await service.associate({
+      taskId: "task-names",
+      conversationId: "maya-named-chat",
+      transcriptUserId: "member-task",
+      kind: "builder",
+    });
+
+    await expect(service.listForTask("task-names")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ conversationId: "owner-named-chat", transcriptUserName: "Owner Task" }),
+        expect.objectContaining({ conversationId: "maya-named-chat", transcriptUserName: "Maya Task" }),
+      ]),
+    );
+    await expect(service.getForTask("task-names", "maya-named-chat")).resolves.toMatchObject({
+      conversationId: "maya-named-chat",
+      transcriptUserName: "Maya Task",
+    });
+
+    // Viewer-scoped reads keep their summaries free of other users' names.
+    await expect(service.listForTranscriptUser("task-names", "member-task")).resolves.toEqual([
+      expect.objectContaining({ conversationId: "maya-named-chat", transcriptUserName: undefined }),
+    ]);
+    await expect(service.getForTranscriptUser("task-names", "maya-named-chat", "member-task")).resolves.toMatchObject({
+      conversationId: "maya-named-chat",
+    });
+
+    // A transcript whose user row is missing still lists, without a name.
+    await service.associate({
+      taskId: "task-names",
+      conversationId: "orphan-named-chat",
+      transcriptUserId: "deleted-user",
+      kind: "web_chat",
+    });
+    await expect(service.listForTask("task-names", { includeArchived: true })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ conversationId: "orphan-named-chat", transcriptUserName: undefined }),
+      ]),
+    );
+  });
 });

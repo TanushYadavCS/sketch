@@ -39,6 +39,24 @@ afterEach(async () => {
   await db.destroy();
 });
 
+describe("create", () => {
+  it("records the optional triggered_by_user_id on the run", async () => {
+    const id = await runs.create({ taskId: "task-1", triggeredByUserId: "user-123" });
+    const run = await runs.getById(id);
+    expect(run?.triggered_by_user_id).toBe("user-123");
+
+    const unattributed = await runs.create({ taskId: "task-1" });
+    const run2 = await runs.getById(unattributed);
+    expect(run2?.triggered_by_user_id).toBeNull();
+  });
+
+  it("accepts an explicit null trigger attribution", async () => {
+    const id = await runs.create({ taskId: "task-1", triggeredByUserId: null });
+    const run = await runs.getById(id);
+    expect(run?.triggered_by_user_id).toBeNull();
+  });
+});
+
 describe("markRunningAsFailed", () => {
   it("stores started_at as ISO UTC when creating a run", async () => {
     const id = await runs.create({ taskId: "task-1" });

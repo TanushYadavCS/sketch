@@ -21,6 +21,7 @@ export interface AgentEnvironmentVariableRecord {
   isSecret: boolean;
   createdAt: string;
   updatedAt: string;
+  managedBy?: string;
   shares: AgentEnvironmentVariableShareRecord[];
 }
 
@@ -41,6 +42,8 @@ const RESERVED_AGENT_ENV_EXACT = new Set([
   "ANTHROPIC_MODEL",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
+  "GH_TOKEN",
+  "LINEAR_API_KEY",
 ]);
 
 const RESERVED_AGENT_ENV_PREFIXES = [

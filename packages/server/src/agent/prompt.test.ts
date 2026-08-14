@@ -206,6 +206,15 @@ describe("buildSystemContext", () => {
       expect(result).toContain("durable follow-up state is authoritative");
     });
 
+    it("uses the same plain-language execution mode names as the builder", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("Fixed recipe runs action steps exactly as saved and has no AI steps");
+      expect(result).toContain("Recipe + AI combines deterministic action steps with bounded agent steps");
+      expect(result).toContain("Agent-led uses AI steps only and has no code or action steps");
+      expect(result).toContain("with Fixed recipe, Recipe + AI, and Agent-led as the choices");
+    });
+
     it("prefers deterministic action steps for fixed automation work", () => {
       const result = buildSystemContext({ platform: "slack" });
 
@@ -247,6 +256,17 @@ describe("buildSystemContext", () => {
       expect(result).not.toContain("Never use updateStepContent");
       expect(result).toContain("pass the resolved target ID in ManageScheduledTasks delivery");
       expect(result).toContain("Operational actions remain deterministic");
+    });
+
+    it("routes share requests to the web app instead of granting access in chat", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("do not grant or revoke access directly in chat");
+      expect(result).toContain("/scheduled-tasks/{taskId}/edit");
+      expect(result).toContain("open the Share dialog");
+      expect(result).toContain("/scheduled-tasks");
+      expect(result).toContain("You may still list current shares for information");
+      expect(result).toContain("Do not construct automation URLs yourself");
     });
   });
 
@@ -375,6 +395,13 @@ describe("buildSystemContext", () => {
   });
 
   describe("web chat platform formatting", () => {
+    it("documents managed Linear routing", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("Linear is a managed API integration in Sketch.");
+      expect(result).toContain("use its GraphQL API");
+      expect(result).toContain("never route Linear through Canvas tools");
+    });
+
     it("includes GitHub-flavored Markdown rules", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("Sketch web chat");
@@ -387,6 +414,15 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("use AskUserQuestion with two to four concrete options");
       expect(result).toContain("stop after the tool call");
+    });
+
+    it("routes web automation authoring into the builder", () => {
+      const result = buildSystemContext({ platform: "web", automationAuthoringEnabled: true });
+
+      expect(result).toContain("route automation work instead of authoring it");
+      expect(result).toContain("call action 'open' with that task_id");
+      expect(result).toContain("The builder conversation owns all setup questions and edits");
+      expect(result).not.toContain("Create or update the automation directly with ManageScheduledTasks");
     });
 
     it("tells the agent to resolve integration status without UI-render side effects", () => {

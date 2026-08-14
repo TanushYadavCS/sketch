@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 183;
+const EXPECTED_MIGRATION_COUNT = 186;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -218,6 +218,36 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[177]).toBe("182-project-minting-states");
     expect(names[178]).toBe("183-graph-pass-runs");
     expect(names[179]).toBe("184-person-contact-point-cutover");
+    expect(names[180]).toBe("185-queue-pass-reason");
+    expect(names[181]).toBe("186-entity-merge-groups");
+    expect(names[182]).toBe("187-automation-shares");
+    expect(names[183]).toBe("187-entity-name-proposals");
+    expect(names[184]).toBe("188-automation-locks");
+    expect(names[185]).toBe("189-cli-integration-connections");
+  });
+
+  it("keeps the automation-sharing migration ledger in order", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration ORDER BY name ASC
+    `.execute(db);
+    const names = rows.rows.map((row) => row.name);
+
+    // Audit of the automation-sharing feature slice: shares (187) must precede
+    // locks (188), and neither may be renumbered relative to the minting,
+    // cutover, queue-pass, and merge-groups migrations that precede them.
+    expect(names.slice(176, 185)).toEqual([
+      "181-project-minting-verdicts",
+      "182-project-minting-states",
+      "183-graph-pass-runs",
+      "184-person-contact-point-cutover",
+      "185-queue-pass-reason",
+      "186-entity-merge-groups",
+      "187-automation-shares",
+      "187-entity-name-proposals",
+      "188-automation-locks",
+    ]);
   });
 
   it("upgrades existing email access rows on Postgres", async () => {

@@ -11,6 +11,12 @@ import { join } from "node:path";
 import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
 import { z } from "zod";
 import type { CredentialEnvelope } from "../connectors/credential-envelope";
+import {
+  canvasBlockedIntegrationMessage,
+  isCanvasBlockedAppId,
+  isCanvasBlockedComponentKey,
+  isCanvasBlockedConnectionId,
+} from "./cli/policy";
 import type { BrokerSpec, IntegrationActionRequest, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -146,6 +152,9 @@ export class CanvasProvider implements IntegrationProvider {
   }
 
   async executeAction(request: IntegrationActionRequest, signal?: AbortSignal): Promise<unknown> {
+    if (isCanvasBlockedComponentKey(request.componentKey)) {
+      throw new CanvasProviderRequestError(409, "CLI_INTEGRATION", canvasBlockedIntegrationMessage());
+    }
     const url = new URL("/api/direct-executions/action", this.apiUrl);
     const requestSignal = AbortSignal.timeout(ACTION_REQUEST_TIMEOUT_MS);
     const combinedSignal = signal ? AbortSignal.any([signal, requestSignal]) : requestSignal;
@@ -184,8 +193,16 @@ export class CanvasProvider implements IntegrationProvider {
     if (userEmail) credentialEnv.CANVAS_USER_EMAIL = userEmail;
     return {
       cliPath: join(claudeConfigDir, "skills", "canvas", "canvas-cli.js"),
-      credentialEnv,
+      credentialEnv: { ...credentialEnv, CANVAS_BLOCKED_APP_IDS: "github,github-oauth,linear,linear-oauth" },
       launcherEnvName: "CANVAS_CLI",
+      argvPolicy: (argv) => {
+        const blocked = argv.some((value) => {
+          const normalized = value.trim().toLowerCase();
+          if (isCanvasBlockedAppId(normalized) || isCanvasBlockedComponentKey(normalized)) return true;
+          return normalized.includes("github") || normalized.includes("linear");
+        });
+        return blocked ? { allowed: false, message: canvasBlockedIntegrationMessage() } : { allowed: true };
+      },
     };
   }
 
@@ -235,6 +252,9 @@ export class CanvasProvider implements IntegrationProvider {
     limit?: number,
     after?: string,
   ): Promise<{ apps: IntegrationApp[]; pageInfo: PageInfo }> {
+    if (query && isCanvasBlockedAppId(query)) {
+      return { apps: [], pageInfo: { endCursor: null, hasMore: false } };
+    }
     const url = new URL("/api/apps", this.apiUrl);
     if (query) url.searchParams.set("q", query);
     if (limit !== undefined || after !== undefined) {
@@ -271,13 +291,16 @@ export class CanvasProvider implements IntegrationProvider {
       message?: string;
     };
 
-    const apps: IntegrationApp[] = (raw.data?.data ?? []).map((app) => ({
-      id: app.nameSlug,
-      name: app.name,
-      description: app.description ?? "",
-      icon: app.imgSrc,
-      category: app.categories?.[0],
-    }));
+    const apps: IntegrationApp[] = (raw.data?.data ?? [])
+      .filter((app) => !isCanvasBlockedAppId(app.nameSlug ?? app.id ?? "") && !isCanvasBlockedAppId(app.name ?? ""))
+      .map((app) => ({
+        id: app.nameSlug,
+        name: app.name,
+        description: app.description ?? "",
+        icon: app.imgSrc,
+        category: app.categories?.[0],
+        executionMode: "canvas" as const,
+      }));
 
     const pageInfo: PageInfo = raw.data?.pageInfo ?? { endCursor: null, hasMore: false };
 
@@ -291,6 +314,9 @@ export class CanvasProvider implements IntegrationProvider {
     userName?: string,
     userOrgRole?: IntegrationUserOrgRole,
   ): Promise<{ redirectUrl: string }> {
+    if (isCanvasBlockedAppId(appId)) {
+      throw new CanvasProviderRequestError(409, "CLI_INTEGRATION", canvasBlockedIntegrationMessage());
+    }
     const res = await fetch(`${this.apiUrl}/api/apps/connect-token`, {
       method: "POST",
       headers: this.headers(userEmail, true, userName, userOrgRole),
@@ -325,42 +351,57 @@ export class CanvasProvider implements IntegrationProvider {
 
     const data = (await res.json()) as { accounts: CanvasAccountResponse[] };
 
-    return (data.accounts ?? []).filter(canUseConnection).map((account): IntegrationConnection => {
-      const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
-      const appName = account.app?.name ?? account.name ?? "Unknown";
-      const connectedAt = account.connectedAt ?? account.created_at ?? new Date().toISOString();
-      return {
-        id: account.id,
-        providerId: this.providerId,
-        source: getConnectionSource(account),
-        appId,
-        appName,
-        app: account.app
-          ? {
-              name: appName,
-              nameSlug: appId,
-              imgSrc: account.app.imgSrc,
-            }
-          : undefined,
-        icon: account.app?.imgSrc,
-        accountName: account.accountName ?? account.name,
-        authType: account.authType,
-        healthy: account.healthy,
-        status: account.status ?? (account.dead ? "error" : account.healthy ? "active" : "error"),
-        accessLevel: account.accessLevel,
-        ownerUserId: account.ownerUserId,
-        ownerName: account.ownerName,
-        isOwnedByViewer: account.isOwnedByViewer,
-        canUse: account.canUse,
-        canManageAccess: account.canManageAccess,
-        canDelete: account.canDelete,
-        createdAt: connectedAt,
-        connectedAt,
-      };
-    });
+    return (data.accounts ?? [])
+      .filter(canUseConnection)
+      .filter((account) => {
+        const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
+        return (
+          !isCanvasBlockedAppId(appId) &&
+          !isCanvasBlockedAppId(account.app?.name ?? "") &&
+          !isCanvasBlockedAppId(account.name ?? "") &&
+          !isCanvasBlockedConnectionId(account.id)
+        );
+      })
+      .map((account): IntegrationConnection => {
+        const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
+        const appName = account.app?.name ?? account.name ?? "Unknown";
+        const connectedAt = account.connectedAt ?? account.created_at ?? new Date().toISOString();
+        return {
+          id: account.id,
+          providerId: this.providerId,
+          source: getConnectionSource(account),
+          executionMode: "canvas",
+          appId,
+          appName,
+          app: account.app
+            ? {
+                name: appName,
+                nameSlug: appId,
+                imgSrc: account.app.imgSrc,
+              }
+            : undefined,
+          icon: account.app?.imgSrc,
+          accountName: account.accountName ?? account.name,
+          authType: account.authType,
+          healthy: account.healthy,
+          status: account.status ?? (account.dead ? "error" : account.healthy ? "active" : "error"),
+          accessLevel: account.accessLevel,
+          ownerUserId: account.ownerUserId,
+          ownerName: account.ownerName,
+          isOwnedByViewer: account.isOwnedByViewer,
+          canUse: account.canUse,
+          canManageAccess: account.canManageAccess,
+          canDelete: account.canDelete,
+          createdAt: connectedAt,
+          connectedAt,
+        };
+      });
   }
 
   async removeConnection(userEmail: string, connectionId: string, userName?: string): Promise<void> {
+    if (isCanvasBlockedConnectionId(connectionId)) {
+      throw new CanvasProviderRequestError(409, "CLI_INTEGRATION", canvasBlockedIntegrationMessage());
+    }
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts/${connectionId}`, {
       method: "DELETE",
       headers: this.headers(userEmail, false, userName),
@@ -378,6 +419,9 @@ export class CanvasProvider implements IntegrationProvider {
     accessLevel: "personal" | "organization",
     userName?: string,
   ): Promise<IntegrationConnection | null> {
+    if (isCanvasBlockedConnectionId(connectionId)) {
+      throw new CanvasProviderRequestError(409, "CLI_INTEGRATION", canvasBlockedIntegrationMessage());
+    }
     const res = await fetch(`${this.apiUrl}/api/canvas-accounts/${encodeURIComponent(connectionId)}/access`, {
       method: "PATCH",
       headers: this.headers(userEmail, true, userName),
