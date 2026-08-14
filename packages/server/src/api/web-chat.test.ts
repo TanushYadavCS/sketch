@@ -1775,7 +1775,6 @@ describe("web chat API", () => {
     expect(builderAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
   });
 
-<<<<<<< HEAD
   it("preserves the original web-chat requirements when trimming builder history", async () => {
     const admin = await seedAdmin(db);
     const conversations = createScheduledTaskConversationRepository(db);

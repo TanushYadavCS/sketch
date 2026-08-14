@@ -29,7 +29,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 
-const EXPECTED_MIGRATION_COUNT = 183;
+const EXPECTED_MIGRATION_COUNT = 185;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -304,10 +304,11 @@ describe("runMigrations — full sequence", () => {
     expect(names[180]).toBe("185-queue-pass-reason");
     expect(names[181]).toBe("186-entity-merge-groups");
     expect(names[182]).toBe("187-automation-shares");
-    expect(names[183]).toBe("188-automation-locks");
+    expect(names[183]).toBe("187-entity-name-proposals");
+    expect(names[184]).toBe("188-automation-locks");
   });
 
-  it("keeps the automation-sharing migration ledger (181-185) in order", async () => {
+  it("keeps the automation-sharing migration ledger in order", async () => {
     await runMigrations(db, { quiet: true });
 
     const rows = await sql<{ name: string }>`
@@ -315,10 +316,7 @@ describe("runMigrations — full sequence", () => {
     `.execute(db);
     const names = rows.rows.map((row) => row.name);
 
-    // Audit of the automation-sharing feature slice: shares (187) must precede
-    // locks (188), and neither may be renumbered relative to the minting,
-    // cutover, queue-pass, and merge-groups migrations that precede them.
-    expect(names.slice(176, 184)).toEqual([
+    expect(names.slice(176, 185)).toEqual([
       "181-project-minting-verdicts",
       "182-project-minting-states",
       "183-graph-pass-runs",
@@ -326,6 +324,7 @@ describe("runMigrations — full sequence", () => {
       "185-queue-pass-reason",
       "186-entity-merge-groups",
       "187-automation-shares",
+      "187-entity-name-proposals",
       "188-automation-locks",
     ]);
   });
