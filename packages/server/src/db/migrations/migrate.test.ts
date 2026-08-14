@@ -28,6 +28,7 @@ import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-syn
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
+import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
 const EXPECTED_MIGRATION_COUNT = 186;
 
@@ -303,10 +304,10 @@ describe("runMigrations — full sequence", () => {
     expect(names[179]).toBe("184-person-contact-point-cutover");
     expect(names[180]).toBe("185-queue-pass-reason");
     expect(names[181]).toBe("186-entity-merge-groups");
-    expect(names[182]).toBe("187-automation-shares");
-    expect(names[183]).toBe("187-entity-name-proposals");
-    expect(names[184]).toBe("188-automation-locks");
-    expect(names[185]).toBe("189-cli-integration-connections");
+    expect(names[182]).toBe("187-entity-name-proposals");
+    expect(names[183]).toBe("188-automation-shares");
+    expect(names[184]).toBe("189-automation-locks");
+    expect(names[185]).toBe("190-cli-integration-connections");
   });
 
   it("keeps the automation-sharing migration ledger in order", async () => {
@@ -324,10 +325,25 @@ describe("runMigrations — full sequence", () => {
       "184-person-contact-point-cutover",
       "185-queue-pass-reason",
       "186-entity-merge-groups",
-      "187-automation-shares",
       "187-entity-name-proposals",
-      "188-automation-locks",
+      "188-automation-shares",
+      "189-automation-locks",
     ]);
+  });
+
+  it("upgrades databases that already applied entity-name proposals before automation sharing", async () => {
+    const migrator = createMigrator(db);
+    await migrator.migrateTo("186-entity-merge-groups");
+
+    await entityNameProposalsMigration.up(db as unknown as Kysely<unknown>);
+    await sql`
+      INSERT INTO kysely_migration (name, timestamp)
+      VALUES ('187-entity-name-proposals', ${new Date().toISOString()})
+    `.execute(db);
+
+    const { error } = await migrator.migrateToLatest();
+
+    expect(error).toBeUndefined();
   });
 
   it("backfills only exact web origin task conversations", async () => {
