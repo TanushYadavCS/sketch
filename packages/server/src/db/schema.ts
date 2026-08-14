@@ -1483,6 +1483,21 @@ export interface TasksTable {
   source_provider_thread_id: string | null;
   source_anchor_key: string | null;
   origin_agent_output_id: string | null;
+  owner_scope: string | null;
+  owner_basis: string | null;
+  expiry_state: string | null;
+  due_basis: string | null;
+  urgency: string | null;
+  perishable: Generated<number>;
+  raised_at: string | null;
+  evidence_quote: string | null;
+  confidence: string | null;
+  client_entity_id: string | null;
+  client_name: string | null;
+  status_signal: string | null;
+  status_reason: string | null;
+  status_confidence: string | null;
+  status_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
