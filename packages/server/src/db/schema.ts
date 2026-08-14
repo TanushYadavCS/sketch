@@ -1248,6 +1248,38 @@ export interface UserEntityLinkSweepRunsTable {
   updated_at: Generated<string>;
 }
 
+export interface WeeklyMintCandidatesTable {
+  review_id: string;
+  company_key: string;
+  last_grouped_at: string | null;
+  dry_streak: Generated<number>;
+  scan_days: Generated<number>;
+  scan_first_day: string | null;
+  scan_last_day: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WeeklyMintRunsTable {
+  id: string;
+  run_key: string;
+  lease_token: string | null;
+  status: string;
+  stage: string;
+  company_cursor: string | null;
+  clock_week: string;
+  candidates_grouped: Generated<number>;
+  verdicts_requested: Generated<number>;
+  verdicts_stored: Generated<number>;
+  aged_out: Generated<number>;
+  heartbeat_at: string | null;
+  started_at: Generated<string>;
+  completed_at: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface EntityMentionsTable {
   id: string;
   entity_id: string;
@@ -1947,6 +1979,8 @@ export interface DB {
   entity_contact_points: EntityContactPointsTable;
   user_entity_links: UserEntityLinksTable;
   user_entity_link_sweep_runs: UserEntityLinkSweepRunsTable;
+  weekly_mint_candidates: WeeklyMintCandidatesTable;
+  weekly_mint_runs: WeeklyMintRunsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

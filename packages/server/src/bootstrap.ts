@@ -23,11 +23,14 @@ import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { AutomationLockSweeper } from "./automation/lock-service";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
+import { resolveOpenRouterEnrichmentConfig } from "./connectors/enrichment-providers";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
+import { createOpenRouterGenerator } from "./connectors/openrouter-generate";
 import { getPostSyncCoordinator } from "./connectors/post-sync-coordinator";
 import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
 import { archiveAllSlackChannelFiles } from "./connectors/slack-salience";
 import { startSyncScheduler } from "./connectors/sync";
+import { createWeeklyMintService } from "./connectors/weekly-mint";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
 import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
@@ -912,6 +915,36 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (backgroundWork && externalStartup) slackEntitySync.start();
   const userEntityLinkSweep = createUserEntityLinkSweepService({ db, users, logger });
   if (config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup) userEntityLinkSweep.start();
+  const weeklyMintSettings =
+    config.WEEKLY_MINT_MODE === "off" ? null : await createSettingsRepository(db, config.ENCRYPTION_KEY).get();
+  const weeklyMintOpenRouter =
+    weeklyMintSettings && config.WEEKLY_MINT_MODE !== "off"
+      ? resolveOpenRouterEnrichmentConfig(weeklyMintSettings, config.OPENROUTER_API_KEY)
+      : null;
+  const weeklyMintModel =
+    config.WEEKLY_MINT_MODE !== "off"
+      ? (config.PROJECT_MINTING_MODEL ?? weeklyMintOpenRouter?.openRouterModel ?? null)
+      : null;
+  const weeklyMintGenerator =
+    config.WEEKLY_MINT_MODE === "live" && weeklyMintOpenRouter?.openRouterApiKey && weeklyMintModel
+      ? createOpenRouterGenerator(weeklyMintOpenRouter.openRouterApiKey, {
+          model: weeklyMintModel,
+          reasoningEffort: "medium",
+          timeoutMs: 300_000,
+        })
+      : null;
+  const weeklyMint =
+    config.WEEKLY_MINT_MODE !== "off"
+      ? createWeeklyMintService({
+          db,
+          mode: config.WEEKLY_MINT_MODE,
+          logger,
+          generator: weeklyMintGenerator,
+          model: weeklyMintModel,
+          intervalMs: config.WEEKLY_MINT_INTERVAL_MS,
+        })
+      : null;
+  if (backgroundWork && externalStartup && config.WEEKLY_MINT_MODE !== "off") weeklyMint?.start();
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;
@@ -1341,6 +1374,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     await syncScheduler?.stop();
     await slackEntitySync.stop();
     await userEntityLinkSweep.stop();
+    await weeklyMint?.stop();
     whatsappWindowKeepAliveJob?.stop();
     if (backgroundWork) {
       agentScheduler.stop();
