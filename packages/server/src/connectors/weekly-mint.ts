@@ -11,6 +11,7 @@ import type { DB, WeeklyMintRunsTable } from "../db/schema";
 import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
+  CADENCE_TOKENS,
   type ClientCluster,
   type ClusterFile,
   type ClusterVerdict,
@@ -43,10 +44,15 @@ const GITHUB_REPO_PATTERN = /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g
  * Weekly minting only claims content-extraction project pool rows. The list is
  * intentionally positive and narrow so structural connector seeds,
  * user_entity_link reviews, and any future review source stay invisible until
- * deliberately admitted here.
+ * deliberately admitted here. `llm_relation` was historically excluded for its
+ * leak record, but the weekly pass carries the machinery that era lacked — the
+ * recurrence floor, dedup against accepted projects, and a human accept gate —
+ * and excluding it dropped real candidates (Traveller Segmentation Dashboard
+ * only ever arrived through it).
  */
 export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST = [
   "llm_extraction",
+  "llm_relation",
   "candidate_promotion",
   "entity_candidate_promotion",
 ] as const;
@@ -379,40 +385,120 @@ async function readClaimedCandidates(
     .filter((row) => row.evidenceFileIds.length > 0);
 }
 
-function groupClaimedCandidates(candidates: ClaimedCandidate[]): CandidateGroup[] {
+/**
+ * Words that describe the shape of a deliverable rather than which one it is.
+ * On the Oliver Wyman corpus "dashboard" alone chained War Dashboard, MiZa
+ * Impact Dashboard, Budget dashboard, and five more distinct projects into one
+ * group; "tool", "report", and "project" behave the same way everywhere.
+ */
+const GENERIC_PROJECT_TOKENS = new Set([
+  "project",
+  "projects",
+  "dashboard",
+  "dashboards",
+  "tool",
+  "tools",
+  "app",
+  "apps",
+  "portal",
+  "platform",
+  "system",
+  "report",
+  "reports",
+  "demo",
+  "prototype",
+  "pilot",
+  "poc",
+  "internal",
+  "dev",
+  "development",
+  "engagement",
+  "workstream",
+  "initiative",
+]);
+
+/** Tokens per candidate name are eligible for fusion only past this pool-wide frequency cut. */
+const FUSION_TOKEN_MAX_CANDIDATES = 3;
+
+function companyNameTokens(companyName: string): Set<string> {
+  const tokens = fragmentNameTokens(companyName);
+  const initialism = tokens.length > 1 ? tokens.map((token) => token[0] ?? "").join("") : "";
+  return new Set(initialism ? [...tokens, initialism] : tokens);
+}
+
+/**
+ * The tokens a candidate may fuse or scan on: its name minus cadence words,
+ * deliverable-shape words, and the company's own name (including its
+ * initialism — "ow" chained every ow-* repo into one group). A name made
+ * entirely of filtered words keeps its full token set so it still forms a
+ * group of its own instead of vanishing.
+ */
+function distinctiveTokens(name: string, company: Set<string>): string[] {
+  const tokens = fragmentNameTokens(name);
+  const filtered = tokens.filter(
+    (token) => !CADENCE_TOKENS.has(token) && !GENERIC_PROJECT_TOKENS.has(token) && !company.has(token),
+  );
+  return filtered.length > 0 ? filtered : tokens;
+}
+
+/**
+ * Groups candidates by shared distinctive tokens. Fusion is pairwise, not
+ * transitive-on-any-token: two names fuse when they share two distinctive
+ * tokens, or one when either side has only a single distinctive token
+ * ("Saudi" must still join "Saudi Arabia"). Tokens carried by more than
+ * FUSION_TOKEN_MAX_CANDIDATES candidates in this pool never fuse — a word
+ * that common inside one company's pool is vocabulary, not identity. The old
+ * transitive single-token union-find collapsed 26 of Oliver Wyman's 39
+ * candidates into one group, which then alias-matched a single existing
+ * project and silently swallowed all of them.
+ */
+function groupClaimedCandidates(candidates: ClaimedCandidate[], companyName: string): CandidateGroup[] {
+  const company = companyNameTokens(companyName);
+  const tokensByIndex = candidates.map((candidate) => distinctiveTokens(candidate.proposedName, company));
+  const poolFrequency = new Map<string, number>();
+  for (const tokens of tokensByIndex) {
+    for (const token of new Set(tokens)) poolFrequency.set(token, (poolFrequency.get(token) ?? 0) + 1);
+  }
+  const fusionTokens = tokensByIndex.map(
+    (tokens) => new Set(tokens.filter((token) => (poolFrequency.get(token) ?? 0) <= FUSION_TOKEN_MAX_CANDIDATES)),
+  );
+
   const parent = candidates.map((_, index) => index);
   const find = (index: number): number => {
     if (parent[index] === index) return index;
     parent[index] = find(parent[index]);
     return parent[index];
   };
-  const firstByToken = new Map<string, number>();
-  candidates.forEach((candidate, index) => {
-    const tokens = fragmentNameTokens(candidate.proposedName);
-    for (const token of tokens) {
-      const seen = firstByToken.get(token);
-      if (seen === undefined) firstByToken.set(token, index);
-      else parent[find(index)] = find(seen);
+  for (let a = 0; a < candidates.length; a++) {
+    for (let b = a + 1; b < candidates.length; b++) {
+      let shared = 0;
+      for (const token of fusionTokens[a]) if (fusionTokens[b].has(token)) shared++;
+      const required = fusionTokens[a].size === 1 || fusionTokens[b].size === 1 ? 1 : 2;
+      if (shared >= required && shared > 0) parent[find(a)] = find(b);
     }
-  });
-  const grouped = new Map<number, ClaimedCandidate[]>();
-  candidates.forEach((candidate, index) => {
+  }
+
+  const grouped = new Map<number, number[]>();
+  candidates.forEach((_, index) => {
     const root = find(index);
     const list = grouped.get(root);
-    if (list) list.push(candidate);
-    else grouped.set(root, [candidate]);
+    if (list) list.push(index);
+    else grouped.set(root, [index]);
   });
   const groups: CandidateGroup[] = [];
-  for (const members of grouped.values()) {
+  for (const memberIndexes of grouped.values()) {
+    const members = memberIndexes.map((index) => candidates[index]);
     const reviewIds = members.map((member) => member.reviewId).sort();
     const tokenCounts = new Map<string, number>();
-    for (const member of members) {
-      for (const token of new Set(fragmentNameTokens(member.proposedName))) {
+    for (const index of memberIndexes) {
+      for (const token of new Set(tokensByIndex[index])) {
         tokenCounts.set(token, (tokenCounts.get(token) ?? 0) + 1);
       }
     }
-    const shared = [...tokenCounts.entries()].filter(([, count]) => count === members.length).map(([token]) => token);
-    const fallback = fragmentNameTokens(members[0]?.proposedName ?? "");
+    const shared = [...tokenCounts.entries()]
+      .filter(([, count]) => count === memberIndexes.length)
+      .map(([token]) => token);
+    const fallback = tokensByIndex[memberIndexes[0]] ?? [];
     const tokens = (shared.length > 0 ? shared : fallback).sort();
     groups.push({
       key: reviewIds.join("|"),
@@ -486,14 +572,13 @@ function matchingStandingProduct(group: CandidateGroup, products: StandingProduc
   return null;
 }
 
+/**
+ * Deterministic disposition is containment-only. Exact name/alias matches are
+ * handled per candidate before grouping (splitAliasCandidates) — deciding
+ * alias at group level let one matching member alias its entire group, which
+ * pointed 26 distinct Oliver Wyman candidates at GCC Dashboard.
+ */
 function chooseDeterministicDisposition(group: CandidateGroup, projects: ExistingProject[]): DeterministicDisposition {
-  const nameKeys = new Set(group.names.map((name) => normalizeName(name)));
-  for (const project of projects) {
-    const projectKeys = [project.name, ...project.aliases].map((name) => normalizeName(name));
-    if (projectKeys.some((key) => nameKeys.has(key))) {
-      return { action: "alias_of", entityId: project.entityId, entityName: project.name };
-    }
-  }
   const scanFiles = group.scan?.files.length ? group.scan.files : group.evidenceFileIds;
   if (scanFiles.length === 0) return { action: "new" };
   let best: { project: ExistingProject; ratio: number } | null = null;
@@ -664,13 +749,39 @@ async function groupHasInternalStructuralCoSignal(db: Kysely<DB>, group: Candida
   );
 }
 
+/**
+ * A candidate whose name exactly matches an accepted project's name or alias
+ * needs no verdict — it is that project. Matching is per candidate so one
+ * match can never speak for its group-mates.
+ */
+function splitAliasCandidates(
+  candidates: ClaimedCandidate[],
+  projects: ExistingProject[],
+): { aliases: Array<{ reviewIds: string[]; targetEntityId: string }>; rest: ClaimedCandidate[] } {
+  const projectByKey = new Map<string, string>();
+  for (const project of projects) {
+    for (const name of [project.name, ...project.aliases]) {
+      const key = normalizeName(name);
+      if (!projectByKey.has(key)) projectByKey.set(key, project.entityId);
+    }
+  }
+  const aliases: Array<{ reviewIds: string[]; targetEntityId: string }> = [];
+  const rest: ClaimedCandidate[] = [];
+  for (const candidate of candidates) {
+    const targetEntityId = projectByKey.get(normalizeName(candidate.proposedName));
+    if (targetEntityId) aliases.push({ reviewIds: [candidate.reviewId], targetEntityId });
+    else rest.push(candidate);
+  }
+  return { aliases, rest };
+}
+
 async function markAliasCandidates(
   db: Kysely<DB>,
-  groups: Array<{ group: CandidateGroup; targetEntityId: string }>,
+  groups: Array<{ reviewIds: string[]; targetEntityId: string }>,
   now: string,
 ): Promise<void> {
-  for (const { group, targetEntityId } of groups) {
-    for (const reviewId of group.reviewIds) {
+  for (const { reviewIds, targetEntityId } of groups) {
+    for (const reviewId of reviewIds) {
       await db
         .updateTable("entity_review_queue")
         .set({
@@ -1032,7 +1143,12 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
           counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
         }
         const candidates = await readClaimedCandidates(deps.db, container.key, container, clock);
-        const groups = groupClaimedCandidates(candidates).filter((group) => group.tokens.length > 0);
+        const existingProjects = await loadExistingProjects(deps.db, container.fileIds);
+        const { aliases: exactAliases, rest } = splitAliasCandidates(candidates, existingProjects);
+        if (deps.mode === "live" && exactAliases.length > 0) {
+          await markAliasCandidates(deps.db, exactAliases, batchNow);
+        }
+        const groups = groupClaimedCandidates(rest, container.companyName).filter((group) => group.tokens.length > 0);
         const scanResults = await scanTokenRecurrence(deps.db, {
           candidates: groups.map((group) => ({ key: group.key, tokens: group.tokens })),
           fileIds: container.fileIds,
@@ -1049,23 +1165,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             else await incrementDryStreak(deps.db, container.key, [group], batchNow);
           }
         }
-        const existingProjects = await loadExistingProjects(deps.db, container.fileIds);
         for (const group of crossing) group.deterministic = chooseDeterministicDisposition(group, existingProjects);
         const covered = await coveredByPendingWeeklyVerdict(deps.db, container.companyEntityId);
         const pendingCrossing = crossing.filter(
-          (group) =>
-            !group.reviewIds.every((reviewId) => covered.has(reviewId)) && group.deterministic.action !== "alias_of",
+          (group) => !group.reviewIds.every((reviewId) => covered.has(reviewId)),
         );
-        const deterministicAliases = crossing
-          .filter((group) => group.deterministic.action === "alias_of")
-          .map((group) => ({
-            group,
-            targetEntityId: group.deterministic.action === "alias_of" ? group.deterministic.entityId : "",
-          }))
-          .filter((item) => item.targetEntityId);
-        if (deps.mode === "live") {
-          await markAliasCandidates(deps.db, deterministicAliases, batchNow);
-        }
         if (pendingCrossing.length > 0) {
           counters.verdictsRequested += 1;
           if (deps.mode === "shadow") {
@@ -1097,7 +1201,13 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
               existingProjects,
               standingProducts,
             );
-            if (aliasGroups.length > 0) await markAliasCandidates(deps.db, aliasGroups, batchNow);
+            if (aliasGroups.length > 0) {
+              await markAliasCandidates(
+                deps.db,
+                aliasGroups.map(({ group, targetEntityId }) => ({ reviewIds: group.reviewIds, targetEntityId })),
+                batchNow,
+              );
+            }
             if (verdict.projects.length > 0) {
               const declaration = container.cluster
                 ? resolveDeclaration(
@@ -1120,6 +1230,10 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 declaredClientStage: declaration?.client_stage ?? null,
               });
               counters.verdictsStored += 1;
+              deps.logger.info(
+                { containerKey: container.key, companyName: container.companyName, projects: verdict.projects.length },
+                "Weekly mint stored verdict",
+              );
               await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
             }
           }

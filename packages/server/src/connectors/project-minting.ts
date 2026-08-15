@@ -346,7 +346,7 @@ export const SCAN_CANDIDACY_MIN_DAYS = 2;
  * "Weekly Standup" family recurs by definition and would otherwise top the
  * candidate ranking.
  */
-const CADENCE_TOKENS = new Set([
+export const CADENCE_TOKENS = new Set([
   "standup",
   "weekly",
   "daily",

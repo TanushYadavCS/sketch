@@ -124,6 +124,32 @@ async function seedStandingProduct(db: Kysely<DB>, name: string): Promise<string
   return id;
 }
 
+async function seedProjectEntity(db: Kysely<DB>, name: string, aliases: string[]): Promise<string> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "project",
+      subtype: null,
+      aliases: aliases.length > 0 ? JSON.stringify(aliases) : null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 1,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+  return id;
+}
+
 describe("weekly mint pass", () => {
   let db: Kysely<DB>;
 
@@ -351,5 +377,93 @@ describe("weekly mint pass", () => {
 
     expect(partition.external.get(prospectId)?.has(fileId)).toBe(true);
     expect(partition.internal.has(fileId)).toBe(false);
+  });
+
+  it("keeps distinct candidates separate when they share only generic or company tokens", async () => {
+    const corpus = await seedClientCorpus(db, {
+      companyName: "Oliver Wyman",
+      domain: "oliverwyman.test",
+      files: [
+        { date: "2026-04-06", content: "War dashboard scope review." },
+        { date: "2026-04-07", content: "War dashboard iteration." },
+        { date: "2026-04-08", content: "War dashboard delivery." },
+        { date: "2026-04-06", content: "Budget dashboard planning." },
+        { date: "2026-04-07", content: "Budget dashboard data model." },
+        { date: "2026-04-08", content: "Budget dashboard rollout." },
+      ],
+    });
+    await queueProjectReview(db, { name: "War Dashboard", fileIds: corpus.fileIds.slice(0, 3) });
+    await queueProjectReview(db, { name: "Budget Dashboard", fileIds: corpus.fileIds.slice(3) });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    const verdicts = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("prompt_version", "=", WEEKLY_MINT_PROMPT_VERSION)
+      .execute();
+    expect(verdicts).toHaveLength(1);
+    const verdict = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true });
+    expect(verdict.projects.map((project) => project.name).sort()).toEqual(["Budget Dashboard", "War Dashboard"]);
+  });
+
+  it("aliases only the exact-matching candidate and still mints its group-mate", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-05-04", content: "Atlas phase two planning." },
+        { date: "2026-05-05", content: "Atlas phase two iteration." },
+        { date: "2026-05-06", content: "Atlas phase two wrap." },
+        { date: "2026-05-04", content: "Atlas rollout sync." },
+      ],
+    });
+    const atlasId = await seedProjectEntity(db, "Atlas", ["Atlas Rollout"]);
+    const aliasReviewId = await queueProjectReview(db, { name: "Atlas Rollout", fileIds: [corpus.fileIds[3]] });
+    const phaseReviewId = await queueProjectReview(db, {
+      name: "Atlas Phase Two",
+      fileIds: corpus.fileIds.slice(0, 3),
+    });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-05-11T00:00:00.000Z"));
+
+    const aliasRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["candidate_entity_id", "candidate_reason", "status"])
+      .where("id", "=", aliasReviewId)
+      .executeTakeFirstOrThrow();
+    expect(aliasRow).toMatchObject({
+      candidate_entity_id: atlasId,
+      candidate_reason: "weekly-mint-alias",
+      status: "pending",
+    });
+    const phaseRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["candidate_reason"])
+      .where("id", "=", phaseReviewId)
+      .executeTakeFirstOrThrow();
+    expect(phaseRow.candidate_reason).toBeNull();
+    const verdicts = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("prompt_version", "=", WEEKLY_MINT_PROMPT_VERSION)
+      .execute();
+    expect(verdicts).toHaveLength(1);
+    const verdict = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true });
+    expect(verdict.projects.map((project) => project.name)).toEqual(["Atlas Phase Two"]);
   });
 });
