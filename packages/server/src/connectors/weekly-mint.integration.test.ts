@@ -555,6 +555,94 @@ describe("weekly mint pass", () => {
     ).toHaveLength(0);
   });
 
+  it("prompts with nesting context and stores a child under a same-verdict parent group", async () => {
+    const corpus = await seedClientCorpus(db, {
+      companyName: "Oliver Wyman",
+      domain: "oliverwyman.test",
+      files: [
+        { date: "2026-07-01", content: "Traveller Dashboard roadmap." },
+        { date: "2026-07-02", content: "Traveller Dashboard metrics and Search Terms Display kickoff." },
+        { date: "2026-07-03", content: "Traveller Dashboard delivery review." },
+        { date: "2026-07-04", content: "Search Terms Display query work." },
+        { date: "2026-07-05", content: "Search Terms Display review." },
+      ],
+    });
+    const parentReviewId = await queueProjectReview(db, {
+      name: "Traveller Dashboard",
+      fileIds: corpus.fileIds.slice(0, 3),
+    });
+    const candidateEntityId = await seedProjectEntity(db, "Search Terms Candidate Fragment", []);
+    const childReviewId = await queueProjectReview(db, {
+      name: "Search Terms Display",
+      fileIds: [corpus.fileIds[1], ...corpus.fileIds.slice(3)],
+      candidateEntityId,
+    });
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: randomUUID(),
+        entity_id: candidateEntityId,
+        indexed_file_id: corpus.fileIds[1],
+        chunk_index: null,
+        context_snippet: "Search Terms Display is a workstream inside the Traveller Dashboard build.",
+        confidence: "EXTRACTED",
+        source: "llm_extraction",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+    const prompts: string[] = [];
+    const generator: GeminiGenerator = {
+      async generate() {
+        return "";
+      },
+      async generateJSON<T>(prompt: string) {
+        prompts.push(prompt);
+        return {
+          groups: [
+            {
+              groupKey: parentReviewId,
+              action: "new",
+              projectName: "Traveller Dashboard",
+              targetEntityId: null,
+            },
+            {
+              groupKey: childReviewId,
+              action: "child_of",
+              projectName: "Search Terms Display",
+              targetEntityId: null,
+              parentGroupKey: parentReviewId,
+            },
+          ],
+        } as T;
+      },
+    };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator,
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-07-13T00:00:00.000Z"));
+
+    expect(prompts[0]).toContain(`sharedEvidenceWith: ${childReviewId} (1 files)`);
+    expect(prompts[0]).toContain(
+      'snippets: "Search Terms Display is a workstream inside the Traveller Dashboard build."',
+    );
+    const verdicts = await db
+      .selectFrom("project_minting_verdicts")
+      .selectAll()
+      .where("prompt_version", "=", WEEKLY_MINT_PROMPT_VERSION)
+      .execute();
+    expect(verdicts).toHaveLength(1);
+    const verdict = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true });
+    expect(verdict.projects.find((project) => project.name === "Search Terms Display")?.parentName).toBe(
+      "Traveller Dashboard",
+    );
+  });
+
   it("aliases only the exact-matching candidate and still mints its group-mate", async () => {
     const corpus = await seedClientCorpus(db, {
       files: [

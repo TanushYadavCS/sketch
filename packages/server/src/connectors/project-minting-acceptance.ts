@@ -503,6 +503,37 @@ async function buildAnchorMaps(db: Kysely<DB>, cluster: AcceptanceContainer, cit
   return { titleFamilies, repos, people, fragmentMentions };
 }
 
+async function loadCoveredReviewFileClaims(
+  db: Kysely<DB>,
+  cluster: AcceptanceContainer,
+  projects: ClusterVerdict["projects"],
+): Promise<Map<string, Set<string>>> {
+  const clusterFileIds = new Set(cluster.files.map((file) => file.fileId));
+  const reviewIds = [...new Set(projects.flatMap((project) => project.coveredReviewIds ?? []))];
+  if (reviewIds.length === 0 || clusterFileIds.size === 0) return new Map();
+  const rows = await db
+    .selectFrom("entity_review_evidence")
+    .select(["review_id", "indexed_file_id"])
+    .where("review_id", "in", reviewIds)
+    .execute();
+  const filesByReview = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!clusterFileIds.has(row.indexed_file_id)) continue;
+    const set = filesByReview.get(row.review_id) ?? new Set<string>();
+    set.add(row.indexed_file_id);
+    filesByReview.set(row.review_id, set);
+  }
+  const filesByProject = new Map<string, Set<string>>();
+  for (const project of projects) {
+    const files = new Set<string>();
+    for (const reviewId of project.coveredReviewIds ?? []) {
+      for (const fileId of filesByReview.get(reviewId) ?? []) files.add(fileId);
+    }
+    if (files.size > 0) filesByProject.set(project.name, files);
+  }
+  return filesByProject;
+}
+
 /**
  * A missing anchor is a warning, not a refusal. The model paraphrases — it will
  * write "Mobile App Redesign" for the family "Mobile App Redesign <> Amitesh" —
@@ -520,12 +551,19 @@ function resolveProjectAnchors(
   verdict: ClusterVerdict,
   acceptedOriginalNames: Set<string>,
   maps: Awaited<ReturnType<typeof buildAnchorMaps>>,
+  coveredReviewFileClaims: Map<string, Set<string>>,
 ): { projectFiles: Map<string, Set<string>>; unresolvedAnchors: string[]; groundlessProjects: string[] } {
   const projectFiles = new Map<string, Set<string>>();
   const unresolvedAnchors: string[] = [];
   const groundlessProjects: string[] = [];
   for (const project of verdict.projects) {
     if (!acceptedOriginalNames.has(project.name)) continue;
+    const coveredReviewIds = project.coveredReviewIds ?? [];
+    const coveredReviewFiles = coveredReviewIds.length > 0 ? coveredReviewFileClaims.get(project.name) : undefined;
+    if (coveredReviewFiles && coveredReviewFiles.size > 0) {
+      projectFiles.set(project.name, new Set(coveredReviewFiles));
+      continue;
+    }
     const files = new Set<string>();
     let declaredAnchors = 0;
     for (const family of project.evidenceTitleFamilies) {
@@ -821,10 +859,12 @@ async function planAcceptance(
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const citedFragmentIds = [...new Set(acceptedProjects.flatMap((project) => project.evidenceFragments))];
   const anchorMaps = await buildAnchorMaps(db, container, citedFragmentIds);
+  const coveredReviewFileClaims = await loadCoveredReviewFileClaims(db, container, acceptedProjects);
   const { projectFiles, unresolvedAnchors, groundlessProjects } = resolveProjectAnchors(
     verdict,
     acceptedOriginalNames,
     anchorMaps,
+    coveredReviewFileClaims,
   );
   if (groundlessProjects.length > 0) {
     throw new ProjectMintingAcceptanceError(

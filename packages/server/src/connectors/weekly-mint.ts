@@ -148,6 +148,13 @@ type ModelDisposition = {
   action: "new" | "alias_of" | "child_of";
   projectName: string | null;
   targetEntityId: string | null;
+  parentGroupKey: string | null;
+};
+
+type WeeklyPromptGroupContext = {
+  coMentionedProjects: string[];
+  sharedEvidenceWith: string[];
+  snippets: string[];
 };
 
 function timestamp(now?: () => Date): string {
@@ -835,26 +842,137 @@ async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: st
   return new Set(verdict.projects.flatMap((project) => project.coveredReviewIds ?? project.evidenceFragments));
 }
 
-function buildWeeklyPrompt(
+function truncateSnippet(snippet: string): string {
+  const normalized = snippet.replace(/\s+/g, " ").trim();
+  return normalized.length <= 160 ? normalized : `${normalized.slice(0, 157)}...`;
+}
+
+function formatCountedList(items: Array<{ name: string; count: number }>): string[] {
+  return items
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, 5)
+    .map((item) => `${item.name} (${item.count} files)`);
+}
+
+async function buildWeeklyPromptContext(
+  db: Kysely<DB>,
+  groups: CandidateGroup[],
+  projects: ExistingProject[],
+): Promise<Map<string, WeeklyPromptGroupContext>> {
+  const context = new Map<string, WeeklyPromptGroupContext>(
+    groups.map((group) => [group.key, { coMentionedProjects: [], sharedEvidenceWith: [], snippets: [] }]),
+  );
+  const evidenceFileIds = [...new Set(groups.flatMap((group) => group.evidenceFileIds))];
+  const groupEvidence = new Map(groups.map((group) => [group.key, new Set(group.evidenceFileIds)]));
+  const sharedCounts = new Map<string, Array<{ name: string; count: number }>>();
+  for (let a = 0; a < groups.length; a++) {
+    for (let b = a + 1; b < groups.length; b++) {
+      const left = groups[a];
+      const right = groups[b];
+      const rightFiles = groupEvidence.get(right.key) ?? new Set<string>();
+      let shared = 0;
+      for (const fileId of groupEvidence.get(left.key) ?? []) {
+        if (rightFiles.has(fileId)) shared++;
+      }
+      if (shared === 0) continue;
+      sharedCounts.set(left.key, [...(sharedCounts.get(left.key) ?? []), { name: right.key, count: shared }]);
+      sharedCounts.set(right.key, [...(sharedCounts.get(right.key) ?? []), { name: left.key, count: shared }]);
+    }
+  }
+  for (const [groupKey, items] of sharedCounts) {
+    const groupContext = context.get(groupKey);
+    if (groupContext) groupContext.sharedEvidenceWith = formatCountedList(items);
+  }
+
+  if (evidenceFileIds.length > 0 && projects.length > 0) {
+    const coMentionRows = await db
+      .selectFrom("entity_mentions")
+      .select(["entity_id", "indexed_file_id"])
+      .where(
+        "entity_id",
+        "in",
+        projects.map((project) => project.entityId),
+      )
+      .where("indexed_file_id", "in", evidenceFileIds)
+      .execute();
+    const filesByProject = new Map<string, Set<string>>();
+    for (const row of coMentionRows) {
+      const files = filesByProject.get(row.entity_id) ?? new Set<string>();
+      files.add(row.indexed_file_id);
+      filesByProject.set(row.entity_id, files);
+    }
+    for (const group of groups) {
+      const files = groupEvidence.get(group.key) ?? new Set<string>();
+      const counted = projects
+        .map((project) => ({
+          name: project.name,
+          count: [...(filesByProject.get(project.entityId) ?? new Set<string>())].filter((fileId) => files.has(fileId))
+            .length,
+        }))
+        .filter((item) => item.count > 0);
+      const groupContext = context.get(group.key);
+      if (groupContext) groupContext.coMentionedProjects = formatCountedList(counted);
+    }
+  }
+
+  const reviewIds = groups.flatMap((group) => group.reviewIds);
+  if (reviewIds.length > 0 && evidenceFileIds.length > 0) {
+    const snippetRows = await db
+      .selectFrom("entity_review_queue")
+      .innerJoin("entity_mentions", "entity_mentions.entity_id", "entity_review_queue.candidate_entity_id")
+      .select(["entity_review_queue.id as reviewId", "entity_mentions.context_snippet as snippet"])
+      .where("entity_review_queue.id", "in", reviewIds)
+      .where("entity_review_queue.candidate_entity_id", "is not", null)
+      .where("entity_mentions.indexed_file_id", "in", evidenceFileIds)
+      .where("entity_mentions.context_snippet", "is not", null)
+      .execute();
+    const snippetsByReview = new Map<string, string[]>();
+    for (const row of snippetRows) {
+      if (!row.snippet) continue;
+      snippetsByReview.set(row.reviewId, [...(snippetsByReview.get(row.reviewId) ?? []), truncateSnippet(row.snippet)]);
+    }
+    for (const group of groups) {
+      const snippets = group.reviewIds.flatMap((reviewId) => snippetsByReview.get(reviewId) ?? []);
+      const groupContext = context.get(group.key);
+      if (groupContext) groupContext.snippets = [...new Set(snippets)].slice(0, 3);
+    }
+  }
+  return context;
+}
+
+async function buildWeeklyPrompt(
+  db: Kysely<DB>,
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
   projects: ExistingProject[],
   products: StandingProduct[],
-): string {
+): Promise<string> {
+  const contexts = await buildWeeklyPromptContext(db, groups, projects);
   const groupLines = groups
     .map((group) => {
       const deterministic =
         group.deterministic.action === "new"
           ? "new"
           : `${group.deterministic.action}:${group.deterministic.entityId}:${group.deterministic.entityName}`;
-      return [
+      const groupContext = contexts.get(group.key);
+      const lines = [
         `- groupKey: ${group.key}`,
         `  names: ${group.names.join(", ")}`,
         `  tokens: ${group.tokens.join(", ")}`,
         `  scanDays: ${group.scan?.distinctDays ?? 0}`,
         `  scanFiles: ${(group.scan?.files ?? []).join(", ")}`,
         `  deterministicProposal: ${deterministic}`,
-      ].join("\n");
+      ];
+      if (groupContext?.coMentionedProjects.length) {
+        lines.push(`  coMentionedProjects: ${groupContext.coMentionedProjects.join(", ")}`);
+      }
+      if (groupContext?.sharedEvidenceWith.length) {
+        lines.push(`  sharedEvidenceWith: ${groupContext.sharedEvidenceWith.join(", ")}`);
+      }
+      if (groupContext?.snippets.length) {
+        lines.push(`  snippets: ${groupContext.snippets.map((snippet) => JSON.stringify(snippet)).join("; ")}`);
+      }
+      return lines.join("\n");
     })
     .join("\n");
   const projectLines = projects
@@ -871,14 +989,16 @@ function buildWeeklyPrompt(
     .join("\n");
   return `You are reviewing weekly project minting candidates for ${container.companyName}.
 
-For every group, return exactly one action: new, alias_of, or child_of. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of. Use projectName for new and child_of.
+For every group, return exactly one action: new, alias_of, or child_of. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of when the parent or alias is an existing accepted project. Use parentGroupKey for child_of when the parent is another group in this same response. Use projectName for new and child_of.
 
 Groups that are the same real-world project under different spellings, transliterations, or names (for example "Inaj" and "INJAZ", a codename and its formal name, a repo and the project it implements) must return the SAME projectName — that is how they merge into one project. Only merge when you are confident they are one piece of work; when unsure, keep them separate.
+
+A recurring meeting that belongs to a bigger project makes every topic inside it look recurring. When coMentionedProjects, sharedEvidenceWith, or snippets indicate a group is a workstream inside another group's project or an existing project, return child_of instead of a sibling new: targetEntityId for an existing accepted project, parentGroupKey for another group in this verdict.
 
 Return only JSON:
 {
   "groups": [
-    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of", "projectName": "project name or null", "targetEntityId": "existing project entity id or null" }
+    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of", "projectName": "project name or null", "targetEntityId": "existing project entity id or null", "parentGroupKey": "same-verdict parent groupKey or null" }
   ]
 }
 
@@ -904,15 +1024,25 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
     if (!byKey.has(groupKey)) continue;
     const action = rawItem.action;
     if (action !== "new" && action !== "alias_of" && action !== "child_of") continue;
+    const targetEntityId =
+      typeof rawItem.targetEntityId === "string" && rawItem.targetEntityId.trim()
+        ? rawItem.targetEntityId.trim()
+        : null;
+    const rawParentGroupKey =
+      typeof rawItem.parentGroupKey === "string" && rawItem.parentGroupKey.trim()
+        ? rawItem.parentGroupKey.trim()
+        : null;
+    const parentGroupKey =
+      action === "child_of" && !targetEntityId && rawParentGroupKey && rawParentGroupKey !== groupKey
+        ? rawParentGroupKey
+        : null;
     dispositions.set(groupKey, {
       groupKey,
       action,
       projectName:
         typeof rawItem.projectName === "string" && rawItem.projectName.trim() ? rawItem.projectName.trim() : null,
-      targetEntityId:
-        typeof rawItem.targetEntityId === "string" && rawItem.targetEntityId.trim()
-          ? rawItem.targetEntityId.trim()
-          : null,
+      targetEntityId,
+      parentGroupKey: parentGroupKey && byKey.has(parentGroupKey) ? parentGroupKey : null,
     });
   }
   for (const group of groups) {
@@ -922,6 +1052,7 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
       action: group.deterministic.action,
       projectName: null,
       targetEntityId: group.deterministic.action === "new" ? null : group.deterministic.entityId,
+      parentGroupKey: null,
     });
   }
   return dispositions;
@@ -986,6 +1117,36 @@ function setOrMergeVerdictProject(map: Map<string, VerdictProject>, project: Ver
   map.set(project.name.toLowerCase(), existing ? mergeVerdictProjects(existing, project) : project);
 }
 
+function parentGroupReference(disposition: ModelDisposition): string | null {
+  if (disposition.action !== "child_of" || disposition.targetEntityId) return null;
+  return disposition.parentGroupKey;
+}
+
+function parentGroupChainWouldCycle(groupKey: string, dispositions: Map<string, ModelDisposition>): boolean {
+  const seen = new Set<string>([groupKey]);
+  let current = groupKey;
+  while (true) {
+    const disposition = dispositions.get(current);
+    if (!disposition) return false;
+    const parentGroupKey = parentGroupReference(disposition);
+    if (!parentGroupKey) return false;
+    if (seen.has(parentGroupKey)) return true;
+    seen.add(parentGroupKey);
+    current = parentGroupKey;
+  }
+}
+
+function sameVerdictProjectNameForParent(
+  parentGroupKey: string,
+  groupsByKey: Map<string, CandidateGroup>,
+  dispositions: Map<string, ModelDisposition>,
+): string | null {
+  const parentGroup = groupsByKey.get(parentGroupKey);
+  const parentDisposition = dispositions.get(parentGroupKey);
+  if (!parentGroup || !parentDisposition || parentDisposition.action === "alias_of") return null;
+  return parentDisposition.projectName ?? defaultProjectName(parentGroup);
+}
+
 function buildStoredVerdict(
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
@@ -998,6 +1159,7 @@ function buildStoredVerdict(
   aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }>;
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
+  const groupsByKey = new Map(groups.map((group) => [group.key, group]));
   const verdictProjects = new Map<string, VerdictProject>();
   const existingEntities: ClusterVerdict["existingEntities"] = [];
   const storedGroups: CandidateGroup[] = [];
@@ -1016,17 +1178,40 @@ function buildStoredVerdict(
       const parentEntityId =
         disposition.targetEntityId ?? (group.deterministic.action === "child_of" ? group.deterministic.entityId : null);
       const parent = parentEntityId ? projectsById.get(parentEntityId) : null;
-      const parentName =
-        parent?.name ?? (group.deterministic.action === "child_of" ? group.deterministic.entityName : null);
-      if (!parentName) continue;
-      const childName = disposition.projectName ?? defaultProjectName(group);
-      if (childName.toLowerCase() === parentName.toLowerCase()) {
-        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
+      const sameVerdictParentName =
+        !parentEntityId && disposition.parentGroupKey && !parentGroupChainWouldCycle(group.key, dispositions)
+          ? sameVerdictProjectNameForParent(disposition.parentGroupKey, groupsByKey, dispositions)
+          : null;
+      const fallbackParentName =
+        group.deterministic.action === "child_of" && !disposition.parentGroupKey
+          ? group.deterministic.entityName
+          : null;
+      const resolvedParentName = parent?.name ?? sameVerdictParentName ?? fallbackParentName;
+      if (!resolvedParentName) {
+        const name = disposition.projectName ?? defaultProjectName(group);
+        const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
+        setOrMergeVerdictProject(
+          verdictProjects,
+          projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
+        );
+        storedGroups.push(group);
         continue;
       }
-      if (!verdictProjects.has(parentName.toLowerCase())) {
-        verdictProjects.set(parentName.toLowerCase(), {
-          name: parentName,
+      const childName = disposition.projectName ?? defaultProjectName(group);
+      if (childName.toLowerCase() === resolvedParentName.toLowerCase()) {
+        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
+        else {
+          setOrMergeVerdictProject(
+            verdictProjects,
+            projectForGroup(group, childName, null, evidenceTitleFamiliesForGroup(container, group)),
+          );
+          storedGroups.push(group);
+        }
+        continue;
+      }
+      if (parentEntityId && !verdictProjects.has(resolvedParentName.toLowerCase())) {
+        verdictProjects.set(resolvedParentName.toLowerCase(), {
+          name: resolvedParentName,
           status: "active",
           confidence: "high",
           parentName: null,
@@ -1047,7 +1232,7 @@ function buildStoredVerdict(
       }
       setOrMergeVerdictProject(
         verdictProjects,
-        projectForGroup(group, childName, parentName, evidenceTitleFamiliesForGroup(container, group)),
+        projectForGroup(group, childName, resolvedParentName, evidenceTitleFamiliesForGroup(container, group)),
       );
       storedGroups.push(group);
       continue;
@@ -1267,7 +1452,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
              */
             try {
               const raw = await deps.generator.generateJSON<unknown>(
-                buildWeeklyPrompt(container, pendingCrossing, existingProjects, standingProducts),
+                await buildWeeklyPrompt(deps.db, container, pendingCrossing, existingProjects, standingProducts),
                 {
                   maxTokens: 12_000,
                   label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,

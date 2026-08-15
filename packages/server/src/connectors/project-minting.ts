@@ -1276,7 +1276,7 @@ export interface VerdictProject {
   evidenceRepos: string[];
   /** Entity ids from the dossier fragments/candidates sections this project absorbs. v1 rows: empty. */
   evidenceFragments: string[];
-  /** Weekly-only review-row bookkeeping for pending-verdict deduplication; never an evidence anchor. */
+  /** Weekly-only review rows: dedup bookkeeping and accept-time precise file claims, never fragment anchors. */
   coveredReviewIds?: string[];
   evidencePeople: string[];
   reasoning?: string;
