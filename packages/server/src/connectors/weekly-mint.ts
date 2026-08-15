@@ -983,6 +983,11 @@ function buildStoredVerdict(
       const parentName =
         parent?.name ?? (group.deterministic.action === "child_of" ? group.deterministic.entityName : null);
       if (!parentName) continue;
+      const childName = disposition.projectName ?? defaultProjectName(group);
+      if (childName.toLowerCase() === parentName.toLowerCase()) {
+        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
+        continue;
+      }
       if (!verdictProjects.has(parentName.toLowerCase())) {
         verdictProjects.set(parentName.toLowerCase(), {
           name: parentName,
@@ -1004,8 +1009,7 @@ function buildStoredVerdict(
           reasoning: "Existing accepted project is the weekly candidate parent.",
         });
       }
-      const name = disposition.projectName ?? defaultProjectName(group);
-      verdictProjects.set(name.toLowerCase(), projectForGroup(group, name, parentName));
+      verdictProjects.set(childName.toLowerCase(), projectForGroup(group, childName, parentName));
       storedGroups.push(group);
       continue;
     }
@@ -1169,9 +1173,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         }
         for (const group of crossing) group.deterministic = chooseDeterministicDisposition(group, existingProjects);
         const covered = await coveredByPendingWeeklyVerdict(deps.db, container.companyEntityId);
-        const pendingCrossing = crossing.filter(
-          (group) => !group.reviewIds.every((reviewId) => covered.has(reviewId)),
-        );
+        const pendingCrossing = crossing.filter((group) => !group.reviewIds.every((reviewId) => covered.has(reviewId)));
         if (pendingCrossing.length > 0) {
           counters.verdictsRequested += 1;
           if (deps.mode === "shadow") {
@@ -1185,58 +1187,75 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             );
           } else {
             if (!deps.generator || !deps.model) throw new Error("weekly mint live mode requires a generator and model");
-            const raw = await deps.generator.generateJSON<unknown>(
-              buildWeeklyPrompt(container, pendingCrossing, existingProjects, standingProducts),
-              {
-                maxTokens: 12_000,
-                label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
-                model: deps.model,
-                reasoningEffort: "medium",
-                thinkingBudget: null,
-              },
-            );
-            const dispositions = readModelDispositions(raw, pendingCrossing);
-            const { verdict, storedGroups, aliasGroups } = buildStoredVerdict(
-              container,
-              pendingCrossing,
-              dispositions,
-              existingProjects,
-              standingProducts,
-            );
-            if (aliasGroups.length > 0) {
-              await markAliasCandidates(
-                deps.db,
-                aliasGroups.map(({ group, targetEntityId }) => ({ reviewIds: group.reviewIds, targetEntityId })),
-                batchNow,
+            /**
+             * One company's bad model response must not fail the whole pass:
+             * the candidates stay pooled and get another shot next week, while
+             * every other company still stores its verdict this week.
+             */
+            try {
+              const raw = await deps.generator.generateJSON<unknown>(
+                buildWeeklyPrompt(container, pendingCrossing, existingProjects, standingProducts),
+                {
+                  maxTokens: 12_000,
+                  label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
+                  model: deps.model,
+                  reasoningEffort: "medium",
+                  thinkingBudget: null,
+                },
               );
-            }
-            if (verdict.projects.length > 0) {
-              const declaration = container.cluster
-                ? resolveDeclaration(
-                    container.cluster.groupMembers
-                      .map((member) => declaredById.get(member.entityId))
-                      .filter((row) => row != null),
-                  )
-                : null;
-              await createProjectMintingVerdictRepository(deps.db).storePending({
-                companyEntityId: container.companyEntityId,
-                companyName: container.companyName,
-                fileCount: container.fileIds.length,
-                dossier: renderWeeklyDossier(container, storedGroups),
-                verdict: JSON.stringify(verdict),
-                model: deps.model,
-                promptVersion: WEEKLY_MINT_PROMPT_VERSION,
-                counterpartyKind: verdict.counterpartyKind,
-                clientStage: verdict.clientStage,
-                declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
-                declaredClientStage: declaration?.client_stage ?? null,
-              });
-              counters.verdictsStored += 1;
-              deps.logger.info(
-                { containerKey: container.key, companyName: container.companyName, projects: verdict.projects.length },
-                "Weekly mint stored verdict",
+              const dispositions = readModelDispositions(raw, pendingCrossing);
+              const { verdict, storedGroups, aliasGroups } = buildStoredVerdict(
+                container,
+                pendingCrossing,
+                dispositions,
+                existingProjects,
+                standingProducts,
               );
-              await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
+              if (aliasGroups.length > 0) {
+                await markAliasCandidates(
+                  deps.db,
+                  aliasGroups.map(({ group, targetEntityId }) => ({ reviewIds: group.reviewIds, targetEntityId })),
+                  batchNow,
+                );
+              }
+              if (verdict.projects.length > 0) {
+                const declaration = container.cluster
+                  ? resolveDeclaration(
+                      container.cluster.groupMembers
+                        .map((member) => declaredById.get(member.entityId))
+                        .filter((row) => row != null),
+                    )
+                  : null;
+                await createProjectMintingVerdictRepository(deps.db).storePending({
+                  companyEntityId: container.companyEntityId,
+                  companyName: container.companyName,
+                  fileCount: container.fileIds.length,
+                  dossier: renderWeeklyDossier(container, storedGroups),
+                  verdict: JSON.stringify(verdict),
+                  model: deps.model,
+                  promptVersion: WEEKLY_MINT_PROMPT_VERSION,
+                  counterpartyKind: verdict.counterpartyKind,
+                  clientStage: verdict.clientStage,
+                  declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
+                  declaredClientStage: declaration?.client_stage ?? null,
+                });
+                counters.verdictsStored += 1;
+                deps.logger.info(
+                  {
+                    containerKey: container.key,
+                    companyName: container.companyName,
+                    projects: verdict.projects.length,
+                  },
+                  "Weekly mint stored verdict",
+                );
+                await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
+              }
+            } catch (error) {
+              if (error instanceof WeeklyMintProcessCrash) throw error;
+              deps.logger.warn(
+                { err: error, containerKey: container.key, companyName: container.companyName },
+                "Weekly mint verdict failed for container; candidates stay pooled",
+              );
             }
           }
         }

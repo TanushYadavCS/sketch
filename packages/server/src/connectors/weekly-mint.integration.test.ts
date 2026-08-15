@@ -415,6 +415,63 @@ describe("weekly mint pass", () => {
     expect(verdict.projects.map((project) => project.name).sort()).toEqual(["Budget Dashboard", "War Dashboard"]);
   });
 
+  it("treats a child named after its parent as an alias instead of failing the run", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-06-01", content: "One Stop questionnaire kickoff." },
+        { date: "2026-06-02", content: "One Stop questionnaire buildout." },
+        { date: "2026-06-03", content: "One Stop questionnaire review." },
+      ],
+    });
+    const oneStopId = await seedProjectEntity(db, "One Stop", []);
+    const reviewId = await queueProjectReview(db, { name: "One Stop Questionnaire", fileIds: corpus.fileIds });
+    const selfParentGenerator: GeminiGenerator = {
+      async generate() {
+        return "";
+      },
+      async generateJSON<T>() {
+        const rows = await db.selectFrom("weekly_mint_candidates").select("review_id").execute();
+        return {
+          groups: [
+            {
+              groupKey: rows
+                .map((row) => row.review_id)
+                .sort()
+                .join("|"),
+              action: "child_of",
+              projectName: "One Stop",
+              targetEntityId: oneStopId,
+            },
+          ],
+        } as T;
+      },
+    };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: selfParentGenerator,
+      model: "test/reasoning-model",
+    });
+
+    const result = await service.runOnce(new Date("2026-06-08T00:00:00.000Z"));
+
+    expect(result.status).toBe("completed");
+    const aliasRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["candidate_entity_id", "candidate_reason"])
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    expect(aliasRow).toMatchObject({ candidate_entity_id: oneStopId, candidate_reason: "weekly-mint-alias" });
+    expect(
+      await db
+        .selectFrom("project_minting_verdicts")
+        .selectAll()
+        .where("prompt_version", "=", WEEKLY_MINT_PROMPT_VERSION)
+        .execute(),
+    ).toHaveLength(0);
+  });
+
   it("aliases only the exact-matching candidate and still mints its group-mate", async () => {
     const corpus = await seedClientCorpus(db, {
       files: [
