@@ -1681,12 +1681,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => {
-      toast.error(builderChatMutationError(error, "Could not start a chat"));
-      if (error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED") {
-        void conversationsQuery.refetch();
-      }
-    },
+    onError: (error) => toast.error(builderChatMutationError(error, "Could not start a chat")),
   });
   const selectMutation = useMutation({
     mutationFn: (conversation: ScheduledTaskConversationSummary) =>
@@ -1732,7 +1727,6 @@ function BuilderChatSidecar({
         onBackToAutomations={onBackToAutomations}
         onNew={() => createMutation.mutate()}
         newPending={createMutation.isPending}
-        newDisabled={conversationsQuery.data?.builderLock?.state === "held"}
         onArchive={
           selectedConversation && !selectedIsArchived
             ? () => archiveMutation.mutate(selectedConversation.conversationId)
@@ -1798,7 +1792,6 @@ function BuilderChatHeader({
   onBackToAutomations,
   onNew,
   newPending,
-  newDisabled,
   onArchive,
   archivePending,
 }: {
@@ -1809,7 +1802,6 @@ function BuilderChatHeader({
   onBackToAutomations: () => void;
   onNew: () => void;
   newPending: boolean;
-  newDisabled?: boolean;
   onArchive?: () => void;
   archivePending: boolean;
 }) {
@@ -1891,7 +1883,7 @@ function BuilderChatHeader({
             variant="outline"
             className="h-8 shrink-0 gap-1.5 rounded-[8px] border-border/80 bg-background px-2.5 text-[12px] shadow-none hover:bg-muted/70 focus-visible:ring-brand-accent/50"
             onClick={onNew}
-            disabled={newPending || newDisabled}
+            disabled={newPending}
           >
             {newPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} />}
             New chat
