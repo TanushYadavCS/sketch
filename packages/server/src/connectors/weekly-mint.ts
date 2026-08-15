@@ -872,6 +872,8 @@ function buildWeeklyPrompt(
 
 For every group, return exactly one action: new, alias_of, or child_of. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of. Use projectName for new and child_of.
 
+Groups that are the same real-world project under different spellings, transliterations, or names (for example "Inaj" and "INJAZ", a codename and its formal name, a repo and the project it implements) must return the SAME projectName — that is how they merge into one project. Only merge when you are confident they are one piece of work; when unsure, keep them separate.
+
 Return only JSON:
 {
   "groups": [
