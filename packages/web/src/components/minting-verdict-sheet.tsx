@@ -13,9 +13,9 @@
  *
  * Renames and moves are keyed by the project's ORIGINAL verdict name
  * throughout; the server applies renames only at write time, so the two never
- * interact. Every tree computation here (ordering, strike cascade, root
- * check, move targets) runs on the EFFECTIVE forest — verdict parents with the
- * reviewer's moves overlaid — mirroring the server's validation exactly.
+ * interact. Every tree computation here (ordering, strike cascade, move
+ * targets) runs on the EFFECTIVE forest — verdict parents with the reviewer's
+ * moves overlaid — mirroring the server's validation exactly.
  */
 import {
   type ClientStage,
@@ -220,9 +220,6 @@ function SheetBody({
   const carriesStage = kindCarriesStage(kind);
   const blockedByStage = carriesStage && !stage;
   const blockedByFlags = verdict.flags.length > 0 && !override;
-  const rootSurvives =
-    projects.length === 0 ||
-    effectiveProjects.some((project) => project.parentName === null && !effectiveStruck.has(project.name));
   const previewBlocked =
     dryRun.error instanceof ApiRequestError ? dryRun.error.message : dryRun.error ? String(dryRun.error) : null;
   const displayName = (originalName: string) => renamePayload[originalName] ?? originalName;
@@ -233,13 +230,7 @@ function SheetBody({
       })
     : [];
   const canAccept =
-    !previewBlocked &&
-    !!dryRun.data &&
-    !blockedByStage &&
-    !blockedByFlags &&
-    rootSurvives &&
-    !accept.isPending &&
-    !reject.isPending;
+    !previewBlocked && !!dryRun.data && !blockedByStage && !blockedByFlags && !accept.isPending && !reject.isPending;
   const decision = carriesStage && stage ? `${kind} · ${stage}` : kind;
   const error = accept.error ?? reject.error;
 
@@ -285,22 +276,26 @@ function SheetBody({
 
         <section>
           <SectionLabel>Relationship</SectionLabel>
-          <dl className="mt-2 space-y-1">
-            <Fact label="Registry says">
-              {verdict.declaredCounterpartyKind ? (
-                axisText(verdict.declaredCounterpartyKind, verdict.declaredClientStage)
-              ) : (
-                <span className="italic text-muted-foreground">undeclared</span>
-              )}
-            </Fact>
-            <Fact label="Model nominates">
+          <p className="mt-2 text-[12.5px] text-muted-foreground">
+            Model nominates{" "}
+            <span className="text-foreground">
               {axisText(verdict.verdict.counterpartyKind, verdict.verdict.clientStage)}
-            </Fact>
-          </dl>
+            </span>{" "}
+            — registry{" "}
+            {verdict.declaredCounterpartyKind ? (
+              <>
+                says{" "}
+                <span className="text-foreground">
+                  {axisText(verdict.declaredCounterpartyKind, verdict.declaredClientStage)}
+                </span>
+              </>
+            ) : (
+              <span className="italic">undeclared</span>
+            )}
+          </p>
 
-          <div className="mt-3 border-t border-border/60 pt-3">
-            <SectionLabel>Your answer</SectionLabel>
-            <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-3">
+            <div className="flex flex-wrap gap-1.5">
               {KINDS.map((option) => (
                 <Pick key={option} label={option} selected={kind === option} onClick={() => setKind(option)} />
               ))}
@@ -431,11 +426,6 @@ function SheetBody({
                 );
               })}
             </div>
-            {!rootSurvives ? (
-              <p className="mt-1.5 text-[11.5px] text-destructive">
-                At least one top-level project must survive — unstrike one or move a project to top level.
-              </p>
-            ) : null}
           </section>
         ) : null}
 
@@ -509,17 +499,6 @@ function SheetBody({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">{children}</div>;
-}
-
-function Fact({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex gap-3 text-[12.5px]">
-      <dt className="w-32 shrink-0 font-mono text-[10.5px] uppercase tracking-[0.04em] text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="text-foreground">{children}</dd>
-    </div>
-  );
 }
 
 function Pick({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {

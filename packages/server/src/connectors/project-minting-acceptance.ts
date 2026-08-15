@@ -292,7 +292,6 @@ function acceptedProjectsForConfirmedAxes(
   struck: Set<string>,
   isV2: boolean,
   isInternal: boolean,
-  effectiveParentName: (name: string) => string | null,
 ): {
   acceptedProjects: ClusterVerdict["projects"];
   shouldWriteNothing: boolean;
@@ -345,12 +344,13 @@ function acceptedProjectsForConfirmedAxes(
     };
   }
   if (isV2) {
-    if (!projectsAfterStrike.some((project) => effectiveParentName(project.name) === null)) {
-      throw new ProjectMintingAcceptanceError(
-        "INVALID_ACCEPTANCE_SHAPE",
-        "active acceptance requires the top-level account project",
-      );
-    }
+    /**
+     * No in-verdict root is required: weekly verdicts routinely add sub-work
+     * under entities that already exist in the graph, so demanding a
+     * top-level project here would make those unacceptable. Without a root,
+     * residualTarget stays null and the dry run warns that unmatched files
+     * attach to nothing — the reviewer sees the consequence and decides.
+     */
     return {
       acceptedProjects: projectsAfterStrike,
       shouldWriteNothing: false,
@@ -817,14 +817,7 @@ async function planAcceptance(
 
   const renameMap = input.renameMap ?? {};
   const { acceptedProjects, shouldWriteNothing, shouldWriteEngagement, droppedByGate } =
-    acceptedProjectsForConfirmedAxes(
-      verdict,
-      input,
-      struck,
-      isV2,
-      container.companyEntityId === null,
-      effectiveParentName,
-    );
+    acceptedProjectsForConfirmedAxes(verdict, input, struck, isV2, container.companyEntityId === null);
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const citedFragmentIds = [...new Set(acceptedProjects.flatMap((project) => project.evidenceFragments))];
   const anchorMaps = await buildAnchorMaps(db, container, citedFragmentIds);

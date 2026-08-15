@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestLogger, createTestPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
-import { readClusterVerdict } from "./project-minting";
+import { normalizeTitleFamily, readClusterVerdict } from "./project-minting";
 import { seedAttendee, seedCompany, seedConnector, seedFile } from "./project-minting-fixtures";
 import {
   WEEKLY_MINT_PROMPT_VERSION,
@@ -164,9 +164,21 @@ describe("weekly mint pass", () => {
   it("stores one verdict for a three-day crossing group and dedupes the same pool next week", async () => {
     const corpus = await seedClientCorpus(db, {
       files: [
-        { date: "2026-01-05", content: "Atlas Migration kickoff and plan." },
-        { date: "2026-01-06", content: "Atlas Migration implementation update." },
-        { date: "2026-01-07", content: "Atlas Migration delivery review." },
+        {
+          id: "Client Atlas Migration - 2026-01-05",
+          date: "2026-01-05",
+          content: "Atlas Migration kickoff and plan.",
+        },
+        {
+          id: "Client Atlas Migration - 2026-01-06",
+          date: "2026-01-06",
+          content: "Atlas Migration implementation update.",
+        },
+        {
+          id: "Client Atlas Migration - 2026-01-07",
+          date: "2026-01-07",
+          content: "Atlas Migration delivery review.",
+        },
       ],
     });
     const reviewId = await queueProjectReview(db, { name: "Atlas Migration", fileIds: corpus.fileIds });
@@ -184,9 +196,13 @@ describe("weekly mint pass", () => {
     const verdicts = await db.selectFrom("project_minting_verdicts").selectAll().execute();
     expect(verdicts).toHaveLength(1);
     expect(verdicts[0]?.prompt_version).toBe(WEEKLY_MINT_PROMPT_VERSION);
-    expect(
-      readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true }).projects[0]?.evidenceFragments,
-    ).toEqual([reviewId]);
+    const project = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true }).projects[0];
+    expect(project?.evidenceTitleFamilies.map((family) => normalizeTitleFamily(family).key)).toEqual([
+      "client atlas migration",
+    ]);
+    expect(project?.evidenceTitleFamilies).not.toContain("Atlas Migration");
+    expect(project?.evidenceFragments).toEqual([]);
+    expect(project?.coveredReviewIds).toEqual([reviewId]);
 
     await service.runOnce(new Date("2026-01-19T00:00:00.000Z"));
     expect(counter.calls).toBe(1);
@@ -386,7 +402,8 @@ describe("weekly mint pass", () => {
     expect(verdicts[0]?.company_entity_id).toBeNull();
     const project = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true }).projects[0];
     expect(project).toMatchObject({ name: "Sketch Memory", parentEntityId: productId });
-    expect(project?.evidenceFragments).toEqual([reviewId]);
+    expect(project?.evidenceFragments).toEqual([]);
+    expect(project?.coveredReviewIds).toEqual([reviewId]);
   });
 
   it("keeps an internal recurring topic pooled when it has no structural co-signal", async () => {

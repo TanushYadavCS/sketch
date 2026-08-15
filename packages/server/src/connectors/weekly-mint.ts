@@ -19,6 +19,7 @@ import {
   channelMatchesCompany,
   clusterClientFiles,
   fragmentNameTokens,
+  normalizeTitleFamily,
   readClusterVerdict,
 } from "./project-minting";
 import { type TokenRecurrence, scanTokenRecurrence } from "./token-recurrence-scan";
@@ -831,7 +832,7 @@ async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: st
     .executeTakeFirst();
   if (!row) return new Set();
   const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: true });
-  return new Set(verdict.projects.flatMap((project) => project.evidenceFragments));
+  return new Set(verdict.projects.flatMap((project) => project.coveredReviewIds ?? project.evidenceFragments));
 }
 
 function buildWeeklyPrompt(
@@ -930,10 +931,20 @@ function defaultProjectName(group: CandidateGroup): string {
   return group.names[0] ?? group.tokens.join(" ");
 }
 
+function evidenceTitleFamiliesForGroup(container: WeeklyMintContainer, group: CandidateGroup): string[] {
+  const fileNames = new Map(container.files.map((file) => [file.fileId, file.fileName]));
+  const families = group.evidenceFileIds
+    .map((fileId) => fileNames.get(fileId))
+    .filter((fileName): fileName is string => fileName != null)
+    .map((fileName) => normalizeTitleFamily(fileName).display);
+  return [...new Set(families)].sort((a, b) => a.localeCompare(b));
+}
+
 function projectForGroup(
   group: CandidateGroup,
   name: string,
   parentName: string | null,
+  evidenceTitleFamilies: string[],
   parentEntityId?: string,
 ): VerdictProject {
   return {
@@ -942,9 +953,10 @@ function projectForGroup(
     confidence: "medium",
     parentName,
     ...(parentEntityId ? { parentEntityId } : {}),
-    evidenceTitleFamilies: group.names,
+    evidenceTitleFamilies,
     evidenceRepos: [],
-    evidenceFragments: group.reviewIds,
+    evidenceFragments: [],
+    coveredReviewIds: group.reviewIds,
     evidencePeople: [],
     reasoning: `Weekly recurrence crossed ${group.scan?.distinctDays ?? 0} distinct days.`,
   };
@@ -964,6 +976,7 @@ function mergeVerdictProjects(a: VerdictProject, b: VerdictProject): VerdictProj
     evidenceTitleFamilies: [...new Set([...a.evidenceTitleFamilies, ...b.evidenceTitleFamilies])],
     evidenceRepos: [...new Set([...a.evidenceRepos, ...b.evidenceRepos])],
     evidenceFragments: [...new Set([...a.evidenceFragments, ...b.evidenceFragments])],
+    coveredReviewIds: [...new Set([...(a.coveredReviewIds ?? []), ...(b.coveredReviewIds ?? [])])],
     evidencePeople: [...new Set([...a.evidencePeople, ...b.evidencePeople])],
   };
 }
@@ -1032,13 +1045,19 @@ function buildStoredVerdict(
           reasoning: "Existing accepted project is the weekly candidate parent.",
         });
       }
-      setOrMergeVerdictProject(verdictProjects, projectForGroup(group, childName, parentName));
+      setOrMergeVerdictProject(
+        verdictProjects,
+        projectForGroup(group, childName, parentName, evidenceTitleFamiliesForGroup(container, group)),
+      );
       storedGroups.push(group);
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
     const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
-    setOrMergeVerdictProject(verdictProjects, projectForGroup(group, name, null, product?.entityId));
+    setOrMergeVerdictProject(
+      verdictProjects,
+      projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
+    );
     storedGroups.push(group);
   }
 

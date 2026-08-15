@@ -1276,6 +1276,8 @@ export interface VerdictProject {
   evidenceRepos: string[];
   /** Entity ids from the dossier fragments/candidates sections this project absorbs. v1 rows: empty. */
   evidenceFragments: string[];
+  /** Weekly-only review-row bookkeeping for pending-verdict deduplication; never an evidence anchor. */
+  coveredReviewIds?: string[];
   evidencePeople: string[];
   reasoning?: string;
 }
@@ -1395,6 +1397,7 @@ export function readClusterVerdict(value: unknown, options?: ReadClusterVerdictO
       throw new Error(`Cluster verdict project "${raw.name}" has invalid status: ${String(raw.status)}`);
     }
     const confidence = typeof raw.confidence === "string" && CONFIDENCES.has(raw.confidence) ? raw.confidence : "low";
+    const coveredReviewIds = readStringArray(raw.coveredReviewIds);
     projects.push({
       name: raw.name.trim(),
       status: raw.status as ProjectLifecycleStatus,
@@ -1406,6 +1409,7 @@ export function readClusterVerdict(value: unknown, options?: ReadClusterVerdictO
       evidenceTitleFamilies: readStringArray(raw.evidenceTitleFamilies),
       evidenceRepos: readStringArray(raw.evidenceRepos),
       evidenceFragments: [...new Set(readStringArray(raw.evidenceFragments))],
+      ...(raw.coveredReviewIds === undefined ? {} : { coveredReviewIds: [...new Set(coveredReviewIds)] }),
       evidencePeople: readStringArray(raw.evidencePeople),
       ...(typeof raw.reasoning === "string" && raw.reasoning.trim() ? { reasoning: raw.reasoning.trim() } : {}),
     });
