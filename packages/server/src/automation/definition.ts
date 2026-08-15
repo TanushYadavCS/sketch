@@ -587,9 +587,6 @@ export function validateAutomationBuilderSaveRequest(params: {
     }
   }
 
-  const terminalStepIds = new Set(request.steps.map((step) => step.id));
-  for (const edge of request.edges) terminalStepIds.delete(edge.from);
-
   for (const step of request.steps) {
     const content = request.stepContent[step.id];
     const isEmptyPausedAgentPlaceholder =
@@ -632,18 +629,6 @@ export function validateAutomationBuilderSaveRequest(params: {
         );
       }
       if (content?.contentType === "script") {
-        if (
-          request.delivery.mode === "deliver" &&
-          terminalStepIds.has(step.id) &&
-          /\breturn\s*(?:\(\s*)?\{/.test(content.content)
-        ) {
-          addIssue(
-            issues,
-            "DELIVERY_MESSAGE_STRING_REQUIRED",
-            `Final delivery action step "${step.label}" must return a non-empty human-readable string, not an object`,
-            `stepContent.${step.id}`,
-          );
-        }
         if (hasInvalidAutomationSketchToolNamespace(content.content)) {
           addIssue(
             issues,

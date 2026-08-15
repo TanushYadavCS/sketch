@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
-import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
+import { formatWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 
 function makeTask(overrides: Partial<ScheduledTaskRow> = {}): ScheduledTaskRow {
   return {
@@ -68,15 +68,18 @@ describe("resolveWorkflowDelivery", () => {
   });
 });
 
-describe("requireWorkflowMessageText", () => {
+describe("formatWorkflowMessageText", () => {
   it("accepts and trims human-readable text", () => {
-    expect(requireWorkflowMessageText("  *Done*\n  ")).toBe("*Done*");
+    expect(formatWorkflowMessageText("  *Done*\n  ")).toBe("*Done*");
   });
 
-  it("rejects structured output", () => {
-    expect(() => requireWorkflowMessageText({ summary: "Done" })).toThrow("human-readable string");
-    expect(() => requireWorkflowMessageText(["Done"])).toThrow("human-readable string");
-    expect(() => requireWorkflowMessageText(' {"summary":"Done"} ')).toThrow("serialized JSON");
-    expect(() => requireWorkflowMessageText('```json\n{"summary":"Done"}\n``` ')).toThrow("serialized JSON");
+  it("serializes structured output for delivery", () => {
+    expect(formatWorkflowMessageText({ message: "Done" })).toBe('{\n  "message": "Done"\n}');
+    expect(formatWorkflowMessageText(["one", "two"])).toBe('[\n  "one",\n  "two"\n]');
+  });
+
+  it("skips absent output instead of failing the workflow", () => {
+    expect(formatWorkflowMessageText(null)).toBeNull();
+    expect(formatWorkflowMessageText(undefined)).toBeNull();
   });
 });

@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 187;
+const EXPECTED_MIGRATION_COUNT = 188;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -224,6 +224,34 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[183]).toBe("188-automation-shares");
     expect(names[184]).toBe("189-automation-locks");
     expect(names[185]).toBe("190-cli-integration-connections");
+    expect(names[186]).toBe("191-task-review-fields");
+    expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
+  });
+
+  it("stores millisecond builder-lock expiry timestamps as bigint", async () => {
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const column = await sql<{ data_type: string; udt_name: string }>`
+      SELECT data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'scheduled_task_builder_locks'
+        AND column_name = 'expires_at'
+    `.execute(db);
+
+    expect(column.rows).toEqual([{ data_type: "bigint", udt_name: "int8" }]);
+
+    await sql`
+      INSERT INTO scheduled_task_builder_locks
+        (task_id, conversation_id, transcript_user_id, expires_at)
+      VALUES ('m192-builder-lock', 'm192-conversation', 'm192-user', ${expiresAt})
+    `.execute(db);
+
+    const row = await sql<{ expires_at: number | string }>`
+      SELECT expires_at
+      FROM scheduled_task_builder_locks
+      WHERE task_id = 'm192-builder-lock'
+    `.execute(db);
+    expect(Number(row.rows[0]?.expires_at)).toBe(expiresAt);
   });
 
   it("keeps the automation-sharing migration ledger in order", async () => {

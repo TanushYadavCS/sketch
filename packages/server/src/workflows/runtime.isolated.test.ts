@@ -1072,7 +1072,7 @@ describe("executeAutomation action steps", () => {
     );
   });
 
-  it("fails message delivery instead of JSON-stringifying structured final output", async () => {
+  it("delivers legacy structured final output through the message compatibility adapter", async () => {
     const params = makeParams({
       task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
       stepContentRepo: makeStepContent([
@@ -1083,13 +1083,26 @@ describe("executeAutomation action steps", () => {
 
     const result = await executeAutomation(params as never);
 
-    expect(result.status).toBe("failed");
-    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
-    expect(params.sendMessage).toHaveBeenCalledWith(expect.stringContaining("Message delivery requires"));
-    expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('"summary"'));
+    expect(result.status).toBe("completed");
+    expect(result.stepOutputs.act1.output).toBe('{\n  "summary": "done"\n}');
+    expect(params.sendMessage).toHaveBeenCalledWith('{\n  "summary": "done"\n}');
   });
 
-  it("fails a test run when its final delivery output is structured", async () => {
+  it("completes when a final action has no output instead of failing delivery", async () => {
+    const params = makeParams({
+      task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return;" }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.stepOutputs.act1.output).toBeNull();
+    expect(params.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("formats structured final output during a test run without delivering it", async () => {
     const params = makeParams({
       runMode: "test",
       task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
@@ -1104,8 +1117,8 @@ describe("executeAutomation action steps", () => {
 
     const result = await executeAutomation(params as never);
 
-    expect(result.status).toBe("failed");
-    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
+    expect(result.status).toBe("completed");
+    expect(result.stepOutputs.act1.output).toBe('{\n  "message": "Reminder: message Vedant on Slack."\n}');
     expect(params.sendMessage).not.toHaveBeenCalled();
   });
 
