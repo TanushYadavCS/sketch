@@ -8,12 +8,13 @@
  * then age); this list does not re-sort. Nothing fills the queue over HTTP yet,
  * so the empty state carries the command that does.
  */
-import { type ProjectMintingAcceptance, type ProjectMintingVerdict, api } from "@/lib/api";
+import { MintingVerdictRow } from "@/components/minting-verdict-row";
+import { MintingVerdictSheet } from "@/components/minting-verdict-sheet";
+import { type ProjectMintingAcceptance, api } from "@/lib/api";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { MintingClusters } from "./minting-clusters";
-import { MintingVerdictSheet } from "./minting-sheet";
 
 export function MintingQueue() {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -63,7 +64,7 @@ export function MintingQueue() {
         ) : (
           <div className="divide-y divide-border rounded-md border border-border">
             {verdicts.map((verdict) => (
-              <QueueRow key={verdict.id} verdict={verdict} onOpen={() => setOpenId(verdict.id)} />
+              <MintingVerdictRow key={verdict.id} verdict={verdict} onOpen={() => setOpenId(verdict.id)} />
             ))}
           </div>
         )}
@@ -116,46 +117,4 @@ function UnresolvedAnchorNotice({
       </ul>
     </div>
   );
-}
-
-function QueueRow({ verdict, onOpen }: { verdict: ProjectMintingVerdict; onOpen: () => void }) {
-  const proposal = verdict.verdict;
-  const nominated = axisText(proposal.counterpartyKind, proposal.clientStage);
-  const declared = verdict.declaredCounterpartyKind
-    ? axisText(verdict.declaredCounterpartyKind, verdict.declaredClientStage)
-    : null;
-  const shape = [
-    proposal.engagement ? "1 container" : null,
-    proposal.projects.length > 0
-      ? `${proposal.projects.length} project${proposal.projects.length === 1 ? "" : "s"}`
-      : null,
-  ].filter(Boolean);
-
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex w-full items-center gap-3 px-3 py-2 text-left"
-      data-testid={`minting-row-${verdict.id}`}
-    >
-      {verdict.flags.length > 0 ? (
-        <span className="shrink-0 rounded-full border border-amber-400/70 bg-amber-50 px-1.5 py-0.5 font-mono text-[9px] uppercase text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-          flag
-        </span>
-      ) : (
-        <span aria-hidden className="w-[34px] shrink-0" />
-      )}
-      <span className="shrink-0 text-[13px] font-medium text-foreground">{verdict.companyName}</span>
-      <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
-        nominates <span className="text-foreground">{nominated}</span> — registry says{" "}
-        {declared ? <span className="text-foreground">{declared}</span> : <span className="italic">undeclared</span>}
-        {shape.length > 0 ? ` · ${shape.join(", ")}` : " · nothing proposed"}
-      </span>
-      <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">{verdict.fileCount} files</span>
-    </button>
-  );
-}
-
-function axisText(kind: string, stage: string | null): string {
-  return stage ? `${kind} · ${stage}` : kind;
 }

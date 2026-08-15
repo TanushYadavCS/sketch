@@ -1145,6 +1145,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       verdictsRequested: ownedRun.verdicts_requested,
       verdictsStored: ownedRun.verdicts_stored,
       agedOut: ownedRun.aged_out,
+      vendorsSkipped: 0,
     };
     const dbCounters = () => ({
       candidates_grouped: counters.candidatesGrouped,
@@ -1165,11 +1166,41 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       const standingProducts = await loadStandingProducts(deps.db);
       for (const container of containers) {
         if (companyCursor && container.key <= companyCursor) continue;
+        const declaration = container.cluster
+          ? resolveDeclaration(
+              container.cluster.groupMembers
+                .map((member) => declaredById.get(member.entityId))
+                .filter((row) => row != null),
+            )
+          : null;
         const batchNow = timestamp(deps.now);
         const claimed = await claimCandidatesForCompany(deps.db, container, container.key, clock, batchNow);
         counters.candidatesGrouped += claimed;
         if (deps.mode === "live") {
           counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
+        }
+        if (declaration?.counterparty_kind === "vendor") {
+          counters.vendorsSkipped += 1;
+          deps.logger.info(
+            {
+              companyEntityId: container.companyEntityId,
+              containerKey: container.key,
+              companyName: container.companyName,
+              vendorsSkipped: counters.vendorsSkipped,
+            },
+            "Weekly mint skipped vendor-declared container",
+          );
+          companyCursor = container.key;
+          await updateOwnedRun({
+            stage: COMPANIES_STAGE,
+            company_cursor: companyCursor,
+            heartbeat_at: timestamp(deps.now),
+            ...dbCounters(),
+            updated_at: timestamp(deps.now),
+          });
+          await deps.afterCompanyBatch?.(container.key);
+          if (batchSize <= 1) await new Promise((resolve) => setTimeout(resolve, 0));
+          continue;
         }
         const candidates = await readClaimedCandidates(deps.db, container.key, container, clock);
         const existingProjects = await loadExistingProjects(deps.db, container.fileIds);
@@ -1242,13 +1273,6 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 );
               }
               if (verdict.projects.length > 0) {
-                const declaration = container.cluster
-                  ? resolveDeclaration(
-                      container.cluster.groupMembers
-                        .map((member) => declaredById.get(member.entityId))
-                        .filter((row) => row != null),
-                    )
-                  : null;
                 await createProjectMintingVerdictRepository(deps.db).storePending({
                   companyEntityId: container.companyEntityId,
                   companyName: container.companyName,

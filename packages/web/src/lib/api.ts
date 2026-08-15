@@ -517,6 +517,8 @@ export interface ProjectMintingAcceptBody {
   confirmedClientStage?: ClientStage;
   struckProjectNames?: string[];
   renameMap?: Record<string, string>;
+  /** Original project name → new parent's original name, or null for top level. */
+  reparentMap?: Record<string, string | null>;
   overrideTripwireFlags?: boolean;
   /** Compute the full acceptance without writing anything. */
   dryRun?: boolean;
@@ -525,7 +527,15 @@ export interface ProjectMintingAcceptBody {
 export interface ProjectMintingAcceptance {
   verdictId: string;
   entityIds: { engagementId: string | null; projectIds: string[] };
-  entities: { id: string; name: string; kind: "engagement" | "project"; parentId?: string | null; fileIds: string[] }[];
+  entities: {
+    id: string;
+    name: string;
+    kind: "engagement" | "project";
+    parentId?: string | null;
+    /** The parent's name as it appeared in the verdict, after any reparent — for labeling without name reconstruction. */
+    parentOriginalName?: string | null;
+    fileIds: string[];
+  }[];
   mergeIds: string[];
   struckProjects: string[];
   droppedByGate: {

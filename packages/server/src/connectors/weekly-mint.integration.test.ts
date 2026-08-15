@@ -234,6 +234,72 @@ describe("weekly mint pass", () => {
     expect(stale).toEqual({ status: "pending", resolved_by: null });
   });
 
+  it("skips vendor-declared containers without stranding claimed or stale weekly candidates", async () => {
+    const corpus = await seedClientCorpus(db, {
+      companyName: "Vendorco",
+      domain: "vendorco.test",
+      files: [
+        { date: "2026-04-06", content: "Atlas Migration kickoff and plan." },
+        { date: "2026-04-07", content: "Atlas Migration implementation update." },
+        { date: "2026-01-01", content: "Legacy Cleanup archive review." },
+      ],
+    });
+    await db
+      .insertInto("company_relationship_declarations")
+      .values({
+        subject_entity_id: corpus.companyId,
+        counterparty_kind: "vendor",
+        client_stage: null,
+        note: null,
+      })
+      .execute();
+    const freshReviewId = await queueProjectReview(db, {
+      name: "Atlas Migration",
+      fileIds: corpus.fileIds.slice(0, 2),
+    });
+    const staleReviewId = await queueProjectReview(db, {
+      name: "Legacy Cleanup",
+      fileIds: [corpus.fileIds[2]],
+      lastSeenAt: "2026-01-01T00:00:00.000Z",
+    });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(0);
+    expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(0);
+    const candidates = await db
+      .selectFrom("weekly_mint_candidates")
+      .select(["review_id", "company_key"])
+      .orderBy("review_id", "asc")
+      .execute();
+    expect(candidates).toEqual(
+      [freshReviewId, staleReviewId].sort().map((reviewId) => ({
+        review_id: reviewId,
+        company_key: corpus.companyId,
+      })),
+    );
+    const rows = await db
+      .selectFrom("entity_review_queue")
+      .select(["id", "status", "resolved_by"])
+      .where("id", "in", [freshReviewId, staleReviewId])
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual(
+      [
+        { id: freshReviewId, status: "pending", resolved_by: null },
+        { id: staleReviewId, status: "dismissed", resolved_by: "weekly-mint-ageout" },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
+  });
+
   it("steals an abandoned lease after a crash past the company cursor without a second verdict call", async () => {
     const corpus = await seedClientCorpus(db, {
       files: [

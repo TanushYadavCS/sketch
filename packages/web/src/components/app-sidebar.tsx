@@ -448,6 +448,14 @@ export function AppSidebar({
     enabled: role === "admin",
     refetchInterval: 30_000,
   });
+  const yourOrgVerdicts = useQuery({
+    queryKey: ["project-minting", "verdicts"],
+    queryFn: () => api.projectMinting.listVerdicts(),
+    enabled: role === "admin",
+    retry: false,
+    refetchInterval: 30_000,
+  });
+  const yourOrgBadgeCount = (yourOrgReview.data?.total ?? 0) + (yourOrgVerdicts.data?.verdicts.length ?? 0);
   const logout = useMutation({
     mutationFn: () => api.auth.logout(),
     onSuccess: () => {
@@ -511,7 +519,7 @@ export function AppSidebar({
                 key={item.href}
                 item={item}
                 active={isNavItemActive(location.pathname, item.href)}
-                badge={item.yourOrgBadge ? (yourOrgReview.data?.total ?? 0) : undefined}
+                badge={item.yourOrgBadge ? yourOrgBadgeCount : undefined}
                 onSelect={closeMobile}
               />
             ))}
