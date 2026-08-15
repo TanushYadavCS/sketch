@@ -535,6 +535,8 @@ export interface ProjectMintingAcceptance {
     /** The parent's name as it appeared in the verdict, after any reparent — for labeling without name reconstruction. */
     parentOriginalName?: string | null;
     fileIds: string[];
+    /** Dry runs only: display fields for each claimed file. */
+    files?: { id: string; name: string; source: string; date: string | null }[];
   }[];
   mergeIds: string[];
   struckProjects: string[];

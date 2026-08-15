@@ -61,6 +61,8 @@ export interface AcceptedEntitySummary {
   /** Original-name parent selected by the acceptance overlay; null for top-level and non-project parents. */
   parentOriginalName: string | null;
   fileIds: string[];
+  /** Dry runs only: display fields for each claimed file so the sheet can list them without a second endpoint. */
+  files?: { id: string; name: string; source: string; date: string | null }[];
   /** v2 accepts only: files claimed by the content scan and tasks re-parented because of them. */
   retroClaim?: { filesClaimed: number; tasksReparented: number };
   /**
@@ -988,6 +990,13 @@ function planResult(
  * Adopted entities show their canonical id; to-be-created ones show null.
  */
 function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
+  const fileById = new Map(plan.container.files.map((file) => [file.fileId, file]));
+  const claimedFiles = (fileIds: string[]) =>
+    fileIds
+      .map((fileId) => fileById.get(fileId))
+      .filter((file): file is ClusterFile => file !== undefined)
+      .map((file) => ({ id: file.fileId, name: file.fileName, source: file.source, date: file.date }))
+      .sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "") || a.name.localeCompare(b.name));
   const entities: AcceptedEntitySummary[] = [];
   if (plan.shouldWriteEngagement && plan.verdict.engagement) {
     const originalName = plan.verdict.engagement.name;
@@ -1009,6 +1018,7 @@ function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
         parentId: null,
         parentOriginalName: plan.isV2 ? plan.effectiveParentName(project.name) : null,
         fileIds: [...(plan.projectFiles.get(project.name) ?? [])].sort(),
+        files: claimedFiles([...(plan.projectFiles.get(project.name) ?? [])]),
       });
     }
   }

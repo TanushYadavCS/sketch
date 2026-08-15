@@ -7,7 +7,7 @@
 import type { ProjectMintingVerdict } from "@/lib/api";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
@@ -132,7 +132,8 @@ describe("review tab project suggestions", () => {
     await userEvent.clear(rename);
     await userEvent.type(rename, "MiMo Finance Automation");
 
-    await userEvent.selectOptions(screen.getByLabelText("parent for Ops Dashboard"), "MiMo Automation");
+    fireEvent.dragStart(screen.getByTestId("minting-project-Ops Dashboard"));
+    fireEvent.drop(screen.getByTestId("minting-project-MiMo Automation"));
 
     await userEvent.click(screen.getByLabelText("keep Ops Reporting"));
     const dashboardCheckbox = screen.getByLabelText("keep Ops Dashboard");
@@ -154,5 +155,47 @@ describe("review tab project suggestions", () => {
       const section = screen.queryByTestId("review-band-project-suggestions");
       if (section) expect(within(section).queryByTestId("minting-row-verdict-1")).not.toBeInTheDocument();
     });
+  });
+
+  it("opens the dry run's claimed files for a project", async () => {
+    const row = verdict();
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [], total: 0 })),
+      http.get("/api/project-minting/verdicts", () => HttpResponse.json({ verdicts: [row] })),
+      http.get("/api/project-minting/verdicts/:id", () => HttpResponse.json({ verdict: row })),
+      http.post("/api/project-minting/verdicts/:id/acceptance", () =>
+        HttpResponse.json({
+          acceptance: {
+            ...emptyAcceptance(row.id),
+            entities: [
+              {
+                id: "",
+                name: "MiMo Automation",
+                kind: "project",
+                parentId: null,
+                parentOriginalName: null,
+                fileIds: ["file-1", "file-2"],
+                files: [
+                  { id: "file-1", name: "MiMo weekly sync", source: "fireflies", date: "2026-08-01T09:00:00Z" },
+                  { id: "file-2", name: "MiMo rollout plan", source: "gmail", date: null },
+                ],
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<ReviewTab isAdmin />);
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+    await userEvent.click(await screen.findByLabelText("files for MiMo Automation"));
+
+    const panel = await screen.findByTestId("minting-files-panel");
+    expect(within(panel).getByText("MiMo weekly sync")).toBeInTheDocument();
+    expect(within(panel).getByText("2026-08-01")).toBeInTheDocument();
+    expect(within(panel).getByText("MiMo rollout plan")).toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByRole("button", { name: "Back" }));
+    expect(screen.queryByTestId("minting-files-panel")).not.toBeInTheDocument();
   });
 });

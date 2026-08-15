@@ -273,6 +273,5 @@ describe("project minting review", () => {
     expect(parentRow).toHaveStyle({ paddingLeft: "12px" });
     expect(childRow).toHaveStyle({ paddingLeft: "32px" });
     expect(await screen.findByText(/Create “Habuild Sketch deployment” under “Habuild”/)).toBeInTheDocument();
-    expect(screen.getByText(/1 fragments/)).toBeInTheDocument();
   });
 });

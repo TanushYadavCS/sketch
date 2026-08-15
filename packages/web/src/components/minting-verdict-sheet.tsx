@@ -1,3 +1,4 @@
+import { EntryList, SectionLabel, SourceTag } from "@/components/entity-drawer/drawer-kit";
 /**
  * One verdict, opened for decision. Reads top to bottom as the questions a
  * reviewer actually asks: who is this cluster, what is the relationship, what
@@ -102,6 +103,9 @@ function SheetBody({
   const [renames, setRenames] = useState<Record<string, string>>({});
   const [reparents, setReparents] = useState<Record<string, string | null>>({});
   const [override, setOverride] = useState(false);
+  const [draggedName, setDraggedName] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [filesFor, setFilesFor] = useState<string | null>(null);
 
   /** Seed the picker from the nomination once the verdict lands. */
   useEffect(() => {
@@ -243,14 +247,34 @@ function SheetBody({
     });
   };
 
-  const moveTargetsFor = (name: string): string[] => {
-    const blocked = descendantsOf(name);
-    blocked.add(name);
-    return projects.map((project) => project.name).filter((candidate) => !blocked.has(candidate));
+  /** Dry-run claim per ORIGINAL project name — entities come back under display names. */
+  const claimByOriginal = new Map(
+    (dryRun.data?.acceptance.entities ?? [])
+      .filter((entity) => entity.kind === "project")
+      .map((entity) => [originalNameByDisplay(projects, renamePayload, entity.name), entity] as const)
+      .filter((pair): pair is [string, (typeof pair)[1]] => pair[0] !== null),
+  );
+
+  const isValidDropTarget = (target: string): boolean => {
+    if (!draggedName || target === draggedName) return false;
+    if (effectiveStruck.has(target)) return false;
+    return !descendantsOf(draggedName).has(target);
   };
 
+  const dropOn = (target: string | null) => {
+    if (!draggedName) return;
+    if (target !== null && !isValidDropTarget(target)) return;
+    if (effectiveParentOf(draggedName) !== target) {
+      setReparents((current) => ({ ...current, [draggedName]: target }));
+    }
+    setDraggedName(null);
+    setDropTarget(null);
+  };
+
+  const filesPanelProject = filesFor ? claimByOriginal.get(filesFor) : undefined;
+
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="relative flex min-h-full flex-col">
       <div className="border-b border-border px-6 py-4">
         <h2 className="text-[17px] font-semibold text-foreground">{verdict.companyName}</h2>
         <p className="mt-0.5 text-[12.5px] text-muted-foreground">
@@ -340,87 +364,108 @@ function SheetBody({
           <section>
             <div className="flex items-baseline justify-between">
               <SectionLabel>Proposed projects · {projects.length}</SectionLabel>
-              <span className="font-mono text-[10px] text-muted-foreground">untick to strike · edit to rename</span>
+              <span className="font-mono text-[10px] text-muted-foreground">untick to strike · drag to nest</span>
             </div>
             <div className="mt-2 divide-y divide-border/60 rounded-md border border-border">
+              {draggedName && effectiveParentOf(draggedName) !== null ? (
+                <div
+                  data-testid="minting-drop-top-level"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => dropOn(null)}
+                  className="border-b border-dashed border-border px-3 py-1.5 text-center font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground"
+                >
+                  drop here for top level
+                </div>
+              ) : null}
               {treeOrder(effectiveProjects).map(({ project, depth }) => {
                 const name = project.name;
                 const isStruck = effectiveStruck.has(name);
                 const struckViaAncestor = isStruck && !struck.has(name);
                 const isMergeTarget = mergeTargets.has(name);
-                const parent = effectiveParentOf(name);
+                const claim = claimByOriginal.get(name);
+                const draggable = !isStruck && projects.length > 1;
                 return (
-                  <div key={name} className="px-3 py-2" style={{ paddingLeft: 12 + depth * 20 }}>
-                    <div className="flex items-start gap-2.5">
+                  <div
+                    key={name}
+                    data-testid={`minting-project-${name}`}
+                    draggable={draggable}
+                    onDragStart={(e) => {
+                      setDraggedName(name);
+                      e.dataTransfer?.setData("text/plain", name);
+                    }}
+                    onDragEnd={() => {
+                      setDraggedName(null);
+                      setDropTarget(null);
+                    }}
+                    onDragOver={(e) => {
+                      if (!isValidDropTarget(name)) return;
+                      e.preventDefault();
+                      setDropTarget(name);
+                    }}
+                    onDragLeave={() => setDropTarget((current) => (current === name ? null : current))}
+                    onDrop={() => dropOn(name)}
+                    className={cn(
+                      "px-3 py-2",
+                      draggedName === name && "opacity-50",
+                      dropTarget === name && "bg-muted/60",
+                    )}
+                    style={{ paddingLeft: 12 + depth * 20 }}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      {draggable ? (
+                        <span aria-hidden className="cursor-grab select-none text-[13px] text-muted-foreground/70">
+                          ⠿
+                        </span>
+                      ) : null}
                       <input
                         type="checkbox"
-                        className="mt-2"
                         checked={!isStruck}
                         disabled={struckViaAncestor || isMergeTarget}
                         aria-label={`keep ${name}`}
                         onChange={() => toggleStrike(name)}
                       />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          {isStruck ? (
-                            <span className="text-[13px] font-medium text-foreground line-through opacity-60">
-                              {name}
-                            </span>
-                          ) : (
-                            <input
-                              type="text"
-                              value={renames[name] ?? name}
-                              aria-label={`name for ${name}`}
-                              onChange={(e) => setRenames((current) => ({ ...current, [name]: e.target.value }))}
-                              className="h-7 min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 text-[13px] font-medium text-foreground hover:border-border focus:border-border focus:outline-none"
-                            />
-                          )}
-                          <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
-                            {project.status} · {project.confidence}
-                          </span>
-                        </div>
-                        <span className="mt-0.5 block text-[11.5px] text-muted-foreground">
-                          {evidenceSummary(project)}
+                      {isStruck ? (
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground line-through opacity-60">
+                          {name}
                         </span>
-                        {isMergeTarget ? (
-                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            Merge target for an existing entity — can't be struck.
-                          </span>
-                        ) : null}
-                        {struckViaAncestor ? (
-                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                            Struck with its parent.
-                          </span>
-                        ) : null}
-                        {!isStruck && projects.length > 1 ? (
-                          <label className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                            <span className="font-mono uppercase tracking-[0.04em]">under</span>
-                            <select
-                              value={parent ?? ""}
-                              aria-label={`parent for ${name}`}
-                              onChange={(e) =>
-                                setReparents((current) => ({ ...current, [name]: e.target.value || null }))
-                              }
-                              className="h-6 max-w-[280px] truncate rounded border border-border bg-background px-1 text-[11px] text-foreground"
-                            >
-                              <option value="">top level</option>
-                              {moveTargetsFor(name).map((candidate) => (
-                                <option key={candidate} value={candidate}>
-                                  {displayName(candidate)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ) : null}
-                      </div>
+                      ) : (
+                        <input
+                          type="text"
+                          value={renames[name] ?? name}
+                          aria-label={`name for ${name}`}
+                          onChange={(e) => setRenames((current) => ({ ...current, [name]: e.target.value }))}
+                          className="h-7 min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 text-[13px] font-medium text-foreground hover:border-border focus:border-border focus:outline-none"
+                        />
+                      )}
+                      {!isStruck && claim ? (
+                        <button
+                          type="button"
+                          aria-label={`files for ${name}`}
+                          onClick={() => setFilesFor(name)}
+                          disabled={claim.fileIds.length === 0}
+                          className={cn(
+                            "shrink-0 font-mono text-[10.5px] tabular-nums",
+                            claim.fileIds.length === 0
+                              ? "text-muted-foreground/60"
+                              : "text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground",
+                          )}
+                        >
+                          {claim.fileIds.length} {claim.fileIds.length === 1 ? "file" : "files"}
+                        </button>
+                      ) : null}
+                      <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
+                        {project.status} · {project.confidence}
+                      </span>
                     </div>
-                    {project.reasoning ? (
-                      <details className="ml-7 mt-1">
-                        <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-                          why
-                        </summary>
-                        <p className="mt-1 text-[11.5px] text-muted-foreground">{project.reasoning}</p>
-                      </details>
+                    {isMergeTarget ? (
+                      <span className="mt-0.5 block pl-6 text-[11px] text-muted-foreground">
+                        Merge target for an existing entity — can't be struck.
+                      </span>
+                    ) : null}
+                    {struckViaAncestor ? (
+                      <span className="mt-0.5 block pl-6 text-[11px] text-muted-foreground">
+                        Struck with its parent.
+                      </span>
                     ) : null}
                   </div>
                 );
@@ -493,12 +538,54 @@ function SheetBody({
           </p>
         ) : null}
       </div>
+
+      {filesFor && filesPanelProject ? (
+        <div className="absolute inset-0 z-10 flex flex-col bg-background" data-testid="minting-files-panel">
+          <div className="flex items-center justify-between border-b border-border px-6 py-4">
+            <div>
+              <h3 className="text-[15px] font-semibold text-foreground">{filesPanelProject.name}</h3>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">
+                {filesPanelProject.fileIds.length} {filesPanelProject.fileIds.length === 1 ? "file" : "files"} this
+                accept will attach
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => setFilesFor(null)}>
+              Back
+            </Button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <EntryList>
+              {(filesPanelProject.files ?? []).map((file) => (
+                <li key={file.id} className="flex items-center gap-2 px-3 py-2">
+                  <SourceTag>{file.source}</SourceTag>
+                  <span className="min-w-0 flex-1 truncate text-sm">{file.name}</span>
+                  <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">
+                    {file.date ? file.date.slice(0, 10) : "—"}
+                  </span>
+                </li>
+              ))}
+            </EntryList>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">{children}</div>;
+/**
+ * Dry-run entities come back under their DISPLAY names (renames applied).
+ * Recover the original verdict name so claims key the same way every other
+ * per-project structure in this sheet does.
+ */
+function originalNameByDisplay(
+  projects: VerdictProject[],
+  renamePayload: Record<string, string>,
+  entityDisplayName: string,
+): string | null {
+  for (const project of projects) {
+    if ((renamePayload[project.name] ?? project.name) === entityDisplayName) return project.name;
+  }
+  return null;
 }
 
 function Pick({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
@@ -538,22 +625,6 @@ function ConsequenceRow({ line }: { line: GateLine }) {
 
 function axisText(kind: CounterpartyKind, stage: ClientStage | null): string {
   return kindCarriesStage(kind) && stage ? `${kind} · ${stage}` : kind;
-}
-
-function evidenceSummary(project: {
-  evidenceTitleFamilies: string[];
-  evidenceRepos: string[];
-  evidencePeople: string[];
-  evidenceFragments?: string[];
-}) {
-  const fragments = project.evidenceFragments ?? [];
-  const parts = [
-    project.evidenceTitleFamilies.length > 0 ? `${project.evidenceTitleFamilies.length} title families` : null,
-    project.evidenceRepos.length > 0 ? `${project.evidenceRepos.length} repos` : null,
-    project.evidencePeople.length > 0 ? `${project.evidencePeople.length} people` : null,
-    fragments.length > 0 ? `${fragments.length} fragments` : null,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : "no evidence anchors";
 }
 
 /**
