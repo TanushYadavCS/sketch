@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [1.3.1] -- 2026-08-15
+
+- Fixes automation delivery contract to accept structured or empty terminal output for Slack and WhatsApp, replacing strict validation with a compatibility formatter.
+- Widen scheduled_task_builder_locks.expires_at to bigint in PostgreSQL to support millisecond Unix timestamps from Date.now(), preventing builder-chat creation and lease acquisition failures.
+- Adds regression tests for shared-user builder-chat creation and builder-lock acquisition.
+
 ## [1.3.0] -- 2026-08-14
 
 - Decouples chat history access from indexing by authorizing against passive membership state before fetching, consolidating Slack and WhatsApp history into a unified search/read API with directional page tokens.
