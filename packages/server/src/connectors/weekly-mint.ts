@@ -950,6 +950,29 @@ function projectForGroup(
   };
 }
 
+/**
+ * Two groups the model merged by returning the same projectName must UNION
+ * their evidence — overwriting drops the earlier group's review ids, which
+ * un-covers those rows for next week's dedup and hides them from absorption
+ * at accept (the Inaj/INJAZ merge silently lost Inaj's evidence this way).
+ */
+function mergeVerdictProjects(a: VerdictProject, b: VerdictProject): VerdictProject {
+  return {
+    ...a,
+    parentName: a.parentName ?? b.parentName,
+    ...(a.parentEntityId ?? b.parentEntityId ? { parentEntityId: a.parentEntityId ?? b.parentEntityId } : {}),
+    evidenceTitleFamilies: [...new Set([...a.evidenceTitleFamilies, ...b.evidenceTitleFamilies])],
+    evidenceRepos: [...new Set([...a.evidenceRepos, ...b.evidenceRepos])],
+    evidenceFragments: [...new Set([...a.evidenceFragments, ...b.evidenceFragments])],
+    evidencePeople: [...new Set([...a.evidencePeople, ...b.evidencePeople])],
+  };
+}
+
+function setOrMergeVerdictProject(map: Map<string, VerdictProject>, project: VerdictProject): void {
+  const existing = map.get(project.name.toLowerCase());
+  map.set(project.name.toLowerCase(), existing ? mergeVerdictProjects(existing, project) : project);
+}
+
 function buildStoredVerdict(
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
@@ -1009,13 +1032,13 @@ function buildStoredVerdict(
           reasoning: "Existing accepted project is the weekly candidate parent.",
         });
       }
-      verdictProjects.set(childName.toLowerCase(), projectForGroup(group, childName, parentName));
+      setOrMergeVerdictProject(verdictProjects, projectForGroup(group, childName, parentName));
       storedGroups.push(group);
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
     const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
-    verdictProjects.set(name.toLowerCase(), projectForGroup(group, name, null, product?.entityId));
+    setOrMergeVerdictProject(verdictProjects, projectForGroup(group, name, null, product?.entityId));
     storedGroups.push(group);
   }
 
