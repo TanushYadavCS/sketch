@@ -40,4 +40,20 @@ describe("scheduled task conversation repository on Postgres", () => {
       repo.listByTaskAndTranscriptUser(input.taskId, input.transcriptUserId, { includeArchived: true }),
     ).resolves.toHaveLength(2);
   });
+
+  it("acquires builder locks with millisecond Unix expiry timestamps", async () => {
+    const repo = createScheduledTaskConversationRepository(db);
+    const nowMs = Date.now();
+    const result = await repo.acquireBuilderLock({
+      taskId: "pg-builder-lock-overflow",
+      conversationId: "pg-builder-conversation",
+      transcriptUserId: "pg-builder-user",
+      nowMs,
+      nowIso: new Date(nowMs).toISOString(),
+      expiresAt: nowMs + 5 * 60 * 1000,
+    });
+
+    expect(result.acquired).toBe(true);
+    expect(Number(result.lock.expires_at)).toBeGreaterThan(2_147_483_647);
+  });
 });

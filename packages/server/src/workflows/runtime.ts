@@ -57,7 +57,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-run-telemetry";
-import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
+import { formatWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowEdge, WorkflowStep } from "./types";
 
 export type { AutomationRunMode } from "@sketch/shared";
@@ -405,7 +405,7 @@ async function executeAutomationInternal(
       });
 
       const normalizedOutput = normalizeStepOutput(output);
-      const outputForStep = isMessageDeliveryStep ? requireWorkflowMessageText(normalizedOutput) : normalizedOutput;
+      const outputForStep = isMessageDeliveryStep ? formatWorkflowMessageText(normalizedOutput) : normalizedOutput;
       const durationMs = Date.now() - startTime;
       stepOutputs[step.id] = { output: outputForStep, status: "completed", duration_ms: durationMs };
       previousOutput = outputForStep;
@@ -487,7 +487,8 @@ async function executeAutomationInternal(
       });
 
       if (sendMessage && task.output_mode !== "silent" && finalOutput != null) {
-        await sendMessage(requireWorkflowMessageText(finalOutput));
+        const finalMessage = formatWorkflowMessageText(finalOutput);
+        if (finalMessage !== null) await sendMessage(finalMessage);
       }
       logger.info({ taskId: task.id, runId }, "Automation: execution completed");
     } catch (error) {

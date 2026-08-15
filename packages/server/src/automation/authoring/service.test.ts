@@ -170,8 +170,7 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.sketch and ctx.sketchTools are invalid");
     expect(generate.mock.calls[0]?.[0].instructions).toContain('cliIntegrations: ["github"]');
     expect(generate.mock.calls[0]?.[0].instructions).toContain("managed gh executable");
-    expect(generate.mock.calls[0]?.[0].instructions).toContain("human-readable message string");
-    expect(generate.mock.calls[0]?.[0].instructions).toContain("JSON.stringify output");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("structured output for delivery");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("short headings and bullet lists");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.integrations.executeAction");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("fetch Slack urlPrivate without authentication");

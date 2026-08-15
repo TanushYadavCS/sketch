@@ -30,7 +30,7 @@ import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calend
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
-const EXPECTED_MIGRATION_COUNT = 187;
+const EXPECTED_MIGRATION_COUNT = 188;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -308,6 +308,31 @@ describe("runMigrations — full sequence", () => {
     expect(names[183]).toBe("188-automation-shares");
     expect(names[184]).toBe("189-automation-locks");
     expect(names[185]).toBe("190-cli-integration-connections");
+    expect(names[186]).toBe("191-task-review-fields");
+    expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
+  });
+
+  it("accepts millisecond builder-lock expiry timestamps on SQLite", async () => {
+    await runMigrations(db, { quiet: true });
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+
+    await db
+      .insertInto("scheduled_task_builder_locks")
+      .values({
+        task_id: "m192-builder-lock",
+        conversation_id: "m192-conversation",
+        transcript_user_id: "m192-user",
+        expires_at: expiresAt,
+      })
+      .execute();
+
+    await expect(
+      db
+        .selectFrom("scheduled_task_builder_locks")
+        .select("expires_at")
+        .where("task_id", "=", "m192-builder-lock")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ expires_at: expiresAt });
   });
 
   it("keeps the automation-sharing migration ledger in order", async () => {

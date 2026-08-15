@@ -438,6 +438,43 @@ describe("scheduled task conversation API", () => {
     });
   });
 
+  it("lets an explicit grantee create a builder conversation", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-create-grantee@test.com" });
+    const member = await createUserRepository(db).create({ name: "Member", email: "member-create-grantee@test.com" });
+    await seedTask(db, "granted-create-task", owner.id);
+    await createAutomationSharesRepository(db).grant({
+      taskId: "granted-create-task",
+      userId: member.id,
+      grantedByUserId: owner.id,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const response = await app.request("/api/scheduled-tasks/granted-create-task/conversations", {
+      method: "POST",
+      headers: { Cookie: await memberCookie(db, member.id), "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true }),
+    });
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.conversation.conversationId).toMatch(/^builder-/);
+    await expect(
+      db
+        .selectFrom("scheduled_task_conversations")
+        .select(["transcript_user_id", "kind"])
+        .where("task_id", "=", "granted-create-task")
+        .execute(),
+    ).resolves.toEqual([{ transcript_user_id: member.id, kind: "builder" }]);
+  });
+
   it("keeps the builder-chat lock discipline for admins on a foreign task", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder-lock@test.com" });

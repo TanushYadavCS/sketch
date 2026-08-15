@@ -11,8 +11,8 @@ describe("buildAutomationMessageDeliveryLines", () => {
   it("provides Slack-safe human-readable delivery rules", () => {
     const result = buildAutomationMessageDeliveryLines("slack").join("\n");
 
-    expect(result).toContain("human-readable message body as plain text");
-    expect(result).toContain("JSON.stringify output");
+    expect(result).toContain("structured output is serialized when needed");
+    expect(result).not.toContain("Do not return a JSON object or array");
     expect(result).toContain("short headings and bullet lists");
     expect(result).toContain("relevant time window");
     expect(result).toContain("Slack mrkdwn");

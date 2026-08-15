@@ -110,17 +110,13 @@ describe("automation trigger validation", () => {
 });
 
 describe("automation action capability validation", () => {
-  it("rejects a final delivery action that returns an object", () => {
+  it("allows a final delivery action to return structured output", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.status = "active";
     request.delivery.mode = "deliver";
     request.stepContent.action.content = 'return { message: "Reminder: message Vedant on Slack." };';
 
-    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
-      expect.objectContaining({
-        issues: expect.arrayContaining([expect.objectContaining({ code: "DELIVERY_MESSAGE_STRING_REQUIRED" })]),
-      }),
-    );
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).not.toThrow();
   });
 
   it("allows a read-only Sketch action without a broker", () => {
