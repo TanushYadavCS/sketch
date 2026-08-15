@@ -1473,6 +1473,43 @@ describe("AutomationBuilderPage", () => {
     );
   });
 
+  it("makes a foreign owner's active builder lock visible and blocks new chats", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "owner-builder-chat",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Alice Member",
+        },
+      ],
+      builderLock: {
+        state: "held",
+        conversationId: "owner-builder-chat",
+        owner: "other",
+        expiresAt: "2026-06-01T00:05:00.000Z",
+      },
+      transcriptAccess: "admin",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    const lockNotice = await screen.findByTestId("automation-builder-chat-lock-notice");
+    expect(lockNotice).toHaveTextContent("You can still inspect and edit this automation");
+    const newChatButton = screen.getByRole("button", { name: "New chat" });
+    expect(newChatButton).toBeDisabled();
+
+    await userEvent.setup().click(newChatButton);
+    expect(mocks.createConversation).not.toHaveBeenCalled();
+  });
+
   it("uses viewer-scoped transcript summaries for builder chat labels and hides source chats", async () => {
     mocks.search = {};
     mocks.listConversations.mockResolvedValue({
