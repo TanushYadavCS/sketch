@@ -2645,21 +2645,24 @@ export const api = {
         method: "POST",
       });
     },
-    async pause(id: string) {
+    async pause(id: string, lease?: { clientSessionId: string; generation: number }) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/pause`, {
         method: "POST",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
       return res.task;
     },
-    async resume(id: string) {
+    async resume(id: string, lease?: { clientSessionId: string; generation: number }) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/resume`, {
         method: "POST",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
       return res.task;
     },
-    remove(id: string) {
+    remove(id: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: true }>(`/api/scheduled-tasks/${id}`, {
         method: "DELETE",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
     },
     async listRuns(taskId: string) {

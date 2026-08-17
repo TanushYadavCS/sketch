@@ -1040,7 +1040,7 @@ describe("automation persistence", () => {
     expect(holderEdit).toMatchObject({ kind: "saved", row: { title: "Holder edit", revision: 1 } });
   });
 
-  it("removes lock rows for the task inside the delete transaction", async () => {
+  it("blocks deletion while another session holds the task lock", async () => {
     await addUser("user-2");
     await createAutomationDefinition({
       db,
@@ -1060,8 +1060,9 @@ describe("automation persistence", () => {
       scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
     });
 
-    expect(result).toEqual({ kind: "deleted" });
-    await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeUndefined();
+    expect(result).toMatchObject({ kind: "locked", lock: { holder_user_id: "user-2" } });
+    await expect(createScheduledTaskRepository(db).getById("automation-delete-lock")).resolves.toBeDefined();
+    await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeDefined();
   });
 
   it("denies a grantee's next save after a revoke while the grantee still holds the edit lock", async () => {
@@ -1178,7 +1179,7 @@ describe("automation persistence", () => {
     });
   });
 
-  it("lets an admin delete while another user holds the lock and clears lock rows in the transaction", async () => {
+  it("blocks an admin delete while another user holds the lock", async () => {
     await addUser("user-2");
     await createAutomationDefinition({
       db,
@@ -1200,18 +1201,18 @@ describe("automation persistence", () => {
       scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
     });
 
-    expect(result).toEqual({ kind: "deleted" });
-    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-locked")).resolves.toBeUndefined();
+    expect(result).toMatchObject({ kind: "locked", lock: { holder_user_id: "user-2" } });
+    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-locked")).resolves.toBeDefined();
     await expect(
       createAutomationLocksRepository(db).getByTaskId("automation-admin-delete-locked"),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
     await expect(
       db
         .selectFrom("automation_task_shares")
         .selectAll()
         .where("task_id", "=", "automation-admin-delete-locked")
         .execute(),
-    ).resolves.toEqual([]);
+    ).resolves.toHaveLength(1);
   });
 
   it("surfaces LOCKED and REVISION_CONFLICT across builder-save and agent-edit seams without silent clobbering", async () => {

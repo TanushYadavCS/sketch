@@ -917,6 +917,7 @@ export function scheduledTaskRoutes(
 
   async function readOptionalLeaseRequest(
     c: Context,
+    options: { requireGeneration?: boolean } = {},
   ): Promise<
     { body: Record<string, unknown>; lease?: { clientSessionId: string; generation?: number } } | { response: Response }
   > {
@@ -931,7 +932,7 @@ export function scheduledTaskRoutes(
     const hasLeaseFields = "clientSessionId" in record || "generation" in record;
     if (!hasLeaseFields) return { body: record };
     const parsed = parseLeaseRequestBody(record);
-    if (!parsed) {
+    if (!parsed || (options.requireGeneration && parsed.generation === undefined)) {
       return {
         response: c.json(
           { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
@@ -940,6 +941,23 @@ export function scheduledTaskRoutes(
       };
     }
     return { body: record, lease: parsed };
+  }
+
+  async function authorizeTaskMutationLease(
+    taskId: string,
+    userId: string | null,
+    lease: { clientSessionId: string; generation?: number } | undefined,
+  ): Promise<Extract<AuthoringLeaseAuthorization, { kind: "conflict" | "stale" }> | null> {
+    const authorization = await db.transaction().execute((trx) =>
+      authorizeAuthoringLease(trx, {
+        taskId,
+        userId,
+        sessionId: lease?.clientSessionId,
+        generation: lease?.generation,
+      }),
+    );
+    if (authorization.kind === "conflict" || authorization.kind === "stale") return authorization;
+    return null;
   }
 
   async function authorizeManualRun(
@@ -960,6 +978,27 @@ export function scheduledTaskRoutes(
       return manualRunLeaseError(c, userId, lease, authorization);
     }
     return null;
+  }
+
+  async function taskMutationLeaseError(
+    c: Context,
+    userId: string | null,
+    lease: { clientSessionId: string; generation?: number } | undefined,
+    authorization:
+      | Extract<AuthoringLeaseAuthorization, { kind: "conflict" | "stale" }>
+      | { kind: "locked" | "lease_stale"; lock: AutomationTaskLockRow },
+  ): Promise<Response> {
+    const isStale = authorization.kind === "stale" || authorization.kind === "lease_stale";
+    return c.json(
+      {
+        error: {
+          code: isStale ? "LEASE_STALE" : "LOCKED",
+          message: isStale ? "Editing session is stale" : "Automation is locked by another editor",
+          lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
+        },
+      },
+      409,
+    );
   }
 
   async function manualRunLeaseError(
@@ -1498,6 +1537,11 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
 
+    const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
+    if ("response" in request) return request.response;
+    const leaseConflict = await authorizeTaskMutationLease(id, result.userId, request.lease);
+    if (leaseConflict) return taskMutationLeaseError(c, result.userId, request.lease, leaseConflict);
+
     if (result.row.status === "completed") {
       return c.json({ error: { code: "INVALID_STATE", message: "Completed tasks cannot be paused" } }, 400);
     }
@@ -1524,6 +1568,11 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
 
+    const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
+    if ("response" in request) return request.response;
+    const leaseConflict = await authorizeTaskMutationLease(id, result.userId, request.lease);
+    if (leaseConflict) return taskMutationLeaseError(c, result.userId, request.lease, leaseConflict);
+
     if (result.row.status === "completed") {
       return c.json({ error: { code: "INVALID_STATE", message: "Completed tasks cannot be resumed" } }, 400);
     }
@@ -1549,6 +1598,8 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const access = await loadDeletableTask(c, id);
     if ("response" in access) return access.response;
+    const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
+    if ("response" in request) return request.response;
     const removeTaskRuntime = scheduler.removeTaskRuntime;
     if (!removeTaskRuntime) {
       return c.json(
@@ -1560,12 +1611,20 @@ export function scheduledTaskRoutes(
     const deletion = await deleteAutomation({
       db,
       taskId: id,
-      actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
+      actor: {
+        userId,
+        role: c.get("role") === "admin" ? "admin" : undefined,
+        source: "web",
+        lease: leaseForPersistence(request.lease),
+      },
       scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
       encryptionKey: options.encryptionKey,
     });
     if (deletion.kind === "not_found" || deletion.kind === "access_denied") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (deletion.kind === "locked" || deletion.kind === "lease_stale") {
+      return taskMutationLeaseError(c, access.userId, request.lease, deletion);
     }
     if (deletion.kind === "scheduler_failure") {
       logger?.error(

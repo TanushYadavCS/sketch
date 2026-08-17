@@ -913,6 +913,117 @@ describe("Scheduled Tasks API", () => {
     expect((await resumeRes.json()).task.status).toBe("active");
   });
 
+  it("fences pause and resume behind the exact authoring lease", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-lease-pause@test.com" });
+    await tasks.add({
+      id: "task-lease-pause",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "alice@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Pause safely",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "task-lease-pause",
+      holder: { userId: alice.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+    const scheduler = {
+      pauseTask: vi.fn(async (id: string) => tasks.updateStatus(id, "paused")),
+      resumeTask: vi.fn(async (id: string) => tasks.updateStatus(id, "active")),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await getMemberCookie(db, alice.id);
+
+    const blocked = await app.request("/api/scheduled-tasks/task-lease-pause/pause", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+
+    const pause = await app.request("/api/scheduled-tasks/task-lease-pause/pause", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: 1 }),
+    });
+    expect(pause.status).toBe(200);
+    expect(scheduler.pauseTask).toHaveBeenCalledWith("task-lease-pause");
+
+    const resume = await app.request("/api/scheduled-tasks/task-lease-pause/resume", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: 1 }),
+    });
+    expect(resume.status).toBe(200);
+    expect(scheduler.resumeTask).toHaveBeenCalledWith("task-lease-pause");
+  });
+
+  it("authorizes deletion inside the transaction and accepts only the exact lease", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-lease-delete@test.com" });
+    await tasks.add({
+      id: "task-lease-delete",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "alice@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Delete safely",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "task-lease-delete",
+      holder: { userId: alice.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      removeTaskRuntime: vi.fn().mockResolvedValue(true),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await getMemberCookie(db, alice.id);
+
+    const blocked = await app.request("/api/scheduled-tasks/task-lease-delete", {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(scheduler.removeTaskRuntime).not.toHaveBeenCalled();
+    await expect(tasks.getById("task-lease-delete")).resolves.toBeDefined();
+
+    const deleted = await app.request("/api/scheduled-tasks/task-lease-delete", {
+      method: "DELETE",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: 1 }),
+    });
+    expect(deleted.status).toBe(200);
+    expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-lease-delete");
+    await expect(tasks.getById("task-lease-delete")).resolves.toBeUndefined();
+  });
+
   it("members cannot access other users' tasks via any route", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

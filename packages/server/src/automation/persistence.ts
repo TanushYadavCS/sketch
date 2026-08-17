@@ -126,6 +126,8 @@ export type AutomationDeletionResult =
   | { kind: "deleted" }
   | { kind: "not_found" }
   | { kind: "access_denied" }
+  | { kind: "locked"; lock: AutomationTaskLockRow }
+  | { kind: "lease_stale"; lock: AutomationTaskLockRow }
   | { kind: "scheduler_failure"; error: unknown };
 
 class AutomationDeletionRaceError extends Error {
@@ -468,6 +470,15 @@ export async function deleteAutomation(params: {
       if (!params.actor.userId || (current.created_by !== params.actor.userId && params.actor.role !== "admin")) {
         return { kind: "access_denied" as const };
       }
+
+      const lease = await authorizeAuthoringLease(trx, {
+        taskId: params.taskId,
+        userId: params.actor.userId,
+        sessionId: params.actor.lease?.sessionId,
+        generation: params.actor.lease?.generation,
+      });
+      if (lease.kind === "conflict") return { kind: "locked" as const, lock: lease.lock };
+      if (lease.kind === "stale") return { kind: "lease_stale" as const, lock: lease.lock };
 
       await createScheduledTaskConversationRepository(trx).deleteByTaskId(params.taskId);
       await createAutomationStepContentRepository(trx).deleteByTaskId(params.taskId);
