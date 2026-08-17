@@ -54,6 +54,7 @@ describe("scheduled task conversation repository on Postgres", () => {
     });
 
     expect(result.acquired).toBe(true);
-    expect(Number(result.lock.expires_at)).toBeGreaterThan(2_147_483_647);
+    expect(typeof result.lock.expires_at).toBe("number");
+    expect(result.lock.expires_at).toBeGreaterThan(2_147_483_647);
   });
 });

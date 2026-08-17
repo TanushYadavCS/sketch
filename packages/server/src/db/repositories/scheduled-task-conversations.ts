@@ -5,6 +5,24 @@ import type { DB, ScheduledTaskBuilderLocksTable, ScheduledTaskConversationsTabl
 export type ScheduledTaskConversationRow = Selectable<ScheduledTaskConversationsTable>;
 export type ScheduledTaskBuilderLockRow = Selectable<ScheduledTaskBuilderLocksTable>;
 
+type RawScheduledTaskBuilderLockRow = Omit<ScheduledTaskBuilderLockRow, "expires_at"> & {
+  expires_at: number | string | bigint;
+};
+
+export function normalizeScheduledTaskBuilderLockRow(row: RawScheduledTaskBuilderLockRow): ScheduledTaskBuilderLockRow {
+  const rawExpiresAt = row.expires_at;
+  if (typeof rawExpiresAt === "string" && !/^-?\d+$/.test(rawExpiresAt)) {
+    throw new Error("Invalid builder lock expiry: expected an integer Unix timestamp");
+  }
+
+  const expiresAt = Number(rawExpiresAt);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt < 0) {
+    throw new Error("Invalid builder lock expiry: expected a non-negative safe integer Unix timestamp");
+  }
+
+  return { ...row, expires_at: expiresAt };
+}
+
 export interface ScheduledTaskConversationWithUserNameRow extends ScheduledTaskConversationRow {
   transcript_user_name: string | null;
 }
@@ -193,7 +211,12 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
     },
 
     async getBuilderLock(taskId: string): Promise<ScheduledTaskBuilderLockRow | undefined> {
-      return db.selectFrom("scheduled_task_builder_locks").selectAll().where("task_id", "=", taskId).executeTakeFirst();
+      const row = await db
+        .selectFrom("scheduled_task_builder_locks")
+        .selectAll()
+        .where("task_id", "=", taskId)
+        .executeTakeFirst();
+      return row ? normalizeScheduledTaskBuilderLockRow(row) : undefined;
     },
 
     async acquireBuilderLock(
@@ -238,7 +261,7 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
         .selectAll()
         .where("task_id", "=", input.taskId)
         .executeTakeFirstOrThrow();
-      return { acquired: Number(result.numUpdatedRows ?? 0) > 0, lock };
+      return { acquired: Number(result.numUpdatedRows ?? 0) > 0, lock: normalizeScheduledTaskBuilderLockRow(lock) };
     },
 
     async releaseBuilderLock(taskId: string, conversationId: string, transcriptUserId: string): Promise<boolean> {

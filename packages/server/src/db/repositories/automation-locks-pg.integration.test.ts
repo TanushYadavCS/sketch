@@ -165,6 +165,8 @@ describe("automation_task_locks repository on shared Postgres", () => {
     await locks.clearSteal({
       taskId: "pg-task-steal",
       holderUserId: "pg-lock-user-b",
+      holderSessionId: "legacy",
+      holderGeneration: 2,
       now: "2026-08-01T10:21:00.000Z",
     });
     await expect(locks.getByTaskId("pg-task-steal")).resolves.toMatchObject({

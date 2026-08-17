@@ -192,6 +192,7 @@ import * as m189Locks from "./migrations/189-automation-locks";
 import * as m190 from "./migrations/190-cli-integration-connections";
 import * as m191 from "./migrations/191-task-review-fields";
 import * as m192 from "./migrations/192-scheduled-task-builder-lock-expires-at";
+import * as m193 from "./migrations/193-automation-lock-sessions";
 import type { DB } from "./schema";
 
 /**
@@ -393,6 +394,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "190-cli-integration-connections": m190,
           "191-task-review-fields": m191,
           "192-scheduled-task-builder-lock-expires-at": m192,
+          "193-automation-lock-sessions": m193,
         };
       },
     },

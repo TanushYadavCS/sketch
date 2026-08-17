@@ -102,6 +102,30 @@ describe("automation lock service", () => {
       expect(result.lock.holder_user_id).toBe("user-a");
     });
 
+    it("blocks a second session for the same user and fences its renew/release", async () => {
+      const firstSession: LockHolderFields = { ...HOLDER_A, sessionId: "tab-a" };
+      const secondSession: LockHolderFields = { ...HOLDER_A, sessionId: "tab-b" };
+
+      const first = await acquireOrRenewLock(db, { taskId: "task-session", holder: firstSession });
+      expect(first.kind).toBe("held");
+      if (first.kind !== "held") return;
+      expect(first.lock).toMatchObject({ holder_session_id: "tab-a", generation: 1 });
+
+      const second = await acquireOrRenewLock(db, { taskId: "task-session", holder: secondSession });
+      expect(second.kind).toBe("locked");
+      if (second.kind !== "locked") return;
+      expect(second.lock).toMatchObject({ holder_user_id: "user-a", holder_session_id: "tab-a", generation: 1 });
+
+      await expect(
+        renewLock(db, { taskId: "task-session", userId: "user-a", sessionId: "tab-b", generation: 1 }),
+      ).resolves.toEqual({ kind: "not_holder" });
+      await releaseLock(db, { taskId: "task-session", userId: "user-a", sessionId: "tab-b", generation: 1 });
+      await expect(createAutomationLocksRepository(db).getByTaskId("task-session")).resolves.toMatchObject({
+        holder_session_id: "tab-a",
+        generation: 1,
+      });
+    });
+
     it("takes over an expired lock and clears pending steals", async () => {
       const repo = createAutomationLocksRepository(db);
       await repo.insertIfAbsent(HOLDER_A, {
@@ -121,6 +145,8 @@ describe("automation lock service", () => {
       if (result.kind !== "held") return;
       expect(result.lock).toMatchObject({
         holder_user_id: "user-b",
+        holder_session_id: "legacy",
+        generation: 2,
         expires_at: new Date(T0_MS + LOCK_TTL_MS).toISOString(),
         steal_requester_user_id: null,
         steal_requested_at: null,
@@ -351,6 +377,62 @@ describe("automation lock service", () => {
   });
 
   describe("cross-lane lock races", () => {
+    it("increments the generation on expiry takeover and rejects stale holder transitions", async () => {
+      const repo = createAutomationLocksRepository(db);
+      const firstSession: LockHolderFields = { ...HOLDER_A, sessionId: "tab-a" };
+      const nextSession: LockHolderFields = { ...HOLDER_B, sessionId: "tab-b" };
+      await repo.insertIfAbsent(firstSession, {
+        taskId: "task-generation-expiry",
+        now: "2026-08-01T09:00:00.000Z",
+        expiresAt: "2026-08-01T09:59:59.000Z",
+      });
+
+      const takeover = await acquireOrRenewLock(db, {
+        taskId: "task-generation-expiry",
+        holder: nextSession,
+        nowMs: T0_MS,
+      });
+      expect(takeover.kind).toBe("held");
+      if (takeover.kind !== "held") return;
+      expect(takeover.lock).toMatchObject({ holder_session_id: "tab-b", generation: 2 });
+
+      await expect(
+        renewLock(db, { taskId: "task-generation-expiry", userId: "user-a", sessionId: "tab-a", generation: 1 }),
+      ).resolves.toEqual({ kind: "not_holder" });
+      await releaseLock(db, { taskId: "task-generation-expiry", userId: "user-a", sessionId: "tab-a", generation: 1 });
+      await expect(repo.getByTaskId("task-generation-expiry")).resolves.toMatchObject({
+        holder_user_id: "user-b",
+        holder_session_id: "tab-b",
+        generation: 2,
+      });
+    });
+
+    it("increments the generation and transfers the requester session on approved takeover", async () => {
+      const repo = createAutomationLocksRepository(db);
+      const holder: LockHolderFields = { ...HOLDER_A, sessionId: "tab-a" };
+      const requester: LockHolderFields = { ...HOLDER_B, sessionId: "tab-b" };
+      await repo.insertIfAbsent(holder, {
+        taskId: "task-generation-approve",
+        now: T0,
+        expiresAt: new Date(T0_MS + LOCK_TTL_MS).toISOString(),
+      });
+      await requestSteal(db, { taskId: "task-generation-approve", requester });
+
+      const approved = await approveSteal(db, {
+        taskId: "task-generation-approve",
+        approverUserId: "user-a",
+        approverSessionId: "tab-a",
+        approverGeneration: 1,
+      });
+      expect(approved.kind).toBe("approved");
+      if (approved.kind !== "approved") return;
+      expect(approved.lock).toMatchObject({ holder_user_id: "user-b", holder_session_id: "tab-b", generation: 2 });
+
+      await expect(
+        renewLock(db, { taskId: "task-generation-approve", userId: "user-a", sessionId: "tab-a", generation: 1 }),
+      ).resolves.toEqual({ kind: "not_holder" });
+    });
+
     it("renewal loses when an expired lock is taken over first (expiry-takeover vs renewal)", async () => {
       const repo = createAutomationLocksRepository(db);
       await repo.insertIfAbsent(HOLDER_A, {

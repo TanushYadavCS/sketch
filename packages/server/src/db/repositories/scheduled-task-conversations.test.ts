@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAutomationTaskConversationService } from "../../automation/task-conversations";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { createScheduledTaskConversationRepository } from "./scheduled-task-conversations";
+import {
+  createScheduledTaskConversationRepository,
+  normalizeScheduledTaskBuilderLockRow,
+} from "./scheduled-task-conversations";
 
 describe("scheduled task conversation repository", () => {
   let db: Kysely<DB>;
@@ -15,6 +18,36 @@ describe("scheduled task conversation repository", () => {
   afterEach(async () => {
     await db.destroy();
   });
+
+  it("normalizes a PostgreSQL bigint expiry returned as a string", () => {
+    const expiresAt = String(Date.now() + 5 * 60 * 1000);
+    const normalized = normalizeScheduledTaskBuilderLockRow({
+      task_id: "task-pg-string-expiry",
+      conversation_id: "builder-chat",
+      transcript_user_id: "owner",
+      acquired_at: "2026-08-17T10:00:00.000Z",
+      renewed_at: "2026-08-17T10:00:00.000Z",
+      expires_at: expiresAt,
+    });
+
+    expect(normalized.expires_at).toBe(Number(expiresAt));
+  });
+
+  it.each(["", "not-a-number", "1.5", "-1", String(Number.MAX_SAFE_INTEGER + 1)])(
+    "rejects an unsafe PostgreSQL bigint expiry value (%s)",
+    (expiresAt) => {
+      expect(() =>
+        normalizeScheduledTaskBuilderLockRow({
+          task_id: "task-invalid-expiry",
+          conversation_id: "builder-chat",
+          transcript_user_id: "owner",
+          acquired_at: "2026-08-17T10:00:00.000Z",
+          renewed_at: "2026-08-17T10:00:00.000Z",
+          expires_at: expiresAt,
+        }),
+      ).toThrow(/invalid builder lock expiry/i);
+    },
+  );
 
   it("supports many-to-many links, idempotent upserts, grouped kinds, and archival without deletion", async () => {
     const repo = createScheduledTaskConversationRepository(db);

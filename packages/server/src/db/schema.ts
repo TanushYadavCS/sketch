@@ -942,6 +942,8 @@ export interface ScheduledTaskBuilderLocksTable {
 export interface AutomationTaskLocksTable {
   task_id: string;
   holder_user_id: string;
+  holder_session_id: string;
+  generation: number;
   holder_platform: string;
   holder_surface: string;
   holder_conversation_id: string | null;
@@ -949,6 +951,7 @@ export interface AutomationTaskLocksTable {
   updated_at: Generated<string>;
   expires_at: string;
   steal_requester_user_id: string | null;
+  steal_requester_session_id: string | null;
   steal_requester_platform: string | null;
   steal_requester_surface: string | null;
   steal_requester_conversation_id: string | null;
