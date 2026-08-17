@@ -25,7 +25,7 @@ import {
   HIDDEN_ENTITY_SOURCE_TYPES,
   mapSourceTypeToEntityType,
 } from "../../entities/profile-facts";
-import { ProjectBindingError, reparentProject } from "../../entities/project-bindings";
+import { ProjectBindingError, rankRelationshipSource, restructureProject } from "../../entities/project-bindings";
 import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
 
@@ -496,8 +496,10 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
      * Hierarchy fields for project rows only: part_of parent and
      * engagement_for company. Targets are joined through the viewer's
      * visibility predicate — without it a visible project would leak the
-     * name/id of a hidden parent or company. Oldest active edge per type
-     * wins so the choice is deterministic.
+     * name/id of a hidden parent or company. One edge per type wins by
+     * trust rank (human edit > minting acceptance > LLM paths), oldest
+     * first within a rank — real data has projects with several
+     * conflicting llm_extraction company edges, and age alone picks junk.
      */
     const projectIds = entities.filter((e) => e.source_type === "project").map((e) => e.id);
     const parentByProject = new Map<string, string>();
@@ -506,7 +508,13 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       let edgeQuery = db
         .selectFrom("entity_relationships as r")
         .innerJoin("entities as target", "target.id", "r.target_entity_id")
-        .select(["r.source_entity_id", "r.target_entity_id", "r.relationship_type", "target.name as target_name"])
+        .select([
+          "r.source_entity_id",
+          "r.target_entity_id",
+          "r.relationship_type",
+          "r.source",
+          "target.name as target_name",
+        ])
         .where("r.relationship_type", "in", ["part_of", "engagement_for"])
         .where("r.source_entity_id", "in", projectIds)
         .where("r.valid_to", "is", null)
@@ -516,7 +524,10 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       if (!viewer.isAdmin) {
         edgeQuery = edgeQuery.where(entityVisibilityPredicate(viewer, "target"));
       }
-      for (const edge of await edgeQuery.execute()) {
+      const edges = (await edgeQuery.execute()).sort(
+        (a, b) => rankRelationshipSource(a.source) - rankRelationshipSource(b.source),
+      );
+      for (const edge of edges) {
         if (edge.relationship_type === "part_of") {
           if (!parentByProject.has(edge.source_entity_id)) {
             parentByProject.set(edge.source_entity_id, edge.target_entity_id);
@@ -1110,19 +1121,27 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       aliases?: string[];
       subtype?: string;
       parentEntityId?: string | null;
+      companyEntityId?: string | null;
     };
 
     /**
-     * Re-parenting runs before any field update so a mixed request can't
+     * Structural edits run before any field update so a mixed request can't
      * rename the entity and then fail with WOULD_CYCLE, leaving a partial
-     * apply behind.
+     * apply behind. restructureProject validates both keys before writing
+     * and applies them in one transaction.
      */
-    if ("parentEntityId" in body) {
-      if (body.parentEntityId !== null && typeof body.parentEntityId !== "string") {
+    if ("parentEntityId" in body || "companyEntityId" in body) {
+      if ("parentEntityId" in body && body.parentEntityId !== null && typeof body.parentEntityId !== "string") {
         return c.json({ error: { code: "BAD_REQUEST", message: "parentEntityId must be an entity id or null" } }, 400);
       }
+      if ("companyEntityId" in body && body.companyEntityId !== null && typeof body.companyEntityId !== "string") {
+        return c.json({ error: { code: "BAD_REQUEST", message: "companyEntityId must be an entity id or null" } }, 400);
+      }
       try {
-        await reparentProject(db, entity.id, body.parentEntityId ?? null);
+        await restructureProject(db, entity.id, {
+          ...("parentEntityId" in body ? { parentEntityId: body.parentEntityId ?? null } : {}),
+          ...("companyEntityId" in body ? { companyEntityId: body.companyEntityId ?? null } : {}),
+        });
       } catch (err) {
         if (err instanceof ProjectBindingError && err.code === "WOULD_CYCLE") {
           return c.json(
@@ -1136,6 +1155,23 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
               error: {
                 code: "BAD_REQUEST",
                 message: "parentEntityId requires a live project and a live project or product parent",
+              },
+            },
+            400,
+          );
+        }
+        if (err instanceof ProjectBindingError && err.code === "NOT_A_COMPANY") {
+          return c.json(
+            { error: { code: "BAD_REQUEST", message: "companyEntityId must point at a live confirmed company" } },
+            400,
+          );
+        }
+        if (err instanceof ProjectBindingError && err.code === "COMPANY_ON_NESTED") {
+          return c.json(
+            {
+              error: {
+                code: "BAD_REQUEST",
+                message: "companyEntityId on a nested project has no effect — un-nest it in the same request",
               },
             },
             400,

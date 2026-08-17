@@ -16,7 +16,9 @@ export type EffectiveBinding = EntityProjectBindingRow & { viaProjectId: string;
 export type GroupedProjectChild = { id: string; name: string };
 
 export class ProjectBindingError extends Error {
-  constructor(public code: "NOT_A_PROJECT" | "ALREADY_GROUPED" | "WOULD_CYCLE") {
+  constructor(
+    public code: "NOT_A_PROJECT" | "ALREADY_GROUPED" | "WOULD_CYCLE" | "NOT_A_COMPANY" | "COMPANY_ON_NESTED",
+  ) {
     super(code);
   }
 }
@@ -90,34 +92,44 @@ export async function assertNoPartOfCycle(db: Kysely<DB>, childId: string, paren
   if ((await subtreeIds(db, childId)).includes(parentId)) throw new ProjectBindingError("WOULD_CYCLE");
 }
 
-async function activeParentOf(db: Kysely<DB>, childId: string): Promise<string | null> {
-  const row = await db
+/**
+ * Trust rank for picking one edge among several of the same type: a human
+ * edit beats a reviewed minting verdict beats anything the loose LLM paths
+ * wrote. Lower is better; ties break by age (oldest first) at call sites.
+ */
+export function rankRelationshipSource(source: string): number {
+  if (source === GROUPING_SOURCE) return 0;
+  if (source === "project_minting_acceptance") return 1;
+  return 2;
+}
+
+type RankedEdge = { targetEntityId: string; source: string };
+
+async function activeEdgesOf(db: Kysely<DB>, sourceEntityId: string, relationshipType: string): Promise<RankedEdge[]> {
+  const rows = await db
     .selectFrom("entity_relationships as r")
-    .innerJoin("entities as parent", "parent.id", "r.target_entity_id")
-    .select("r.target_entity_id")
-    .where("r.relationship_type", "=", PART_OF)
-    .where("r.source_entity_id", "=", childId)
+    .innerJoin("entities as target", "target.id", "r.target_entity_id")
+    .select(["r.target_entity_id", "r.source"])
+    .where("r.relationship_type", "=", relationshipType)
+    .where("r.source_entity_id", "=", sourceEntityId)
     .where("r.valid_to", "is", null)
-    .where(whereLiveEntity("parent"))
+    .where(whereLiveEntity("target"))
     .orderBy("r.created_at", "asc")
     .orderBy("r.id", "asc")
-    .executeTakeFirst();
-  return row?.target_entity_id ?? null;
+    .execute();
+  return rows
+    .map((row) => ({ targetEntityId: row.target_entity_id, source: row.source }))
+    .sort((a, b) => rankRelationshipSource(a.source) - rankRelationshipSource(b.source));
+}
+
+async function activeParentOf(db: Kysely<DB>, childId: string): Promise<string | null> {
+  const edges = await activeEdgesOf(db, childId, PART_OF);
+  return edges[0]?.targetEntityId ?? null;
 }
 
 async function engagementCompanyOf(db: Kysely<DB>, projectId: string): Promise<string | null> {
-  const row = await db
-    .selectFrom("entity_relationships as r")
-    .innerJoin("entities as company", "company.id", "r.target_entity_id")
-    .select("r.target_entity_id")
-    .where("r.relationship_type", "=", ENGAGEMENT_FOR)
-    .where("r.source_entity_id", "=", projectId)
-    .where("r.valid_to", "is", null)
-    .where(whereLiveEntity("company"))
-    .orderBy("r.created_at", "asc")
-    .orderBy("r.id", "asc")
-    .executeTakeFirst();
-  return row?.target_entity_id ?? null;
+  const edges = await activeEdgesOf(db, projectId, ENGAGEMENT_FOR);
+  return edges[0]?.targetEntityId ?? null;
 }
 
 async function isLiveGroupingParentTarget(db: Kysely<DB>, entityId: string): Promise<boolean> {
@@ -135,65 +147,132 @@ async function isLiveGroupingParentTarget(db: Kysely<DB>, entityId: string): Pro
   );
 }
 
-/**
- * Replace a project's parent with a single user-authored part_of edge, or
- * remove it entirely. Unlike groupProject this replaces edges from ANY source
- * (acceptance writes part_of under its own source) and never throws
- * ALREADY_GROUPED — re-parenting is the point.
- *
- * Un-nesting re-anchors the child's client section: accepted children carry
- * no engagement_for edge of their own (acceptance writes part_of INSTEAD of
- * engagement_for on nested projects), so without copying the old root's
- * engagement_for company onto the child, un-nesting an Oliver Wyman child
- * would silently move it to the Internal section.
- */
-export async function reparentProject(db: Kysely<DB>, childId: string, parentId: string | null): Promise<void> {
-  if (!(await isLiveProject(db, childId))) throw new ProjectBindingError("NOT_A_PROJECT");
+async function isLiveConfirmedCompany(db: Kysely<DB>, entityId: string): Promise<boolean> {
+  const row = await db
+    .selectFrom("entities")
+    .select(["source_type", "status", "deleted_at", "merged_into_entity_id"])
+    .where("id", "=", entityId)
+    .executeTakeFirst();
+  return Boolean(
+    row &&
+      row.source_type === "company" &&
+      row.status === "confirmed" &&
+      row.deleted_at === null &&
+      row.merged_into_entity_id === null,
+  );
+}
 
-  if (parentId !== null) {
+async function insertGroupingEdge(
+  tx: Kysely<DB>,
+  sourceEntityId: string,
+  targetEntityId: string,
+  relationshipType: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO entity_relationships
+      (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)
+    VALUES
+      (${randomUUID()}, ${sourceEntityId}, ${targetEntityId}, ${relationshipType}, 'CONFIRMED', 1, ${GROUPING_SOURCE}, '', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
+    DO UPDATE SET source = EXCLUDED.source, updated_at = CURRENT_TIMESTAMP
+  `.execute(tx);
+}
+
+export type ProjectStructureInput = {
+  /** Present = rewrite the parent; string nests, null un-nests. Absent = leave part_of alone. */
+  parentEntityId?: string | null;
+  /** Present = rewrite the client company; string assigns, null clears. Absent = derive on un-nest. */
+  companyEntityId?: string | null;
+};
+
+/**
+ * Rewrite a project's structural edges — part_of parent and/or
+ * engagement_for company — as ONE validated transaction. Unlike
+ * groupProject this replaces edges from ANY source (acceptance writes
+ * part_of under its own source) and never throws ALREADY_GROUPED.
+ *
+ * Everything is validated before anything is written, so a mixed request
+ * (un-nest + bad company) can never leave a partial apply behind. The two
+ * rewrites can't be separate helpers with their own transactions: Kysely
+ * forbids nesting, and two sequential transactions would not be atomic.
+ *
+ * Un-nesting without an explicit company keeps the child in the section
+ * the user sees (the old root's): accepted children carry no
+ * engagement_for edge of their own, and children with junk llm_extraction
+ * edges must not jump sections. Only a prior user_grouping company edge —
+ * an earlier human override — survives untouched.
+ */
+export async function restructureProject(
+  db: Kysely<DB>,
+  projectId: string,
+  input: ProjectStructureInput,
+): Promise<void> {
+  const parentGiven = input.parentEntityId !== undefined;
+  const companyGiven = input.companyEntityId !== undefined;
+  if (!parentGiven && !companyGiven) return;
+  if (!(await isLiveProject(db, projectId))) throw new ProjectBindingError("NOT_A_PROJECT");
+
+  const parentId = input.parentEntityId ?? null;
+  if (parentGiven && parentId !== null) {
     if (!(await isLiveGroupingParentTarget(db, parentId))) throw new ProjectBindingError("NOT_A_PROJECT");
-    await assertNoPartOfCycle(db, childId, parentId);
-    await db.transaction().execute(async (tx) => {
+    await assertNoPartOfCycle(db, projectId, parentId);
+  }
+
+  const companyId = input.companyEntityId ?? null;
+  if (companyGiven) {
+    if (companyId !== null && !(await isLiveConfirmedCompany(db, companyId))) {
+      throw new ProjectBindingError("NOT_A_COMPANY");
+    }
+    if (!parentGiven && (await activeParentOf(db, projectId)) !== null) {
+      throw new ProjectBindingError("COMPANY_ON_NESTED");
+    }
+  }
+
+  let reanchorCompanyId: string | null = null;
+  let reanchor = false;
+  if (parentGiven && parentId === null && !companyGiven) {
+    const ownEdges = await activeEdgesOf(db, projectId, ENGAGEMENT_FOR);
+    reanchor = !ownEdges.some((edge) => edge.source === GROUPING_SOURCE);
+    if (reanchor) {
+      let rootId = projectId;
+      for (let depth = 0; depth < MAX_DEPTH; depth += 1) {
+        const parent = await activeParentOf(db, rootId);
+        if (parent === null) break;
+        rootId = parent;
+      }
+      reanchorCompanyId = rootId === projectId ? null : await engagementCompanyOf(db, rootId);
+    }
+  }
+
+  await db.transaction().execute(async (tx) => {
+    if (parentGiven) {
       await tx
         .deleteFrom("entity_relationships")
         .where("relationship_type", "=", PART_OF)
-        .where("source_entity_id", "=", childId)
+        .where("source_entity_id", "=", projectId)
         .execute();
-      await sql`
-        INSERT INTO entity_relationships
-          (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)
-        VALUES
-          (${randomUUID()}, ${childId}, ${parentId}, ${PART_OF}, 'CONFIRMED', 1, ${GROUPING_SOURCE}, '', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
-        DO UPDATE SET source = EXCLUDED.source, updated_at = CURRENT_TIMESTAMP
-      `.execute(tx);
-    });
-    return;
-  }
-
-  let rootId = childId;
-  for (let depth = 0; depth < MAX_DEPTH; depth += 1) {
-    const parent = await activeParentOf(db, rootId);
-    if (parent === null) break;
-    rootId = parent;
-  }
-  const sectionCompanyId = rootId === childId ? null : await engagementCompanyOf(db, rootId);
-  const ownCompanyId = await engagementCompanyOf(db, childId);
-  await db.transaction().execute(async (tx) => {
-    await tx
-      .deleteFrom("entity_relationships")
-      .where("relationship_type", "=", PART_OF)
-      .where("source_entity_id", "=", childId)
-      .execute();
-    if (sectionCompanyId !== null && ownCompanyId === null) {
-      await sql`
-        INSERT INTO entity_relationships
-          (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)
-        VALUES
-          (${randomUUID()}, ${childId}, ${sectionCompanyId}, ${ENGAGEMENT_FOR}, 'CONFIRMED', 1, ${GROUPING_SOURCE}, '', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
-        DO UPDATE SET source = EXCLUDED.source, updated_at = CURRENT_TIMESTAMP
-      `.execute(tx);
+      if (parentId !== null) {
+        await insertGroupingEdge(tx, projectId, parentId, PART_OF);
+      } else if (reanchor) {
+        await tx
+          .deleteFrom("entity_relationships")
+          .where("relationship_type", "=", ENGAGEMENT_FOR)
+          .where("source_entity_id", "=", projectId)
+          .execute();
+        if (reanchorCompanyId !== null) {
+          await insertGroupingEdge(tx, projectId, reanchorCompanyId, ENGAGEMENT_FOR);
+        }
+      }
+    }
+    if (companyGiven) {
+      await tx
+        .deleteFrom("entity_relationships")
+        .where("relationship_type", "=", ENGAGEMENT_FOR)
+        .where("source_entity_id", "=", projectId)
+        .execute();
+      if (companyId !== null) {
+        await insertGroupingEdge(tx, projectId, companyId, ENGAGEMENT_FOR);
+      }
     }
   });
 }

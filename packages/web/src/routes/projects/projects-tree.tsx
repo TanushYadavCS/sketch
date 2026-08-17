@@ -5,10 +5,10 @@
  * A section comes from the ROOT ancestor's engagement_for company: acceptance
  * writes engagement_for only on top-level projects (nested children get
  * part_of instead), so a child inherits its root's section. Admins drag a row
- * onto another project to nest it, or onto the section's "top level" strip to
- * un-nest; the server re-anchors an un-nested child's section company. The
- * strip only accepts rows from its own section — a cross-section top-level
- * move would need an engagement_for write the PATCH doesn't do.
+ * onto another project to nest it, or onto a section's "top level" strip:
+ * the row's own strip un-nests (the server re-anchors the section company),
+ * any other section's strip un-nests AND reassigns the client company in the
+ * same PATCH.
  *
  * Rows whose parent is off-page (the list caps at 200) render top-level.
  */
@@ -79,8 +79,8 @@ export function ProjectsTree({
   const sections = buildSections(roots);
 
   const reparent = useMutation({
-    mutationFn: ({ id, parentEntityId }: { id: string; parentEntityId: string | null }) =>
-      api.entities.update(id, { parentEntityId }),
+    mutationFn: ({ id, ...data }: { id: string; parentEntityId: string | null; companyEntityId?: string | null }) =>
+      api.entities.update(id, data),
     onError: (err: Error) => toast.error(err.message),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["entities"] }),
   });
@@ -130,10 +130,23 @@ export function ProjectsTree({
     setDropTargetId(null);
   };
 
+  /**
+   * Own-section drop = un-nest (server re-anchors the section company).
+   * Cross-section drop = un-nest AND move the client company in one PATCH —
+   * two separate requests could leave the row half-moved on failure.
+   */
   const dropOnTopLevel = (sectionKey: string) => {
     if (!draggedId) return;
-    if (sectionKeyOf(draggedId) === sectionKey && byId.get(draggedId)?.parentEntityId != null) {
-      reparent.mutate({ id: draggedId, parentEntityId: null });
+    if (sectionKeyOf(draggedId) === sectionKey) {
+      if (byId.get(draggedId)?.parentEntityId != null) {
+        reparent.mutate({ id: draggedId, parentEntityId: null });
+      }
+    } else {
+      reparent.mutate({
+        id: draggedId,
+        parentEntityId: null,
+        companyEntityId: sectionKey === INTERNAL_KEY ? null : sectionKey,
+      });
     }
     setDraggedId(null);
     setDropTargetId(null);
@@ -154,8 +167,10 @@ export function ProjectsTree({
       {sections.map((section) => {
         const rows: FlatRow[] = [];
         flatten(section.roots, 0, rows);
+        const ownSectionDrag = draggedId !== null && sectionKeyOf(draggedId) === section.key;
         const showTopLevelStrip =
-          draggedId !== null && sectionKeyOf(draggedId) === section.key && byId.get(draggedId)?.parentEntityId != null;
+          draggedId !== null && (ownSectionDrag ? byId.get(draggedId)?.parentEntityId != null : true);
+        const stripLabel = ownSectionDrag ? "drop here for top level" : `move to ${section.label} · top level`;
         return (
           <section key={section.key}>
             <SectionLabel
@@ -174,7 +189,7 @@ export function ProjectsTree({
                   onDrop={() => dropOnTopLevel(section.key)}
                   className="border-b border-dashed border-border px-3 py-1.5 text-center font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground"
                 >
-                  drop here for top level
+                  {stripLabel}
                 </div>
               ) : null}
               {rows.map(({ entity, depth, hasChildren }) => (

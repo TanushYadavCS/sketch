@@ -3667,7 +3667,14 @@ export const api = {
     },
     update(
       id: string,
-      data: { name?: string; sourceType?: string; status?: string; aliases?: string[]; parentEntityId?: string | null },
+      data: {
+        name?: string;
+        sourceType?: string;
+        status?: string;
+        aliases?: string[];
+        parentEntityId?: string | null;
+        companyEntityId?: string | null;
+      },
     ) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {
         method: "PATCH",

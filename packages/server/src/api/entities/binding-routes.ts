@@ -5,8 +5,10 @@ import { ProjectBindingError, createProjectBindingsService } from "../../entitie
 import { createProjectMembersService } from "../../entities/project-members";
 import { denyIfNotAdmin } from "../auth-helpers";
 
-function statusForBindingError(code: "NOT_A_PROJECT" | "ALREADY_GROUPED" | "WOULD_CYCLE"): 409 | 422 {
-  return code === "NOT_A_PROJECT" ? 422 : 409;
+function statusForBindingError(code: ProjectBindingError["code"]): 400 | 409 | 422 {
+  if (code === "NOT_A_PROJECT") return 422;
+  if (code === "NOT_A_COMPANY" || code === "COMPANY_ON_NESTED") return 400;
+  return 409;
 }
 
 function handleBindingError(c: Context, err: unknown): Response {

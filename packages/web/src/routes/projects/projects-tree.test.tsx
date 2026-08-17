@@ -1,6 +1,8 @@
 import type { EntityListItem } from "@/lib/api";
+import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { ProjectsTree } from "./projects-tree";
 
@@ -56,5 +58,40 @@ describe("ProjectsTree", () => {
 
     const orphanRow = within(internalSection).getByTestId("entity-row-orphan-child");
     expect(orphanRow).not.toHaveStyle({ paddingLeft: "20px" });
+  });
+
+  it("shows every section's strip while dragging and PATCHes an un-nest + company move on a cross-section drop", async () => {
+    let patched: { url: string; body: unknown } | null = null;
+    server.use(
+      http.patch("/api/entities/:id", async ({ request, params }) => {
+        patched = { url: String(params.id), body: await request.json() };
+        return HttpResponse.json({ entity: { id: params.id } });
+      }),
+    );
+    const entities = [
+      makeProject("segmentation", "Segmentation", { companyEntityId: "ow", companyName: "Oliver Wyman" }),
+      makeProject("search-terms", "Search Terms Display", { parentEntityId: "segmentation" }),
+      makeProject("beetu", "Beetu", { companyEntityId: "habuild", companyName: "Habuild" }),
+      makeProject("durable-tasks", "Durable Tasks Epic"),
+    ];
+
+    renderWithProviders(<ProjectsTree entities={entities} onSelect={() => {}} isAdmin />);
+
+    fireEvent.dragStart(screen.getByTestId("entity-row-search-terms"));
+
+    expect(screen.getByTestId("tree-drop-top-level-ow")).toHaveTextContent("drop here for top level");
+    expect(screen.getByTestId("tree-drop-top-level-habuild")).toHaveTextContent("move to Habuild · top level");
+    expect(screen.getByTestId("tree-drop-top-level-__internal__")).toHaveTextContent("move to Internal · top level");
+
+    const habuildStrip = screen.getByTestId("tree-drop-top-level-habuild");
+    const dragOverCancelled = fireEvent.dragOver(habuildStrip);
+    expect(dragOverCancelled).toBe(false);
+    fireEvent.drop(habuildStrip);
+
+    await waitFor(() => expect(patched).not.toBeNull());
+    expect(patched).toEqual({
+      url: "search-terms",
+      body: { parentEntityId: null, companyEntityId: "habuild" },
+    });
   });
 });

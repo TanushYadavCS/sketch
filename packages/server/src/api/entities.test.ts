@@ -3001,3 +3001,132 @@ describe("PATCH /api/entities/:id parentEntityId + list hierarchy fields", () =>
     expect(person && "parentEntityId" in person).toBe(false);
   });
 });
+
+describe("PATCH /api/entities/:id companyEntityId + trust-ranked hierarchy", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+
+  async function seedGraphEntity(id: string, name: string, sourceType: string): Promise<void> {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values({
+        id,
+        name,
+        source_type: sourceType,
+        subtype: null,
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+        ai_brief: null,
+        share_with_everyone: 1,
+        deleted_at: null,
+        merged_into_entity_id: null,
+      })
+      .execute();
+  }
+
+  async function seedEdge(
+    sourceId: string,
+    targetId: string,
+    type: string,
+    source: string,
+    createdAt: string,
+  ): Promise<void> {
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: randomUUID(),
+        source_entity_id: sourceId,
+        target_entity_id: targetId,
+        relationship_type: type,
+        confidence: "CONFIRMED",
+        confidence_score: 1,
+        source,
+        valid_from: "",
+        valid_to: null,
+        created_at: createdAt,
+        updated_at: createdAt,
+      })
+      .execute();
+  }
+
+  async function companyEdges(projectId: string): Promise<{ target: string; source: string }[]> {
+    const rows = await db
+      .selectFrom("entity_relationships")
+      .select(["target_entity_id", "source"])
+      .where("relationship_type", "=", "engagement_for")
+      .where("source_entity_id", "=", projectId)
+      .execute();
+    return rows.map((r) => ({ target: r.target_entity_id, source: r.source }));
+  }
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+    app = createApp(db, config, { logger });
+    adminCookie = await login(app);
+    await seedGraphEntity("ow", "Oliver Wyman", "company");
+    await seedGraphEntity("injaz", "Injaz Arabia", "company");
+    await seedGraphEntity("someone", "Some Person", "person");
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("replaces conflicting LLM company edges with one user edge, clears on null, and 400s on a non-company", async () => {
+    await seedGraphEntity("maaden-dash", "Maaden Dashboard", "project");
+    await seedEdge("maaden-dash", "injaz", "engagement_for", "llm_extraction", "2026-01-01T00:00:00.000Z");
+    await seedEdge("maaden-dash", "ow", "engagement_for", "llm_extraction", "2026-02-01T00:00:00.000Z");
+
+    const assign = await app.request("/api/entities/maaden-dash", {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ companyEntityId: "ow" }),
+    });
+    expect(assign.status).toBe(200);
+    expect(await companyEdges("maaden-dash")).toEqual([{ target: "ow", source: "user_grouping" }]);
+
+    const clear = await app.request("/api/entities/maaden-dash", {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ companyEntityId: null }),
+    });
+    expect(clear.status).toBe(200);
+    expect(await companyEdges("maaden-dash")).toEqual([]);
+
+    await seedEdge("maaden-dash", "ow", "engagement_for", "llm_extraction", "2026-03-01T00:00:00.000Z");
+    const bad = await app.request("/api/entities/maaden-dash", {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ companyEntityId: "someone" }),
+    });
+    expect(bad.status).toBe(400);
+    expect(await companyEdges("maaden-dash")).toEqual([{ target: "ow", source: "llm_extraction" }]);
+  });
+
+  it("ranks company edges by trust, not age, in the list response", async () => {
+    await seedGraphEntity("ranked", "Ranked Project", "project");
+    await seedEdge("ranked", "injaz", "engagement_for", "llm_extraction", "2026-01-01T00:00:00.000Z");
+    await seedEdge("ranked", "ow", "engagement_for", "project_minting_acceptance", "2026-02-01T00:00:00.000Z");
+
+    const listCompany = async (): Promise<string | null | undefined> => {
+      const res = await app.request("/api/entities?limit=200", { headers: { Cookie: adminCookie } });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { entities: { id: string; companyEntityId?: string | null }[] };
+      return body.entities.find((e) => e.id === "ranked")?.companyEntityId;
+    };
+
+    expect(await listCompany()).toBe("ow");
+
+    await seedGraphEntity("habuild", "Habuild", "company");
+    await seedEdge("ranked", "habuild", "engagement_for", "user_grouping", "2026-03-01T00:00:00.000Z");
+    expect(await listCompany()).toBe("habuild");
+  });
+});
