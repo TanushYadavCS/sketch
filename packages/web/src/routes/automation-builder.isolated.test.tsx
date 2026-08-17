@@ -1160,6 +1160,7 @@ describe("AutomationBuilderPage", () => {
   it("refreshes the graph and latest run after an external automation update", async () => {
     vi.useFakeTimers();
     const refreshedAutomation = automationWithStepOutput("fresh run output");
+    refreshedAutomation.revision = automation.revision + 1;
     refreshedAutomation.steps = [
       ...refreshedAutomation.steps,
       {
@@ -1195,6 +1196,41 @@ describe("AutomationBuilderPage", () => {
 
     expect(screen.getByRole("button", { name: "Notify Slack" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Viewing/ })).toBeInTheDocument();
+    expect(mocks.getAutomation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rebuild the workflow for a same-revision background refresh", async () => {
+    vi.useFakeTimers();
+    const volatileRefresh = {
+      ...automation,
+      lock: {
+        heldByUserId: "user-1",
+        heldByName: "Owner Member",
+        heldByPlatform: "web",
+        heldBySurface: "builder",
+        expiresAt: "2026-06-01T00:10:00.000Z",
+        generation: 1,
+        isHeldByMe: true,
+        stealPending: null,
+      },
+      steps: [
+        ...automation.steps,
+        { id: "volatile", type: "action", label: "Must not appear", icon: "slack", position: { x: 460, y: 0 } },
+      ],
+    };
+    mocks.getAutomation.mockReset().mockResolvedValueOnce(automation).mockResolvedValue(volatileRefresh);
+
+    renderBuilder();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("button", { name: "Check rating" })).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_REFRESH_INTERVAL_MS);
+    });
+
+    expect(screen.queryByRole("button", { name: "Must not appear" })).not.toBeInTheDocument();
     expect(mocks.getAutomation).toHaveBeenCalledTimes(2);
   });
 

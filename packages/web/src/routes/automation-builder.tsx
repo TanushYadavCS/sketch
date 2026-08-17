@@ -613,6 +613,7 @@ export function AutomationBuilderPage() {
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
+  const hydratedRevisionRef = useRef<number | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveCountRef = useRef(0);
   const runLeaseRef = useRef<AutomationLeaseRequest | null>(null);
@@ -725,7 +726,9 @@ export function AutomationBuilderPage() {
 
   useEffect(() => {
     if (!automationQuery.data || pendingSaveCountRef.current > 0) return;
+    if (hydratedRevisionRef.current === automationQuery.data.revision) return;
     const nextDraft = draftFromDefinition(automationQuery.data);
+    hydratedRevisionRef.current = nextDraft.revision;
     latestDraftRef.current = nextDraft;
     setDraft(nextDraft);
   }, [automationQuery.data]);
@@ -848,6 +851,7 @@ export function AutomationBuilderPage() {
             );
             if (!leaseIsCurrent(requestLease)) return;
             const updatedDraft = draftFromDefinition(updatedAutomation);
+            hydratedRevisionRef.current = updatedDraft.revision;
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
             setDraft(updatedDraft);
@@ -860,6 +864,7 @@ export function AutomationBuilderPage() {
             try {
               const refreshed = await api.scheduledTasks.get(taskId);
               const refreshedDraft = draftFromDefinition(refreshed);
+              hydratedRevisionRef.current = refreshedDraft.revision;
               latestDraftRef.current = refreshedDraft;
               queryClient.setQueryData(queryKey, refreshed);
               setDraft(refreshedDraft);
@@ -994,6 +999,7 @@ export function AutomationBuilderPage() {
             if (executionModeRequestIdRef.current !== requestId) return;
             setSetupExecutionMode(executionMode);
             const updatedDraft = draftFromDefinition(updatedAutomation);
+            hydratedRevisionRef.current = updatedDraft.revision;
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
             setDraft(updatedDraft);
