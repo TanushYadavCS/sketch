@@ -4,7 +4,7 @@
  * a type-scoped capped review band. Companies / Teams / Projects use the
  * generic {@link OrgEntityTab}; Products has its own two-section split.
  */
-import { type CuratedProduct, api } from "@/lib/api";
+import { type CuratedProduct, type EntityListItem, api } from "@/lib/api";
 import { useEntityUi } from "@/lib/entity-ui";
 import { EntityTable } from "@/routes/files/entity-explorer";
 import { CaretRightIcon, CubeIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
@@ -64,11 +64,14 @@ export function OrgEntityTab({
   typeLabel,
   onSeeAllReview,
   renderEmpty,
+  renderList,
 }: {
   type: string;
   typeLabel: string;
   onSeeAllReview: () => void;
   renderEmpty?: (search: string) => ReactNode;
+  /** Replaces the default flat EntityTable — the Projects tab renders its tree here. */
+  renderList?: (entities: EntityListItem[], search: string) => ReactNode;
 }) {
   const { search, setSearch, debounced } = useDebouncedSearch();
   const { openEntity } = useEntityUi();
@@ -93,6 +96,8 @@ export function OrgEntityTab({
             {debounced ? `No ${typeLabel.toLowerCase()} match your search.` : `No ${typeLabel.toLowerCase()} yet.`}
           </OrgEmpty>
         )
+      ) : renderList ? (
+        renderList(entities, debounced)
       ) : (
         <EntityTable entities={entities} onSelect={openEntity} />
       )}
@@ -200,7 +205,7 @@ function TierBadge({ tier }: { tier: string }) {
   );
 }
 
-function SectionLabel({ label, note, accent }: { label: string; note: string; accent?: boolean }) {
+export function SectionLabel({ label, note, accent }: { label: string; note: string; accent?: boolean }) {
   return (
     <div className="mb-3 flex items-baseline justify-between border-b border-border/60 pb-2">
       <span

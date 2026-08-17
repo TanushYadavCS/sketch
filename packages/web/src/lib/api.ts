@@ -721,6 +721,11 @@ export interface EntityListItem {
   lastMentionAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Project rows only: active part_of parent (project or product). */
+  parentEntityId?: string | null;
+  /** Project rows only: active engagement_for client company. */
+  companyEntityId?: string | null;
+  companyName?: string | null;
 }
 
 export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp" | "whatsapp_lid";
@@ -3660,7 +3665,10 @@ export const api = {
         method: "DELETE",
       });
     },
-    update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
+    update(
+      id: string,
+      data: { name?: string; sourceType?: string; status?: string; aliases?: string[]; parentEntityId?: string | null },
+    ) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {
         method: "PATCH",
         body: JSON.stringify(data),

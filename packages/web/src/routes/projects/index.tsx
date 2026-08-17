@@ -13,6 +13,8 @@
 import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
+import { useEntityUi } from "@/lib/entity-ui";
+import { EntityTable } from "@/routes/files/entity-explorer";
 import { type CoarseType, KnowledgeGraphView, NODE_COLOR } from "@/routes/files/knowledge-graph";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -22,6 +24,7 @@ import { useState } from "react";
 import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { OrgEntityTab, ProductsTab, TeamsEmpty } from "./entity-tab";
 import { PeopleTab } from "./people-tab";
+import { ProjectsTree } from "./projects-tree";
 import { ReviewTab } from "./review-tab";
 
 type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review" | "graph";
@@ -79,6 +82,7 @@ export function ProjectsPage({
   role?: "admin" | "member";
 } = {}) {
   const isAdmin = role === "admin";
+  const { openEntity } = useEntityUi();
   const [localTab, setLocalTab] = useState<OrgTab>("people");
   const [addOpen, setAddOpen] = useState(false);
   const [addType, setAddType] = useState("person");
@@ -172,7 +176,18 @@ export function ProjectsPage({
             renderEmpty={() => <TeamsEmpty pendingCount={teamReviewQuery.data?.total ?? 0} onSeeAllReview={goReview} />}
           />
         ) : tab === "projects" ? (
-          <OrgEntityTab type="project" typeLabel="Projects" onSeeAllReview={goReview} />
+          <OrgEntityTab
+            type="project"
+            typeLabel="Projects"
+            onSeeAllReview={goReview}
+            renderList={(entities, search) =>
+              search ? (
+                <EntityTable entities={entities} onSelect={openEntity} />
+              ) : (
+                <ProjectsTree entities={entities} onSelect={openEntity} isAdmin={isAdmin} />
+              )
+            }
+          />
         ) : tab === "products" ? (
           <ProductsTab onSeeAllReview={goReview} onDeclare={() => openAdd("product")} />
         ) : (
