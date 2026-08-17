@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   loadMessages: vi.fn(),
   conversationMessages: vi.fn(),
   releaseLock: vi.fn(),
+  acquireLock: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
   createConversation: vi.fn(),
@@ -52,6 +53,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
         originChatMessages: mocks.originChatMessages,
         conversationMessages: mocks.conversationMessages,
         releaseLock: mocks.releaseLock,
+        acquireLock: mocks.acquireLock,
         run: mocks.runTask,
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
@@ -300,6 +302,19 @@ describe("AutomationBuilderPage sharing", () => {
     mocks.conversationMessages.mockResolvedValue({ messages: [], updatedAt: null });
     mocks.releaseLock.mockReset();
     mocks.releaseLock.mockResolvedValue({ success: true });
+    mocks.acquireLock.mockReset();
+    mocks.acquireLock.mockResolvedValue({
+      lock: {
+        heldByUserId: "user-1",
+        heldByName: "Owner Member",
+        heldByPlatform: "web",
+        heldBySurface: "builder",
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        generation: 1,
+        isHeldByMe: true,
+        stealPending: null,
+      },
+    });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
     mocks.createConversation.mockResolvedValue({ created: false, conversation: null, builderLock: null });
     mocks.selectConversation.mockResolvedValue({ created: false, conversation: null, builderLock: null });

@@ -40,11 +40,17 @@ export function AutomationLockStealDialog({
   open,
   onOpenChange,
   lock,
+  clientSessionId,
+  generation,
+  onRequested,
 }: {
   taskId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   lock: AutomationEditLockView | null;
+  clientSessionId: string;
+  generation?: number;
+  onRequested?: () => void;
 }) {
   const [phase, setPhase] = useState<StealPhase>("confirm");
   const [requestedAt, setRequestedAt] = useState<number | null>(null);
@@ -55,8 +61,13 @@ export function AutomationLockStealDialog({
   const now = useLockNow(phase === "waiting");
 
   const stealMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.requestSteal(taskId),
+    mutationFn: () =>
+      api.scheduledTasks.requestSteal(taskId, {
+        clientSessionId,
+        ...(generation === undefined ? {} : { generation }),
+      }),
     onSuccess: () => {
+      onRequested?.();
       setRequestedAt(Date.now());
       setPhase("waiting");
     },

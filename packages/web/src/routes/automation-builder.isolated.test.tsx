@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   loadMessages: vi.fn(),
   conversationMessages: vi.fn(),
   releaseLock: vi.fn(),
+  acquireLock: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
   createConversation: vi.fn(),
@@ -66,6 +67,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
         originChatMessages: mocks.originChatMessages,
         conversationMessages: mocks.conversationMessages,
         releaseLock: mocks.releaseLock,
+        acquireLock: mocks.acquireLock,
         run: mocks.runTask,
         getRun: mocks.getRun,
         save: mocks.saveAutomation,
@@ -395,6 +397,19 @@ describe("AutomationBuilderPage", () => {
     mocks.conversationMessages.mockResolvedValue({ messages: [], updatedAt: null });
     mocks.releaseLock.mockClear();
     mocks.releaseLock.mockResolvedValue({ success: true });
+    mocks.acquireLock.mockClear();
+    mocks.acquireLock.mockResolvedValue({
+      lock: {
+        heldByUserId: "user-1",
+        heldByName: "Owner Member",
+        heldByPlatform: "web",
+        heldBySurface: "builder",
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        generation: 1,
+        isHeldByMe: true,
+        stealPending: null,
+      },
+    });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
     mocks.createConversation.mockClear();
     mocks.createConversation.mockResolvedValue({
@@ -758,6 +773,7 @@ describe("AutomationBuilderPage", () => {
       expect(mocks.saveAutomation).toHaveBeenCalledWith(
         "task-123",
         expect.objectContaining({ executionMode: "deterministic" }),
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
       ),
     );
     await waitFor(() =>
@@ -765,7 +781,13 @@ describe("AutomationBuilderPage", () => {
         expect.objectContaining({
           text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Deterministic) for this automation. Please continue by asking the next relevant automation questions.',
         }),
-        { body: { automationTaskId: "task-123" } },
+        {
+          body: expect.objectContaining({
+            automationTaskId: "task-123",
+            clientSessionId: expect.any(String),
+            generation: 1,
+          }),
+        },
       ),
     );
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
@@ -784,14 +806,24 @@ describe("AutomationBuilderPage", () => {
     await user.click(await screen.findByRole("radio", { name: label }));
 
     await waitFor(() =>
-      expect(mocks.saveAutomation).toHaveBeenCalledWith("task-123", expect.objectContaining({ executionMode: mode })),
+      expect(mocks.saveAutomation).toHaveBeenCalledWith(
+        "task-123",
+        expect.objectContaining({ executionMode: mode }),
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+      ),
     );
     await waitFor(() =>
       expect(mocks.sendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           text: `[automation-setup-mode-selection] I chose the "${mode}" execution mode (${label}) for this automation. Please continue by asking the next relevant automation questions.`,
         }),
-        { body: { automationTaskId: "task-123" } },
+        {
+          body: expect.objectContaining({
+            automationTaskId: "task-123",
+            clientSessionId: expect.any(String),
+            generation: 1,
+          }),
+        },
       ),
     );
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
@@ -1038,7 +1070,11 @@ describe("AutomationBuilderPage", () => {
     await user.click(screen.getByLabelText("Send message"));
 
     expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Make it daily" }), {
-      body: { automationTaskId: "task-123" },
+      body: expect.objectContaining({
+        automationTaskId: "task-123",
+        clientSessionId: expect.any(String),
+        generation: 1,
+      }),
     });
   });
 
@@ -1463,7 +1499,13 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "New chat" }));
-    await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledWith("task-123", { createNew: true }));
+    await waitFor(() =>
+      expect(mocks.createConversation).toHaveBeenCalledWith("task-123", {
+        createNew: true,
+        clientSessionId: expect.any(String),
+        generation: 1,
+      }),
+    );
     expect(mocks.navigate).toHaveBeenCalledWith(
       expect.objectContaining({
         to: "/scheduled-tasks/$taskId/edit",
@@ -1682,7 +1724,14 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
     await user.click(await screen.findByTestId("automation-builder-conversation-chat-beta"));
 
-    await waitFor(() => expect(mocks.selectConversation).toHaveBeenCalledWith("task-123", "chat-beta", "builder"));
+    await waitFor(() =>
+      expect(mocks.selectConversation).toHaveBeenCalledWith(
+        "task-123",
+        "chat-beta",
+        "builder",
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+      ),
+    );
     expect(mocks.navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { conversationId: "chat-beta" } }));
     expect(mocks.conversationMessages).not.toHaveBeenCalled();
   });
@@ -1693,7 +1742,14 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "Archive chat" }));
 
-    await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-alpha", true));
+    await waitFor(() =>
+      expect(mocks.archiveConversation).toHaveBeenCalledWith(
+        "task-123",
+        "chat-alpha",
+        true,
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+      ),
+    );
     expect(mocks.navigate).toHaveBeenCalledWith(
       expect.objectContaining({ search: {}, params: { taskId: "task-123" } }),
     );
@@ -1723,7 +1779,14 @@ describe("AutomationBuilderPage", () => {
     expect(await screen.findByTestId("automation-builder-chat-archived")).toBeInTheDocument();
     expect(mocks.conversationMessages).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Restore chat" }));
-    await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-archived", false));
+    await waitFor(() =>
+      expect(mocks.archiveConversation).toHaveBeenCalledWith(
+        "task-123",
+        "chat-archived",
+        false,
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+      ),
+    );
 
     mocks.search = { conversationId: "not-associated" };
     mocks.listConversations.mockResolvedValue({
