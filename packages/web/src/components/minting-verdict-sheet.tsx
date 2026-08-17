@@ -44,9 +44,18 @@ function kindCarriesStage(kind: CounterpartyKind): boolean {
 
 type GateLineTone = "add" | "drop" | "warn" | "declare";
 
+/**
+ * Create-lines shown before the box collapses behind "Show N more". Small
+ * dossiers (Habuild's 3) render in full; a 27-project OW dossier shows 5
+ * plus the toggle, so the unique consequence lines stay above the fold.
+ */
+const PREVIEW_CREATE_CAP = 5;
+
 interface GateLine {
   tone: GateLineTone;
   text: string;
+  /** Per-entity create lines collapse behind "Show more" past a cap; consequence lines never do. */
+  collapsible?: boolean;
 }
 
 export type MintingSheetVariant = "dev" | "org";
@@ -106,12 +115,14 @@ function SheetBody({
   const [draggedName, setDraggedName] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [filesFor, setFilesFor] = useState<string | null>(null);
+  const [showAllPreviewLines, setShowAllPreviewLines] = useState(false);
 
   /** Seed the picker from the nomination once the verdict lands. */
   useEffect(() => {
     if (!verdict) return;
     setKind(verdict.verdict.counterpartyKind);
     setStage(verdict.verdict.clientStage);
+    setShowAllPreviewLines(false);
   }, [verdict]);
 
   const settle = (accepted: ProjectMintingAcceptance | null) => {
@@ -233,6 +244,10 @@ function SheetBody({
         displayName,
       })
     : [];
+  const createLines = previewLines.filter((line) => line.collapsible);
+  const consequenceLines = previewLines.filter((line) => !line.collapsible);
+  const visibleCreateLines = showAllPreviewLines ? createLines : createLines.slice(0, PREVIEW_CREATE_CAP);
+  const hiddenCreateCount = createLines.length - visibleCreateLines.length;
   const canAccept =
     !previewBlocked && !!dryRun.data && !blockedByStage && !blockedByFlags && !accept.isPending && !reject.isPending;
   const decision = carriesStage && stage ? `${kind} · ${stage}` : kind;
@@ -349,7 +364,21 @@ function SheetBody({
             </p>
           ) : dryRun.data ? (
             <ul className="mt-2 space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2.5">
-              {previewLines.map((line) => (
+              {visibleCreateLines.map((line) => (
+                <ConsequenceRow key={line.text} line={line} />
+              ))}
+              {hiddenCreateCount > 0 || showAllPreviewLines ? (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setShowAllPreviewLines((value) => !value)}
+                    className="ml-5 text-[11px] text-primary hover:underline"
+                  >
+                    {showAllPreviewLines ? "Show less" : `Show ${hiddenCreateCount} more`}
+                  </button>
+                </li>
+              ) : null}
+              {consequenceLines.map((line) => (
                 <ConsequenceRow key={line.text} line={line} />
               ))}
             </ul>
@@ -695,7 +724,7 @@ function dryRunLines(
   for (const entity of entities) {
     const files = entity.fileIds.length > 0 ? ` — ${entity.fileIds.length} files` : "";
     if (entity.kind === "engagement") {
-      lines.push({ tone: "add", text: `Create “${entity.name}” as the account container${files}` });
+      lines.push({ tone: "add", text: `Create “${entity.name}” as the account container${files}`, collapsible: true });
     } else {
       const parentOriginal =
         entity.parentOriginalName !== undefined
@@ -705,6 +734,7 @@ function dryRunLines(
       lines.push({
         tone: "add",
         text: parent ? `Create “${entity.name}” under “${parent}”${files}` : `Create “${entity.name}”${files}`,
+        collapsible: true,
       });
     }
   }
