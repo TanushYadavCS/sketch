@@ -525,13 +525,17 @@ export function scheduledTaskRoutes(
     });
   }
 
-  async function reserveManualRun(taskId: string, triggeredByUserId?: string | null): Promise<string | null> {
+  async function reserveUserRun(
+    taskId: string,
+    runMode: "manual" | "test",
+    triggeredByUserId?: string | null,
+  ): Promise<string | null> {
     const runId = randomUUID();
     try {
       await runsRepo.create({
         id: runId,
         taskId,
-        triggerData: { type: "manual" },
+        triggerData: { type: runMode },
         triggeredByUserId: triggeredByUserId ?? null,
       });
       return runId;
@@ -541,15 +545,16 @@ export function scheduledTaskRoutes(
     }
   }
 
-  async function enqueueReservedManualRun(
+  async function enqueueReservedUserRun(
     taskId: string,
     runId: string,
+    runMode: "manual" | "test",
     triggeredByUserId?: string | null,
   ): Promise<boolean> {
     try {
       const execution = scheduler.executeTaskById(taskId, {
         preserveTaskState: true,
-        runMode: "manual",
+        runMode,
         runId,
         triggeredByUserId: triggeredByUserId ?? null,
       });
@@ -1163,14 +1168,20 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id, result.userId);
+    const body: unknown = await c.req.json().catch(() => ({}));
+    const runMode = typeof body === "object" && body !== null && "mode" in body ? body.mode : "manual";
+    if (runMode !== "manual" && runMode !== "test") {
+      return c.json({ error: { code: "INVALID_RUN_MODE", message: "Run mode must be manual or test" } }, 400);
+    }
+
+    const runId = await reserveUserRun(id, runMode, result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
+    if (!(await enqueueReservedUserRun(id, runId, runMode, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 
@@ -1340,14 +1351,14 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const runId = await reserveManualRun(id, result.userId);
+    const runId = await reserveUserRun(id, "manual", result.userId);
     if (!runId) {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
-    if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
+    if (!(await enqueueReservedUserRun(id, runId, "manual", result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
 

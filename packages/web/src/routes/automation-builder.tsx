@@ -691,7 +691,7 @@ export function AutomationBuilderPage() {
   }, [displayDraft, selectedStepId]);
 
   const runMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.run(taskId),
+    mutationFn: (mode: "manual" | "test") => api.scheduledTasks.run(taskId, mode),
     onMutate: () => {
       setRunRequestError(null);
     },
@@ -1109,8 +1109,36 @@ export function AutomationBuilderPage() {
             </Button>
             <Button
               size="sm"
+              variant="outline"
+              className={canvasToolbarButtonClass}
+              aria-label="Test automation"
+              onClick={() => runMutation.mutate("test")}
+              disabled={runIsBusy || !canRunAutomation}
+              title={
+                placeholderSetup
+                  ? "Finish setup before testing this automation"
+                  : canRunAutomation
+                    ? "Run without sending output to configured channels"
+                    : "Only active automations can be tested"
+              }
+            >
+              {runMutation.isPending && runMutation.variables === "test" ? (
+                <SpinnerGapIcon size={14} className="animate-spin" />
+              ) : (
+                <PlayIcon size={14} weight="fill" />
+              )}
+              {runMutation.isPending && runMutation.variables === "test"
+                ? "Testing…"
+                : placeholderSetup
+                  ? "Setting up"
+                  : canRunAutomation
+                    ? "Test"
+                    : "Paused"}
+            </Button>
+            <Button
+              size="sm"
               className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
-              onClick={() => runMutation.mutate()}
+              onClick={() => runMutation.mutate("manual")}
               disabled={runIsBusy || !canRunAutomation}
               title={
                 placeholderSetup
@@ -1120,12 +1148,12 @@ export function AutomationBuilderPage() {
                     : "Only active automations can be triggered"
               }
             >
-              {runMutation.isPending ? (
+              {runMutation.isPending && runMutation.variables === "manual" ? (
                 <SpinnerGapIcon size={14} className="animate-spin" />
               ) : (
                 <PlayIcon size={14} weight="fill" />
               )}
-              {runMutation.isPending
+              {runMutation.isPending && runMutation.variables === "manual"
                 ? "Starting…"
                 : runIsBusy
                   ? "Running"
