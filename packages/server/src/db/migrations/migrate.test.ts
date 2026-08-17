@@ -30,7 +30,7 @@ import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calend
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
-const EXPECTED_MIGRATION_COUNT = 189;
+const EXPECTED_MIGRATION_COUNT = 190;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -311,29 +311,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[186]).toBe("191-task-review-fields");
     expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
     expect(names[188]).toBe("193-automation-lock-sessions");
-  });
-
-  it("accepts millisecond builder-lock expiry timestamps on SQLite", async () => {
-    await runMigrations(db, { quiet: true });
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-
-    await db
-      .insertInto("scheduled_task_builder_locks")
-      .values({
-        task_id: "m192-builder-lock",
-        conversation_id: "m192-conversation",
-        transcript_user_id: "m192-user",
-        expires_at: expiresAt,
-      })
-      .execute();
-
-    await expect(
-      db
-        .selectFrom("scheduled_task_builder_locks")
-        .select("expires_at")
-        .where("task_id", "=", "m192-builder-lock")
-        .executeTakeFirstOrThrow(),
-    ).resolves.toEqual({ expires_at: expiresAt });
+    expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
   });
 
   it("adds portable session fencing columns with safe legacy defaults", async () => {
@@ -526,12 +504,11 @@ describe("runMigrations — full sequence", () => {
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master
       WHERE type = 'table'
-        AND name IN ('organization_domains', 'scheduled_task_builder_locks', 'slack_user_sync_state', 'slack_sync_runs')
+      AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
       ORDER BY name
     `.execute(db);
     expect(tables.rows.map((row) => row.name)).toEqual([
       "organization_domains",
-      "scheduled_task_builder_locks",
       "slack_sync_runs",
       "slack_user_sync_state",
     ]);

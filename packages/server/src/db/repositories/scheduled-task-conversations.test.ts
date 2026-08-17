@@ -3,10 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAutomationTaskConversationService } from "../../automation/task-conversations";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import {
-  createScheduledTaskConversationRepository,
-  normalizeScheduledTaskBuilderLockRow,
-} from "./scheduled-task-conversations";
+import { createScheduledTaskConversationRepository } from "./scheduled-task-conversations";
 
 describe("scheduled task conversation repository", () => {
   let db: Kysely<DB>;
@@ -18,36 +15,6 @@ describe("scheduled task conversation repository", () => {
   afterEach(async () => {
     await db.destroy();
   });
-
-  it("normalizes a PostgreSQL bigint expiry returned as a string", () => {
-    const expiresAt = String(Date.now() + 5 * 60 * 1000);
-    const normalized = normalizeScheduledTaskBuilderLockRow({
-      task_id: "task-pg-string-expiry",
-      conversation_id: "builder-chat",
-      transcript_user_id: "owner",
-      acquired_at: "2026-08-17T10:00:00.000Z",
-      renewed_at: "2026-08-17T10:00:00.000Z",
-      expires_at: expiresAt,
-    });
-
-    expect(normalized.expires_at).toBe(Number(expiresAt));
-  });
-
-  it.each(["", "not-a-number", "1.5", "-1", String(Number.MAX_SAFE_INTEGER + 1)])(
-    "rejects an unsafe PostgreSQL bigint expiry value (%s)",
-    (expiresAt) => {
-      expect(() =>
-        normalizeScheduledTaskBuilderLockRow({
-          task_id: "task-invalid-expiry",
-          conversation_id: "builder-chat",
-          transcript_user_id: "owner",
-          acquired_at: "2026-08-17T10:00:00.000Z",
-          renewed_at: "2026-08-17T10:00:00.000Z",
-          expires_at: expiresAt,
-        }),
-      ).toThrow(/invalid builder lock expiry/i);
-    },
-  );
 
   it("supports many-to-many links, idempotent upserts, grouped kinds, and archival without deletion", async () => {
     const repo = createScheduledTaskConversationRepository(db);
@@ -151,59 +118,6 @@ describe("scheduled task conversation repository", () => {
     await expect(
       service.listForTranscriptUser("task-reuse", "owner-reuse", { includeArchived: true }),
     ).resolves.toHaveLength(2);
-  });
-
-  it("serializes builder leases, expires stale owners, and releases on archival", async () => {
-    await db
-      .insertInto("scheduled_tasks")
-      .values({
-        id: "task-lock",
-        platform: "slack",
-        context_type: "dm",
-        delivery_target: "D-lock",
-        prompt: "Lock this task",
-        schedule_type: "cron",
-        schedule_value: "0 9 * * *",
-        created_by: "owner-lock",
-      })
-      .execute();
-
-    const repo = createScheduledTaskConversationRepository(db);
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "owner-chat",
-        transcriptUserId: "owner-lock",
-        nowMs: 1_000,
-        nowIso: "2026-08-07T00:00:01.000Z",
-        expiresAt: 2_000,
-      }),
-    ).resolves.toMatchObject({ acquired: true, lock: { conversation_id: "owner-chat" } });
-
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "admin-chat",
-        transcriptUserId: "admin-lock",
-        nowMs: 1_500,
-        nowIso: "2026-08-07T00:00:01.500Z",
-        expiresAt: 2_500,
-      }),
-    ).resolves.toMatchObject({ acquired: false, lock: { transcript_user_id: "owner-lock" } });
-
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "admin-chat",
-        transcriptUserId: "admin-lock",
-        nowMs: 2_000,
-        nowIso: "2026-08-07T00:00:02.000Z",
-        expiresAt: 3_000,
-      }),
-    ).resolves.toMatchObject({ acquired: true, lock: { transcript_user_id: "admin-lock" } });
-
-    await expect(repo.releaseBuilderLock("task-lock", "admin-chat", "admin-lock")).resolves.toBe(true);
-    await expect(repo.getBuilderLock("task-lock")).resolves.toBeUndefined();
   });
 
   it("locks source-chat authoring without exposing another user's transcript", async () => {
