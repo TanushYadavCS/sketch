@@ -49,7 +49,6 @@ import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
-import { denyIfNotAdmin } from "./auth-helpers";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
@@ -743,13 +742,10 @@ export function scheduledTaskRoutes(
   }
 
   routes.post("/", async (c) => {
-    const denied = denyIfNotAdmin(c);
-    if (denied) return denied;
-
     const userId = await resolveUserId(c.get("sub"));
     const currentUser = userId ? await users.findById(userId) : undefined;
     if (!currentUser) {
-      return c.json({ error: { code: "UNAUTHORIZED", message: "Admin identity could not be resolved" } }, 401);
+      return c.json({ error: { code: "UNAUTHORIZED", message: "User identity could not be resolved" } }, 401);
     }
 
     const builderConversationId = `builder-${randomUUID()}`;
@@ -777,7 +773,7 @@ export function scheduledTaskRoutes(
 
       return c.json({ automationId: result.row.id, conversationId: builderConversationId }, 201);
     } catch (error) {
-      logger?.error({ err: error, userId: currentUser.id }, "scheduled-tasks: failed to create admin draft");
+      logger?.error({ err: error, userId: currentUser.id }, "scheduled-tasks: failed to create automation draft");
       return c.json({ error: { code: "CREATION_FAILED", message: "Automation could not be created" } }, 500);
     }
   });

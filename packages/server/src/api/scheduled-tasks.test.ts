@@ -170,7 +170,7 @@ describe("Scheduled Tasks API", () => {
     ).resolves.toEqual([expect.objectContaining({ kind: "builder", archived_at: null })]);
   });
 
-  it("requires an admin to create a placeholder draft", async () => {
+  it("creates a member-owned placeholder draft and a fresh builder conversation", async () => {
     await seedAdmin(db);
     const member = await createUserRepository(db).create({ name: "Member", email: "member-create@test.com" });
     const scheduler = {
@@ -185,11 +185,21 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: await getMemberCookie(db, member.id) },
     });
 
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({
-      error: { code: "FORBIDDEN", message: "Admin role required" },
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toEqual({ automationId: expect.any(String), conversationId: expect.stringMatching(/^builder-/) });
+    await expect(createScheduledTaskRepository(db).getById(body.automationId)).resolves.toMatchObject({
+      id: body.automationId,
+      created_by: member.id,
+      origin_conversation_id: body.conversationId,
     });
-    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversationForTranscriptUser(
+        body.automationId,
+        body.conversationId,
+        member.id,
+      ),
+    ).resolves.toEqual([expect.objectContaining({ kind: "builder", archived_at: null })]);
   });
 
   it("rolls back the placeholder when the builder conversation association fails", async () => {
