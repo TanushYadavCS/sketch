@@ -157,7 +157,9 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
           steal_expires_at: params.stealExpiresAt,
         })
         .where("task_id", "=", params.taskId)
-        .where("holder_user_id", "<>", requester.userId)
+        .where((eb) =>
+          eb.or([eb("holder_user_id", "<>", requester.userId), eb("holder_session_id", "<>", sessionIdFor(requester))]),
+        )
         .where("expires_at", ">", params.stealRequestedAt)
         .where("steal_requester_user_id", "is", null)
         .execute();

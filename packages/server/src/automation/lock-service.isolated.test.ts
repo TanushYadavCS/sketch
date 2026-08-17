@@ -243,6 +243,38 @@ describe("automation lock service", () => {
       });
     });
 
+    it("allows a different session of the same user to request a takeover", async () => {
+      const holder = { ...HOLDER_A, sessionId: "tab-a" };
+      const requester = { ...HOLDER_A, sessionId: "tab-b" };
+      await acquireOrRenewLock(db, { taskId: "task-same-user-steal", holder });
+
+      const requested = await requestSteal(db, { taskId: "task-same-user-steal", requester });
+
+      expect(requested.kind).toBe("pending");
+      if (requested.kind !== "pending") return;
+      expect(requested.lock).toMatchObject({
+        holder_user_id: "user-a",
+        holder_session_id: "tab-a",
+        steal_requester_user_id: "user-a",
+        steal_requester_session_id: "tab-b",
+      });
+
+      const approved = await approveSteal(db, {
+        taskId: "task-same-user-steal",
+        approverUserId: "user-a",
+        approverSessionId: "tab-a",
+        approverGeneration: requested.lock.generation,
+      });
+
+      expect(approved.kind).toBe("approved");
+      if (approved.kind !== "approved") return;
+      expect(approved.lock).toMatchObject({
+        holder_user_id: "user-a",
+        holder_session_id: "tab-b",
+        generation: requested.lock.generation + 1,
+      });
+    });
+
     it("rejects stealing when there is no lock", async () => {
       await expect(requestSteal(db, { taskId: "task-1", requester: HOLDER_B })).resolves.toEqual({
         kind: "not_locked",

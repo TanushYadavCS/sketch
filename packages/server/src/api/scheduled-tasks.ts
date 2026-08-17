@@ -167,6 +167,7 @@ interface AutomationLockView {
   generation: number;
   expiresAt: string;
   isHeldByMe: boolean;
+  isHeldByMyOtherSession: boolean;
   stealPending: { requesterName: string | null; expiresAt: string } | null;
 }
 
@@ -501,6 +502,7 @@ async function toLockView(
     row.steal_expires_at > new Date().toISOString()
       ? { requesterName: requester?.name ?? null, expiresAt: row.steal_expires_at }
       : null;
+  const sameUser = viewerUserId !== null && row.holder_user_id === viewerUserId;
   return {
     heldByUserId: row.holder_user_id,
     heldByName: holder?.name ?? null,
@@ -508,10 +510,8 @@ async function toLockView(
     heldBySurface: row.holder_surface,
     generation: row.generation,
     expiresAt: row.expires_at,
-    isHeldByMe:
-      viewerUserId !== null &&
-      row.holder_user_id === viewerUserId &&
-      (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
+    isHeldByMe: sameUser && (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
+    isHeldByMyOtherSession: sameUser && viewerSessionId !== undefined && row.holder_session_id !== viewerSessionId,
     stealPending,
   };
 }
@@ -698,7 +698,12 @@ export function scheduledTaskRoutes(
 
   async function loadFullDefinition(
     row: ScheduledTaskRow,
-    viewer: { userId: string | null; grantedTaskIds: ReadonlySet<string>; role?: string },
+    viewer: {
+      userId: string | null;
+      grantedTaskIds: ReadonlySet<string>;
+      role?: string;
+      sessionId?: string;
+    },
   ) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
@@ -730,7 +735,7 @@ export function scheduledTaskRoutes(
       shares: isOwner ? await listSharesWithNames(db, row.id) : [],
       // Lazy expiry on access: an expired lock is not a lock — hide it from the view.
       ...(lockRow && lockRow.expires_at > new Date().toISOString()
-        ? { lock: await toLockView(lockRow, viewer.userId, users) }
+        ? { lock: await toLockView(lockRow, viewer.userId, users, viewer.sessionId) }
         : {}),
     };
   }
@@ -845,11 +850,14 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
+    const clientSessionId = c.req.query("clientSessionId")?.trim();
+    const viewerSessionId = clientSessionId && clientSessionId.length <= 200 ? clientSessionId : undefined;
     return c.json({
       automation: await loadFullDefinition(result.row, {
         userId: result.userId,
         grantedTaskIds: result.grantedTaskIds,
         role: c.get("role"),
+        sessionId: viewerSessionId,
       }),
     });
   });

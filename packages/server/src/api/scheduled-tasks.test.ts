@@ -2710,6 +2710,56 @@ describe("Scheduled Tasks API", () => {
     await expect(second.json()).resolves.toMatchObject({
       error: { code: "LOCKED", lock: { generation: 1, isHeldByMe: false } },
     });
+
+    const sameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b" }),
+    });
+    expect(sameUserSteal.status).toBe(200);
+    const sameUserStealBody = await sameUserSteal.json();
+    expect(sameUserStealBody).toMatchObject({
+      status: "pending",
+      lock: {
+        heldByUserId: alice.id,
+        isHeldByMe: false,
+        isHeldByMyOtherSession: true,
+        stealPending: { requesterName: "Alice" },
+      },
+    });
+
+    const otherSessionDetail = await app.request("/api/scheduled-tasks/task-session-contract?clientSessionId=tab-b", {
+      headers: { Cookie: cookie },
+    });
+    await expect(otherSessionDetail.json()).resolves.toMatchObject({
+      automation: {
+        lock: {
+          heldByUserId: alice.id,
+          isHeldByMe: false,
+          isHeldByMyOtherSession: true,
+        },
+      },
+    });
+
+    const approveSameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approve: true,
+        clientSessionId: "tab-a",
+        generation: sameUserStealBody.lock.generation,
+      }),
+    });
+    expect(approveSameUserSteal.status).toBe(200);
+    await expect(approveSameUserSteal.json()).resolves.toMatchObject({
+      status: "approved",
+      lock: {
+        heldByUserId: alice.id,
+        isHeldByMe: false,
+        isHeldByMyOtherSession: true,
+        generation: sameUserStealBody.lock.generation + 1,
+      },
+    });
   });
 
   it("notifies a Slack holder when a web member requests a steal", async () => {
