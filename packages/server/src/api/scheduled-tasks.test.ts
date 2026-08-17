@@ -115,6 +115,10 @@ function makeBuilderSaveRequest(overrides: Partial<AutomationBuilderSaveRequest>
   return { ...request, ...overrides };
 }
 
+function withLease(request: AutomationBuilderSaveRequest, clientSessionId = "tab-a", generation = 1) {
+  return { ...request, clientSessionId, generation };
+}
+
 describe("Scheduled Tasks API", () => {
   let db: Kysely<DB>;
 
@@ -268,6 +272,141 @@ describe("Scheduled Tasks API", () => {
         triggered_by_user_id: admin.id,
       });
     });
+  });
+
+  it("fences manual runs by the active authoring session and generation", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-lease-run@test.com" });
+    const grantee = await users.create({ name: "Grantee", email: "grantee-lease-run@test.com" });
+    await createScheduledTaskRepository(db).add({
+      id: "task-lease-run",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Run the leased automation",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await createAutomationSharesRepository(db).grant({
+      taskId: "task-lease-run",
+      userId: grantee.id,
+      grantedByUserId: owner.id,
+    });
+
+    const executeTaskById = vi.fn().mockResolvedValue({ status: "completed" });
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById,
+      },
+    });
+    const granteeCookie = await getMemberCookie(db, grantee.id);
+
+    const freeRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
+      method: "POST",
+      headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: 1 }),
+    });
+    expect(freeRun.status).toBe(200);
+
+    const acquired = await app.request("/api/scheduled-tasks/task-lease-run/lock", {
+      method: "POST",
+      headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a" }),
+    });
+    expect(acquired.status).toBe(200);
+    const lock = (await acquired.json()).lock;
+    expect(lock).toMatchObject({ generation: 1, isHeldByMe: true });
+
+    const conflictingRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
+      method: "POST",
+      headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: lock.generation }),
+    });
+    expect(conflictingRun.status).toBe(409);
+    await expect(conflictingRun.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    const exactRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
+      method: "POST",
+      headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: lock.generation }),
+    });
+    expect(exactRun.status).toBe(200);
+    expect(executeTaskById).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires an exact authoring lease for browser saves", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-browser-save@test.com" });
+    await createScheduledTaskRepository(db).add({
+      id: "task-browser-save",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Browser save",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule: vi.fn(async () => null),
+      },
+    });
+    const cookie = await getMemberCookie(db, owner.id);
+
+    const noLease = await app.request("/api/scheduled-tasks/task-browser-save", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "No lease" })),
+    });
+    expect(noLease.status).toBe(409);
+    await expect(noLease.json()).resolves.toMatchObject({ error: { code: "LEASE_REQUIRED" } });
+
+    await acquireOrRenewLock(db, {
+      taskId: "task-browser-save",
+      holder: { userId: owner.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+    const conflicting = await app.request("/api/scheduled-tasks/task-browser-save", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...makeBuilderSaveRequest({ expectedRevision: 0 }),
+        clientSessionId: "tab-b",
+        generation: 1,
+      }),
+    });
+    expect(conflicting.status).toBe(409);
+    await expect(conflicting.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    const exact = await app.request("/api/scheduled-tasks/task-browser-save", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...makeBuilderSaveRequest({ expectedRevision: 0 }),
+        clientSessionId: "tab-a",
+        generation: 1,
+      }),
+    });
+    expect(exact.status).toBe(200);
   });
 
   it("returns the caller's tasks with resolved labels", async () => {
@@ -1325,7 +1464,7 @@ describe("Scheduled Tasks API", () => {
   });
 
   it("admins list every task with edit/delete capability and no share capability on foreign tasks", async () => {
-    await seedAdmin(db);
+    const admin = await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner-admin-list@test.com" });
@@ -1386,10 +1525,22 @@ describe("Scheduled Tasks API", () => {
     });
 
     // Admins can edit foreign-owned automations through the builder save route.
+    await acquireOrRenewLock(db, {
+      taskId: "task-foreign-list",
+      holder: {
+        userId: admin.id,
+        sessionId: "tab-admin",
+        platform: "web",
+        surface: "builder",
+        conversationId: null,
+      },
+    });
     const editRes = await app.request("/api/scheduled-tasks/task-foreign-list", {
       method: "PUT",
       headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0, title: "Admin-edited brief" })),
+      body: JSON.stringify(
+        withLease(makeBuilderSaveRequest({ expectedRevision: 0, title: "Admin-edited brief" }), "tab-admin"),
+      ),
     });
     expect(editRes.status).toBe(200);
     await expect(editRes.json()).resolves.toMatchObject({
@@ -1560,10 +1711,15 @@ describe("Scheduled Tasks API", () => {
     expect(originRes.status).toBe(200);
     await expect(originRes.json()).resolves.toEqual({ messages: [] });
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-grantee",
+      holder: { userId: member.id, sessionId: "tab-member", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const editRes = await app.request("/api/scheduled-tasks/task-grantee", {
       method: "PUT",
       headers: { Cookie: memberCookie, "Content-Type": "application/json" },
-      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+      body: JSON.stringify(withLease(makeBuilderSaveRequest({ expectedRevision: 0 }), "tab-member")),
     });
     expect(editRes.status).toBe(200);
     await expect(editRes.json()).resolves.toMatchObject({
@@ -1612,10 +1768,15 @@ describe("Scheduled Tasks API", () => {
     });
     const memberCookie = await getMemberCookie(db, member.id);
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-grantee-conflict",
+      holder: { userId: member.id, sessionId: "tab-member", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const res = await app.request("/api/scheduled-tasks/task-grantee-conflict", {
       method: "PUT",
       headers: { Cookie: memberCookie, "Content-Type": "application/json" },
-      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+      body: JSON.stringify(withLease(makeBuilderSaveRequest({ expectedRevision: 0 }), "tab-member")),
     });
     expect(res.status).toBe(409);
     await expect(res.json()).resolves.toMatchObject({
@@ -1680,10 +1841,15 @@ describe("Scheduled Tasks API", () => {
     });
     const cookie = await getMemberCookie(db, alice.id);
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-builder",
+      holder: { userId: alice.id, sessionId: "tab-alice", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify(makeBuilderSaveRequest()),
+      body: JSON.stringify(withLease(makeBuilderSaveRequest(), "tab-alice")),
     });
 
     expect(res.status).toBe(200);
@@ -1762,10 +1928,15 @@ describe("Scheduled Tasks API", () => {
     });
     const cookie = await getMemberCookie(db, alice.id);
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-builder",
+      holder: { userId: alice.id, sessionId: "tab-alice", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+      body: JSON.stringify(withLease(makeBuilderSaveRequest({ expectedRevision: 0 }), "tab-alice")),
     });
 
     expect(res.status).toBe(409);
@@ -1837,10 +2008,15 @@ describe("Scheduled Tasks API", () => {
     });
     const cookie = await getMemberCookie(db, alice.id);
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-builder",
+      holder: { userId: alice.id, sessionId: "tab-alice", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify(actionRequest),
+      body: JSON.stringify(withLease(actionRequest, "tab-alice")),
     });
 
     expect(res.status).toBe(400);
@@ -1911,10 +2087,15 @@ describe("Scheduled Tasks API", () => {
     });
     const cookie = await getMemberCookie(db, alice.id);
 
+    await acquireOrRenewLock(db, {
+      taskId: "task-builder",
+      holder: { userId: alice.id, sessionId: "tab-alice", platform: "web", surface: "builder", conversationId: null },
+    });
+
     const res = await app.request("/api/scheduled-tasks/task-builder", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify(actionRequest),
+      body: JSON.stringify(withLease(actionRequest, "tab-alice")),
     });
 
     expect(res.status).toBe(200);

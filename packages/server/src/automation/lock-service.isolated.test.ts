@@ -17,6 +17,7 @@ import {
   acquireOrRenewLock,
   approveSteal,
   assertEditableBy,
+  authorizeAuthoringLease,
   denySteal,
   releaseLock,
   renewLock,
@@ -590,6 +591,51 @@ describe("automation lock service", () => {
       expect(result.kind).toBe("locked");
       if (result.kind !== "locked") return;
       expect(result.lock.holder_user_id).toBe("user-a");
+    });
+  });
+
+  describe("authorizeAuthoringLease", () => {
+    it("distinguishes an unleased task, a conflicting session, and the exact fenced holder", async () => {
+      await expect(
+        authorizeAuthoringLease(db, {
+          taskId: "task-authorization",
+          userId: "user-b",
+          sessionId: "tab-b",
+          generation: 1,
+        }),
+      ).resolves.toEqual({ kind: "no_lease" });
+
+      await acquireOrRenewLock(db, {
+        taskId: "task-authorization",
+        holder: { ...HOLDER_A, sessionId: "tab-a" },
+      });
+
+      await expect(
+        authorizeAuthoringLease(db, {
+          taskId: "task-authorization",
+          userId: "user-b",
+          sessionId: "tab-b",
+          generation: 1,
+        }),
+      ).resolves.toMatchObject({ kind: "conflict", lock: { holder_session_id: "tab-a", generation: 1 } });
+
+      await expect(
+        authorizeAuthoringLease(db, {
+          taskId: "task-authorization",
+          userId: "user-a",
+          sessionId: "tab-a",
+          generation: 1,
+        }),
+      ).resolves.toMatchObject({ kind: "held", lock: { holder_session_id: "tab-a", generation: 1 } });
+
+      await expect(
+        authorizeAuthoringLease(db, {
+          taskId: "task-authorization",
+          userId: "user-a",
+          sessionId: "tab-a",
+          generation: 0,
+        }),
+      ).resolves.toMatchObject({ kind: "stale", lock: { holder_session_id: "tab-a", generation: 1 } });
     });
   });
 

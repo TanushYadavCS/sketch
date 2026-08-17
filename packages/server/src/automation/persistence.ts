@@ -33,7 +33,7 @@ import {
   scheduledTaskFieldsFromSaveRequest,
   validateAutomationBuilderSaveRequest,
 } from "./definition";
-import { assertEditableBy } from "./lock-service";
+import { assertEditableBy, authorizeAuthoringLease } from "./lock-service";
 import {
   type AutomationTaskConversationAssociation,
   upsertAutomationTaskConversationAssociation,
@@ -61,6 +61,8 @@ export interface AutomationCreateContext {
 export interface AutomationEditActor {
   userId: string | null;
   role?: "admin";
+  source?: "web" | "api" | "agent" | "internal";
+  lease?: { sessionId: string; generation: number };
 }
 
 export type AutomationCreateResult = {
@@ -73,6 +75,8 @@ export type AutomationReplaceResult =
   | { kind: "saved"; row: ScheduledTaskRow }
   | { kind: "not_found" }
   | { kind: "locked"; lock: AutomationTaskLockRow }
+  | { kind: "lease_required" }
+  | { kind: "lease_stale"; lock: AutomationTaskLockRow }
   | { kind: "revision_conflict"; currentRevision: number };
 
 export interface AutomationStepContentPatch {
@@ -102,12 +106,16 @@ export type AutomationMutationResult =
   | { kind: "not_found" }
   | { kind: "access_denied" }
   | { kind: "locked"; lock: AutomationTaskLockRow }
+  | { kind: "lease_required" }
+  | { kind: "lease_stale"; lock: AutomationTaskLockRow }
   | { kind: "revision_conflict"; currentRevision: number };
 
 export type AutomationSetupModeSelectionResult =
   | { kind: "saved"; row: ScheduledTaskRow }
   | { kind: "not_found" }
   | { kind: "locked"; lock: AutomationTaskLockRow }
+  | { kind: "lease_required" }
+  | { kind: "lease_stale"; lock: AutomationTaskLockRow }
   | { kind: "not_placeholder" };
 
 export interface AutomationDeletionScheduler {
@@ -155,6 +163,34 @@ async function ensureWebhookEndpoint(
     return;
   }
   await repository.deactivateForTask(taskId);
+}
+
+type PersistenceLeaseCheck =
+  | { kind: "allowed" }
+  | { kind: "lease_required" }
+  | { kind: "locked"; lock: AutomationTaskLockRow }
+  | { kind: "lease_stale"; lock: AutomationTaskLockRow };
+
+async function authorizePersistenceMutation(
+  db: Kysely<DB>,
+  taskId: string,
+  actor: AutomationEditActor,
+): Promise<PersistenceLeaseCheck> {
+  if (actor.source === "web" || actor.source === "api") {
+    const lease = await authorizeAuthoringLease(db, {
+      taskId,
+      userId: actor.userId,
+      sessionId: actor.lease?.sessionId,
+      generation: actor.lease?.generation,
+    });
+    if (lease.kind === "held") return { kind: "allowed" };
+    if (lease.kind === "conflict") return { kind: "locked", lock: lease.lock };
+    if (lease.kind === "stale") return { kind: "lease_stale", lock: lease.lock };
+    return { kind: "lease_required" };
+  }
+
+  const editable = await assertEditableBy(db, taskId, actor.userId, undefined, actor.lease);
+  return editable.kind === "editable" ? { kind: "allowed" } : { kind: "locked", lock: editable.lock };
 }
 
 function contentEntries(request: AutomationBuilderSaveRequest) {
@@ -485,8 +521,8 @@ export async function updateAutomationDefinition(params: {
     if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId, params.actor.role))) {
       return { kind: "access_denied" as const };
     }
-    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
-    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
+    const lease = await authorizePersistenceMutation(trx, params.taskId, params.actor);
+    if (lease.kind !== "allowed") return lease;
 
     const currentDefinition = buildAutomationDefinition({
       row: current,
@@ -710,8 +746,8 @@ export async function selectAutomationSetupExecutionMode(params: {
     if (!(await isTaskEditor(trx, row.id, row.created_by, params.actor.userId, params.actor.role))) {
       return { kind: "not_found" as const };
     }
-    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
-    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
+    const lease = await authorizePersistenceMutation(trx, params.taskId, params.actor);
+    if (lease.kind !== "allowed") return lease;
     const [stepContentRows, runRows] = await Promise.all([
       createAutomationStepContentRepository(trx).getByTask(params.taskId),
       createAutomationRunsRepository(trx).list(params.taskId),
@@ -762,8 +798,8 @@ export async function replaceAutomationDefinition(params: {
     if (!(await isTaskEditor(trx, current.id, current.created_by, params.actor.userId, params.actor.role))) {
       return { kind: "not_found" as const };
     }
-    const editable = await assertEditableBy(trx, params.taskId, params.actor.userId);
-    if (editable.kind === "locked") return { kind: "locked" as const, lock: editable.lock };
+    const lease = await authorizePersistenceMutation(trx, params.taskId, params.actor);
+    if (lease.kind !== "allowed") return lease;
     const expectedRevision = request.expectedRevision ?? current.revision;
     if (current.revision !== expectedRevision) {
       return { kind: "revision_conflict" as const, currentRevision: current.revision };

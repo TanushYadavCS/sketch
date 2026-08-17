@@ -1291,4 +1291,46 @@ describe("automation persistence", () => {
       revision: 2,
     });
   });
+
+  it("requires the exact active session and generation for browser persistence mutations", async () => {
+    await addUser("user-1");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-browser-lease"),
+      brokerCapable: true,
+    });
+
+    const noLease = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "No lease" }),
+      actor: { userId: "user-1", source: "web" },
+      brokerCapable: true,
+    });
+    expect(noLease).toEqual({ kind: "lease_required" });
+
+    await acquireOrRenewLock(db, {
+      taskId: "automation-browser-lease",
+      holder: { userId: "user-1", sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+
+    const otherSession = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "Other session" }),
+      actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-b", generation: 1 } },
+      brokerCapable: true,
+    });
+    expect(otherSession.kind).toBe("locked");
+
+    const exactSession = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "Exact session" }),
+      actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-a", generation: 1 } },
+      brokerCapable: true,
+    });
+    expect(exactSession).toMatchObject({ kind: "saved", row: { title: "Exact session", revision: 1 } });
+  });
 });

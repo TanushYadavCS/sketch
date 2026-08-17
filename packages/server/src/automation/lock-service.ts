@@ -59,8 +59,53 @@ export type StealResponseResult =
 
 export type EditableCheck = { kind: "editable" } | { kind: "locked"; lock: AutomationTaskLockRow };
 
+/**
+ * Result of checking the caller's exact authoring lease. The distinction
+ * between an absent row, an expired row, a live conflict, and a stale fence is
+ * part of the HTTP contract: callers must not collapse every failure into a
+ * generic lock message.
+ */
+export type AuthoringLeaseAuthorization =
+  | { kind: "no_lease" }
+  | { kind: "held"; lock: AutomationTaskLockRow }
+  | { kind: "conflict"; lock: AutomationTaskLockRow }
+  | { kind: "stale"; lock: AutomationTaskLockRow }
+  | { kind: "expired"; lock: AutomationTaskLockRow };
+
 function iso(nowMs: number): string {
   return new Date(nowMs).toISOString();
+}
+
+/**
+ * Checks an authoring lease without mutating it. A live lease is authoritative
+ * only when the authenticated user, client session, and generation all match.
+ * The caller may use `no_lease` or `expired` to apply an operation's policy;
+ * neither result grants authority to a browser save by itself.
+ */
+export async function authorizeAuthoringLease(
+  db: Kysely<DB>,
+  params: {
+    taskId: string;
+    userId: string | null;
+    sessionId?: string;
+    generation?: number;
+    nowMs?: number;
+  },
+): Promise<AuthoringLeaseAuthorization> {
+  const row = await createAutomationLocksRepository(db).getByTaskId(params.taskId);
+  if (!row) return { kind: "no_lease" };
+
+  const now = iso(params.nowMs ?? Date.now());
+  if (row.expires_at <= now) return { kind: "expired", lock: row };
+
+  if (params.generation !== undefined && row.generation !== params.generation) {
+    return { kind: "stale", lock: row };
+  }
+  if (row.holder_user_id !== params.userId || row.holder_session_id !== params.sessionId) {
+    return { kind: "conflict", lock: row };
+  }
+  if (params.generation === undefined) return { kind: "stale", lock: row };
+  return { kind: "held", lock: row };
 }
 
 async function requireRow(db: Kysely<DB>, taskId: string): Promise<AutomationTaskLockRow> {

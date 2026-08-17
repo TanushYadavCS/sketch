@@ -11,7 +11,14 @@ import {
   isStrictAutomationPlaceholderRow,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
-import { acquireOrRenewLock, approveSteal, denySteal, releaseLock, requestSteal } from "../automation/lock-service";
+import {
+  acquireOrRenewLock,
+  approveSteal,
+  authorizeAuthoringLease,
+  denySteal,
+  releaseLock,
+  requestSteal,
+} from "../automation/lock-service";
 import {
   createAutomationDraft,
   deleteAutomation,
@@ -887,6 +894,79 @@ export function scheduledTaskRoutes(
     return parsed;
   }
 
+  async function readOptionalLeaseRequest(
+    c: Context,
+  ): Promise<
+    { body: Record<string, unknown>; lease?: { clientSessionId: string; generation?: number } } | { response: Response }
+  > {
+    const body = await c.req.json().catch(() => null);
+    if (body === null) return { body: {} };
+    if (typeof body !== "object" || Array.isArray(body)) {
+      return {
+        response: c.json({ error: { code: "VALIDATION_ERROR", message: "Request body must be an object" } }, 400),
+      };
+    }
+    const record = body as Record<string, unknown>;
+    const hasLeaseFields = "clientSessionId" in record || "generation" in record;
+    if (!hasLeaseFields) return { body: record };
+    const parsed = parseLeaseRequestBody(record);
+    if (!parsed) {
+      return {
+        response: c.json(
+          { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
+          400,
+        ),
+      };
+    }
+    return { body: record, lease: parsed };
+  }
+
+  async function authorizeManualRun(
+    c: Context,
+    taskId: string,
+    userId: string | null,
+    lease: { clientSessionId: string; generation?: number } | undefined,
+  ): Promise<Response | null> {
+    const authorization = await authorizeAuthoringLease(db, {
+      taskId,
+      userId,
+      sessionId: lease?.clientSessionId,
+      generation: lease?.generation,
+    });
+    if (authorization.kind === "conflict") {
+      return c.json(
+        {
+          error: {
+            code: "LOCKED",
+            message: "Automation is locked by another editor",
+            lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
+          },
+        },
+        409,
+      );
+    }
+    if (authorization.kind === "stale") {
+      return c.json(
+        {
+          error: {
+            code: "LEASE_STALE",
+            message: "Editing session is stale",
+            lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
+          },
+        },
+        409,
+      );
+    }
+    return null;
+  }
+
+  function leaseForPersistence(
+    lease: { clientSessionId: string; generation?: number } | undefined,
+  ): { sessionId: string; generation: number } | undefined {
+    if (!lease || lease.generation === undefined) return undefined;
+    return { sessionId: lease.clientSessionId, generation: lease.generation };
+  }
+
   routes.post("/:id/lock", async (c) => {
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
@@ -1131,7 +1211,9 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const accessible = await loadOwnedTask(c, id);
     if ("response" in accessible) return accessible.response;
-    const body = await c.req.json().catch(() => null);
+    const request = await readOptionalLeaseRequest(c);
+    if ("response" in request) return request.response;
+    const body = request.body;
     const executionMode =
       body && typeof body === "object" && "executionMode" in body
         ? automationExecutionModeSchema.safeParse((body as { executionMode: unknown }).executionMode)
@@ -1144,7 +1226,7 @@ export function scheduledTaskRoutes(
       db,
       taskId: id,
       executionMode: executionMode.data,
-      actor: { userId },
+      actor: { userId, source: "web", lease: leaseForPersistence(request.lease) },
     });
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
@@ -1155,7 +1237,25 @@ export function scheduledTaskRoutes(
           error: {
             code: "LOCKED",
             message: "Automation is locked by another editor",
-            lock: await toLockView(saveResult.lock, accessible.userId, users),
+            lock: await toLockView(saveResult.lock, accessible.userId, users, request.lease?.clientSessionId),
+          },
+        },
+        409,
+      );
+    }
+    if (saveResult.kind === "lease_required") {
+      return c.json(
+        { error: { code: "LEASE_REQUIRED", message: "Acquire the automation editing session before saving" } },
+        409,
+      );
+    }
+    if (saveResult.kind === "lease_stale") {
+      return c.json(
+        {
+          error: {
+            code: "LEASE_STALE",
+            message: "Editing session is stale",
+            lock: await toLockView(saveResult.lock, accessible.userId, users, request.lease?.clientSessionId),
           },
         },
         409,
@@ -1189,9 +1289,12 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduler refresh is unavailable" } }, 503);
     }
 
+    const requestBody = await readOptionalLeaseRequest(c);
+    if ("response" in requestBody) return requestBody.response;
+
     let request: ReturnType<typeof parseAutomationBuilderSaveRequest>;
     try {
-      request = parseAutomationBuilderSaveRequest(await c.req.json());
+      request = parseAutomationBuilderSaveRequest(requestBody.body);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Invalid automation definition";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
@@ -1229,7 +1332,12 @@ export function scheduledTaskRoutes(
         db,
         taskId: id,
         request,
-        actor: { userId, role: c.get("role") === "admin" ? "admin" : undefined },
+        actor: {
+          userId,
+          role: c.get("role") === "admin" ? "admin" : undefined,
+          source: "web",
+          lease: leaseForPersistence(requestBody.lease),
+        },
         brokerCapable,
         encryptionKey: options.encryptionKey,
       });
@@ -1256,7 +1364,25 @@ export function scheduledTaskRoutes(
           error: {
             code: "LOCKED",
             message: "Automation is locked by another editor",
-            lock: await toLockView(saveResult.lock, result.userId, users),
+            lock: await toLockView(saveResult.lock, result.userId, users, requestBody.lease?.clientSessionId),
+          },
+        },
+        409,
+      );
+    }
+    if (saveResult.kind === "lease_required") {
+      return c.json(
+        { error: { code: "LEASE_REQUIRED", message: "Acquire the automation editing session before saving" } },
+        409,
+      );
+    }
+    if (saveResult.kind === "lease_stale") {
+      return c.json(
+        {
+          error: {
+            code: "LEASE_STALE",
+            message: "Editing session is stale",
+            lock: await toLockView(saveResult.lock, result.userId, users, requestBody.lease?.clientSessionId),
           },
         },
         409,
@@ -1291,9 +1417,15 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
 
+    const request = await readOptionalLeaseRequest(c);
+    if ("response" in request) return request.response;
+
     if (result.row.status !== "active") {
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
+
+    const leaseError = await authorizeManualRun(c, id, result.userId, request.lease);
+    if (leaseError) return leaseError;
 
     const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
@@ -1318,7 +1450,9 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "SCHEDULER_UNAVAILABLE", message: "Step testing is unavailable" } }, 503);
     }
 
-    const body = await c.req.json().catch(() => ({}));
+    const request = await readOptionalLeaseRequest(c);
+    if ("response" in request) return request.response;
+    const body = request.body;
     const input =
       typeof body === "object" && body !== null && "input" in body ? (body as { input: unknown }).input : undefined;
     const useLatestUpstreamOutput =
@@ -1326,6 +1460,8 @@ export function scheduledTaskRoutes(
       body !== null &&
       "useLatestUpstreamOutput" in body &&
       (body as { useLatestUpstreamOutput: unknown }).useLatestUpstreamOutput === true;
+    const leaseError = await authorizeManualRun(c, id, result.userId, request.lease);
+    if (leaseError) return leaseError;
     try {
       const run = await scheduler.executeStepById(id, stepId, { input, useLatestUpstreamOutput });
       return c.json({ run });
@@ -1468,9 +1604,15 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
 
+    const request = await readOptionalLeaseRequest(c);
+    if ("response" in request) return request.response;
+
     if (result.row.status !== "active") {
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
+
+    const leaseError = await authorizeManualRun(c, id, result.userId, request.lease);
+    if (leaseError) return leaseError;
 
     const runId = await reserveManualRun(id, result.userId);
     if (!runId) {
