@@ -2752,9 +2752,10 @@ export const api = {
       );
       return res.automation;
     },
-    run(taskId: string) {
+    run(taskId: string, mode: "manual" | "test" = "manual") {
       return request<{ status: "triggered"; runId: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
         method: "POST",
+        body: JSON.stringify({ mode }),
       });
     },
     testStep(taskId: string, stepId: string, body: { input?: unknown; useLatestUpstreamOutput?: boolean } = {}) {
