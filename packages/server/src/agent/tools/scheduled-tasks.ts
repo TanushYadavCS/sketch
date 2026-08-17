@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   type AutomationBuilderSaveRequest,
@@ -374,9 +375,57 @@ async function lockedAutomationMessage(
 function lockHolderFor(ctx: TaskContext): LockHolderFields {
   return {
     userId: ctx.createdBy as string,
+    sessionId: agentLockSessionIdFor(ctx),
     platform: ctx.origin?.platform === "web" ? "web" : ctx.platform,
     surface: ctx.origin?.platform === "web" ? "builder" : "chat",
     conversationId: lockHolderConversationId(ctx),
+  };
+}
+
+/**
+ * Agent turns do not have a browser tab UUID. Derive one from the authenticated
+ * conversation surface instead so consecutive turns on the same chat renew the
+ * same lease while a browser session for that user remains a distinct holder.
+ */
+export function agentLockSessionIdFor(ctx: TaskContext): string {
+  const holderPlatform = ctx.origin?.platform === "web" ? "web" : ctx.platform;
+  const holderSurface = ctx.origin?.platform === "web" ? "builder" : "chat";
+  const conversationId = lockHolderConversationId(ctx) ?? "";
+  const identity = [
+    ctx.createdBy ?? "anonymous",
+    holderPlatform,
+    holderSurface,
+    ctx.contextType,
+    conversationId,
+    ctx.threadTs ?? "",
+    ctx.origin?.providerThreadId ?? "",
+  ].join("\u0000");
+  return `agent:${createHash("sha256").update(identity).digest("hex")}`;
+}
+
+type AgentLease = { sessionId: string; generation: number };
+
+async function acquireAgentLease(
+  db: Kysely<DB>,
+  taskId: string,
+  ctx: TaskContext,
+): Promise<
+  { kind: "held"; lease: AgentLease } | { kind: "locked"; lock: Awaited<ReturnType<typeof acquireOrRenewLock>>["lock"] }
+> {
+  const acquired = await acquireOrRenewLock(db, { taskId, holder: lockHolderFor(ctx) });
+  if (acquired.kind === "locked") return acquired;
+  return {
+    kind: "held",
+    lease: { sessionId: acquired.lock.holder_session_id, generation: acquired.lock.generation },
+  };
+}
+
+function agentMutationActor(ctx: TaskContext, lease?: AgentLease) {
+  return {
+    userId: ctx.createdBy,
+    role: ctx.canManageAnyTask ? ("admin" as const) : undefined,
+    source: "agent" as const,
+    ...(lease ? { lease } : {}),
   };
 }
 
@@ -940,16 +989,18 @@ async function handleConfiguredChatAuthoring(
   let result: ChatAutomationAuthoringResult;
   const db = deps.db;
   const createdBy = deps.taskContext.createdBy;
+  let agentLease: AgentLease | undefined;
   try {
     // The authoring edit path is lock-guarded like the structured update path:
     // acquire before the edit (so persistence's in-transaction lock check passes
     // for us) and release after, with the shared locked message when another
     // editor holds the lock.
     if (params.action === "update" && targetTaskId && db && createdBy) {
-      const acquired = await acquireOrRenewLock(db, { taskId: targetTaskId, holder: lockHolderFor(deps.taskContext) });
+      const acquired = await acquireAgentLease(db, targetTaskId, deps.taskContext);
       if (acquired.kind === "locked") {
         return text(await lockedAutomationMessage(deps, acquired.lock));
       }
+      agentLease = acquired.lease;
     }
     result = await chatAuthoring.author({
       action: params.action === "add" ? "create" : "edit",
@@ -966,8 +1017,13 @@ async function handleConfiguredChatAuthoring(
     }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
   } finally {
-    if (params.action === "update" && targetTaskId && db && createdBy) {
-      await releaseLock(db, { taskId: targetTaskId, userId: createdBy });
+    if (params.action === "update" && targetTaskId && db && createdBy && agentLease) {
+      await releaseLock(db, {
+        taskId: targetTaskId,
+        userId: createdBy,
+        sessionId: agentLease.sessionId,
+        generation: agentLease.generation,
+      });
     }
   }
 
@@ -1418,21 +1474,20 @@ export async function handleManageScheduledTasks(
       if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision;
 
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
+      let agentLease: AgentLease | undefined;
       try {
         if (ctx.createdBy) {
-          const acquired = await acquireOrRenewLock(db, { taskId: task_id, holder: lockHolderFor(ctx) });
+          const acquired = await acquireAgentLease(db, task_id, ctx);
           if (acquired.kind === "locked") {
             return text(await lockedAutomationMessage(deps, acquired.lock));
           }
+          agentLease = acquired.lease;
         }
         saved = await updateAutomationDefinition({
           db,
           taskId: task_id,
           patch,
-          actor: {
-            userId: ctx.createdBy,
-            role: ctx.canManageAnyTask ? "admin" : undefined,
-          },
+          actor: agentMutationActor(ctx, agentLease),
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
@@ -1442,8 +1497,13 @@ export async function handleManageScheduledTasks(
         if (message) return text(message);
         throw error;
       } finally {
-        if (ctx.createdBy) {
-          await releaseLock(db, { taskId: task_id, userId: ctx.createdBy });
+        if (ctx.createdBy && agentLease) {
+          await releaseLock(db, {
+            taskId: task_id,
+            userId: ctx.createdBy,
+            sessionId: agentLease.sessionId,
+            generation: agentLease.generation,
+          });
         }
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
@@ -1528,16 +1588,33 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
-      const deletion = await deleteAutomation({
-        db: deps.db,
-        taskId: task_id,
-        actor: {
-          userId: ctx.createdBy,
-          role: ctx.canManageAnyTask ? "admin" : undefined,
-        },
-        scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
-        encryptionKey: deps.encryptionKey,
-      });
+      let agentLease: AgentLease | undefined;
+      if (ctx.createdBy) {
+        const acquired = await acquireAgentLease(deps.db, task_id, ctx);
+        if (acquired.kind === "locked") {
+          return text(await lockedAutomationMessage(deps, acquired.lock));
+        }
+        agentLease = acquired.lease;
+      }
+      let deletion: Awaited<ReturnType<typeof deleteAutomation>>;
+      try {
+        deletion = await deleteAutomation({
+          db: deps.db,
+          taskId: task_id,
+          actor: agentMutationActor(ctx, agentLease),
+          scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
+          encryptionKey: deps.encryptionKey,
+        });
+      } finally {
+        if (ctx.createdBy && agentLease) {
+          await releaseLock(deps.db, {
+            taskId: task_id,
+            userId: ctx.createdBy,
+            sessionId: agentLease.sessionId,
+            generation: agentLease.generation,
+          });
+        }
+      }
       if (deletion.kind === "not_found") return text(`Error: task ${task_id} not found.`);
       if (deletion.kind === "access_denied")
         return text(`Error: you do not have permission to delete task ${task_id}.`);
@@ -1683,12 +1760,14 @@ export async function handleManageScheduledTasks(
         params.expectedRevision ??
         (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
+      let agentLease: AgentLease | undefined;
       try {
         if (ctx.createdBy) {
-          const acquired = await acquireOrRenewLock(db, { taskId: task_id, holder: lockHolderFor(ctx) });
+          const acquired = await acquireAgentLease(db, task_id, ctx);
           if (acquired.kind === "locked") {
             return text(await lockedAutomationMessage(deps, acquired.lock));
           }
+          agentLease = acquired.lease;
         }
         saved = await updateAutomationDefinition({
           db,
@@ -1703,10 +1782,7 @@ export async function handleManageScheduledTasks(
               },
             },
           },
-          actor: {
-            userId: ctx.createdBy,
-            role: ctx.canManageAnyTask ? "admin" : undefined,
-          },
+          actor: agentMutationActor(ctx, agentLease),
           brokerCapable: await getBrokerCapabilitySnapshot(),
           encryptionKey: deps.encryptionKey,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
@@ -1716,8 +1792,13 @@ export async function handleManageScheduledTasks(
         if (message) return text(message);
         throw error;
       } finally {
-        if (ctx.createdBy) {
-          await releaseLock(db, { taskId: task_id, userId: ctx.createdBy });
+        if (ctx.createdBy && agentLease) {
+          await releaseLock(db, {
+            taskId: task_id,
+            userId: ctx.createdBy,
+            sessionId: agentLease.sessionId,
+            generation: agentLease.generation,
+          });
         }
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
