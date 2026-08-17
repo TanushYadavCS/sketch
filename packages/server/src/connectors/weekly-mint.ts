@@ -1453,6 +1453,26 @@ function buildStoredVerdict(
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
   const groupsByKey = new Map(groups.map((group) => [group.key, group]));
+  for (const disposition of dispositions.values()) {
+    if (disposition.targetEntityId !== null && !projectsById.has(disposition.targetEntityId)) {
+      /**
+       * Group keys and entity ids are both bare UUIDs in the prompt, and the
+       * model sometimes returns a groupKey as targetEntityId. Writing that id
+       * to entity_review_queue violates its FK and killed the whole container
+       * verdict, so an id that is not a known existing project is dropped: a
+       * groupKey meant as a parent still works via parentGroupKey, and an
+       * alias with no target leaves the group pooled for next week.
+       */
+      if (
+        disposition.action === "child_of" &&
+        disposition.parentGroupKey === null &&
+        groupsByKey.has(disposition.targetEntityId)
+      ) {
+        disposition.parentGroupKey = disposition.targetEntityId;
+      }
+      disposition.targetEntityId = null;
+    }
+  }
   const verdictProjects = new Map<string, VerdictProject>();
   const existingEntities: ClusterVerdict["existingEntities"] = [];
   const storedGroups: CandidateGroup[] = [];
