@@ -2378,17 +2378,21 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
   it("steal reports not locked when the automation is free or the caller holds the lock", async () => {
     await createTask("steal-free-task");
     const scheduler = schedulerFor("steal-free-task");
+    const taskContext = taskContextFor("steal-free-task");
 
     const free = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-free-task" },
-      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+      { db, scheduler, taskContext },
     );
     expect(free.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
 
-    await acquireOrRenewLock(db, { taskId: "steal-free-task", holder: { ...holder, userId: "owner-1" } });
+    await acquireOrRenewLock(db, {
+      taskId: "steal-free-task",
+      holder: { ...holder, userId: "owner-1", sessionId: agentLockSessionIdFor(taskContext) },
+    });
     const self = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-free-task" },
-      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+      { db, scheduler, taskContext },
     );
     expect(self.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
   });
