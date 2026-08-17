@@ -872,10 +872,11 @@ export function scheduledTaskRoutes(
 
   async function readLeaseRequest(
     c: Context,
+    options: { requireGeneration?: boolean } = {},
   ): Promise<{ clientSessionId: string; generation?: number } | { response: Response }> {
     const body = await c.req.json().catch(() => null);
     const parsed = parseLeaseRequestBody(body);
-    if (!parsed) {
+    if (!parsed || (options.requireGeneration && parsed.generation === undefined)) {
       return {
         response: c.json(
           { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
@@ -896,10 +897,19 @@ export function scheduledTaskRoutes(
     const leaseRequest = await readLeaseRequest(c);
     if ("response" in leaseRequest) return leaseRequest.response;
     const existing = await createAutomationLocksRepository(db).getByTaskId(id);
-    if (
+    const exactSessionIsActive =
       existing &&
+      existing.expires_at > new Date().toISOString() &&
       existing.holder_user_id === result.userId &&
-      existing.holder_session_id === leaseRequest.clientSessionId &&
+      existing.holder_session_id === leaseRequest.clientSessionId;
+    if (exactSessionIsActive && leaseRequest.generation === undefined) {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "generation is required to renew an active lease" } },
+        400,
+      );
+    }
+    if (
+      exactSessionIsActive &&
       leaseRequest.generation !== undefined &&
       existing.generation !== leaseRequest.generation
     ) {
@@ -945,7 +955,7 @@ export function scheduledTaskRoutes(
     if (!result.userId) {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
-    const leaseRequest = await readLeaseRequest(c);
+    const leaseRequest = await readLeaseRequest(c, { requireGeneration: true });
     if ("response" in leaseRequest) return leaseRequest.response;
     const current = await createAutomationLocksRepository(db).getByTaskId(id);
     if (
@@ -1055,7 +1065,7 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message: "approve must be a boolean" } }, 400);
     }
     const leaseRequest = parseLeaseRequestBody(body);
-    if (!leaseRequest) {
+    if (!leaseRequest || leaseRequest.generation === undefined) {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
         400,

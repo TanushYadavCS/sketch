@@ -2379,6 +2379,26 @@ describe("Scheduled Tasks API", () => {
     });
     expect(sameSession.status).toBe(200);
 
+    const omittedRenewGeneration = await app.request("/api/scheduled-tasks/task-session-contract/lock", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a" }),
+    });
+    expect(omittedRenewGeneration.status).toBe(400);
+    await expect(omittedRenewGeneration.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR" },
+    });
+
+    const omittedReleaseGeneration = await app.request("/api/scheduled-tasks/task-session-contract/lock", {
+      method: "DELETE",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a" }),
+    });
+    expect(omittedReleaseGeneration.status).toBe(400);
+    await expect(omittedReleaseGeneration.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR" },
+    });
+
     const second = await app.request("/api/scheduled-tasks/task-session-contract/lock", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
