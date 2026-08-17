@@ -1096,6 +1096,7 @@ export function AutomationBuilderPage() {
         onExecutionModeSelectionHandled={handleExecutionModeSelectionHandled}
         onBusyChange={setBuilderChatBusy}
         onBackToAutomations={navigateToAutomations}
+        clientSessionId={clientSessionId}
         authoringLease={authoringLease ? leaseRequest(authoringLease) : null}
         onLeaseStale={() => setAuthoringLease(null)}
         className="automation-builder-sidecar-enter hidden lg:flex"
@@ -1626,7 +1627,8 @@ function outgoingBuilderRequestOptions(
   };
 }
 
-const builderConversationQueryKey = (taskId: string) => ["scheduled-tasks", taskId, "conversations"] as const;
+const builderConversationQueryKey = (taskId: string, clientSessionId: string) =>
+  ["scheduled-tasks", taskId, "conversations", clientSessionId] as const;
 
 function replaceBuilderConversationCache(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -1702,6 +1704,7 @@ function BuilderChatSidecar({
   onExecutionModeSelectionHandled,
   onBusyChange,
   onBackToAutomations,
+  clientSessionId,
   authoringLease,
   onLeaseStale,
   className,
@@ -1719,19 +1722,23 @@ function BuilderChatSidecar({
   onExecutionModeSelectionHandled: (selectionId: number) => void;
   onBusyChange: (busy: boolean) => void;
   onBackToAutomations: () => void;
+  clientSessionId: string;
   authoringLease: AutomationLeaseRequest | null;
   onLeaseStale: () => void;
   className?: string;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const conversationsQueryKey = useMemo(() => builderConversationQueryKey(taskId), [taskId]);
+  const conversationsQueryKey = useMemo(
+    () => builderConversationQueryKey(taskId, clientSessionId),
+    [clientSessionId, taskId],
+  );
   const conversationsQuery = useQuery({
     queryKey: conversationsQueryKey,
     queryFn: () =>
       api.scheduledTasks.conversations(taskId, {
         includeArchived: true,
-        clientSessionId: authoringLease?.clientSessionId,
+        clientSessionId,
       }),
   });
   const webChatConversationsQuery = useQuery({
@@ -2105,7 +2112,9 @@ function BuilderChatListView({
   return (
     <div className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3">
       <div className="flex min-h-full flex-col gap-5">
-        {builderLock?.state === "held" ? <BuilderChatLockNotice lock={builderLock} /> : null}
+        {builderLock?.state === "held" && builderLock.owner !== "self" ? (
+          <BuilderChatLockNotice lock={builderLock} />
+        ) : null}
         <div>
           <p className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">Recent</p>
           {active.length > 0 ? (
@@ -2130,20 +2139,13 @@ function BuilderChatListView({
 }
 
 function BuilderChatLockNotice({ lock }: { lock: ScheduledTaskConversationLock }) {
-  const isOtherUser = lock.owner === "other";
   return (
     <div
       data-testid="automation-builder-chat-lock-notice"
       className="mx-2.5 border-l-2 border-amber-500/70 pl-3 text-[12px] leading-5 text-muted-foreground"
     >
-      <p className="font-medium text-foreground">
-        {isOtherUser ? "Builder chat is in use" : "Builder chat is open in another session"}
-      </p>
-      <p>
-        {isOtherUser
-          ? "You can still inspect and edit this automation. Chat becomes available when the other session leaves or goes idle."
-          : "Return to the open session to continue this chat, or wait for its lease to expire."}
-      </p>
+      <p className="font-medium text-foreground">Chat is read-only</p>
+      <p>Another editing session is active. Use Take over editing above to continue here.</p>
     </div>
   );
 }
@@ -2206,12 +2208,12 @@ function BuilderChatLockState({
     <div data-testid="automation-builder-chat-locked" className="flex min-h-full items-center justify-center px-5 py-6">
       <div className="w-full border-l-2 border-amber-500/70 pl-4">
         <p className="text-[13px] font-semibold text-foreground">
-          {locked ? "Builder chat is in use" : "Builder chat unavailable"}
+          {locked ? "Chat is read-only" : "Chat temporarily unavailable"}
         </p>
         <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
           {locked
-            ? "Another session owns this active chat. You can still inspect and edit the automation; chat becomes available when the lease is released or expires."
-            : "Sketch could not verify the builder chat lease. Try again before sending a message."}
+            ? "Another editing session is active. Use Take over editing above, then try again."
+            : "Sketch could not confirm editing access. Refresh and try again before sending a message."}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button

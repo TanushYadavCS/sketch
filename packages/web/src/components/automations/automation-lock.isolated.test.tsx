@@ -358,6 +358,59 @@ describe("AutomationBuilderPage edit lock", () => {
     await waitFor(() => expect(mocks.acquireLock).toHaveBeenCalledWith("task-123", expect.any(String), undefined));
   });
 
+  it("does not describe the exact holder's builder chat lease as expired or unavailable", async () => {
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [],
+      builderLock: {
+        state: "held",
+        conversationId: "builder-owned",
+        owner: "self",
+        expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_TTL_MS).toISOString(),
+        generation: 1,
+      },
+      transcriptAccess: "viewer",
+    });
+
+    renderBuilder();
+
+    expect(await screen.findByText("You're editing")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listConversations).toHaveBeenCalledWith("task-123", {
+        includeArchived: true,
+        clientSessionId: expect.any(String),
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("automation-builder-chat-lock-notice")).not.toBeInTheDocument());
+  });
+
+  it("explains an actual chat conflict without exposing lease expiry jargon", async () => {
+    const otherLock = heldByOtherLock();
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: otherLock }));
+    mocks.acquireLock.mockRejectedValue(lockedError(otherLock));
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [],
+      builderLock: {
+        state: "held",
+        conversationId: "builder-other",
+        owner: "other",
+        expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_TTL_MS).toISOString(),
+        generation: 1,
+      },
+      transcriptAccess: "viewer",
+    });
+
+    renderBuilder();
+
+    expect(await screen.findByText("Chat is read-only")).toBeInTheDocument();
+    expect(
+      screen.getByText("Another editing session is active. Use Take over editing above to continue here."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/lease|expire/i)).not.toBeInTheDocument();
+  });
+
   it("keeps the canvas read-only while another member holds the lock", async () => {
     const otherLock = heldByOtherLock();
     mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: otherLock }));
