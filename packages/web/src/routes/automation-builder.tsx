@@ -678,6 +678,16 @@ export function AutomationBuilderPage() {
   );
   const builderReadOnly = !canEditAutomation || !exactLeaseHeld || lockHeldByOther;
   const isLockHolder = exactLeaseHeld;
+  const authoringLeaseClientSessionId = authoringLease?.clientSessionId;
+  const authoringLeaseGeneration = authoringLease?.generation;
+  const authoringLeaseRequest = useMemo(
+    () =>
+      authoringLeaseClientSessionId && authoringLeaseGeneration
+        ? { clientSessionId: authoringLeaseClientSessionId, generation: authoringLeaseGeneration }
+        : null,
+    [authoringLeaseClientSessionId, authoringLeaseGeneration],
+  );
+  const handleLeaseStale = useCallback(() => setAuthoringLease(null), []);
   const lockHolderRef = useRef<AutomationAuthoringLease | null>(authoringLease);
   useEffect(() => {
     lockHolderRef.current = authoringLease;
@@ -1129,8 +1139,8 @@ export function AutomationBuilderPage() {
         onBusyChange={setBuilderChatBusy}
         onBackToAutomations={navigateToAutomations}
         clientSessionId={clientSessionId}
-        authoringLease={authoringLease ? leaseRequest(authoringLease) : null}
-        onLeaseStale={() => setAuthoringLease(null)}
+        authoringLease={authoringLeaseRequest}
+        onLeaseStale={handleLeaseStale}
         className="automation-builder-sidecar-enter hidden lg:flex"
       />
 

@@ -1132,6 +1132,23 @@ describe("AutomationBuilderPage", () => {
     });
   });
 
+  it("keeps the loaded transcript mounted when the same editing lease is renewed", async () => {
+    mocks.chatMessages = [{ id: "u1", role: "user", parts: [{ type: "text", text: "Keep this transcript visible" }] }];
+    renderBuilder();
+
+    expect(await screen.findByText("Keep this transcript visible")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.selectConversation).toHaveBeenCalledTimes(1));
+    const acquireCallsBeforeFocus = mocks.acquireLock.mock.calls.length;
+
+    act(() => window.dispatchEvent(new Event("focus")));
+
+    await waitFor(() => expect(mocks.acquireLock.mock.calls.length).toBeGreaterThan(acquireCallsBeforeFocus));
+    expect(mocks.selectConversation).toHaveBeenCalledTimes(1);
+    expect(mocks.conversationMessages).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Loading chat…")).not.toBeInTheDocument();
+    expect(screen.getByText("Keep this transcript visible")).toBeInTheDocument();
+  });
+
   it("reloads persisted chat progress when returning to the builder window", async () => {
     mocks.chatMessages = [
       {
