@@ -17,6 +17,30 @@ import type { SketchMcpDeps, ToolResult } from "./types";
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
 export const SEARCH_CHAT_HISTORY_TOOL_NAME = "SearchChatHistory";
 
+/**
+ * Row ids are 32-bit `integer`/`serial` columns under Postgres, while the tool
+ * schemas only constrain model-supplied ids to positive safe JS integers. An
+ * agent that invents a sentinel such as Number.MAX_SAFE_INTEGER to mean "no
+ * upper bound" therefore passes validation and overflows the bind parameter,
+ * surfacing a raw driver error as tool output. SQLite stores 64-bit integers
+ * and never reproduces it.
+ */
+const INT4_MAX = 2_147_483_647;
+
+/**
+ * Clamps a range bound rather than rejecting it: no stored row id can exceed
+ * the ceiling, so a clamped upper bound is unbounded and a clamped lower bound
+ * matches nothing — the same rows the oversized value asked for.
+ */
+function clampRowIdBound(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : Math.min(value, INT4_MAX);
+}
+
+/** Guards ids that address one specific row, where clamping would retarget the lookup. */
+function isStorableRowId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= INT4_MAX;
+}
+
 function renderAttachment(attachment: Attachment): Record<string, unknown> {
   return {
     name: attachment.originalName,
@@ -50,7 +74,7 @@ function parseConversationRef(value: string): number | null {
   const match = /^conversation:(\d+)$/u.exec(value);
   if (!match) return null;
   const id = Number(match[1]);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
+  return isStorableRowId(id) ? id : null;
 }
 
 function unavailableCrossConversationResult(): ToolResult {
@@ -97,15 +121,11 @@ function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<CrossReadPageToken>;
     if (
       parsed.version !== 1 ||
-      !Number.isSafeInteger(parsed.conversationId) ||
-      Number(parsed.conversationId) <= 0 ||
-      !Number.isSafeInteger(parsed.anchorMessageId) ||
-      Number(parsed.anchorMessageId) <= 0 ||
+      !isStorableRowId(parsed.conversationId) ||
+      !isStorableRowId(parsed.anchorMessageId) ||
       (parsed.direction !== "older" && parsed.direction !== "newer") ||
-      !Number.isSafeInteger(parsed.boundaryMessageId) ||
-      Number(parsed.boundaryMessageId) <= 0 ||
-      (parsed.snapshotBeforeMessageId !== null &&
-        (!Number.isSafeInteger(parsed.snapshotBeforeMessageId) || Number(parsed.snapshotBeforeMessageId) <= 0)) ||
+      !isStorableRowId(parsed.boundaryMessageId) ||
+      (parsed.snapshotBeforeMessageId !== null && !isStorableRowId(parsed.snapshotBeforeMessageId)) ||
       typeof parsed.includeBotMessages !== "boolean"
     ) {
       return null;
@@ -324,8 +344,18 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         .describe(
           "Read the whole current conversation or only the active Slack thread. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
         ),
-      afterMessageId: z.number().int().positive().optional().describe("Return messages with row id greater than this."),
-      beforeMessageId: z.number().int().positive().optional().describe("Return messages with row id less than this."),
+      afterMessageId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Return messages with row id greater than this. Omit to read from the start; never pass a sentinel."),
+      beforeMessageId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Return messages with row id less than this. Omit for no upper bound; never pass a sentinel."),
       limit: z.number().int().positive().max(100).optional().describe("Max messages to return. Default 50, max 100."),
       order: z.enum(["asc", "desc"]).optional().describe("Message row-id order. Default asc."),
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
@@ -335,12 +365,14 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       anchorMessageId,
       pageToken,
       scope,
-      afterMessageId,
-      beforeMessageId,
+      afterMessageId: requestedAfterMessageId,
+      beforeMessageId: requestedBeforeMessageId,
       limit,
       order,
       includeBotMessages,
     }) => {
+      const afterMessageId = clampRowIdBound(requestedAfterMessageId);
+      const beforeMessageId = clampRowIdBound(requestedBeforeMessageId);
       if (
         pageToken &&
         (conversationRef ||
@@ -384,6 +416,9 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             },
           ],
         };
+      }
+      if (anchorMessageId !== undefined && !isStorableRowId(anchorMessageId)) {
+        return unavailableCrossConversationResult();
       }
 
       const parsedPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
@@ -509,13 +544,22 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new Ch
         .enum(["slack", "whatsapp"])
         .optional()
         .describe("With scope all_chats only: restrict results to one platform."),
-      afterMessageId: z.number().int().positive().optional().describe("Search messages with row id greater than this."),
+      afterMessageId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Search messages with row id greater than this. Omit to search from the start; never pass a sentinel.",
+        ),
       beforeMessageId: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Search messages with row id less than this. Defaults to the current trigger message id."),
+        .describe(
+          "Search messages with row id less than this. Defaults to the current trigger message id. Omit for no upper bound; never pass a sentinel.",
+        ),
       limit: z
         .number()
         .int()
@@ -527,7 +571,17 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new Ch
         ),
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
     },
-    async ({ query, scope, platform, afterMessageId, beforeMessageId, limit, includeBotMessages }) => {
+    async ({
+      query,
+      scope,
+      platform,
+      afterMessageId: requestedAfterMessageId,
+      beforeMessageId: requestedBeforeMessageId,
+      limit,
+      includeBotMessages,
+    }) => {
+      const afterMessageId = clampRowIdBound(requestedAfterMessageId);
+      const beforeMessageId = clampRowIdBound(requestedBeforeMessageId);
       if (platform && scope !== "all_chats") {
         return {
           content: [{ type: "text" as const, text: "The platform filter is only valid with scope 'all_chats'." }],
