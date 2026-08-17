@@ -157,6 +157,7 @@ interface AutomationLockView {
   heldByName: string | null;
   heldByPlatform: string;
   heldBySurface: string;
+  generation: number;
   expiresAt: string;
   isHeldByMe: boolean;
   stealPending: { requesterName: string | null; expiresAt: string } | null;
@@ -481,6 +482,7 @@ async function toLockView(
   row: AutomationTaskLockRow,
   viewerUserId: string | null,
   usersRepo: ReturnType<typeof createUserRepository>,
+  viewerSessionId?: string,
 ): Promise<AutomationLockView> {
   const [holder, requester] = await Promise.all([
     usersRepo.findById(row.holder_user_id),
@@ -497,8 +499,12 @@ async function toLockView(
     heldByName: holder?.name ?? null,
     heldByPlatform: row.holder_platform,
     heldBySurface: row.holder_surface,
+    generation: row.generation,
     expiresAt: row.expires_at,
-    isHeldByMe: viewerUserId !== null && row.holder_user_id === viewerUserId,
+    isHeldByMe:
+      viewerUserId !== null &&
+      row.holder_user_id === viewerUserId &&
+      (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
     stealPending,
   };
 }
@@ -847,6 +853,39 @@ export function scheduledTaskRoutes(
     return { userId, platform: "web", surface: "builder", conversationId: null };
   }
 
+  function parseLeaseRequestBody(body: unknown): { clientSessionId: string; generation?: number } | null {
+    if (typeof body !== "object" || body === null) return null;
+    const value = body as { clientSessionId?: unknown; generation?: unknown };
+    const clientSessionId = typeof value.clientSessionId === "string" ? value.clientSessionId.trim() : "";
+    if (clientSessionId.length === 0 || clientSessionId.length > 200) return null;
+    if (
+      value.generation !== undefined &&
+      (!Number.isSafeInteger(value.generation) || (value.generation as number) < 1)
+    ) {
+      return null;
+    }
+    return {
+      clientSessionId,
+      generation: value.generation as number | undefined,
+    };
+  }
+
+  async function readLeaseRequest(
+    c: Context,
+  ): Promise<{ clientSessionId: string; generation?: number } | { response: Response }> {
+    const body = await c.req.json().catch(() => null);
+    const parsed = parseLeaseRequestBody(body);
+    if (!parsed) {
+      return {
+        response: c.json(
+          { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
+          400,
+        ),
+      };
+    }
+    return parsed;
+  }
+
   routes.post("/:id/lock", async (c) => {
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
@@ -854,12 +893,46 @@ export function scheduledTaskRoutes(
     if (!result.userId) {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
+    const leaseRequest = await readLeaseRequest(c);
+    if ("response" in leaseRequest) return leaseRequest.response;
+    const existing = await createAutomationLocksRepository(db).getByTaskId(id);
+    if (
+      existing &&
+      existing.holder_user_id === result.userId &&
+      existing.holder_session_id === leaseRequest.clientSessionId &&
+      leaseRequest.generation !== undefined &&
+      existing.generation !== leaseRequest.generation
+    ) {
+      const lock = await toLockView(existing, result.userId, users, leaseRequest.clientSessionId);
+      logger?.warn(
+        {
+          taskId: id,
+          userId: result.userId,
+          clientSessionId: leaseRequest.clientSessionId,
+          requestedGeneration: leaseRequest.generation,
+          currentGeneration: existing.generation,
+        },
+        "scheduled-tasks: stale authoring lease acquire",
+      );
+      return c.json({ error: { code: "LEASE_STALE", message: "Editing session is stale", lock } }, 409);
+    }
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
-      holder: await webLockHolderFor(result.userId),
+      holder: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
     });
-    const lock = await toLockView(acquired.lock, result.userId, users);
+    const lock = await toLockView(acquired.lock, result.userId, users, leaseRequest.clientSessionId);
     if (acquired.kind === "locked") {
+      logger?.info(
+        {
+          taskId: id,
+          userId: result.userId,
+          clientSessionId: leaseRequest.clientSessionId,
+          holderUserId: acquired.lock.holder_user_id,
+          holderSessionId: acquired.lock.holder_session_id,
+          generation: acquired.lock.generation,
+        },
+        "scheduled-tasks: authoring lease conflict",
+      );
       return c.json({ error: { code: "LOCKED", message: "Automation is locked by another editor", lock } }, 409);
     }
     return c.json({ lock });
@@ -872,7 +945,34 @@ export function scheduledTaskRoutes(
     if (!result.userId) {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
-    await releaseLock(db, { taskId: id, userId: result.userId });
+    const leaseRequest = await readLeaseRequest(c);
+    if ("response" in leaseRequest) return leaseRequest.response;
+    const current = await createAutomationLocksRepository(db).getByTaskId(id);
+    if (
+      current &&
+      current.holder_user_id === result.userId &&
+      current.holder_session_id === leaseRequest.clientSessionId &&
+      leaseRequest.generation !== current.generation
+    ) {
+      const lock = await toLockView(current, result.userId, users, leaseRequest.clientSessionId);
+      logger?.warn(
+        {
+          taskId: id,
+          userId: result.userId,
+          clientSessionId: leaseRequest.clientSessionId,
+          requestedGeneration: leaseRequest.generation,
+          currentGeneration: current.generation,
+        },
+        "scheduled-tasks: stale authoring lease release",
+      );
+      return c.json({ error: { code: "LEASE_STALE", message: "Editing session is stale", lock } }, 409);
+    }
+    await releaseLock(db, {
+      taskId: id,
+      userId: result.userId,
+      sessionId: leaseRequest.clientSessionId,
+      generation: leaseRequest.generation,
+    });
     return c.json({ success: true });
   });
 
@@ -883,14 +983,16 @@ export function scheduledTaskRoutes(
     if (!result.userId) {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
+    const leaseRequest = await readLeaseRequest(c);
+    if ("response" in leaseRequest) return leaseRequest.response;
     const stolen = await requestSteal(db, {
       taskId: id,
-      requester: await webLockHolderFor(result.userId),
+      requester: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
     });
     if (stolen.kind === "not_locked") {
       return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);
     }
-    const lock = await toLockView(stolen.lock, result.userId, users);
+    const lock = await toLockView(stolen.lock, result.userId, users, leaseRequest.clientSessionId);
     if (stolen.kind === "locked") {
       return c.json({ error: { code: "LOCKED", message: "A steal request is already pending", lock } }, 409);
     }
@@ -952,16 +1054,36 @@ export function scheduledTaskRoutes(
     if (approve === null) {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "approve must be a boolean" } }, 400);
     }
+    const leaseRequest = parseLeaseRequestBody(body);
+    if (!leaseRequest) {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "clientSessionId and a valid generation are required" } },
+        400,
+      );
+    }
     const responded = approve
-      ? await approveSteal(db, { taskId: id, approverUserId: result.userId })
-      : await denySteal(db, { taskId: id, holderUserId: result.userId });
+      ? await approveSteal(db, {
+          taskId: id,
+          approverUserId: result.userId,
+          approverSessionId: leaseRequest.clientSessionId,
+          approverGeneration: leaseRequest.generation,
+        })
+      : await denySteal(db, {
+          taskId: id,
+          holderUserId: result.userId,
+          holderSessionId: leaseRequest.clientSessionId,
+          holderGeneration: leaseRequest.generation,
+        });
     if (responded.kind === "not_found" || responded.kind === "not_holder") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
     }
     if (responded.kind === "no_pending_steal") {
       return c.json({ error: { code: "NO_PENDING_STEAL", message: "There is no pending steal request" } }, 409);
     }
-    return c.json({ status: responded.kind, lock: await toLockView(responded.lock, result.userId, users) });
+    return c.json({
+      status: responded.kind,
+      lock: await toLockView(responded.lock, result.userId, users, leaseRequest.clientSessionId),
+    });
   });
 
   routes.get("/:id/shares", async (c) => {
