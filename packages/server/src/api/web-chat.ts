@@ -1985,6 +1985,7 @@ function automationBuilderTaskContext(params: {
   currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
   role: string | undefined;
   conversationId: string;
+  lease: BuilderLease;
 }) {
   const task = params.context.task;
   return {
@@ -1997,6 +1998,7 @@ function automationBuilderTaskContext(params: {
     threadTs: task.threadTs ?? undefined,
     canManageAnyTask: params.role === "admin",
     currentAutomation: params.context.currentAutomation,
+    authoringLease: { sessionId: params.lease.clientSessionId, generation: params.lease.generation },
     origin: {
       platform: "web" as const,
       conversationId: params.conversationId,
@@ -2535,6 +2537,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           currentUser,
           role: c.get("role"),
           conversationId,
+          lease: builderLease as BuilderLease,
         })
       : dmContext
         ? {

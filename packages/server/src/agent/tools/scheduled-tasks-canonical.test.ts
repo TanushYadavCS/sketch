@@ -2222,9 +2222,9 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toBeUndefined();
   });
 
-  it("uses a deterministic agent session and conflicts with the same user's browser lease", async () => {
+  it("borrows the exact builder lease and leaves the browser session active after saving", async () => {
     await createTask("agent-browser-conflict-task");
-    const taskContext = taskContextFor("agent-browser-conflict-task");
+    const baseTaskContext = taskContextFor("agent-browser-conflict-task");
     const browserSessionId = "browser-tab-agent-conflict";
     await acquireOrRenewLock(db, {
       taskId: "agent-browser-conflict-task",
@@ -2239,18 +2239,27 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
 
     const lock = await createAutomationLocksRepository(db).getByTaskId("agent-browser-conflict-task");
     expect(lock?.holder_session_id).toBe(browserSessionId);
-    expect(agentLockSessionIdFor(taskContext)).toMatch(/^agent:[a-f0-9]{64}$/);
-    expect(agentLockSessionIdFor(taskContext)).not.toBe(browserSessionId);
+    const taskContext = {
+      ...baseTaskContext,
+      authoringLease: { sessionId: browserSessionId, generation: lock?.generation ?? 0 },
+    };
 
     const result = await handleManageScheduledTasks(
       { action: "update", task_id: "agent-browser-conflict-task", prompt: "Agent edit", expected_revision: 0 },
       { db, scheduler: schedulerFor("agent-browser-conflict-task"), taskContext },
     );
 
-    expect(result.content[0].text).toContain("owner-1 is editing this automation right now");
+    expect(result.content[0].text).toContain("Automation updated:");
     await expect(createScheduledTaskRepository(db).getById("agent-browser-conflict-task")).resolves.toMatchObject({
-      revision: 0,
+      revision: 1,
     });
+    await expect(createAutomationLocksRepository(db).getByTaskId("agent-browser-conflict-task")).resolves.toMatchObject(
+      {
+        holder_user_id: "owner-1",
+        holder_session_id: browserSessionId,
+        generation: lock?.generation,
+      },
+    );
   });
 
   it("acquires and releases the edit lock around a successful step-content update", async () => {

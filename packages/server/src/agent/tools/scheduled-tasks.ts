@@ -17,7 +17,13 @@ import {
   addWebhookEndpointMetadata,
   isCanvasWebhookTrigger,
 } from "../../automation/definition";
-import { type LockHolderFields, acquireOrRenewLock, releaseLock, requestSteal } from "../../automation/lock-service";
+import {
+  type LockHolderFields,
+  acquireOrRenewLock,
+  releaseLock,
+  renewLock,
+  requestSteal,
+} from "../../automation/lock-service";
 import {
   type AutomationDefinitionPatch,
   createAutomationDefinition,
@@ -403,20 +409,40 @@ export function agentLockSessionIdFor(ctx: TaskContext): string {
   return `agent:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
-type AgentLease = { sessionId: string; generation: number };
+type AgentLease = { sessionId: string; generation: number; releaseAfterMutation: boolean };
 
 async function acquireAgentLease(
   db: Kysely<DB>,
   taskId: string,
   ctx: TaskContext,
 ): Promise<
-  { kind: "held"; lease: AgentLease } | { kind: "locked"; lock: Awaited<ReturnType<typeof acquireOrRenewLock>>["lock"] }
+  | { kind: "held"; lease: AgentLease }
+  | { kind: "locked"; lock: Awaited<ReturnType<typeof acquireOrRenewLock>>["lock"] }
+  | { kind: "stale" }
 > {
+  if (ctx.authoringLease && ctx.createdBy) {
+    const renewed = await renewLock(db, {
+      taskId,
+      userId: ctx.createdBy,
+      sessionId: ctx.authoringLease.sessionId,
+      generation: ctx.authoringLease.generation,
+    });
+    if (renewed.kind === "renewed") {
+      return { kind: "held", lease: { ...ctx.authoringLease, releaseAfterMutation: false } };
+    }
+    const lock = await createAutomationLocksRepository(db).getByTaskId(taskId);
+    if (lock) return { kind: "locked", lock };
+    return { kind: "stale" };
+  }
   const acquired = await acquireOrRenewLock(db, { taskId, holder: lockHolderFor(ctx) });
   if (acquired.kind === "locked") return acquired;
   return {
     kind: "held",
-    lease: { sessionId: acquired.lock.holder_session_id, generation: acquired.lock.generation },
+    lease: {
+      sessionId: acquired.lock.holder_session_id,
+      generation: acquired.lock.generation,
+      releaseAfterMutation: true,
+    },
   };
 }
 
@@ -425,7 +451,7 @@ function agentMutationActor(ctx: TaskContext, lease?: AgentLease) {
     userId: ctx.createdBy,
     role: ctx.canManageAnyTask ? ("admin" as const) : undefined,
     source: "agent" as const,
-    ...(lease ? { lease } : {}),
+    ...(lease ? { lease: { sessionId: lease.sessionId, generation: lease.generation } } : {}),
   };
 }
 
@@ -997,6 +1023,9 @@ async function handleConfiguredChatAuthoring(
     // editor holds the lock.
     if (params.action === "update" && targetTaskId && db && createdBy) {
       const acquired = await acquireAgentLease(db, targetTaskId, deps.taskContext);
+      if (acquired.kind === "stale") {
+        return text("Error: the browser editing session is no longer active. Refresh and try again.");
+      }
       if (acquired.kind === "locked") {
         return text(await lockedAutomationMessage(deps, acquired.lock));
       }
@@ -1008,7 +1037,7 @@ async function handleConfiguredChatAuthoring(
       ...(targetTaskId ? { taskId: targetTaskId } : {}),
       taskContext: deps.taskContext,
       ...(targetTaskId && currentAutomation?.taskId === targetTaskId ? { currentAutomation } : {}),
-      ...(agentLease ? { lease: agentLease } : {}),
+      ...(agentLease ? { lease: { sessionId: agentLease.sessionId, generation: agentLease.generation } } : {}),
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {
@@ -1018,7 +1047,7 @@ async function handleConfiguredChatAuthoring(
     }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
   } finally {
-    if (params.action === "update" && targetTaskId && db && createdBy && agentLease) {
+    if (params.action === "update" && targetTaskId && db && createdBy && agentLease?.releaseAfterMutation) {
       await releaseLock(db, {
         taskId: targetTaskId,
         userId: createdBy,
@@ -1479,6 +1508,9 @@ export async function handleManageScheduledTasks(
       try {
         if (ctx.createdBy) {
           const acquired = await acquireAgentLease(db, task_id, ctx);
+          if (acquired.kind === "stale") {
+            return text("Error: the browser editing session is no longer active. Refresh and try again.");
+          }
           if (acquired.kind === "locked") {
             return text(await lockedAutomationMessage(deps, acquired.lock));
           }
@@ -1498,7 +1530,7 @@ export async function handleManageScheduledTasks(
         if (message) return text(message);
         throw error;
       } finally {
-        if (ctx.createdBy && agentLease) {
+        if (ctx.createdBy && agentLease?.releaseAfterMutation) {
           await releaseLock(db, {
             taskId: task_id,
             userId: ctx.createdBy,
@@ -1598,6 +1630,9 @@ export async function handleManageScheduledTasks(
       let agentLease: AgentLease | undefined;
       if (ctx.createdBy) {
         const acquired = await acquireAgentLease(deps.db, task_id, ctx);
+        if (acquired.kind === "stale") {
+          return text("Error: the browser editing session is no longer active. Refresh and try again.");
+        }
         if (acquired.kind === "locked") {
           return text(await lockedAutomationMessage(deps, acquired.lock));
         }
@@ -1613,7 +1648,7 @@ export async function handleManageScheduledTasks(
           encryptionKey: deps.encryptionKey,
         });
       } finally {
-        if (ctx.createdBy && agentLease) {
+        if (ctx.createdBy && agentLease?.releaseAfterMutation) {
           await releaseLock(deps.db, {
             taskId: task_id,
             userId: ctx.createdBy,
@@ -1771,6 +1806,9 @@ export async function handleManageScheduledTasks(
       try {
         if (ctx.createdBy) {
           const acquired = await acquireAgentLease(db, task_id, ctx);
+          if (acquired.kind === "stale") {
+            return text("Error: the browser editing session is no longer active. Refresh and try again.");
+          }
           if (acquired.kind === "locked") {
             return text(await lockedAutomationMessage(deps, acquired.lock));
           }
@@ -1799,7 +1837,7 @@ export async function handleManageScheduledTasks(
         if (message) return text(message);
         throw error;
       } finally {
-        if (ctx.createdBy && agentLease) {
+        if (ctx.createdBy && agentLease?.releaseAfterMutation) {
           await releaseLock(db, {
             taskId: task_id,
             userId: ctx.createdBy,

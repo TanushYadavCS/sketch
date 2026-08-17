@@ -94,4 +94,5 @@ export interface TaskContext {
   origin?: TaskOriginChat;
   canManageAnyTask?: boolean;
   currentAutomation?: CurrentAutomation;
+  authoringLease?: { sessionId: string; generation: number };
 }

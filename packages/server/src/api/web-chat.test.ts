@@ -1493,6 +1493,10 @@ describe("web chat API", () => {
     expect(withLease.status).toBe(200);
     await withLease.text();
     expect(runAgent).toHaveBeenCalledOnce();
+    expect(runAgent.mock.calls[0]?.[0].taskContext?.authoringLease).toEqual({
+      sessionId: "builder-session-a",
+      generation: 1,
+    });
 
     const otherSession = await app.request("/api/web-chat?conversationId=builder-lease", {
       method: "POST",
