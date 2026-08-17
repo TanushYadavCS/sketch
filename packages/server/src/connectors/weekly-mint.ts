@@ -644,6 +644,49 @@ function matchingStandingProduct(group: CandidateGroup, products: StandingProduc
 }
 
 /**
+ * Unlike standing products (declared/human_confirmed only), the company guard
+ * accepts inferred companies: the entities it must catch (Goosebumps, Beetu,
+ * Craft Idea) were all created by extraction, never declared by a human.
+ */
+async function loadCompanyGuards(db: Kysely<DB>): Promise<StandingProduct[]> {
+  const rows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("source_type", "=", "company")
+    .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
+    .execute();
+  return rows
+    .map((row) => ({ entityId: row.id, name: row.name, aliases: parseAliases(row.aliases) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function squashName(value: string): string {
+  return normalizeName(value).replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * An internal-pot group named after a known company is client work whose
+ * discussions happened without a client attendee — not an internal project.
+ * The match requires the complete company name (squashed, so "craftidea"
+ * equals the "Craft Idea" entity) — token containment over-fires: it killed
+ * "AWS-accelerator", a real internal initiative, because the AWS company
+ * entity exists. Groups that merely mention a company go to the model, whose
+ * guidance already skips demos and engagement overhead. The squash floor of 4
+ * keeps short acronyms from swallowing unrelated candidates.
+ */
+function matchingCompany(group: CandidateGroup, companies: StandingProduct[]): StandingProduct | null {
+  const squashedGroupNames = new Set(group.names.map(squashName));
+  for (const company of companies) {
+    for (const name of [company.name, ...company.aliases]) {
+      const squashed = squashName(name);
+      if (squashed.length >= 4 && squashedGroupNames.has(squashed)) return company;
+    }
+  }
+  return null;
+}
+
+/**
  * Deterministic disposition is containment-only. Exact name/alias matches are
  * handled per candidate before grouping (splitAliasCandidates) — deciding
  * alias at group level let one matching member alias its entire group, which
@@ -1606,6 +1649,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       agedOut: ownedRun.aged_out,
       vendorsSkipped: 0,
       skippedGroups: 0,
+      companyMatchedSkips: 0,
     };
     const dbCounters = () => ({
       candidates_grouped: counters.candidatesGrouped,
@@ -1624,6 +1668,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         ]),
       );
       const standingProducts = await loadStandingProducts(deps.db);
+      const companyGuards = await loadCompanyGuards(deps.db);
       for (const container of containers) {
         if (companyCursor && container.key <= companyCursor) continue;
         const declaration = container.cluster
@@ -1681,6 +1726,22 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const crossing = container.companyEntityId === null ? [] : recurrenceCrossing;
         if (container.companyEntityId === null) {
           for (const group of recurrenceCrossing) {
+            const guardCompany =
+              matchingStandingProduct(group, standingProducts) === null ? matchingCompany(group, companyGuards) : null;
+            if (guardCompany) {
+              counters.companyMatchedSkips += 1;
+              deps.logger.info(
+                {
+                  groupKey: group.key,
+                  companyEntityId: guardCompany.entityId,
+                  companyName: guardCompany.name,
+                  companyMatchedSkips: counters.companyMatchedSkips,
+                },
+                "Weekly mint skipped internal group matching a company entity",
+              );
+              await incrementDryStreak(deps.db, container.key, [group], batchNow);
+              continue;
+            }
             if (await groupHasInternalStructuralCoSignal(deps.db, group)) crossing.push(group);
             else await incrementDryStreak(deps.db, container.key, [group], batchNow);
           }

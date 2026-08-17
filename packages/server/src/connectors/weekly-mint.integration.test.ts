@@ -124,6 +124,33 @@ async function seedStandingProduct(db: Kysely<DB>, name: string): Promise<string
   return id;
 }
 
+async function seedGuardCompany(db: Kysely<DB>, name: string): Promise<string> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "company",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      provenance_tier: "inferred",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 1,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+  return id;
+}
+
 async function seedProjectEntity(
   db: Kysely<DB>,
   name: string,
@@ -505,6 +532,121 @@ describe("weekly mint pass", () => {
 
     expect(counter.calls).toBe(0);
     expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(0);
+  });
+
+  it("skips an internal recurring topic named after a confirmed company and pools it toward age-out", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedGuardCompany(db, "Goosebumps");
+    const fileIds = [];
+    for (const [index, date] of ["2026-04-06", "2026-04-07", "2026-04-08"].entries()) {
+      fileIds.push(
+        await seedFile(db, connectorId, {
+          fileName: `goosebumps-${index}.txt`,
+          source: "fireflies",
+          date: `${date}T10:00:00.000Z`,
+          content:
+            index < 2
+              ? "Goosebumps rollout continues in github.com/canvasxai/goosebumps-deploy."
+              : "Goosebumps rollout notes.",
+        }),
+      );
+    }
+    const reviewId = await queueProjectReview(db, { name: "Goosebumps", fileIds });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(0);
+    expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(0);
+    expect(companyId).toBeTruthy();
+    const candidate = await db
+      .selectFrom("weekly_mint_candidates")
+      .select(["dry_streak"])
+      .where("review_id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    expect(candidate.dry_streak).toBe(1);
+    const review = await db
+      .selectFrom("entity_review_queue")
+      .select(["status"])
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    expect(review.status).toBe("pending");
+  });
+
+  it("skips a company match even when the candidate collapses the company name spacing", async () => {
+    const connectorId = await seedConnector(db);
+    await seedGuardCompany(db, "Craft Idea");
+    const fileIds = [];
+    for (const [index, date] of ["2026-04-06", "2026-04-07", "2026-04-08"].entries()) {
+      fileIds.push(
+        await seedFile(db, connectorId, {
+          fileName: `craftidea-${index}.txt`,
+          source: "fireflies",
+          date: `${date}T10:00:00.000Z`,
+          content:
+            index < 2
+              ? "craftidea launch work tracked in github.com/canvasxai/craftidea-site."
+              : "craftidea launch notes.",
+        }),
+      );
+    }
+    await queueProjectReview(db, { name: "craftidea", fileIds });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(0);
+    expect(await db.selectFrom("project_minting_verdicts").selectAll().execute()).toHaveLength(0);
+  });
+
+  it("routes an internal topic under a declared standing product even when a company shares the name", async () => {
+    const connectorId = await seedConnector(db);
+    const productId = await seedStandingProduct(db, "Beetu");
+    await seedGuardCompany(db, "Beetu");
+    const fileIds = [];
+    for (const [index, date] of ["2026-04-06", "2026-04-07", "2026-04-08"].entries()) {
+      fileIds.push(
+        await seedFile(db, connectorId, {
+          fileName: `beetu-${index}.txt`,
+          source: "fireflies",
+          date: `${date}T10:00:00.000Z`,
+          content:
+            index < 2 ? "Beetu app work continues in github.com/canvasxai/beetu-app." : "Beetu app rollout notes.",
+        }),
+      );
+    }
+    const reviewId = await queueProjectReview(db, { name: "Beetu", fileIds });
+    const counter = { calls: 0 };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator(counter),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-04-13T00:00:00.000Z"));
+
+    expect(counter.calls).toBe(1);
+    const verdicts = await db.selectFrom("project_minting_verdicts").selectAll().execute();
+    expect(verdicts).toHaveLength(1);
+    const project = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true }).projects[0];
+    expect(project).toMatchObject({ parentEntityId: productId });
+    expect(project?.coveredReviewIds).toEqual([reviewId]);
   });
 
   it("partitions a prospect-domain sales call into the prospect external cluster instead of the internal pot", async () => {
