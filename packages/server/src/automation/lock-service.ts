@@ -26,11 +26,11 @@ import { createAutomationLocksRepository } from "../db/repositories/automation-l
 import type { DB } from "../db/schema";
 
 /** How long a lock stays valid after acquire or the last renewal. */
-export const LOCK_TTL_MS = 15 * 60 * 1000;
+export const LOCK_TTL_MS = 90 * 1000;
 /** Cadence clients should renew at (heartbeat) — well inside the lock TTL. */
-export const LOCK_HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000;
+export const LOCK_HEARTBEAT_INTERVAL_MS = 20 * 1000;
 /** How long a pending steal request stays valid before expiring. */
-export const STEAL_TTL_MS = 5 * 60 * 1000;
+export const STEAL_TTL_MS = 60 * 1000;
 /** Interval of the stale-row hygiene sweeper. */
 export const LOCK_SWEEP_INTERVAL_MS = 60 * 1000;
 

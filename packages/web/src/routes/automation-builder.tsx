@@ -699,7 +699,7 @@ export function AutomationBuilderPage() {
     const release = () => {
       const lease = lockHolderRef.current;
       if (!lease) return;
-      void api.scheduledTasks.releaseLock(taskId, leaseRequest(lease)).catch(() => undefined);
+      void api.scheduledTasks.releaseLock(taskId, leaseRequest(lease), { keepalive: true }).catch(() => undefined);
     };
     window.addEventListener("pagehide", release);
     return () => window.removeEventListener("pagehide", release);
@@ -901,9 +901,17 @@ export function AutomationBuilderPage() {
 
   const autoAcquireEnabled = automationQuery.data != null && automationQuery.data.canEdit !== false;
   useEffect(() => {
-    if (!autoAcquireEnabled) return;
+    if (!autoAcquireEnabled || authoringLease) return;
+    const expiresAt = lockView?.expiresAt ? new Date(lockView.expiresAt).getTime() : null;
+    const heldByActiveOtherSession =
+      Boolean(lockView?.heldByUserId && !lockView.isHeldByMe) && expiresAt !== null && expiresAt > Date.now();
+    if (heldByActiveOtherSession) {
+      const expiryTimer = window.setTimeout(() => void acquireLock(), expiresAt - Date.now() + 50);
+      return () => window.clearTimeout(expiryTimer);
+    }
     void acquireLock();
-  }, [acquireLock, autoAcquireEnabled]);
+    return;
+  }, [acquireLock, authoringLease, autoAcquireEnabled, lockView]);
 
   useEffect(() => {
     if (authoringLease || !lockView?.isHeldByMe || !lockView.generation) return;
@@ -912,10 +920,17 @@ export function AutomationBuilderPage() {
 
   useEffect(() => {
     if (!isLockHolder) return;
+    const renew = () => void acquireLock();
     const interval = window.setInterval(() => {
-      if (document.hasFocus()) void acquireLock();
+      renew();
     }, AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS);
-    return () => window.clearInterval(interval);
+    window.addEventListener("focus", renew);
+    document.addEventListener("visibilitychange", renew);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", renew);
+      document.removeEventListener("visibilitychange", renew);
+    };
   }, [acquireLock, isLockHolder]);
 
   const updateAgentPrompt = useCallback(
@@ -1779,6 +1794,13 @@ function BuilderChatSidecar({
   const selectedConversation = visibleConversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
+  const initialBuilderConversationId = useMemo(() => {
+    const builderConversations = visibleConversations.filter((conversation) => conversation.kinds.includes("builder"));
+    return builderConversations.reduce<ScheduledTaskConversationSummary | null>((oldest, conversation) => {
+      if (!oldest) return conversation;
+      return new Date(conversation.createdAt).getTime() < new Date(oldest.createdAt).getTime() ? conversation : oldest;
+    }, null)?.conversationId;
+  }, [visibleConversations]);
   const originContextQuery = useQuery({
     queryKey: ["automation-origin-context", taskId, originChat?.platform, originChat?.conversationId],
     queryFn: async (): Promise<BuilderSourceContextMessage[]> => {
@@ -1936,6 +1958,7 @@ function BuilderChatSidecar({
             executionMode={executionMode}
             executionModeRecommendation={executionModeRecommendation}
             isSetupPlaceholder={isSetupPlaceholder}
+            isInitialBuilderConversation={selectedConversation.conversationId === initialBuilderConversationId}
             executionModeSelection={executionModeSelection}
             originContextMessages={originContextQuery.data ?? []}
             originContextLoading={originContextQuery.isPending && Boolean(originChat?.conversationId)}
@@ -2310,6 +2333,7 @@ function BuilderChatTranscript({
   executionMode,
   executionModeRecommendation,
   isSetupPlaceholder,
+  isInitialBuilderConversation,
   executionModeSelection,
   originContextMessages,
   originContextLoading,
@@ -2329,6 +2353,7 @@ function BuilderChatTranscript({
   executionMode: AutomationExecutionMode | null;
   executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
   isSetupPlaceholder: boolean;
+  isInitialBuilderConversation: boolean;
   executionModeSelection: ExecutionModeSelection | null;
   originContextMessages: BuilderSourceContextMessage[];
   originContextLoading: boolean;
@@ -2589,7 +2614,7 @@ function BuilderChatTranscript({
             {originContextLoading ? <BuilderSourceContextLoading /> : null}
             {originContextMessages.length > 0 ? <BuilderSourceContext messages={originContextMessages} /> : null}
             {chat.messages.length === 0 ? (
-              !isSetupPlaceholder || originContextMessages.length > 0 ? (
+              isSetupPlaceholder && isInitialBuilderConversation && originContextMessages.length > 0 ? (
                 <SketchMessage>
                   <AutomationSetupCard
                     mode={executionMode}

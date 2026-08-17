@@ -19,10 +19,10 @@ import { Button } from "@sketch/ui/components/button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useEffect, useState } from "react";
 
-export const AUTOMATION_EDIT_LOCK_TTL_MS = 15 * 60 * 1000;
-export const AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000;
+export const AUTOMATION_EDIT_LOCK_TTL_MS = 90 * 1000;
+export const AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS = 20 * 1000;
 export const AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS = 10 * 1000;
-export const AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS = 5 * 60 * 1000;
+export const AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS = 60 * 1000;
 
 /**
  * Live clock that only ticks while `active`, so closed dialogs and unlocked

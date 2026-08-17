@@ -2816,10 +2816,15 @@ export const api = {
         body: JSON.stringify({ clientSessionId, ...(generation === undefined ? {} : { generation }) }),
       });
     },
-    releaseLock(taskId: string, lease: { clientSessionId: string; generation: number }) {
+    releaseLock(
+      taskId: string,
+      lease: { clientSessionId: string; generation: number },
+      options?: { keepalive?: boolean },
+    ) {
       return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
         method: "DELETE",
         body: JSON.stringify(lease),
+        keepalive: options?.keepalive,
       });
     },
     requestSteal(taskId: string, lease: { clientSessionId: string; generation?: number }) {

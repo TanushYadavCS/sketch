@@ -335,6 +335,43 @@ function renderBuilder() {
   );
 }
 
+function mockInitialExecutionModeSetup() {
+  mocks.getAutomation.mockResolvedValue({
+    ...automation,
+    isPlaceholderDraft: true,
+    originChat: {
+      platform: "web",
+      conversationId: "chat-setup-source",
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  });
+  mocks.search = { conversationId: "builder-setup" };
+  mocks.listConversations.mockResolvedValue({
+    taskId: "task-123",
+    conversations: [
+      {
+        conversationId: "builder-setup",
+        kinds: ["builder"],
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+        lastActiveAt: "2026-06-01T00:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+      },
+    ],
+    transcriptAccess: "owner",
+  });
+  mocks.loadMessages.mockImplementation(async (conversationId: string) =>
+    conversationId === "chat-setup-source"
+      ? {
+          messages: [{ id: "setup-source", role: "user", parts: [{ type: "text", text: "Set this automation up." }] }],
+          updatedAt: "2026-06-01T00:00:00.000Z",
+        }
+      : { messages: [], updatedAt: null },
+  );
+}
+
 describe("AutomationBuilderPage", () => {
   it("validates run search independently and ignores unsafe run IDs", () => {
     expect(validateAutomationBuilderSearch({ conversationId: " chat-alpha ", runId: "run-old_1" })).toEqual({
@@ -758,6 +795,7 @@ describe("AutomationBuilderPage", () => {
   it("shows the three execution modes and leaves the recommendation advisory", async () => {
     const user = userEvent.setup();
     mocks.chatMessages = [];
+    mockInitialExecutionModeSetup();
 
     renderBuilder();
 
@@ -765,14 +803,14 @@ describe("AutomationBuilderPage", () => {
     expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Deterministic");
     expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Hybrid");
     expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent");
-    expect(screen.getByText(/Sketch recommended Agent/)).toBeVisible();
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Recommended");
 
     await user.click(screen.getByTestId("automation-mode-deterministic"));
 
     await waitFor(() =>
-      expect(mocks.saveAutomation).toHaveBeenCalledWith(
+      expect(mocks.selectSetupExecutionMode).toHaveBeenCalledWith(
         "task-123",
-        expect.objectContaining({ executionMode: "deterministic" }),
+        "deterministic",
         expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
       ),
     );
@@ -798,7 +836,18 @@ describe("AutomationBuilderPage", () => {
     ["agent-led", "Agent"],
   ] as const)("saves and sends the %s execution mode choice", async (mode, label) => {
     const user = userEvent.setup();
-    mocks.getAutomation.mockResolvedValue({ ...automation, executionMode: "deterministic" });
+    mockInitialExecutionModeSetup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      executionMode: "deterministic",
+      isPlaceholderDraft: true,
+      originChat: {
+        platform: "web",
+        conversationId: "chat-setup-source",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    });
     mocks.chatMessages = [];
 
     renderBuilder();
@@ -806,9 +855,9 @@ describe("AutomationBuilderPage", () => {
     await user.click(await screen.findByRole("radio", { name: label }));
 
     await waitFor(() =>
-      expect(mocks.saveAutomation).toHaveBeenCalledWith(
+      expect(mocks.selectSetupExecutionMode).toHaveBeenCalledWith(
         "task-123",
-        expect.objectContaining({ executionMode: mode }),
+        mode,
         expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
       ),
     );
@@ -1154,14 +1203,14 @@ describe("AutomationBuilderPage", () => {
     expect(viewingButton.querySelector("span")).toHaveClass("min-w-0", "max-w-full", "truncate");
   });
 
-  it("shows the execution-mode setup card in an empty chat for a saved automation", async () => {
+  it("uses a normal prompt instead of repeating execution-mode setup in a new chat", async () => {
     renderBuilder();
 
     expect(await screen.findByLabelText("Message Sketch")).toBeInTheDocument();
     expect(screen.getByText("Create an automation")).toBeInTheDocument();
     expect(screen.queryByTestId("automation-builder-empty-canvas")).not.toBeInTheDocument();
-    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Hybrid" })).toBeChecked();
+    expect(screen.queryByTestId("automation-setup-card")).not.toBeInTheDocument();
+    expect(await screen.findByText("What should this automation do?")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
   });
 

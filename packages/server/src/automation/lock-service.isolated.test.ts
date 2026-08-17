@@ -12,6 +12,7 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
   AutomationLockSweeper,
+  LOCK_HEARTBEAT_INTERVAL_MS,
   LOCK_TTL_MS,
   STEAL_TTL_MS,
   acquireOrRenewLock,
@@ -83,13 +84,13 @@ describe("automation lock service", () => {
 
     it("renews when the caller already holds the lock", async () => {
       await acquireOrRenewLock(db, { taskId: "task-1", holder: HOLDER_A });
-      vi.setSystemTime(new Date(T0_MS + 2 * 60 * 1000));
+      vi.setSystemTime(new Date(T0_MS + LOCK_HEARTBEAT_INTERVAL_MS));
 
       const result = await acquireOrRenewLock(db, { taskId: "task-1", holder: HOLDER_A });
 
       expect(result.kind).toBe("held");
       if (result.kind !== "held") return;
-      expect(result.lock.expires_at).toBe(new Date(T0_MS + 2 * 60 * 1000 + LOCK_TTL_MS).toISOString());
+      expect(result.lock.expires_at).toBe(new Date(T0_MS + LOCK_HEARTBEAT_INTERVAL_MS + LOCK_TTL_MS).toISOString());
       expect(result.lock.acquired_at).toBe(T0);
     });
 
@@ -159,13 +160,13 @@ describe("automation lock service", () => {
   describe("renew", () => {
     it("extends the lock TTL for the holder", async () => {
       await acquireOrRenewLock(db, { taskId: "task-1", holder: HOLDER_A });
-      vi.setSystemTime(new Date(T0_MS + 2 * 60 * 1000));
+      vi.setSystemTime(new Date(T0_MS + LOCK_HEARTBEAT_INTERVAL_MS));
 
       const result = await renewLock(db, { taskId: "task-1", userId: "user-a" });
 
       expect(result.kind).toBe("renewed");
       if (result.kind !== "renewed") return;
-      expect(result.lock.expires_at).toBe(new Date(T0_MS + 2 * 60 * 1000 + LOCK_TTL_MS).toISOString());
+      expect(result.lock.expires_at).toBe(new Date(T0_MS + LOCK_HEARTBEAT_INTERVAL_MS + LOCK_TTL_MS).toISOString());
     });
 
     it("fails for a non-holder and a missing task", async () => {
@@ -396,7 +397,7 @@ describe("automation lock service", () => {
       await requestSteal(db, { taskId: "task-1", requester: HOLDER_B });
 
       // The holder heartbeats while the steal is pending.
-      vi.setSystemTime(new Date(T0_MS + 2 * 60 * 1000));
+      vi.setSystemTime(new Date(T0_MS + LOCK_HEARTBEAT_INTERVAL_MS));
       const renewed = await renewLock(db, { taskId: "task-1", userId: "user-a" });
       expect(renewed.kind).toBe("renewed");
       if (renewed.kind !== "renewed") return;

@@ -1,4 +1,5 @@
 import {
+  AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS,
   AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
   AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS,
   AUTOMATION_EDIT_LOCK_TTL_MS,
@@ -560,6 +561,31 @@ describe("AutomationBuilderPage edit lock", () => {
     );
   });
 
+  it("automatically acquires editing when an abandoned presence lease expires", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(new Date("2026-08-17T09:00:00.000Z"));
+    const abandonedLock = heldByOtherLock({
+      expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_TTL_MS).toISOString(),
+    });
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: abandonedLock }));
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+
+    renderBuilder();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByText(/Editing by Bob Jones/)).toBeInTheDocument();
+    expect(mocks.acquireLock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_TTL_MS + 100);
+    });
+
+    expect(mocks.acquireLock).toHaveBeenCalledWith("task-123", expect.any(String), undefined);
+    expect(screen.getByText("You're editing")).toBeInTheDocument();
+  });
+
   it("requests a takeover, waits for approval, then starts heartbeat renewals", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const user = userEvent.setup();
@@ -783,9 +809,64 @@ describe("AutomationBuilderPage edit lock", () => {
     expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
   });
 
-  it("pauses the heartbeat while the tab is not focused", async () => {
+  it("discovers takeover requests while the holder is inside an automation chat", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    const hasFocusSpy = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    let currentLock = heldByMeLock();
+    mocks.search = { conversationId: "builder-active-chat" };
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: currentLock }));
+    mocks.acquireLock.mockImplementation(async () => ({ lock: currentLock }));
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-active-chat",
+          kinds: ["builder"],
+          createdAt: "2026-08-17T09:00:00.000Z",
+          updatedAt: "2026-08-17T09:00:00.000Z",
+          lastActiveAt: "2026-08-17T09:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Owner Member",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+    mocks.selectConversation.mockResolvedValue({
+      created: false,
+      conversation: {
+        conversationId: "builder-active-chat",
+        kinds: ["builder"],
+        createdAt: "2026-08-17T09:00:00.000Z",
+        updatedAt: "2026-08-17T09:00:00.000Z",
+        lastActiveAt: "2026-08-17T09:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+        transcriptUserName: "Owner Member",
+      },
+      builderLock: null,
+    });
+
+    renderBuilder();
+
+    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("task-123", "builder-active-chat"));
+    currentLock = heldByMeLock({
+      stealPending: {
+        requesterName: "Carol Davis",
+        expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS).toISOString(),
+      },
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS);
+    });
+
+    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Review request/ })).toBeInTheDocument();
+  });
+
+  it("keeps the presence lease alive while the tab is in the background", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: heldByMeLock() }));
     mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
 
@@ -794,15 +875,8 @@ describe("AutomationBuilderPage edit lock", () => {
     await screen.findByTestId("automation-lock-banner");
     expect(mocks.acquireLock).toHaveBeenCalledTimes(1);
 
-    hasFocusSpy.mockReturnValue(false);
     await act(async () => {
-      vi.advanceTimersByTime(2 * 60 * 1000);
-    });
-    expect(mocks.acquireLock).toHaveBeenCalledTimes(1);
-
-    hasFocusSpy.mockReturnValue(true);
-    await act(async () => {
-      vi.advanceTimersByTime(2 * 60 * 1000);
+      vi.advanceTimersByTime(AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS);
     });
     expect(mocks.acquireLock.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -860,6 +934,23 @@ describe("AutomationBuilderPage edit lock", () => {
         clientSessionId: expect.any(String),
         generation: 1,
       }),
+    );
+  });
+
+  it("uses a teardown-safe request to release the edit lock when the page closes", async () => {
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+
+    renderBuilder();
+
+    await screen.findByText("You're editing");
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+
+    await waitFor(() =>
+      expect(mocks.releaseLock).toHaveBeenCalledWith(
+        "task-123",
+        { clientSessionId: expect.any(String), generation: 1 },
+        { keepalive: true },
+      ),
     );
   });
 });
