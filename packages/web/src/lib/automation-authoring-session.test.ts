@@ -1,18 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUTOMATION_AUTHORING_CLAIM_KEY_PREFIX,
   AUTOMATION_AUTHORING_SESSION_STORAGE_KEY,
   type AutomationAuthoringStorage,
-  bindAutomationAuthoringSessionLifecycle,
-  createAutomationAuthoringSession,
+  resolveAutomationAuthoringSessionId,
 } from "./automation-authoring-session";
 
-function storage(): AutomationAuthoringStorage {
-  const values = new Map<string, string>();
+function storage(initial?: string): AutomationAuthoringStorage {
+  let value = initial ?? null;
   return {
-    getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-    removeItem: (key) => values.delete(key),
+    getItem: () => value,
+    setItem: (_key, nextValue) => {
+      value = nextValue;
+    },
   };
 }
 
@@ -21,108 +20,77 @@ function uuids(...values: string[]): () => string {
   return () => values[index++] ?? `uuid-${index}`;
 }
 
-describe("automation authoring session", () => {
-  it("persists one session across a same-tab reload", () => {
+describe("automation authoring session identity", () => {
+  it.each(["reload", "back_forward"] as const)("reuses storage on %s", (navigationType) => {
     const sessionStorage = storage();
-    const localStorage = storage();
-    const first = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
+    const first = resolveAutomationAuthoringSessionId({
       navigationType: "navigate",
-      randomUUID: uuids("session-a", "context-a", "owner-a"),
+      storage: sessionStorage,
+      randomUUID: uuids("first"),
     });
-    const reloaded = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      navigationType: "reload",
-      randomUUID: uuids("owner-b"),
+    const next = resolveAutomationAuthoringSessionId({
+      navigationType,
+      storage: sessionStorage,
+      randomUUID: uuids("unexpected"),
     });
 
-    expect(reloaded.clientSessionId).toBe(first.clientSessionId);
-    expect(reloaded.contextToken).toBe(first.contextToken);
-    expect(reloaded.isClaimed()).toBe(true);
+    expect(first).toBe("first");
+    expect(next).toBe(first);
   });
 
-  it("rotates a cloned session when a duplicated tab navigates", () => {
-    const sessionStorage = storage();
-    const localStorage = storage();
-    const first = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      navigationType: "navigate",
-      randomUUID: uuids("session-a", "context-a", "owner-a"),
-    });
-    const duplicate = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      navigationType: "navigate",
-      randomUUID: uuids("owner-b", "session-b", "context-b"),
-    });
-
-    expect(duplicate.clientSessionId).toBe("session-b");
-    expect(duplicate.clientSessionId).not.toBe(first.clientSessionId);
-    expect(first.isClaimed()).toBe(true);
-    expect(duplicate.isClaimed()).toBe(true);
+  it("rotates a copied session on a new navigation", () => {
+    expect(
+      resolveAutomationAuthoringSessionId({
+        navigationType: "navigate",
+        storage: storage("copied-session"),
+        randomUUID: uuids("new-session"),
+      }),
+    ).toBe("new-session");
   });
 
-  it("reuses an abandoned claim after its bounded TTL", () => {
-    const sessionStorage = storage();
-    const localStorage = storage();
-    let clock = 1_000;
-    const first = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      now: () => clock,
-      navigationType: "navigate",
-      claimTtlMs: 100,
-      randomUUID: uuids("session-a", "context-a", "owner-a"),
-    });
-    clock += 101;
-    const recovered = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      now: () => clock,
-      navigationType: "navigate",
-      claimTtlMs: 100,
-      randomUUID: uuids("owner-b"),
-    });
-
-    expect(recovered.clientSessionId).toBe(first.clientSessionId);
-    expect(recovered.isClaimed()).toBe(true);
+  it("uses a fresh ID when navigation type is unavailable", () => {
+    expect(
+      resolveAutomationAuthoringSessionId({
+        navigationType: "unknown",
+        storage: storage("copied-session"),
+        randomUUID: uuids("safe-fallback"),
+      }),
+    ).toBe("safe-fallback");
   });
 
-  it("marks a claim closing on pagehide and clears it on dispose", () => {
-    const sessionStorage = storage();
-    const localStorage = storage();
-    let hidden = 0;
-    let shown = 0;
-    const listeners = new Map<string, () => void>();
-    const target = {
-      addEventListener(type: "pagehide" | "pageshow", listener: () => void) {
-        listeners.set(type, listener);
+  it("supports an unavailable storage without throwing", () => {
+    const unavailableStorage: AutomationAuthoringStorage = {
+      getItem: () => {
+        throw new Error("storage unavailable");
       },
-      removeEventListener(type: "pagehide" | "pageshow") {
-        if (type === "pagehide") hidden += 1;
-        if (type === "pageshow") shown += 1;
+      setItem: () => {
+        throw new Error("storage unavailable");
       },
     };
-    const session = createAutomationAuthoringSession({
-      sessionStorage,
-      localStorage,
-      randomUUID: uuids("session-a", "context-a", "owner-a"),
-    });
-    const unbind = bindAutomationAuthoringSessionLifecycle(session, target);
-    listeners.get("pagehide")?.();
+
     expect(
-      JSON.parse(localStorage.getItem(`${AUTOMATION_AUTHORING_CLAIM_KEY_PREFIX}${session.clientSessionId}`) ?? "null"),
-    ).toMatchObject({ closingAt: expect.any(Number) });
-    listeners.get("pageshow")?.();
-    expect(session.isClaimed()).toBe(true);
-    unbind();
-    expect(hidden).toBe(1);
-    expect(shown).toBe(1);
-    session.dispose();
-    expect(localStorage.getItem(`${AUTOMATION_AUTHORING_CLAIM_KEY_PREFIX}${session.clientSessionId}`)).toBeNull();
-    expect(sessionStorage.getItem(AUTOMATION_AUTHORING_SESSION_STORAGE_KEY)).not.toBeNull();
+      resolveAutomationAuthoringSessionId({
+        navigationType: "reload",
+        storage: unavailableStorage,
+        randomUUID: uuids("in-memory"),
+      }),
+    ).toBe("in-memory");
+  });
+
+  it("writes the versioned key", () => {
+    const writes: string[] = [];
+    const sessionStorage: AutomationAuthoringStorage = {
+      getItem: () => null,
+      setItem: (key) => writes.push(key),
+    };
+
+    resolveAutomationAuthoringSessionId({
+      navigationType: "navigate",
+      storage: sessionStorage,
+      randomUUID: uuids("session"),
+    });
+
+    expect(writes).toEqual([AUTOMATION_AUTHORING_SESSION_STORAGE_KEY]);
+    expect(AUTOMATION_AUTHORING_SESSION_STORAGE_KEY).toContain(":v1");
   });
 });
