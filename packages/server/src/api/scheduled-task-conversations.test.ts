@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import { createAutomationTaskConversationService } from "../automation/task-conversations";
+import { createAutomationLocksRepository } from "../db/repositories/automation-locks";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -255,6 +256,61 @@ describe("scheduled task conversation API", () => {
     expect(admin.id).not.toBe(owner.id);
   });
 
+  it("lets an exact lease holder create chats without overwriting its Slack notification route", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({
+      name: "Slack owner",
+      email: "owner-slack-chat@test.com",
+      slackUserId: "UOWNERCHAT",
+    });
+    await seedTask(db, "slack-chat-task", owner.id);
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await memberCookie(db, owner.id);
+    const clientSessionId = "tab-slack-chat";
+    const acquired = await app.request("/api/scheduled-tasks/slack-chat-task/lock", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId }),
+    });
+    expect(acquired.status).toBe(200);
+    const lock = (await acquired.json()).lock;
+    expect(lock).toMatchObject({ generation: 1, isHeldByMe: true });
+
+    const first = await app.request("/api/scheduled-tasks/slack-chat-task/conversations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true, clientSessionId, generation: lock.generation }),
+    });
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+
+    const second = await app.request("/api/scheduled-tasks/slack-chat-task/conversations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true, clientSessionId, generation: lock.generation }),
+    });
+    expect(second.status).toBe(201);
+    const secondBody = await second.json();
+    expect(secondBody.conversation.conversationId).not.toBe(firstBody.conversation.conversationId);
+
+    await expect(createAutomationLocksRepository(db).getByTaskId("slack-chat-task")).resolves.toMatchObject({
+      holder_user_id: owner.id,
+      holder_session_id: clientSessionId,
+      holder_platform: "slack",
+      holder_surface: "dm",
+      holder_conversation_id: "UOWNERCHAT",
+      generation: lock.generation,
+    });
+  });
+
   it("shows every transcript to the owner with names and keeps member access viewer-scoped", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-all-transcripts@test.com" });
@@ -477,7 +533,7 @@ describe("scheduled task conversation API", () => {
     ).resolves.toEqual([{ transcript_user_id: member.id, kind: "builder" }]);
   });
 
-  it("keeps the builder-chat lock discipline for admins on a foreign task", async () => {
+  it("keeps builder-chat lock discipline across users while allowing same-session chat switching", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder-lock@test.com" });
     await seedTask(db, "locked-task", owner.id);
@@ -497,6 +553,7 @@ describe("scheduled task conversation API", () => {
       body: JSON.stringify({ createNew: true, clientSessionId: "tab-owner" }),
     });
     expect(ownerStart.status).toBe(201);
+    const ownerStartBody = await ownerStart.json();
 
     const adminCookie = await loginAdmin(app);
     const adminStart = await app.request("/api/scheduled-tasks/locked-task/conversations", {
@@ -512,15 +569,18 @@ describe("scheduled task conversation API", () => {
     const ownerSecond = await app.request("/api/scheduled-tasks/locked-task/conversations", {
       method: "POST",
       headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true, clientSessionId: "tab-owner" }),
+      body: JSON.stringify({
+        createNew: true,
+        clientSessionId: "tab-owner",
+        generation: ownerStartBody.builderLock.generation,
+      }),
     });
-    expect(ownerSecond.status).toBe(409);
-    await expect(ownerSecond.json()).resolves.toMatchObject({
-      error: { code: "BUILDER_CHAT_LOCKED" },
-    });
+    expect(ownerSecond.status).toBe(201);
+    const ownerSecondBody = await ownerSecond.json();
+    expect(ownerSecondBody.conversation.conversationId).not.toBe(ownerStartBody.conversation.conversationId);
     await expect(
       db.selectFrom("scheduled_task_conversations").selectAll().where("task_id", "=", "locked-task").execute(),
-    ).resolves.toEqual([expect.objectContaining({ transcript_user_id: owner.id, kind: "builder" })]);
+    ).resolves.toHaveLength(2);
   });
 
   it("selects a builder with one session and conflicts for another session of the same user", async () => {

@@ -129,6 +129,10 @@ function availableBuilderLock(): AutomationTaskConversationLockSummary {
   return { state: "available", conversationId: null, owner: null, expiresAt: null, generation: null };
 }
 
+function builderConversationBinding(row: AutomationTaskLockRow): string | null {
+  return row.holder_platform === "web" && row.holder_surface === "builder" ? row.holder_conversation_id : null;
+}
+
 function summarizeBuilderLock(
   row: AutomationTaskLockRow | undefined,
   transcriptUserId: string,
@@ -138,7 +142,7 @@ function summarizeBuilderLock(
   if (!row || Date.parse(row.expires_at) <= nowMs) return availableBuilderLock();
   return {
     state: "held",
-    conversationId: row.holder_conversation_id,
+    conversationId: builderConversationBinding(row),
     owner:
       row.holder_user_id === transcriptUserId &&
       (clientSessionId === undefined || row.holder_session_id === clientSessionId)
@@ -158,20 +162,6 @@ async function claimAuthoringLease(
   generation?: number,
 ): Promise<{ acquired: boolean; stale: boolean; lock: AutomationTaskConversationLockSummary }> {
   const existing = await createAutomationLocksRepository(db).getByTaskId(taskId);
-  if (
-    existing &&
-    Date.parse(existing.expires_at) > Date.now() &&
-    existing.holder_user_id === transcriptUserId &&
-    existing.holder_session_id === clientSessionId &&
-    existing.holder_conversation_id !== null &&
-    existing.holder_conversation_id !== conversationId
-  ) {
-    return {
-      acquired: false,
-      stale: false,
-      lock: summarizeBuilderLock(existing, transcriptUserId, clientSessionId),
-    };
-  }
   if (
     existing &&
     Date.parse(existing.expires_at) > Date.now() &&
@@ -205,7 +195,11 @@ async function claimAuthoringLease(
     };
   }
 
-  if (result.lock.holder_conversation_id !== conversationId) {
+  if (
+    result.lock.holder_platform === "web" &&
+    result.lock.holder_surface === "builder" &&
+    builderConversationBinding(result.lock) !== conversationId
+  ) {
     await db
       .updateTable("automation_task_locks")
       .set({ holder_conversation_id: conversationId })
