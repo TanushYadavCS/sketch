@@ -930,18 +930,11 @@ export interface ScheduledTaskConversationsTable {
   archived_at: string | null;
 }
 
-export interface ScheduledTaskBuilderLocksTable {
-  task_id: string;
-  conversation_id: string;
-  transcript_user_id: string;
-  acquired_at: Generated<string>;
-  renewed_at: Generated<string>;
-  expires_at: number;
-}
-
 export interface AutomationTaskLocksTable {
   task_id: string;
   holder_user_id: string;
+  holder_session_id: string;
+  generation: number;
   holder_platform: string;
   holder_surface: string;
   holder_conversation_id: string | null;
@@ -949,6 +942,7 @@ export interface AutomationTaskLocksTable {
   updated_at: Generated<string>;
   expires_at: string;
   steal_requester_user_id: string | null;
+  steal_requester_session_id: string | null;
   steal_requester_platform: string | null;
   steal_requester_surface: string | null;
   steal_requester_conversation_id: string | null;
@@ -1841,7 +1835,6 @@ export interface DB {
   automation_task_locks: AutomationTaskLocksTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
-  scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;
   graph_pass_runs: GraphPassRunsTable;
   project_minting_verdicts: ProjectMintingVerdictsTable;
   company_relationship_declarations: CompanyRelationshipDeclarationsTable;

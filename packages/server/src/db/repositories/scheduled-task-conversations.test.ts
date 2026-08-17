@@ -87,6 +87,7 @@ describe("scheduled task conversation repository", () => {
   });
 
   it("reuses the active builder association and creates a new one after archival", async () => {
+    await db.insertInto("users").values({ id: "owner-reuse", name: "Owner Reuse" }).execute();
     await db
       .insertInto("scheduled_tasks")
       .values({
@@ -120,60 +121,14 @@ describe("scheduled task conversation repository", () => {
     ).resolves.toHaveLength(2);
   });
 
-  it("serializes builder leases, expires stale owners, and releases on archival", async () => {
-    await db
-      .insertInto("scheduled_tasks")
-      .values({
-        id: "task-lock",
-        platform: "slack",
-        context_type: "dm",
-        delivery_target: "D-lock",
-        prompt: "Lock this task",
-        schedule_type: "cron",
-        schedule_value: "0 9 * * *",
-        created_by: "owner-lock",
-      })
-      .execute();
-
-    const repo = createScheduledTaskConversationRepository(db);
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "owner-chat",
-        transcriptUserId: "owner-lock",
-        nowMs: 1_000,
-        nowIso: "2026-08-07T00:00:01.000Z",
-        expiresAt: 2_000,
-      }),
-    ).resolves.toMatchObject({ acquired: true, lock: { conversation_id: "owner-chat" } });
-
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "admin-chat",
-        transcriptUserId: "admin-lock",
-        nowMs: 1_500,
-        nowIso: "2026-08-07T00:00:01.500Z",
-        expiresAt: 2_500,
-      }),
-    ).resolves.toMatchObject({ acquired: false, lock: { transcript_user_id: "owner-lock" } });
-
-    await expect(
-      repo.acquireBuilderLock({
-        taskId: "task-lock",
-        conversationId: "admin-chat",
-        transcriptUserId: "admin-lock",
-        nowMs: 2_000,
-        nowIso: "2026-08-07T00:00:02.000Z",
-        expiresAt: 3_000,
-      }),
-    ).resolves.toMatchObject({ acquired: true, lock: { transcript_user_id: "admin-lock" } });
-
-    await expect(repo.releaseBuilderLock("task-lock", "admin-chat", "admin-lock")).resolves.toBe(true);
-    await expect(repo.getBuilderLock("task-lock")).resolves.toBeUndefined();
-  });
-
   it("locks source-chat authoring without exposing another user's transcript", async () => {
+    await db
+      .insertInto("users")
+      .values([
+        { id: "owner-source", name: "Owner Source" },
+        { id: "admin-source", name: "Admin Source" },
+      ])
+      .execute();
     await db
       .insertInto("scheduled_tasks")
       .values({

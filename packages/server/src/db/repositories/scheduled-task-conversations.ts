@@ -1,9 +1,8 @@
 import type { Insertable, Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
-import type { DB, ScheduledTaskBuilderLocksTable, ScheduledTaskConversationsTable } from "../schema";
+import type { DB, ScheduledTaskConversationsTable } from "../schema";
 
 export type ScheduledTaskConversationRow = Selectable<ScheduledTaskConversationsTable>;
-export type ScheduledTaskBuilderLockRow = Selectable<ScheduledTaskBuilderLocksTable>;
 
 export interface ScheduledTaskConversationWithUserNameRow extends ScheduledTaskConversationRow {
   transcript_user_name: string | null;
@@ -21,15 +20,6 @@ export interface UpsertScheduledTaskConversationInput {
 export interface ListScheduledTaskConversationOptions {
   includeArchived?: boolean;
   kind?: ScheduledTaskConversationKind;
-}
-
-export interface AcquireScheduledTaskBuilderLockInput {
-  taskId: string;
-  conversationId: string;
-  transcriptUserId: string;
-  expiresAt: number;
-  nowMs: number;
-  nowIso: string;
 }
 
 export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
@@ -192,68 +182,8 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
       return (result.numUpdatedRows ?? 0n) > 0n;
     },
 
-    async getBuilderLock(taskId: string): Promise<ScheduledTaskBuilderLockRow | undefined> {
-      return db.selectFrom("scheduled_task_builder_locks").selectAll().where("task_id", "=", taskId).executeTakeFirst();
-    },
-
-    async acquireBuilderLock(
-      input: AcquireScheduledTaskBuilderLockInput,
-    ): Promise<{ acquired: boolean; lock: ScheduledTaskBuilderLockRow }> {
-      await db
-        .insertInto("scheduled_task_builder_locks")
-        .values({
-          task_id: input.taskId,
-          conversation_id: input.conversationId,
-          transcript_user_id: input.transcriptUserId,
-          acquired_at: input.nowIso,
-          renewed_at: input.nowIso,
-          expires_at: input.expiresAt,
-        })
-        .onConflict((oc) => oc.column("task_id").doNothing())
-        .execute();
-
-      const result = await db
-        .updateTable("scheduled_task_builder_locks")
-        .set({
-          conversation_id: input.conversationId,
-          transcript_user_id: input.transcriptUserId,
-          acquired_at: input.nowIso,
-          renewed_at: input.nowIso,
-          expires_at: input.expiresAt,
-        })
-        .where("task_id", "=", input.taskId)
-        .where((eb) =>
-          eb.or([
-            eb("expires_at", "<=", input.nowMs),
-            eb.and([
-              eb("conversation_id", "=", input.conversationId),
-              eb("transcript_user_id", "=", input.transcriptUserId),
-            ]),
-          ]),
-        )
-        .executeTakeFirst();
-
-      const lock = await db
-        .selectFrom("scheduled_task_builder_locks")
-        .selectAll()
-        .where("task_id", "=", input.taskId)
-        .executeTakeFirstOrThrow();
-      return { acquired: Number(result.numUpdatedRows ?? 0) > 0, lock };
-    },
-
-    async releaseBuilderLock(taskId: string, conversationId: string, transcriptUserId: string): Promise<boolean> {
-      const result = await db
-        .deleteFrom("scheduled_task_builder_locks")
-        .where("task_id", "=", taskId)
-        .where("conversation_id", "=", conversationId)
-        .where("transcript_user_id", "=", transcriptUserId)
-        .executeTakeFirst();
-      return Number(result.numDeletedRows ?? 0) > 0;
-    },
-
     async deleteByTaskId(taskId: string): Promise<void> {
       await db.deleteFrom("scheduled_task_conversations").where("task_id", "=", taskId).execute();
-      await db.deleteFrom("scheduled_task_builder_locks").where("task_id", "=", taskId).execute();
     },
   };
 }

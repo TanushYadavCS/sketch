@@ -1358,6 +1358,8 @@ describe("web chat API", () => {
       body: JSON.stringify({
         message: "<automation_builder>\ntask_id: stale-task\n</automation_builder>\nMake the summary shorter",
         automationTaskId: "task-123",
+        clientSessionId: "test-builder-session",
+        generation: 1,
       }),
     });
 
@@ -1423,7 +1425,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=guessed-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Run this guessed conversation", automationTaskId: "task-guessed" }),
+      body: JSON.stringify({
+        message: "Run this guessed conversation",
+        automationTaskId: "task-guessed",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(404);
@@ -1441,6 +1448,78 @@ describe("web chat API", () => {
         { includeArchived: true },
       ),
     ).resolves.toHaveLength(0);
+  });
+
+  it("requires an exact authoring lease for AI SDK builder messages", async () => {
+    const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-builder-lease",
+      conversationId: "builder-lease",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Builder reply"));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler: makeBuilderScheduler("task-builder-lease", admin.id),
+    });
+    const cookie = await login(app);
+    const headers = { Cookie: cookie, "Content-Type": "application/json" };
+    const message = {
+      messages: [{ id: "builder-user-message", role: "user", parts: [{ type: "text", text: "Continue setup" }] }],
+      automationTaskId: "task-builder-lease",
+    };
+
+    const missingLease = await app.request("/api/web-chat?conversationId=builder-lease", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(message),
+    });
+    expect(missingLease.status).toBe(400);
+    expect(await missingLease.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(runAgent).not.toHaveBeenCalled();
+
+    const withLease = await app.request("/api/web-chat?conversationId=builder-lease", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...message,
+        clientSessionId: "builder-session-a",
+        generation: 1,
+      }),
+    });
+    expect(withLease.status).toBe(200);
+    await withLease.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(runAgent.mock.calls[0]?.[0].taskContext?.authoringLease).toEqual({
+      sessionId: "builder-session-a",
+      generation: 1,
+    });
+
+    const otherSession = await app.request("/api/web-chat?conversationId=builder-lease", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...message, clientSessionId: "builder-session-b", generation: 1 }),
+    });
+    expect(otherSession.status).toBe(409);
+    expect(await otherSession.json()).toMatchObject({ error: { code: "BUILDER_CHAT_LOCKED" } });
+    expect(runAgent).toHaveBeenCalledOnce();
+
+    await db
+      .updateTable("automation_task_locks")
+      .set({ generation: 2 })
+      .where("task_id", "=", "task-builder-lease")
+      .execute();
+    const staleGeneration = await app.request("/api/web-chat?conversationId=builder-lease", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...message, clientSessionId: "builder-session-a", generation: 1 }),
+    });
+    expect(staleGeneration.status).toBe(409);
+    expect(await staleGeneration.json()).toMatchObject({ error: { code: "LEASE_STALE" } });
+    expect(runAgent).toHaveBeenCalledOnce();
   });
 
   it("rejects an archived builder conversation without reviving it", async () => {
@@ -1466,7 +1545,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=archived-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Run this archived conversation", automationTaskId: "task-archived" }),
+      body: JSON.stringify({
+        message: "Run this archived conversation",
+        automationTaskId: "task-archived",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(409);
@@ -1512,7 +1596,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=source-chat", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Continue from the source chat", automationTaskId: "task-source" }),
+      body: JSON.stringify({
+        message: "Continue from the source chat",
+        automationTaskId: "task-source",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(200);
@@ -1569,7 +1658,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=source-with-archived-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Continue from the source chat", automationTaskId: "task-archived-builder" }),
+      body: JSON.stringify({
+        message: "Continue from the source chat",
+        automationTaskId: "task-archived-builder",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(200);
@@ -1629,6 +1723,8 @@ describe("web chat API", () => {
       body: JSON.stringify({
         message: "Continue from the source chat",
         automationTaskId: "task-builder-association-failure",
+        clientSessionId: "test-builder-session",
+        generation: 1,
       }),
     });
 
@@ -1713,7 +1809,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=builder-cli-context", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Use GitHub", automationTaskId: "task-cli-context" }),
+      body: JSON.stringify({
+        message: "Use GitHub",
+        automationTaskId: "task-cli-context",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
     await res.text();
 
@@ -1816,7 +1917,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=builder-task-123", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Tighten the filter", automationTaskId: "task-123" }),
+      body: JSON.stringify({
+        message: "Tighten the filter",
+        automationTaskId: "task-123",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(200);
@@ -1938,6 +2044,8 @@ describe("web chat API", () => {
       body: JSON.stringify({
         message: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Deterministic).',
         automationTaskId: "task-web-origin",
+        clientSessionId: "test-builder-session",
+        generation: 1,
       }),
     });
 
@@ -2005,7 +2113,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=owner-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign" }),
+      body: JSON.stringify({
+        message: "Make this stricter",
+        automationTaskId: "task-foreign",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     // The admin passes the task access gate (re-granted) but the owner's
@@ -2081,7 +2194,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=admin-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign-admin" }),
+      body: JSON.stringify({
+        message: "Make this stricter",
+        automationTaskId: "task-foreign-admin",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(200);
@@ -2155,7 +2273,12 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=chat-private", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Update it", automationTaskId: "task-private" }),
+      body: JSON.stringify({
+        message: "Update it",
+        automationTaskId: "task-private",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
 
     expect(res.status).toBe(404);
@@ -2184,7 +2307,12 @@ describe("web chat API", () => {
     const denied = await app.request("/api/web-chat?conversationId=granted-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+      body: JSON.stringify({
+        message: "Tighten it",
+        automationTaskId: "task-granted-builder",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
     expect(denied.status).toBe(404);
     expect(await denied.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
@@ -2198,7 +2326,12 @@ describe("web chat API", () => {
     const allowed = await app.request("/api/web-chat?conversationId=granted-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Tighten it", automationTaskId: "task-granted-builder" }),
+      body: JSON.stringify({
+        message: "Tighten it",
+        automationTaskId: "task-granted-builder",
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
     });
     expect(allowed.status).toBe(404);
     expect(await allowed.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
@@ -3401,6 +3534,39 @@ describe("web chat API", () => {
         },
       },
     ]);
+  });
+
+  it("requires the exact authoring lease when interrupting builder chat", async () => {
+    const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-builder-stop",
+      conversationId: "builder-stop",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler: makeBuilderScheduler("task-builder-stop", admin.id),
+    });
+    const cookie = await login(app);
+    const url = "/api/web-chat/conversations/builder-stop/interruptions?automationTaskId=task-builder-stop";
+
+    const missingLease = await app.request(url, {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(missingLease.status).toBe(400);
+    expect(await missingLease.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+
+    const withLease = await app.request(url, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "builder-stop-session", generation: 1 }),
+    });
+    expect(withLease.status).toBe(200);
+    await expect(withLease.json()).resolves.toEqual({ success: true, interrupted: false });
   });
 
   it("interrupts a stale pending web chat progress message when no run is active", async () => {

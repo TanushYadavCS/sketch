@@ -167,6 +167,52 @@ describe("renew and release", () => {
   });
 });
 
+describe("touchIfExactHolder", () => {
+  it("holds the exact live row and rejects a stale generation after takeover", async () => {
+    const holder = { ...HOLDER_A, sessionId: "tab-a" };
+    await locks.insertIfAbsent(holder, {
+      taskId: "task-guarded",
+      expiresAt: "2026-08-01T10:01:00.000Z",
+      now: "2026-08-01T10:00:00.000Z",
+    });
+
+    await expect(
+      locks.touchIfExactHolder({
+        taskId: "task-guarded",
+        userId: "user-a",
+        sessionId: "tab-a",
+        generation: 1,
+        now: "2026-08-01T10:00:30.000Z",
+      }),
+    ).resolves.toMatchObject({ holder_session_id: "tab-a", generation: 1, updated_at: "2026-08-01T10:00:30.000Z" });
+
+    await locks.takeoverExpired(
+      { ...HOLDER_B, sessionId: "tab-b" },
+      {
+        taskId: "task-guarded",
+        expiresAt: "2026-08-01T10:20:00.000Z",
+        now: "2026-08-01T10:02:00.000Z",
+      },
+    );
+
+    await expect(
+      locks.touchIfExactHolder({
+        taskId: "task-guarded",
+        userId: "user-a",
+        sessionId: "tab-a",
+        generation: 1,
+        now: "2026-08-01T10:02:01.000Z",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(locks.getByTaskId("task-guarded")).resolves.toMatchObject({
+      holder_user_id: "user-b",
+      holder_session_id: "tab-b",
+      generation: 2,
+      updated_at: "2026-08-01T10:02:00.000Z",
+    });
+  });
+});
+
 describe("requestSteal", () => {
   it("records the steal only when holder differs, lock is unexpired, and no steal is pending", async () => {
     await locks.insertIfAbsent(HOLDER_A, {

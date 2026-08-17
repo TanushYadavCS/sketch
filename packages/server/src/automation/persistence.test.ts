@@ -1040,7 +1040,7 @@ describe("automation persistence", () => {
     expect(holderEdit).toMatchObject({ kind: "saved", row: { title: "Holder edit", revision: 1 } });
   });
 
-  it("removes lock rows for the task inside the delete transaction", async () => {
+  it("blocks deletion while another session holds the task lock", async () => {
     await addUser("user-2");
     await createAutomationDefinition({
       db,
@@ -1060,8 +1060,9 @@ describe("automation persistence", () => {
       scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
     });
 
-    expect(result).toEqual({ kind: "deleted" });
-    await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeUndefined();
+    expect(result).toMatchObject({ kind: "locked", lock: { holder_user_id: "user-2" } });
+    await expect(createScheduledTaskRepository(db).getById("automation-delete-lock")).resolves.toBeDefined();
+    await expect(createAutomationLocksRepository(db).getByTaskId("automation-delete-lock")).resolves.toBeDefined();
   });
 
   it("denies a grantee's next save after a revoke while the grantee still holds the edit lock", async () => {
@@ -1178,7 +1179,7 @@ describe("automation persistence", () => {
     });
   });
 
-  it("lets an admin delete while another user holds the lock and clears lock rows in the transaction", async () => {
+  it("blocks an admin delete while another user holds the lock", async () => {
     await addUser("user-2");
     await createAutomationDefinition({
       db,
@@ -1200,18 +1201,18 @@ describe("automation persistence", () => {
       scheduler: { removeTaskRuntime: vi.fn().mockResolvedValue(true) },
     });
 
-    expect(result).toEqual({ kind: "deleted" });
-    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-locked")).resolves.toBeUndefined();
+    expect(result).toMatchObject({ kind: "locked", lock: { holder_user_id: "user-2" } });
+    await expect(createScheduledTaskRepository(db).getById("automation-admin-delete-locked")).resolves.toBeDefined();
     await expect(
       createAutomationLocksRepository(db).getByTaskId("automation-admin-delete-locked"),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
     await expect(
       db
         .selectFrom("automation_task_shares")
         .selectAll()
         .where("task_id", "=", "automation-admin-delete-locked")
         .execute(),
-    ).resolves.toEqual([]);
+    ).resolves.toHaveLength(1);
   });
 
   it("surfaces LOCKED and REVISION_CONFLICT across builder-save and agent-edit seams without silent clobbering", async () => {
@@ -1290,5 +1291,47 @@ describe("automation persistence", () => {
       prompt: "Builder-prompt version",
       revision: 2,
     });
+  });
+
+  it("requires the exact active session and generation for browser persistence mutations", async () => {
+    await addUser("user-1");
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-browser-lease"),
+      brokerCapable: true,
+    });
+
+    const noLease = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "No lease" }),
+      actor: { userId: "user-1", source: "web" },
+      brokerCapable: true,
+    });
+    expect(noLease).toEqual({ kind: "lease_required" });
+
+    await acquireOrRenewLock(db, {
+      taskId: "automation-browser-lease",
+      holder: { userId: "user-1", sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+
+    const otherSession = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "Other session" }),
+      actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-b", generation: 1 } },
+      brokerCapable: true,
+    });
+    expect(otherSession.kind).toBe("locked");
+
+    const exactSession = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-browser-lease",
+      request: makeDefinition({ expectedRevision: 0, title: "Exact session" }),
+      actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-a", generation: 1 } },
+      brokerCapable: true,
+    });
+    expect(exactSession).toMatchObject({ kind: "saved", row: { title: "Exact session", revision: 1 } });
   });
 });

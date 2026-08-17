@@ -186,6 +186,7 @@ export interface ScheduledTaskConversationLock {
   conversationId: string | null;
   owner: "self" | "other" | null;
   expiresAt: string | null;
+  generation: number | null;
 }
 
 export interface AutomationEditStealPending {
@@ -199,7 +200,9 @@ export interface AutomationEditLockView {
   heldByPlatform: "slack" | "web" | "whatsapp" | null;
   heldBySurface: "builder" | "admin" | null;
   expiresAt: string | null;
+  generation: number;
   isHeldByMe: boolean;
+  isHeldByMyOtherSession?: boolean;
   stealPending: AutomationEditStealPending | null;
 }
 
@@ -1898,12 +1901,19 @@ export const api = {
         method: "DELETE",
       });
     },
-    interrupt(conversationId: string, automationTaskId?: string) {
+    interrupt(
+      conversationId: string,
+      automationTaskId?: string,
+      lease?: { clientSessionId: string; generation: number } | null,
+    ) {
       const query = new URLSearchParams({ conversationId });
       if (automationTaskId) query.set("automationTaskId", automationTaskId);
       return request<{ success: boolean; interrupted: boolean }>(
         `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions?${query.toString()}`,
-        { method: "POST" },
+        {
+          method: "POST",
+          ...(automationTaskId && lease ? { body: JSON.stringify(lease) } : {}),
+        },
       );
     },
     transcribe(audioBlob: Blob, filename = "recording.webm") {
@@ -2636,21 +2646,24 @@ export const api = {
         method: "POST",
       });
     },
-    async pause(id: string) {
+    async pause(id: string, lease?: { clientSessionId: string; generation: number }) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/pause`, {
         method: "POST",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
       return res.task;
     },
-    async resume(id: string) {
+    async resume(id: string, lease?: { clientSessionId: string; generation: number }) {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/resume`, {
         method: "POST",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
       return res.task;
     },
-    remove(id: string) {
+    remove(id: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: true }>(`/api/scheduled-tasks/${id}`, {
         method: "DELETE",
+        ...(lease ? { body: JSON.stringify(lease) } : {}),
       });
     },
     async listRuns(taskId: string) {
@@ -2660,16 +2673,16 @@ export const api = {
     listShares(taskId: string) {
       return request<{ shares: AutomationShare[] }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares`);
     },
-    grantShare(taskId: string, userId: string) {
+    grantShare(taskId: string, userId: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: boolean }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
-        { method: "PUT" },
+        { method: "PUT", ...(lease ? { body: JSON.stringify(lease) } : {}) },
       );
     },
-    revokeShare(taskId: string, userId: string) {
+    revokeShare(taskId: string, userId: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: boolean }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
-        { method: "DELETE" },
+        { method: "DELETE", ...(lease ? { body: JSON.stringify(lease) } : {}) },
       );
     },
     async getRun(taskId: string, runId: string) {
@@ -2678,8 +2691,13 @@ export const api = {
       );
       return { run: normalizeAutomationRun(res.run, taskId) };
     },
-    async get(taskId: string) {
-      const res = await request<{ automation: AutomationDefinitionWithLock }>(`/api/scheduled-tasks/${taskId}`);
+    async get(taskId: string, options?: { clientSessionId?: string }) {
+      const params = new URLSearchParams();
+      if (options?.clientSessionId) params.set("clientSessionId", options.clientSessionId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const res = await request<{ automation: AutomationDefinitionWithLock }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}${query}`,
+      );
       return res.automation;
     },
     originChatMessages(taskId: string) {
@@ -2693,8 +2711,11 @@ export const api = {
         options,
       );
     },
-    conversations(taskId: string, options?: { includeArchived?: boolean }) {
-      const query = options?.includeArchived ? "?includeArchived=true" : "";
+    conversations(taskId: string, options?: { includeArchived?: boolean; clientSessionId?: string }) {
+      const params = new URLSearchParams();
+      if (options?.includeArchived) params.set("includeArchived", "true");
+      if (options?.clientSessionId) params.set("clientSessionId", options.clientSessionId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
       return request<ScheduledTaskConversationsResponse>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations${query}`,
       );
@@ -2703,6 +2724,8 @@ export const api = {
       taskId: string,
       body: {
         createNew: true;
+        clientSessionId?: string;
+        generation?: number;
       },
     ) {
       return request<{
@@ -2719,71 +2742,108 @@ export const api = {
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
       );
     },
-    selectConversation(taskId: string, conversationId: string, kind?: ScheduledTaskConversationKind) {
+    selectConversation(
+      taskId: string,
+      conversationId: string,
+      kind?: ScheduledTaskConversationKind,
+      lease?: { clientSessionId: string; generation: number },
+    ) {
       return request<{
         conversation: ScheduledTaskConversationSummary;
         created: false;
         builderLock: ScheduledTaskConversationLock;
       }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`, {
         method: "PUT",
-        body: JSON.stringify(kind ? { kind } : {}),
+        body: JSON.stringify({ ...(kind ? { kind } : {}), ...lease }),
       });
     },
-    archiveConversation(taskId: string, conversationId: string, archived: boolean) {
+    archiveConversation(
+      taskId: string,
+      conversationId: string,
+      archived: boolean,
+      lease?: { clientSessionId: string; generation: number },
+    ) {
       return request<{ conversation: ScheduledTaskConversationSummary; builderLock: ScheduledTaskConversationLock }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
         {
           method: "PATCH",
-          body: JSON.stringify({ archived }),
+          body: JSON.stringify({ archived, ...lease }),
         },
       );
     },
-    async save(taskId: string, body: AutomationBuilderSaveRequest) {
+    async save(
+      taskId: string,
+      body: AutomationBuilderSaveRequest,
+      lease: { clientSessionId: string; generation: number },
+    ) {
       const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`, {
         method: "PUT",
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, ...lease }),
       });
       return res.automation;
     },
-    async selectSetupExecutionMode(taskId: string, executionMode: "deterministic" | "hybrid" | "agent-led") {
+    async selectSetupExecutionMode(
+      taskId: string,
+      executionMode: "deterministic" | "hybrid" | "agent-led",
+      lease: { clientSessionId: string; generation: number },
+    ) {
       const res = await request<{ automation: AutomationDefinition }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/execution-mode`,
-        { method: "PATCH", body: JSON.stringify({ executionMode }) },
+        { method: "PATCH", body: JSON.stringify({ executionMode, ...lease }) },
       );
       return res.automation;
     },
-    run(taskId: string, mode: "manual" | "test" = "manual") {
+    run(taskId: string, mode: "manual" | "test", lease: { clientSessionId: string; generation: number }) {
       return request<{ status: "triggered"; runId: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
         method: "POST",
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode, ...lease }),
       });
     },
-    testStep(taskId: string, stepId: string, body: { input?: unknown; useLatestUpstreamOutput?: boolean } = {}) {
+    testStep(
+      taskId: string,
+      stepId: string,
+      body: { input?: unknown; useLatestUpstreamOutput?: boolean },
+      lease: { clientSessionId: string; generation: number },
+    ) {
       return request<{ run: unknown }>(`/api/scheduled-tasks/${taskId}/steps/${stepId}/runs`, {
         method: "POST",
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, ...lease }),
       });
     },
-    acquireLock(taskId: string) {
+    acquireLock(taskId: string, clientSessionId: string, generation?: number) {
       return request<{ lock: AutomationEditLockView }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
         method: "POST",
+        body: JSON.stringify({ clientSessionId, ...(generation === undefined ? {} : { generation }) }),
       });
     },
-    releaseLock(taskId: string) {
+    releaseLock(
+      taskId: string,
+      lease: { clientSessionId: string; generation: number },
+      options?: { keepalive?: boolean },
+    ) {
       return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock`, {
         method: "DELETE",
+        body: JSON.stringify(lease),
+        keepalive: options?.keepalive,
       });
     },
-    requestSteal(taskId: string) {
-      return request<{ status: "pending" }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`, {
-        method: "POST",
-      });
+    requestSteal(taskId: string, lease: { clientSessionId: string; generation?: number }) {
+      return request<{ status: "pending"; lock: AutomationEditLockView }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`,
+        {
+          method: "POST",
+          body: JSON.stringify(lease),
+        },
+      );
     },
-    respondToStealRequest(taskId: string, approve: boolean) {
-      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`, {
-        method: "POST",
-        body: JSON.stringify({ approve }),
-      });
+    respondToStealRequest(taskId: string, approve: boolean, lease: { clientSessionId: string; generation: number }) {
+      return request<{ status: "approved" | "denied"; lock: AutomationEditLockView }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`,
+        {
+          method: "POST",
+          body: JSON.stringify({ approve, ...lease }),
+        },
+      );
     },
     async getStepContent(taskId: string) {
       const res = await request<{ stepContent: AutomationStepContentItem[] }>(

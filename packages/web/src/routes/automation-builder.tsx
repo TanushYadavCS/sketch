@@ -44,6 +44,7 @@ import {
   type WorkflowTriggerConfig,
   api,
 } from "@/lib/api";
+import { getAutomationAuthoringSessionId } from "@/lib/automation-authoring-session";
 import {
   AUTOMATION_ACTIVE_RUN_REFRESH_INTERVAL_MS,
   AUTOMATION_REFRESH_INTERVAL_MS,
@@ -357,6 +358,28 @@ function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequ
   };
 }
 
+type AutomationAuthoringLease = {
+  clientSessionId: string;
+  generation: number;
+  holder: AutomationEditLockView;
+};
+
+type AutomationLeaseRequest = Pick<AutomationAuthoringLease, "clientSessionId" | "generation">;
+
+function leaseRequest(lease: AutomationAuthoringLease): AutomationLeaseRequest {
+  return { clientSessionId: lease.clientSessionId, generation: lease.generation };
+}
+
+function sameLease(left: AutomationLeaseRequest | null | undefined, right: AutomationLeaseRequest | null | undefined) {
+  return Boolean(
+    left && right && left.clientSessionId === right.clientSessionId && left.generation === right.generation,
+  );
+}
+
+function isLeaseStaleError(error: unknown): error is ApiRequestError {
+  return error instanceof ApiRequestError && error.code === "LEASE_STALE";
+}
+
 function builderLoadErrorKind(error: unknown): "access" | "server" {
   if (error instanceof ApiRequestError) {
     if (error.status === 403 || error.status === 404 || error.code === "FORBIDDEN" || error.code === "NOT_FOUND") {
@@ -565,6 +588,7 @@ function AutomationSetupCard({
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
   const auth = useDashboardAuth();
+  const clientSessionId = useMemo(() => getAutomationAuthoringSessionId(), []);
   const builderSearch = useSearch({ from: automationBuilderRoute.id }) as BuilderSearch;
   const requestedConversationId = builderSearch.conversationId;
   const requestedRunId =
@@ -585,11 +609,15 @@ export function AutomationBuilderPage() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [holderResponseDialogOpen, setHolderResponseDialogOpen] = useState(false);
+  const [authoringLease, setAuthoringLease] = useState<AutomationAuthoringLease | null>(null);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
+  const hydratedRevisionRef = useRef<number | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveCountRef = useRef(0);
+  const runLeaseRef = useRef<AutomationLeaseRequest | null>(null);
+  const testLeaseRef = useRef<AutomationLeaseRequest | null>(null);
 
   const navigateToAutomations = useCallback(() => {
     void navigate({ to: "/scheduled-tasks" });
@@ -612,7 +640,7 @@ export function AutomationBuilderPage() {
 
   const automationQuery = useQuery({
     queryKey,
-    queryFn: () => api.scheduledTasks.get(taskId),
+    queryFn: () => api.scheduledTasks.get(taskId, { clientSessionId }),
     refetchInterval: (query) =>
       query.state.data?.recentRuns.some((run) => {
         const state = automationRunLifecycleState(run);
@@ -623,35 +651,69 @@ export function AutomationBuilderPage() {
     refetchOnWindowFocus: true,
   });
 
-  const editLockQueryKey = useMemo(() => ["automation-edit-lock", taskId] as const, [taskId]);
+  const editLockQueryKey = useMemo(
+    () => ["automation-edit-lock", taskId, clientSessionId] as const,
+    [clientSessionId, taskId],
+  );
   const editLockQuery = useQuery({
     queryKey: editLockQueryKey,
     queryFn: async () => {
-      const definition = await api.scheduledTasks.get(taskId);
+      const definition = await api.scheduledTasks.get(taskId, { clientSessionId });
       return definition.lock ?? null;
     },
     initialData: automationQuery.data?.lock ?? null,
     initialDataUpdatedAt: Date.now(),
     staleTime: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
     refetchInterval: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
     enabled: Boolean(automationQuery.data),
   });
   const definitionLock = automationQuery.data?.lock ?? null;
   const lockView = editLockQuery.data ?? definitionLock;
   const canEditAutomation = automationQuery.data?.canEdit !== false;
   const lockHeldByOther = Boolean(lockView?.heldByUserId && !lockView.isHeldByMe);
-  const builderReadOnly = canEditAutomation && lockHeldByOther;
-  const isLockHolder = Boolean(lockView?.isHeldByMe);
-  const lockHolderRef = useRef(isLockHolder);
+  const exactLeaseHeld = Boolean(
+    authoringLease?.holder.isHeldByMe && authoringLease.holder.generation === authoringLease.generation,
+  );
+  const builderReadOnly = !canEditAutomation || !exactLeaseHeld || lockHeldByOther;
+  const isLockHolder = exactLeaseHeld;
+  const authoringLeaseClientSessionId = authoringLease?.clientSessionId;
+  const authoringLeaseGeneration = authoringLease?.generation;
+  const authoringLeaseRequest = useMemo(
+    () =>
+      authoringLeaseClientSessionId && authoringLeaseGeneration
+        ? { clientSessionId: authoringLeaseClientSessionId, generation: authoringLeaseGeneration }
+        : null,
+    [authoringLeaseClientSessionId, authoringLeaseGeneration],
+  );
+  const handleLeaseStale = useCallback(() => setAuthoringLease(null), []);
+  const lockHolderRef = useRef<AutomationAuthoringLease | null>(authoringLease);
   useEffect(() => {
-    lockHolderRef.current = isLockHolder;
-  }, [isLockHolder]);
+    lockHolderRef.current = authoringLease;
+  }, [authoringLease]);
+
+  const leaseIsCurrent = useCallback((lease: AutomationLeaseRequest) => {
+    const current = lockHolderRef.current;
+    return current?.clientSessionId === lease.clientSessionId && current.generation === lease.generation;
+  }, []);
 
   useEffect(() => {
     return () => {
-      if (!lockHolderRef.current) return;
-      void api.scheduledTasks.releaseLock(taskId).catch(() => undefined);
+      const lease = lockHolderRef.current;
+      if (!lease) return;
+      void api.scheduledTasks.releaseLock(taskId, leaseRequest(lease)).catch(() => undefined);
     };
+  }, [taskId]);
+
+  useEffect(() => {
+    const release = () => {
+      const lease = lockHolderRef.current;
+      if (!lease) return;
+      void api.scheduledTasks.releaseLock(taskId, leaseRequest(lease), { keepalive: true }).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", release);
+    return () => window.removeEventListener("pagehide", release);
   }, [taskId]);
 
   const hasAttributedRuns = Boolean(
@@ -674,7 +736,9 @@ export function AutomationBuilderPage() {
 
   useEffect(() => {
     if (!automationQuery.data || pendingSaveCountRef.current > 0) return;
+    if (hydratedRevisionRef.current === automationQuery.data.revision) return;
     const nextDraft = draftFromDefinition(automationQuery.data);
+    hydratedRevisionRef.current = nextDraft.revision;
     latestDraftRef.current = nextDraft;
     setDraft(nextDraft);
   }, [automationQuery.data]);
@@ -691,11 +755,17 @@ export function AutomationBuilderPage() {
   }, [displayDraft, selectedStepId]);
 
   const runMutation = useMutation({
-    mutationFn: (mode: "manual" | "test") => api.scheduledTasks.run(taskId, mode),
+    mutationFn: (mode: "manual" | "test") => {
+      const lease = authoringLease;
+      if (!lease) throw new Error("Acquire the automation editing session before running");
+      runLeaseRef.current = leaseRequest(lease);
+      return api.scheduledTasks.run(taskId, mode, runLeaseRef.current);
+    },
     onMutate: () => {
       setRunRequestError(null);
     },
     onSuccess: async ({ runId }) => {
+      if (!runLeaseRef.current || !leaseIsCurrent(runLeaseRef.current)) return;
       if (!runId || !SAFE_AUTOMATION_RUN_ID.test(runId)) {
         setRunRequestError(new Error("The run response did not include a valid run ID."));
         return;
@@ -706,6 +776,7 @@ export function AutomationBuilderPage() {
     },
     onError: (error) => {
       setRunRequestError(error);
+      if (isLeaseStaleError(error)) setAuthoringLease(null);
       toast.error("Could not start the automation run");
     },
   });
@@ -729,16 +800,28 @@ export function AutomationBuilderPage() {
   }, [requestedRunId, triggeredRunId]);
 
   const testMutation = useMutation({
-    mutationFn: (stepId: string) => api.scheduledTasks.testStep(taskId, stepId, { useLatestUpstreamOutput: true }),
+    mutationFn: (stepId: string) => {
+      const lease = authoringLease;
+      if (!lease) throw new Error("Acquire the automation editing session before testing a step");
+      testLeaseRef.current = leaseRequest(lease);
+      return api.scheduledTasks.testStep(taskId, stepId, { useLatestUpstreamOutput: true }, testLeaseRef.current);
+    },
     onSuccess: async () => {
+      if (!testLeaseRef.current || !leaseIsCurrent(testLeaseRef.current)) return;
       toast.success("Test complete");
       await invalidateAutomationQueries(queryClient, [taskId]);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Test failed"),
+    onError: (error) => {
+      if (isLeaseStaleError(error)) setAuthoringLease(null);
+      toast.error(error instanceof Error ? error.message : "Test failed");
+    },
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.remove(taskId),
+    mutationFn: () => {
+      if (!authoringLease) throw new Error("Acquire the automation editing session before deleting");
+      return api.scheduledTasks.remove(taskId, leaseRequest(authoringLease));
+    },
     onSuccess: async () => {
       await invalidateAutomationQueries(queryClient, [taskId]);
       setDeleteDialogOpen(false);
@@ -768,20 +851,30 @@ export function AutomationBuilderPage() {
           if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
 
           try {
-            const updatedAutomation = await api.scheduledTasks.save(taskId, saveRequestFromDraft(nextDraft));
+            const lease = authoringLease;
+            if (!lease) throw new Error("Acquire the automation editing session before saving");
+            const requestLease = leaseRequest(lease);
+            const updatedAutomation = await api.scheduledTasks.save(
+              taskId,
+              saveRequestFromDraft(nextDraft),
+              requestLease,
+            );
+            if (!leaseIsCurrent(requestLease)) return;
             const updatedDraft = draftFromDefinition(updatedAutomation);
+            hydratedRevisionRef.current = updatedDraft.revision;
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
             setDraft(updatedDraft);
             await invalidateAutomationQueries(queryClient, [taskId]);
             if (options.message) toast.success(options.message);
             options.onSaved?.();
-            void api.scheduledTasks.releaseLock(taskId).catch(() => undefined);
           } catch (error) {
+            if (isLeaseStaleError(error)) setAuthoringLease(null);
             toast.error(error instanceof Error ? error.message : "Failed to save automation");
             try {
               const refreshed = await api.scheduledTasks.get(taskId);
               const refreshedDraft = draftFromDefinition(refreshed);
+              hydratedRevisionRef.current = refreshedDraft.revision;
               latestDraftRef.current = refreshedDraft;
               queryClient.setQueryData(queryKey, refreshed);
               setDraft(refreshedDraft);
@@ -800,17 +893,25 @@ export function AutomationBuilderPage() {
         });
       saveQueueRef.current = save.catch(() => undefined);
     },
-    [builderReadOnly, queryClient, queryKey, taskId],
+    [authoringLease, builderReadOnly, leaseIsCurrent, queryClient, queryKey, taskId],
   );
 
   const acquireLockMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.acquireLock(taskId),
+    mutationFn: () =>
+      api.scheduledTasks.acquireLock(
+        taskId,
+        clientSessionId,
+        authoringLease?.generation ?? (lockView?.isHeldByMe ? lockView.generation : undefined),
+      ),
     onSuccess: ({ lock }) => {
       queryClient.setQueryData(editLockQueryKey, lock);
+      setAuthoringLease({ clientSessionId, generation: lock.generation, holder: lock });
     },
     onError: (error) => {
-      if (!(error instanceof ApiRequestError) || error.code !== "LOCKED") return;
-      const lock = error.details.lock as AutomationEditLockView | undefined;
+      if (!(error instanceof ApiRequestError)) return;
+      if (error.code === "LEASE_STALE") setAuthoringLease(null);
+      if (error.code !== "LOCKED" && error.code !== "LEASE_STALE") return;
+      const lock = (error.details.lock ?? error.details.builderLock) as AutomationEditLockView | undefined;
       if (lock) queryClient.setQueryData(editLockQueryKey, lock);
     },
   });
@@ -818,16 +919,36 @@ export function AutomationBuilderPage() {
 
   const autoAcquireEnabled = automationQuery.data != null && automationQuery.data.canEdit !== false;
   useEffect(() => {
-    if (!autoAcquireEnabled) return;
+    if (!autoAcquireEnabled || authoringLease) return;
+    const expiresAt = lockView?.expiresAt ? new Date(lockView.expiresAt).getTime() : null;
+    const heldByActiveOtherSession =
+      Boolean(lockView?.heldByUserId && !lockView.isHeldByMe) && expiresAt !== null && expiresAt > Date.now();
+    if (heldByActiveOtherSession) {
+      const expiryTimer = window.setTimeout(() => void acquireLock(), expiresAt - Date.now() + 50);
+      return () => window.clearTimeout(expiryTimer);
+    }
     void acquireLock();
-  }, [acquireLock, autoAcquireEnabled]);
+    return;
+  }, [acquireLock, authoringLease, autoAcquireEnabled, lockView]);
+
+  useEffect(() => {
+    if (authoringLease || !lockView?.isHeldByMe || !lockView.generation) return;
+    setAuthoringLease({ clientSessionId, generation: lockView.generation, holder: lockView });
+  }, [authoringLease, clientSessionId, lockView]);
 
   useEffect(() => {
     if (!isLockHolder) return;
+    const renew = () => void acquireLock();
     const interval = window.setInterval(() => {
-      if (document.hasFocus()) void acquireLock();
+      renew();
     }, AUTOMATION_EDIT_LOCK_HEARTBEAT_INTERVAL_MS);
-    return () => window.clearInterval(interval);
+    window.addEventListener("focus", renew);
+    document.addEventListener("visibilitychange", renew);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", renew);
+      document.removeEventListener("visibilitychange", renew);
+    };
   }, [acquireLock, isLockHolder]);
 
   const updateAgentPrompt = useCallback(
@@ -877,26 +998,35 @@ export function AutomationBuilderPage() {
         setExecutionModeSelection({ id: executionModeSelectionIdRef.current, mode: executionMode });
       };
       if (automationQuery.data && isPlaceholderDraft(automationQuery.data)) {
+        const lease = authoringLease;
+        if (!lease) {
+          toast.error("Acquire the automation editing session before saving setup");
+          return;
+        }
         void api.scheduledTasks
-          .selectSetupExecutionMode(taskId, executionMode)
+          .selectSetupExecutionMode(taskId, executionMode, leaseRequest(lease))
           .then(async (updatedAutomation) => {
             if (executionModeRequestIdRef.current !== requestId) return;
             setSetupExecutionMode(executionMode);
             const updatedDraft = draftFromDefinition(updatedAutomation);
+            hydratedRevisionRef.current = updatedDraft.revision;
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
             setDraft(updatedDraft);
             await invalidateAutomationQueries(queryClient, [taskId]);
             selected();
           })
-          .catch((error) => toast.error(error instanceof Error ? error.message : "Failed to save automation setup"));
+          .catch((error) => {
+            if (isLeaseStaleError(error)) setAuthoringLease(null);
+            toast.error(error instanceof Error ? error.message : "Failed to save automation setup");
+          });
         return;
       }
       saveDraftPatch((current) => ({ ...current, executionMode }), {
         onSaved: selected,
       });
     },
-    [automationQuery.data, builderReadOnly, queryClient, queryKey, saveDraftPatch, taskId],
+    [automationQuery.data, authoringLease, builderReadOnly, queryClient, queryKey, saveDraftPatch, taskId],
   );
   const handleExecutionModeSelectionHandled = useCallback((selectionId: number) => {
     setExecutionModeSelection((current) => (current?.id === selectionId ? null : current));
@@ -1008,6 +1138,9 @@ export function AutomationBuilderPage() {
         onExecutionModeSelectionHandled={handleExecutionModeSelectionHandled}
         onBusyChange={setBuilderChatBusy}
         onBackToAutomations={navigateToAutomations}
+        clientSessionId={clientSessionId}
+        authoringLease={authoringLeaseRequest}
+        onLeaseStale={handleLeaseStale}
         className="automation-builder-sidecar-enter hidden lg:flex"
       />
 
@@ -1063,6 +1196,7 @@ export function AutomationBuilderPage() {
                 variant="outline"
                 className={cn(canvasToolbarButtonClass, "gap-1.5")}
                 onClick={() => setShareDialogOpen(true)}
+                disabled={builderReadOnly}
               >
                 <ShareNetworkIcon size={14} />
                 Share{automation.shares && automation.shares.length > 0 ? ` · ${automation.shares.length}` : ""}
@@ -1092,7 +1226,7 @@ export function AutomationBuilderPage() {
                 className="h-8 gap-1.5 rounded-[7px] border-destructive/35 px-2.5 text-[12px] text-destructive hover:bg-destructive/10 hover:text-destructive"
                 aria-label="Delete automation"
                 onClick={() => setDeleteDialogOpen(true)}
-                disabled={deleteMutation.isPending}
+                disabled={deleteMutation.isPending || builderReadOnly}
               >
                 <TrashIcon size={14} />
                 <span>Delete</span>
@@ -1113,7 +1247,7 @@ export function AutomationBuilderPage() {
               className={canvasToolbarButtonClass}
               aria-label="Test automation"
               onClick={() => runMutation.mutate("test")}
-              disabled={runIsBusy || !canRunAutomation}
+              disabled={runIsBusy || !canRunAutomation || builderReadOnly}
               title={
                 placeholderSetup
                   ? "Finish setup before testing this automation"
@@ -1139,7 +1273,7 @@ export function AutomationBuilderPage() {
               size="sm"
               className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
               onClick={() => runMutation.mutate("manual")}
-              disabled={runIsBusy || !canRunAutomation}
+              disabled={runIsBusy || !canRunAutomation || builderReadOnly}
               title={
                 placeholderSetup
                   ? "Finish setup before running this automation"
@@ -1209,7 +1343,8 @@ export function AutomationBuilderPage() {
         taskId={taskId}
         taskName={automationTitle}
         ownerUserId={automation.createdBy}
-        canShare={canShareAutomation}
+        canShare={canShareAutomation && !builderReadOnly}
+        lease={authoringLease ? leaseRequest(authoringLease) : null}
         open={shareDialogOpen}
         onOpenChange={setShareDialogOpen}
       />
@@ -1219,6 +1354,11 @@ export function AutomationBuilderPage() {
         open={stealDialogOpen}
         onOpenChange={setStealDialogOpen}
         lock={lockView}
+        clientSessionId={clientSessionId}
+        generation={authoringLease?.generation}
+        onRequested={(nextLock) => {
+          queryClient.setQueryData(editLockQueryKey, nextLock);
+        }}
       />
 
       <AutomationLockHolderResponseDialog
@@ -1226,6 +1366,16 @@ export function AutomationBuilderPage() {
         open={holderResponseDialogOpen}
         onOpenChange={setHolderResponseDialogOpen}
         lock={lockView}
+        lease={authoringLease ? leaseRequest(authoringLease) : null}
+        onResponded={(nextLock) => {
+          queryClient.setQueryData(editLockQueryKey, nextLock);
+          if (nextLock.isHeldByMe) {
+            setAuthoringLease({ clientSessionId, generation: nextLock.generation, holder: nextLock });
+          } else {
+            setAuthoringLease(null);
+          }
+          void queryClient.invalidateQueries({ queryKey: builderConversationQueryKey(taskId, clientSessionId) });
+        }}
       />
     </div>
   );
@@ -1544,16 +1694,22 @@ export function outgoingBuilderQuestionBatchAnswerMessage(
   };
 }
 
-function outgoingBuilderRequestOptions(taskId: string, attachments: WebChatUploadedAttachment[]) {
+function outgoingBuilderRequestOptions(
+  taskId: string,
+  attachments: WebChatUploadedAttachment[],
+  authoringLease?: AutomationLeaseRequest | null,
+) {
   return {
     body: {
       automationTaskId: taskId,
+      ...(authoringLease ?? {}),
       ...(attachments.length > 0 ? { attachments } : {}),
     },
   };
 }
 
-const builderConversationQueryKey = (taskId: string) => ["scheduled-tasks", taskId, "conversations"] as const;
+const builderConversationQueryKey = (taskId: string, clientSessionId: string) =>
+  ["scheduled-tasks", taskId, "conversations", clientSessionId] as const;
 
 function replaceBuilderConversationCache(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -1604,7 +1760,13 @@ function conversationDisplayUpdatedAt(
 
 function builderChatMutationError(error: unknown, fallback: string): string {
   if (error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED") {
-    return "This automation's builder chat is in use by another user. You can edit the automation, but chat is temporarily locked.";
+    const lock = (error.details.builderLock ?? error.details.lock) as ScheduledTaskConversationLock | undefined;
+    return lock?.owner === "self"
+      ? "This automation is open in another window. Return to that window to continue the chat."
+      : "This automation is being edited by another user. You can view it, but chat is read-only until they release it.";
+  }
+  if (error instanceof ApiRequestError && (error.status >= 500 || error.code === "LEASE_STALE")) {
+    return "Sketch could not verify the editing session. Try again.";
   }
   return error instanceof Error ? error.message : fallback;
 }
@@ -1623,6 +1785,9 @@ function BuilderChatSidecar({
   onExecutionModeSelectionHandled,
   onBusyChange,
   onBackToAutomations,
+  clientSessionId,
+  authoringLease,
+  onLeaseStale,
   className,
 }: {
   requestedConversationId: string | null;
@@ -1638,14 +1803,27 @@ function BuilderChatSidecar({
   onExecutionModeSelectionHandled: (selectionId: number) => void;
   onBusyChange: (busy: boolean) => void;
   onBackToAutomations: () => void;
+  clientSessionId: string;
+  authoringLease: AutomationLeaseRequest | null;
+  onLeaseStale: () => void;
   className?: string;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const conversationsQueryKey = useMemo(() => builderConversationQueryKey(taskId), [taskId]);
+  const conversationsQueryKey = useMemo(
+    () => builderConversationQueryKey(taskId, clientSessionId),
+    [clientSessionId, taskId],
+  );
   const conversationsQuery = useQuery({
     queryKey: conversationsQueryKey,
-    queryFn: () => api.scheduledTasks.conversations(taskId, { includeArchived: true }),
+    queryFn: () =>
+      api.scheduledTasks.conversations(taskId, {
+        includeArchived: true,
+        clientSessionId,
+      }),
+    refetchInterval: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
   const webChatConversationsQuery = useQuery({
     queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
@@ -1656,6 +1834,7 @@ function BuilderChatSidecar({
     () => new Map((webChatConversationsQuery.data?.conversations ?? []).map((summary) => [summary.id, summary])),
     [webChatConversationsQuery.data],
   );
+  const pendingSelectionLeaseRef = useRef<AutomationLeaseRequest | null>(null);
   const visibleConversations = useMemo(() => {
     const conversations = conversationsQuery.data?.conversations ?? [];
     const builderConversations = conversations.filter((conversation) => conversation.kinds.includes("builder"));
@@ -1664,6 +1843,13 @@ function BuilderChatSidecar({
   const selectedConversation = visibleConversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
+  const initialBuilderConversationId = useMemo(() => {
+    const builderConversations = visibleConversations.filter((conversation) => conversation.kinds.includes("builder"));
+    return builderConversations.reduce<ScheduledTaskConversationSummary | null>((oldest, conversation) => {
+      if (!oldest) return conversation;
+      return new Date(conversation.createdAt).getTime() < new Date(oldest.createdAt).getTime() ? conversation : oldest;
+    }, null)?.conversationId;
+  }, [visibleConversations]);
   const originContextQuery = useQuery({
     queryKey: ["automation-origin-context", taskId, originChat?.platform, originChat?.conversationId],
     queryFn: async (): Promise<BuilderSourceContextMessage[]> => {
@@ -1704,24 +1890,44 @@ function BuilderChatSidecar({
   }, [navigate, taskId]);
 
   const createMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.createConversation(taskId, { createNew: true }),
+    mutationFn: () => {
+      if (!authoringLease) throw new Error("Acquire the automation editing session before starting a chat");
+      pendingSelectionLeaseRef.current = authoringLease;
+      return api.scheduledTasks.createConversation(taskId, { createNew: true, ...authoringLease });
+    },
     onSuccess: ({ conversation }) => {
+      if (!sameLease(pendingSelectionLeaseRef.current, authoringLease)) return;
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
     onError: (error) => toast.error(builderChatMutationError(error, "Could not start a chat")),
   });
   const selectMutation = useMutation({
-    mutationFn: (conversation: ScheduledTaskConversationSummary) =>
-      api.scheduledTasks.selectConversation(taskId, conversation.conversationId, conversation.kinds[0]),
+    mutationFn: (conversation: ScheduledTaskConversationSummary) => {
+      if (!authoringLease) {
+        return Promise.reject(new Error("Acquire the automation editing session before opening a chat"));
+      }
+      pendingSelectionLeaseRef.current = authoringLease;
+      return api.scheduledTasks.selectConversation(
+        taskId,
+        conversation.conversationId,
+        conversation.kinds[0],
+        authoringLease,
+      );
+    },
     onSuccess: ({ conversation }) => {
+      if (!sameLease(pendingSelectionLeaseRef.current, authoringLease)) return;
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(builderChatMutationError(error, "This chat is unavailable")),
+    onError: (error) => {
+      if (isLeaseStaleError(error)) onLeaseStale();
+      toast.error(builderChatMutationError(error, "This chat is unavailable"));
+    },
   });
   const archiveMutation = useMutation({
-    mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, true),
+    mutationFn: (conversationId: string) =>
+      api.scheduledTasks.archiveConversation(taskId, conversationId, true, authoringLease ?? undefined),
     onSuccess: ({ conversation }) => {
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openChatList();
@@ -1729,7 +1935,8 @@ function BuilderChatSidecar({
     onError: (error) => toast.error(error instanceof Error ? error.message : "Could not archive this chat"),
   });
   const restoreMutation = useMutation({
-    mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, false),
+    mutationFn: (conversationId: string) =>
+      api.scheduledTasks.archiveConversation(taskId, conversationId, false, authoringLease ?? undefined),
     onSuccess: ({ conversation }) => {
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
@@ -1755,8 +1962,9 @@ function BuilderChatSidecar({
         onBackToAutomations={onBackToAutomations}
         onNew={() => createMutation.mutate()}
         newPending={createMutation.isPending}
+        newDisabled={!authoringLease}
         onArchive={
-          selectedConversation && !selectedIsArchived
+          selectedConversation && !selectedIsArchived && authoringLease
             ? () => archiveMutation.mutate(selectedConversation.conversationId)
             : undefined
         }
@@ -1773,7 +1981,7 @@ function BuilderChatSidecar({
             builderLock={conversationsQuery.data.builderLock}
             summaryById={webChatSummaryById}
             onSelect={(conversation) => {
-              if (conversation.state === "archived") openConversation(conversation.conversationId);
+              if (conversation.state === "archived" || !authoringLease) openConversation(conversation.conversationId);
               else selectMutation.mutate(conversation);
             }}
             selectingConversationId={selectMutation.isPending ? selectMutation.variables?.conversationId : null}
@@ -1785,6 +1993,7 @@ function BuilderChatSidecar({
             onBack={openChatList}
             onRestore={() => restoreMutation.mutate(selectedConversation.conversationId)}
             restoring={restoreMutation.isPending}
+            canRestore={Boolean(authoringLease)}
           />
         ) : (
           <BuilderChatTranscript
@@ -1798,9 +2007,12 @@ function BuilderChatSidecar({
             executionMode={executionMode}
             executionModeRecommendation={executionModeRecommendation}
             isSetupPlaceholder={isSetupPlaceholder}
+            isInitialBuilderConversation={selectedConversation.conversationId === initialBuilderConversationId}
             executionModeSelection={executionModeSelection}
             originContextMessages={originContextQuery.data ?? []}
             originContextLoading={originContextQuery.isPending && Boolean(originChat?.conversationId)}
+            authoringLease={authoringLease}
+            onLeaseStale={onLeaseStale}
             onExecutionModeSelect={onExecutionModeSelect}
             onExecutionModeSelectionHandled={onExecutionModeSelectionHandled}
             onBusyChange={onBusyChange}
@@ -1820,6 +2032,7 @@ function BuilderChatHeader({
   onBackToAutomations,
   onNew,
   newPending,
+  newDisabled,
   onArchive,
   archivePending,
 }: {
@@ -1830,6 +2043,7 @@ function BuilderChatHeader({
   onBackToAutomations: () => void;
   onNew: () => void;
   newPending: boolean;
+  newDisabled?: boolean;
   onArchive?: () => void;
   archivePending: boolean;
 }) {
@@ -1911,7 +2125,7 @@ function BuilderChatHeader({
             variant="outline"
             className="h-8 shrink-0 gap-1.5 rounded-[8px] border-border/80 bg-background px-2.5 text-[12px] shadow-none hover:bg-muted/70 focus-visible:ring-brand-accent/50"
             onClick={onNew}
-            disabled={newPending}
+            disabled={newPending || newDisabled}
           >
             {newPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} />}
             New chat
@@ -1988,7 +2202,9 @@ function BuilderChatListView({
   return (
     <div className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3">
       <div className="flex min-h-full flex-col gap-5">
-        {builderLock?.state === "held" ? <BuilderChatLockNotice lock={builderLock} /> : null}
+        {builderLock?.state === "held" && builderLock.owner !== "self" ? (
+          <BuilderChatLockNotice lock={builderLock} />
+        ) : null}
         <div>
           <p className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">Recent</p>
           {active.length > 0 ? (
@@ -2013,20 +2229,13 @@ function BuilderChatListView({
 }
 
 function BuilderChatLockNotice({ lock }: { lock: ScheduledTaskConversationLock }) {
-  const isOtherUser = lock.owner === "other";
   return (
     <div
       data-testid="automation-builder-chat-lock-notice"
       className="mx-2.5 border-l-2 border-amber-500/70 pl-3 text-[12px] leading-5 text-muted-foreground"
     >
-      <p className="font-medium text-foreground">
-        {isOtherUser ? "Builder chat is in use" : "Builder chat is open in another session"}
-      </p>
-      <p>
-        {isOtherUser
-          ? "You can still inspect and edit this automation. Chat becomes available when the other session leaves or goes idle."
-          : "Return to the open session to continue this chat, or wait for its lease to expire."}
-      </p>
+      <p className="font-medium text-foreground">Chat is read-only</p>
+      <p>Another editing session is active. Use Take over editing above to continue here.</p>
     </div>
   );
 }
@@ -2089,12 +2298,12 @@ function BuilderChatLockState({
     <div data-testid="automation-builder-chat-locked" className="flex min-h-full items-center justify-center px-5 py-6">
       <div className="w-full border-l-2 border-amber-500/70 pl-4">
         <p className="text-[13px] font-semibold text-foreground">
-          {locked ? "Builder chat is in use" : "Builder chat unavailable"}
+          {locked ? "Chat is read-only" : "Chat temporarily unavailable"}
         </p>
         <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
           {locked
-            ? "Another session owns this active chat. You can still inspect and edit the automation; chat becomes available when the lease is released or expires."
-            : "Sketch could not verify the builder chat lease. Try again before sending a message."}
+            ? "Another editing session is active. Use Take over editing above, then try again."
+            : "Sketch could not confirm editing access. Refresh and try again before sending a message."}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
@@ -2118,10 +2327,12 @@ function BuilderChatArchivedState({
   onBack,
   onRestore,
   restoring,
+  canRestore,
 }: {
   onBack: () => void;
   onRestore: () => void;
   restoring: boolean;
+  canRestore: boolean;
 }) {
   return (
     <div
@@ -2138,7 +2349,7 @@ function BuilderChatArchivedState({
             size="sm"
             className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
             onClick={onRestore}
-            disabled={restoring}
+            disabled={restoring || !canRestore}
           >
             {restoring ? <SpinnerGapIcon size={14} className="animate-spin" /> : <ArrowClockwiseIcon size={14} />}
             Restore chat
@@ -2171,9 +2382,12 @@ function BuilderChatTranscript({
   executionMode,
   executionModeRecommendation,
   isSetupPlaceholder,
+  isInitialBuilderConversation,
   executionModeSelection,
   originContextMessages,
   originContextLoading,
+  authoringLease,
+  onLeaseStale,
   onExecutionModeSelect,
   onExecutionModeSelectionHandled,
   onBusyChange,
@@ -2188,9 +2402,12 @@ function BuilderChatTranscript({
   executionMode: AutomationExecutionMode | null;
   executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
   isSetupPlaceholder: boolean;
+  isInitialBuilderConversation: boolean;
   executionModeSelection: ExecutionModeSelection | null;
   originContextMessages: BuilderSourceContextMessage[];
   originContextLoading: boolean;
+  authoringLease: AutomationLeaseRequest | null;
+  onLeaseStale: () => void;
   onExecutionModeSelect: (mode: AutomationExecutionMode) => void;
   onExecutionModeSelectionHandled: (selectionId: number) => void;
   onBusyChange: (busy: boolean) => void;
@@ -2218,17 +2435,27 @@ function BuilderChatTranscript({
   const selectBuilderConversation = useCallback(
     async (isCancelled?: () => boolean) => {
       setLockStatus("loading");
+      if (!authoringLease) {
+        setLockStatus("ready");
+        return;
+      }
       try {
-        const { conversation } = await api.scheduledTasks.selectConversation(taskId, conversationId, conversationKind);
+        const { conversation } = await api.scheduledTasks.selectConversation(
+          taskId,
+          conversationId,
+          conversationKind,
+          authoringLease,
+        );
         if (isCancelled?.()) return;
         replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
         setLockStatus("ready");
       } catch (error: unknown) {
         if (isCancelled?.()) return;
+        if (isLeaseStaleError(error)) onLeaseStale();
         setLockStatus(error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED" ? "locked" : "error");
       }
     },
-    [conversationId, conversationKind, conversationsQueryKey, queryClient, taskId],
+    [authoringLease, conversationId, conversationKind, conversationsQueryKey, onLeaseStale, queryClient, taskId],
   );
   useEffect(() => {
     let cancelled = false;
@@ -2270,36 +2497,47 @@ function BuilderChatTranscript({
     if (!executionModeSelection || !historyReady || chatBusy) return;
     const { mode } = executionModeSelection;
     const modeMessage = `${BUILDER_MODE_SELECTION_MARKER} I chose the "${mode}" execution mode (${automationExecutionModeMetadata[mode].label}) for this automation. Please continue by asking the next relevant automation questions.`;
-    void chat.sendMessage(outgoingBuilderTextMessage(modeMessage), outgoingBuilderRequestOptions(taskId, []));
+    void chat.sendMessage(
+      outgoingBuilderTextMessage(modeMessage),
+      outgoingBuilderRequestOptions(taskId, [], authoringLease),
+    );
     onExecutionModeSelectionHandled(executionModeSelection.id);
-  }, [chat.sendMessage, chatBusy, executionModeSelection, historyReady, onExecutionModeSelectionHandled, taskId]);
+  }, [
+    authoringLease,
+    chat.sendMessage,
+    chatBusy,
+    executionModeSelection,
+    historyReady,
+    onExecutionModeSelectionHandled,
+    taskId,
+  ]);
   const sendBuilderMessage = useCallback(
     (value: string, attachments: WebChatUploadedAttachment[] = []) => {
       void chat.sendMessage(
         outgoingBuilderTextMessage(value, attachments),
-        outgoingBuilderRequestOptions(taskId, attachments),
+        outgoingBuilderRequestOptions(taskId, attachments, authoringLease),
       );
     },
-    [chat.sendMessage, taskId],
+    [authoringLease, chat.sendMessage, taskId],
   );
   const selectBuilderQuestion = useCallback(
     (question: WebChatQuestion, answer: WebChatQuestionOption | WebChatQuestionAnswer) => {
       void chat.sendMessage(
         outgoingBuilderQuestionAnswerMessage(question, answer),
-        outgoingBuilderRequestOptions(taskId, []),
+        outgoingBuilderRequestOptions(taskId, [], authoringLease),
       );
     },
-    [chat.sendMessage, taskId],
+    [authoringLease, chat.sendMessage, taskId],
   );
 
   const submitBuilderQuestionBatch = useCallback(
     (batch: WebChatQuestionBatch, answer: WebChatQuestionBatchAnswer) => {
       void chat.sendMessage(
         outgoingBuilderQuestionBatchAnswerMessage(batch, answer),
-        outgoingBuilderRequestOptions(taskId, []),
+        outgoingBuilderRequestOptions(taskId, [], authoringLease),
       );
     },
-    [chat.sendMessage, taskId],
+    [authoringLease, chat.sendMessage, taskId],
   );
 
   const loadMessagesForReconciliation = useCallback(
@@ -2351,19 +2589,29 @@ function BuilderChatTranscript({
   }, [chat.setMessages, conversationId, historyKey, lockReady, taskId]);
 
   useEffect(() => {
-    if (!lockReady) return;
+    if (!lockReady || !authoringLease) return;
     const timer = window.setInterval(() => {
       void api.scheduledTasks
-        .selectConversation(taskId, conversationId, conversationKind)
+        .selectConversation(taskId, conversationId, conversationKind, authoringLease)
         .then(({ conversation }) => {
           replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
         })
         .catch((error: unknown) => {
+          if (isLeaseStaleError(error)) onLeaseStale();
           setLockStatus(error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED" ? "locked" : "error");
         });
     }, BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [conversationId, conversationKind, conversationsQueryKey, lockReady, queryClient, taskId]);
+  }, [
+    authoringLease,
+    conversationId,
+    conversationKind,
+    conversationsQueryKey,
+    lockReady,
+    onLeaseStale,
+    queryClient,
+    taskId,
+  ]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
@@ -2392,10 +2640,10 @@ function BuilderChatTranscript({
     if (stoppingRun) return;
     setStoppingRun(true);
     void api.webChat
-      .interrupt(conversationId, taskId)
+      .interrupt(conversationId, taskId, authoringLease)
       .catch(() => undefined)
       .finally(() => setStoppingRun(false));
-  }, [conversationId, stoppingRun, taskId]);
+  }, [authoringLease, conversationId, stoppingRun, taskId]);
 
   if (lockStatus === "locked" || lockStatus === "error") {
     return (
@@ -2415,7 +2663,7 @@ function BuilderChatTranscript({
             {originContextLoading ? <BuilderSourceContextLoading /> : null}
             {originContextMessages.length > 0 ? <BuilderSourceContext messages={originContextMessages} /> : null}
             {chat.messages.length === 0 ? (
-              !isSetupPlaceholder || originContextMessages.length > 0 ? (
+              isSetupPlaceholder && isInitialBuilderConversation && originContextMessages.length > 0 ? (
                 <SketchMessage>
                   <AutomationSetupCard
                     mode={executionMode}
@@ -2466,7 +2714,7 @@ function BuilderChatTranscript({
       <div className="shrink-0 border-t border-border/80 bg-background px-3 py-3">
         <ChatInput
           key={conversationId}
-          disabled={!historyReady || Boolean(historyLoadError) || chatBusy}
+          disabled={!authoringLease || !historyReady || Boolean(historyLoadError) || chatBusy}
           disabledPlaceholder={chatBusy ? "" : historyReady ? "Transcript unavailable" : "Loading conversation..."}
           running={chatBusy}
           runningPlaceholder="Sketch is thinking..."
@@ -3452,7 +3700,7 @@ function NodeDrawer({
             size="sm"
             variant="secondary"
             className="h-7 gap-1.5 rounded-[6px] bg-muted font-mono text-[11px] uppercase tracking-[0.08em] text-foreground/75 shadow-none hover:bg-accent hover:text-accent-foreground"
-            disabled={isTesting}
+            disabled={readOnly || isTesting}
             aria-busy={isTesting}
             onClick={() => onTest(step.id)}
           >

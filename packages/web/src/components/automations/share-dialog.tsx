@@ -34,6 +34,7 @@ interface AutomationShareDialogProps {
   taskName: string;
   ownerUserId: string | null | undefined;
   canShare: boolean;
+  lease?: { clientSessionId: string; generation: number } | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -45,6 +46,7 @@ export function AutomationShareDialog({
   taskName,
   ownerUserId,
   canShare,
+  lease,
   open,
   onOpenChange,
 }: AutomationShareDialogProps) {
@@ -105,7 +107,9 @@ export function AutomationShareDialog({
 
   const toggleMutation = useMutation({
     mutationFn: ({ userId, grant }: { userId: string; grant: boolean }) =>
-      grant ? api.scheduledTasks.grantShare(taskId, userId) : api.scheduledTasks.revokeShare(taskId, userId),
+      grant
+        ? api.scheduledTasks.grantShare(taskId, userId, lease ?? undefined)
+        : api.scheduledTasks.revokeShare(taskId, userId, lease ?? undefined),
     onMutate: async ({ userId, grant }) => {
       await queryClient.cancelQueries({ queryKey: SHARES_QUERY_KEY(taskId) });
       setOptimistic((previous) => ({ ...previous, [userId]: grant }));

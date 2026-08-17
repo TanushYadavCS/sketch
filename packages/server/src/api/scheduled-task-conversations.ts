@@ -42,7 +42,7 @@ function builderLockError(c: Context, lock: AutomationTaskConversationLockSummar
     {
       error: {
         code: "BUILDER_CHAT_LOCKED",
-        message: "This automation's builder chat is in use by another session",
+        message: "This automation's authoring lease is in use by another session",
         builderLock: lock,
       },
     },
@@ -59,6 +59,20 @@ function parseConversationId(value: unknown): string | null {
 function parseKind(value: unknown): "builder" | "web_chat" | null {
   if (typeof value !== "string" || !CONVERSATION_KINDS.has(value)) return null;
   return value as "builder" | "web_chat";
+}
+
+function parseLeaseFields(body: Record<string, unknown>): { clientSessionId: string; generation?: number } | null {
+  const clientSessionId = typeof body.clientSessionId === "string" ? body.clientSessionId.trim() : "";
+  if (clientSessionId.length === 0 || clientSessionId.length > 200) return null;
+  if (body.generation !== undefined && (!Number.isSafeInteger(body.generation) || (body.generation as number) < 1)) {
+    return null;
+  }
+  return { clientSessionId, generation: body.generation as number | undefined };
+}
+
+function parseLeaseQuery(c: Context): { clientSessionId?: string } {
+  const clientSessionId = c.req.query("clientSessionId")?.trim();
+  return clientSessionId && clientSessionId.length <= 200 ? { clientSessionId } : {};
 }
 
 async function resolveUserId(db: Kysely<DB>, subject: string | undefined): Promise<string | null> {
@@ -133,7 +147,7 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       access.transcriptAccess === "viewer"
         ? await conversations.listForTranscriptUser(taskId, access.userId, { includeArchived })
         : await conversations.listForTask(taskId, { includeArchived });
-    const builderLock = await conversations.getBuilderLock(taskId, access.userId);
+    const builderLock = await conversations.getBuilderLock(taskId, access.userId, parseLeaseQuery(c).clientSessionId);
     return c.json({ taskId, conversations: taskConversations, builderLock, transcriptAccess: access.transcriptAccess });
   });
 
@@ -155,6 +169,10 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if (kind === "web_chat" && !requestedConversationId) {
       return errorResponse(c, "VALIDATION_ERROR", "A web chat conversation id is required", 400);
     }
+    const lease = parseLeaseFields(body);
+    if (!lease) {
+      return errorResponse(c, "VALIDATION_ERROR", "clientSessionId and a valid generation are required", 400);
+    }
 
     let result:
       | {
@@ -165,12 +183,12 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
         }
       | BuilderConversationAccessResult;
     if (kind === "builder" && !requestedConversationId && body.createNew === true) {
-      result = await conversations.createBuilderConversation(taskId, access.userId);
+      result = await conversations.createBuilderConversation(taskId, access.userId, undefined, lease);
     } else if (!requestedConversationId) {
       const activeBuilder = await conversations.listForTranscriptUser(taskId, access.userId, { kind: "builder" });
       const existingConversationId = activeBuilder[0]?.conversationId;
       if (!existingConversationId) {
-        const builderLock = await conversations.getBuilderLock(taskId, access.userId);
+        const builderLock = await conversations.getBuilderLock(taskId, access.userId, lease.clientSessionId);
         if (builderLock.state === "held") return builderLockError(c, builderLock);
         return errorResponse(
           c,
@@ -179,7 +197,13 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
           404,
         );
       }
-      result = await conversations.selectBuilderConversation(taskId, existingConversationId, access.userId, "builder");
+      result = await conversations.selectBuilderConversation(
+        taskId,
+        existingConversationId,
+        access.userId,
+        "builder",
+        lease,
+      );
     } else {
       const existing = await conversations.getForTranscriptUser(taskId, requestedConversationId, access.userId, {
         includeArchived: true,
@@ -198,7 +222,7 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
 
       result =
         kind === "builder"
-          ? await conversations.selectBuilderConversation(taskId, requestedConversationId, access.userId, kind)
+          ? await conversations.selectBuilderConversation(taskId, requestedConversationId, access.userId, kind, lease)
           : {
               kind: "active" as const,
               association: await conversations.associate({
@@ -207,12 +231,15 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
                 transcriptUserId: access.userId,
                 kind,
               }),
-              lock: await conversations.getBuilderLock(taskId, access.userId),
+              lock: await conversations.getBuilderLock(taskId, access.userId, lease.clientSessionId),
               created: false as const,
             };
     }
 
     if (result.kind === "locked") return builderLockError(c, result.lock);
+    if (result.kind === "stale") {
+      return errorResponse(c, "LEASE_STALE", "Editing session is stale", 409, { builderLock: result.lock });
+    }
     if (result.kind !== "active" && result.kind !== "created") {
       return errorResponse(c, "CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable", 409);
     }
@@ -295,7 +322,7 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
     return c.json({
       conversation: summary,
-      builderLock: await conversations.getBuilderLock(taskId, access.userId),
+      builderLock: await conversations.getBuilderLock(taskId, access.userId, parseLeaseQuery(c).clientSessionId),
     });
   });
 
@@ -329,15 +356,23 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if (!selectedKind) {
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association is unavailable", 404);
     }
-    let lock = await conversations.getBuilderLock(taskId, access.userId);
+    const lease = parseLeaseFields(body);
+    if (!lease) {
+      return errorResponse(c, "VALIDATION_ERROR", "clientSessionId and a valid generation are required", 400);
+    }
+    let lock = await conversations.getBuilderLock(taskId, access.userId, lease.clientSessionId);
     if (selectedKind === "builder") {
       const selection = await conversations.selectBuilderConversation(
         taskId,
         conversationId,
         access.userId,
         selectedKind,
+        lease,
       );
       if (selection.kind === "locked") return builderLockError(c, selection.lock);
+      if (selection.kind === "stale") {
+        return errorResponse(c, "LEASE_STALE", "Editing session is stale", 409, { builderLock: selection.lock });
+      }
       if (selection.kind !== "active") {
         return errorResponse(c, "CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable", 409);
       }
@@ -372,13 +407,23 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if (typeof body.archived !== "boolean") {
       return errorResponse(c, "VALIDATION_ERROR", "archived must be a boolean", 400);
     }
+    const lease = body.clientSessionId === undefined ? undefined : parseLeaseFields(body);
+    if (body.clientSessionId !== undefined && !lease) {
+      return errorResponse(c, "VALIDATION_ERROR", "clientSessionId and a valid generation are required", 400);
+    }
 
-    const summary = await conversations.archiveForTranscriptUser(taskId, conversationId, access.userId, body.archived);
+    const summary = await conversations.archiveForTranscriptUser(
+      taskId,
+      conversationId,
+      access.userId,
+      body.archived,
+      lease ?? undefined,
+    );
     if (!summary)
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
     return c.json({
       conversation: summary,
-      builderLock: await conversations.getBuilderLock(taskId, access.userId),
+      builderLock: await conversations.getBuilderLock(taskId, access.userId, lease?.clientSessionId),
     });
   });
 

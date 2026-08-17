@@ -90,11 +90,12 @@ describe("scheduled task conversation API", () => {
       },
     });
     const cookie = await memberCookie(db, member.id);
+    const clientSessionId = "tab-conversations";
 
     const first = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId }),
     });
     expect(first.status).toBe(201);
     const firstBody = await first.json();
@@ -103,7 +104,8 @@ describe("scheduled task conversation API", () => {
 
     const refresh = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       method: "POST",
-      headers: { Cookie: cookie },
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId, generation: firstBody.builderLock.generation }),
     });
     expect(refresh.status).toBe(200);
     expect((await refresh.json()).conversation.conversationId).toBe(firstConversationId);
@@ -111,14 +113,14 @@ describe("scheduled task conversation API", () => {
     const archive = await app.request(`/api/scheduled-tasks/task-conversations/conversations/${firstConversationId}`, {
       method: "PATCH",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ archived: true }),
+      body: JSON.stringify({ archived: true, clientSessionId, generation: firstBody.builderLock.generation }),
     });
     expect(archive.status).toBe(200);
 
     const second = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId }),
     });
     expect(second.status).toBe(201);
     const secondConversationId = (await second.json()).conversation.conversationId;
@@ -145,7 +147,7 @@ describe("scheduled task conversation API", () => {
       {
         method: "PUT",
         headers: { Cookie: cookie, "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ clientSessionId }),
       },
     );
     expect(selectArchived.status).toBe(409);
@@ -212,7 +214,7 @@ describe("scheduled task conversation API", () => {
     await expect(adminList.json()).resolves.toEqual({
       taskId: "foreign-task",
       conversations: [expect.objectContaining({ conversationId: "owner-private-chat", transcriptUserName: "Owner" })],
-      builderLock: { state: "available", conversationId: null, owner: null, expiresAt: null },
+      builderLock: { state: "available", conversationId: null, owner: null, expiresAt: null, generation: null },
       transcriptAccess: "admin",
     });
 
@@ -460,7 +462,7 @@ describe("scheduled task conversation API", () => {
     const response = await app.request("/api/scheduled-tasks/granted-create-task/conversations", {
       method: "POST",
       headers: { Cookie: await memberCookie(db, member.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId: "tab-grantee" }),
     });
 
     expect(response.status).toBe(201);
@@ -492,7 +494,7 @@ describe("scheduled task conversation API", () => {
     const ownerStart = await app.request("/api/scheduled-tasks/locked-task/conversations", {
       method: "POST",
       headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId: "tab-owner" }),
     });
     expect(ownerStart.status).toBe(201);
 
@@ -500,7 +502,7 @@ describe("scheduled task conversation API", () => {
     const adminStart = await app.request("/api/scheduled-tasks/locked-task/conversations", {
       method: "POST",
       headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId: "tab-admin" }),
     });
     // The admin passes the task access gate but the builder-chat lock is held
     // by the owner, so the create is refused — lock discipline is uniform.
@@ -510,7 +512,7 @@ describe("scheduled task conversation API", () => {
     const ownerSecond = await app.request("/api/scheduled-tasks/locked-task/conversations", {
       method: "POST",
       headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ createNew: true }),
+      body: JSON.stringify({ createNew: true, clientSessionId: "tab-owner" }),
     });
     expect(ownerSecond.status).toBe(409);
     await expect(ownerSecond.json()).resolves.toMatchObject({
@@ -519,6 +521,63 @@ describe("scheduled task conversation API", () => {
     await expect(
       db.selectFrom("scheduled_task_conversations").selectAll().where("task_id", "=", "locked-task").execute(),
     ).resolves.toEqual([expect.objectContaining({ transcript_user_id: owner.id, kind: "builder" })]);
+  });
+
+  it("selects a builder with one session and conflicts for another session of the same user", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({
+      name: "Owner",
+      email: "owner-session-select@test.com",
+    });
+    await seedTask(db, "session-select-task", owner.id);
+    await createAutomationTaskConversationService(db).associate({
+      taskId: "session-select-task",
+      conversationId: "session-builder",
+      transcriptUserId: owner.id,
+      kind: "builder",
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await memberCookie(db, owner.id);
+    const first = await app.request("/api/scheduled-tasks/session-select-task/conversations/session-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: 1 }),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody.builderLock).toMatchObject({ state: "held", owner: "self", generation: 1 });
+
+    const sameSession = await app.request("/api/scheduled-tasks/session-select-task/conversations/session-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: firstBody.builderLock.generation }),
+    });
+    expect(sameSession.status).toBe(200);
+
+    const second = await app.request("/api/scheduled-tasks/session-select-task/conversations/session-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b" }),
+    });
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({
+      error: { code: "BUILDER_CHAT_LOCKED", builderLock: { owner: "other", generation: 1 } },
+    });
+    await expect(
+      db
+        .selectFrom("automation_task_locks")
+        .select(["holder_user_id", "holder_session_id", "generation"])
+        .where("task_id", "=", "session-select-task")
+        .executeTakeFirst(),
+    ).resolves.toEqual({ holder_user_id: owner.id, holder_session_id: "tab-a", generation: 1 });
   });
 
   it("rejects unrelated or malformed selections without creating associations", async () => {
@@ -557,7 +616,7 @@ describe("scheduled task conversation API", () => {
     const postGuessed = await app.request("/api/scheduled-tasks/safe-task/conversations", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId: "guessed-builder", createNew: true }),
+      body: JSON.stringify({ conversationId: "guessed-builder", createNew: true, clientSessionId: "tab-safe" }),
     });
     expect(postGuessed.status).toBe(404);
     await expect(postGuessed.json()).resolves.toMatchObject({

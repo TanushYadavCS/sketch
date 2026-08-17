@@ -2,8 +2,8 @@
  * AutomationLockStealDialog — requester side of the whole-automation edit lock.
  *
  * The viewer (read-only because another member holds the lock) requests a
- * takeover here. The backend only returns `{ status: "pending" }`; whether the
- * request was approved, denied, or expired is learned from the lock view that
+ * takeover here. The backend returns the pending lock snapshot; whether the
+ * request was approved, denied, or expired is then learned from the lock view that
  * the builder polls, so the dialog watches the live `lock` prop:
  *
  * - `lock.isHeldByMe` becomes true  -> approved: toast + close (heartbeat
@@ -40,23 +40,35 @@ export function AutomationLockStealDialog({
   open,
   onOpenChange,
   lock,
+  clientSessionId,
+  generation,
+  onRequested,
 }: {
   taskId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   lock: AutomationEditLockView | null;
+  clientSessionId: string;
+  generation?: number;
+  onRequested?: (lock: AutomationEditLockView) => void;
 }) {
   const [phase, setPhase] = useState<StealPhase>("confirm");
   const [requestedAt, setRequestedAt] = useState<number | null>(null);
   const sawPendingRef = useRef(false);
   const resolvedRef = useRef(false);
   const holderName = lock?.heldByName ?? "the current editor";
+  const heldByMyOtherSession = lock?.isHeldByMyOtherSession === true;
   const stealPending = lock?.stealPending ?? null;
   const now = useLockNow(phase === "waiting");
 
   const stealMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.requestSteal(taskId),
-    onSuccess: () => {
+    mutationFn: () =>
+      api.scheduledTasks.requestSteal(taskId, {
+        clientSessionId,
+        ...(generation === undefined ? {} : { generation }),
+      }),
+    onSuccess: ({ lock: nextLock }) => {
+      if (nextLock) onRequested?.(nextLock);
       setRequestedAt(Date.now());
       setPhase("waiting");
     },
@@ -123,8 +135,9 @@ export function AutomationLockStealDialog({
           <DialogDescription className="text-xs">
             {phase === "confirm" ? (
               <>
-                {holderName} is currently editing this automation. Sketch will ask them to approve the takeover — until
-                they do, the workflow stays read-only.
+                {heldByMyOtherSession
+                  ? "This automation is open in another one of your sessions. Sketch will ask that session to approve the takeover — until it does, the workflow stays read-only."
+                  : `${holderName} is currently editing this automation. Sketch will ask them to approve the takeover — until they do, the workflow stays read-only.`}
               </>
             ) : phase === "waiting" ? (
               <>Waiting for {holderName} to approve. This automation is still read-only for now.</>
@@ -171,7 +184,7 @@ export function AutomationLockStealDialog({
           {phase === "confirm" ? (
             <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
               <LockKeyIcon size={12} />
-              Only {holderName} can approve
+              {heldByMyOtherSession ? "Only the other session can approve" : `Only ${holderName} can approve`}
             </span>
           ) : null}
           {phase === "confirm" ? (

@@ -178,7 +178,7 @@ describe("ScheduledTasksPage", () => {
     expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
   });
 
-  it("creates an admin draft and navigates to its fresh builder conversation", async () => {
+  it("creates a draft and navigates to its fresh builder conversation", async () => {
     installTaskHandlers([]);
     server.use(
       http.post("/api/scheduled-tasks", () =>
@@ -201,14 +201,14 @@ describe("ScheduledTasksPage", () => {
     });
   });
 
-  it("keeps create automation actions hidden for members", async () => {
+  it("shows create automation actions for members", async () => {
     setMockAuth({ role: "member", userId: "member-1" });
     installTaskHandlers([]);
 
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Create with Sketch" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
   });
 
   it("refreshes the list graph and run history after an external run starts", async () => {

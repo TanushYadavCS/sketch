@@ -11,7 +11,7 @@ import { createScheduledTaskConversationRepository } from "../../db/repositories
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
 import type { TaskScheduler } from "../../scheduler/service";
 import { createTestDb } from "../../test-utils";
-import { handleManageScheduledTasks, requiresAutomationBuilder } from "./scheduled-tasks";
+import { agentLockSessionIdFor, handleManageScheduledTasks, requiresAutomationBuilder } from "./scheduled-tasks";
 import { AutomationArtifactCollector } from "./types";
 
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -2192,6 +2192,76 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     await expect(createAutomationLocksRepository(db).getByTaskId("lock-release-task")).resolves.toBeUndefined();
   });
 
+  it("passes the acquired generation into the persistence fence", async () => {
+    const taskId = "agent-generation-task";
+    await createTask(taskId);
+    const taskContext = taskContextFor(taskId);
+    const agentSessionId = agentLockSessionIdFor(taskContext);
+    await acquireOrRenewLock(db, {
+      taskId,
+      nowMs: 0,
+      holder: {
+        userId: "owner-1",
+        sessionId: agentSessionId,
+        platform: "slack",
+        surface: "chat",
+        conversationId: "D123",
+      },
+    });
+    await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toMatchObject({
+      holder_session_id: agentSessionId,
+      generation: 1,
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: taskId, prompt: "Fenced agent edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toBeUndefined();
+  });
+
+  it("borrows the exact builder lease and leaves the browser session active after saving", async () => {
+    await createTask("agent-browser-conflict-task");
+    const baseTaskContext = taskContextFor("agent-browser-conflict-task");
+    const browserSessionId = "browser-tab-agent-conflict";
+    await acquireOrRenewLock(db, {
+      taskId: "agent-browser-conflict-task",
+      holder: {
+        userId: "owner-1",
+        sessionId: browserSessionId,
+        platform: "web",
+        surface: "builder",
+        conversationId: "builder-conversation",
+      },
+    });
+
+    const lock = await createAutomationLocksRepository(db).getByTaskId("agent-browser-conflict-task");
+    expect(lock?.holder_session_id).toBe(browserSessionId);
+    const taskContext = {
+      ...baseTaskContext,
+      authoringLease: { sessionId: browserSessionId, generation: lock?.generation ?? 0 },
+    };
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "agent-browser-conflict-task", prompt: "Agent edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor("agent-browser-conflict-task"), taskContext },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("agent-browser-conflict-task")).resolves.toMatchObject({
+      revision: 1,
+    });
+    await expect(createAutomationLocksRepository(db).getByTaskId("agent-browser-conflict-task")).resolves.toMatchObject(
+      {
+        holder_user_id: "owner-1",
+        holder_session_id: browserSessionId,
+        generation: lock?.generation,
+      },
+    );
+  });
+
   it("acquires and releases the edit lock around a successful step-content update", async () => {
     await createTask("lock-release-content-task");
     const scheduler = schedulerFor("lock-release-content-task");
@@ -2287,18 +2357,19 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     await db.insertInto("users").values({ id: "holder-1", name: "holder-1" }).execute();
     await acquireOrRenewLock(db, { taskId: "steal-surface-task", holder });
     const scheduler = schedulerFor("steal-surface-task");
+    const stealContext = {
+      ...taskContextFor("steal-surface-task", "owner-1"),
+      platform: "whatsapp" as const,
+      contextType: "group" as const,
+      deliveryTarget: "group-1@g.us",
+    };
 
     const result = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-surface-task" },
       {
         db,
         scheduler,
-        taskContext: {
-          ...taskContextFor("steal-surface-task", "owner-1"),
-          platform: "whatsapp",
-          contextType: "group",
-          deliveryTarget: "group-1@g.us",
-        },
+        taskContext: stealContext,
       },
     );
 
@@ -2306,6 +2377,7 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     await expect(createAutomationLocksRepository(db).getByTaskId("steal-surface-task")).resolves.toMatchObject({
       holder_user_id: "holder-1",
       steal_requester_user_id: "owner-1",
+      steal_requester_session_id: agentLockSessionIdFor(stealContext),
       steal_requester_platform: "whatsapp",
       steal_requester_surface: "chat",
       steal_requester_conversation_id: "group-1@g.us",
@@ -2315,17 +2387,21 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
   it("steal reports not locked when the automation is free or the caller holds the lock", async () => {
     await createTask("steal-free-task");
     const scheduler = schedulerFor("steal-free-task");
+    const taskContext = taskContextFor("steal-free-task");
 
     const free = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-free-task" },
-      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+      { db, scheduler, taskContext },
     );
     expect(free.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
 
-    await acquireOrRenewLock(db, { taskId: "steal-free-task", holder: { ...holder, userId: "owner-1" } });
+    await acquireOrRenewLock(db, {
+      taskId: "steal-free-task",
+      holder: { ...holder, userId: "owner-1", sessionId: agentLockSessionIdFor(taskContext) },
+    });
     const self = await handleManageScheduledTasks(
       { action: "steal", task_id: "steal-free-task" },
-      { db, scheduler, taskContext: taskContextFor("steal-free-task") },
+      { db, scheduler, taskContext },
     );
     expect(self.content[0].text).toBe('Automation "Daily account brief" is not locked by another editor right now.');
   });
@@ -2412,6 +2488,54 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     expect(author).toHaveBeenCalledOnce();
     expect(result.content[0].text).toContain("Automation updated:");
     await expect(createAutomationLocksRepository(db).getByTaskId("authoring-edit-task")).resolves.toBeUndefined();
+  });
+
+  it("does not let a stale agent release remove a newer browser lease", async () => {
+    await createTask("agent-stale-release-task");
+    const taskContext = taskContextFor("agent-stale-release-task");
+    let agentGeneration: number | undefined;
+    const author = vi.fn().mockImplementation(async () => {
+      const beforeTakeover = await createAutomationLocksRepository(db).getByTaskId("agent-stale-release-task");
+      expect(beforeTakeover?.holder_session_id).toBe(agentLockSessionIdFor(taskContext));
+      agentGeneration = beforeTakeover?.generation;
+      const takeoverAt = Date.parse(beforeTakeover?.expires_at ?? "") + 1;
+      const taken = await acquireOrRenewLock(db, {
+        taskId: "agent-stale-release-task",
+        nowMs: takeoverAt,
+        holder: {
+          userId: "owner-1",
+          sessionId: "browser-after-agent",
+          platform: "web",
+          surface: "builder",
+          conversationId: "builder-after-agent",
+        },
+      });
+      expect(taken.kind).toBe("held");
+      expect(taken.kind === "held" ? taken.lock.generation : undefined).toBe((agentGeneration ?? 0) + 1);
+      return {
+        kind: "saved" as const,
+        task: taskFor("agent-stale-release-task"),
+        artifact: { steps: definition().steps, scheduleType: "interval", scheduleValue: "120", timezone: "UTC" },
+      };
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "agent-stale-release-task", request: "Rewrite the brief" },
+      {
+        db,
+        scheduler: schedulerFor("agent-stale-release-task"),
+        chatAuthoring: { author } as never,
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+        encryptionKey: ENCRYPTION_KEY,
+        taskContext,
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createAutomationLocksRepository(db).getByTaskId("agent-stale-release-task")).resolves.toMatchObject({
+      holder_session_id: "browser-after-agent",
+      generation: (agentGeneration ?? 0) + 1,
+    });
   });
 
   it("reserves a manual run id, fires the run without awaiting it, and returns only the tracking link", async () => {

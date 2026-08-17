@@ -4,18 +4,23 @@
  * Every mutation is a guarded UPDATE/DELETE/INSERT whose WHERE clause encodes
  * the compare-and-swap condition; callers must verify the outcome by reading
  * the row back instead of trusting affected-row counts (numUpdatedRows
- * semantics differ between SQLite and Postgres). All timestamps are
- * app-generated ISO-8601 UTC strings, so expiry comparisons are plain string
- * comparisons — portable across SQLite and Postgres with no dialect date
- * functions.
+ * semantics differ between SQLite and Postgres). A holder is identified by
+ * the authenticated user, client session, and lease generation. All
+ * timestamps are app-generated ISO-8601 UTC strings, so expiry comparisons are
+ * plain string comparisons — portable across SQLite and Postgres with no
+ * dialect date functions.
  */
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { DB } from "../schema";
 
+export const LEGACY_LOCK_SESSION_ID = "legacy";
+
 export interface AutomationTaskLockRow {
   task_id: string;
   holder_user_id: string;
+  holder_session_id: string;
+  generation: number;
   holder_platform: string;
   holder_surface: string;
   holder_conversation_id: string | null;
@@ -23,6 +28,7 @@ export interface AutomationTaskLockRow {
   updated_at: string;
   expires_at: string;
   steal_requester_user_id: string | null;
+  steal_requester_session_id: string | null;
   steal_requester_platform: string | null;
   steal_requester_surface: string | null;
   steal_requester_conversation_id: string | null;
@@ -32,9 +38,14 @@ export interface AutomationTaskLockRow {
 
 export interface LockHolderFields {
   userId: string;
+  sessionId?: string;
   platform: string;
   surface: string;
   conversationId: string | null;
+}
+
+function sessionIdFor(holder: LockHolderFields): string {
+  return holder.sessionId ?? LEGACY_LOCK_SESSION_ID;
 }
 
 export function createAutomationLocksRepository(db: Kysely<DB>) {
@@ -54,6 +65,8 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         .values({
           task_id: params.taskId,
           holder_user_id: holder.userId,
+          holder_session_id: sessionIdFor(holder),
+          generation: 1,
           holder_platform: holder.platform,
           holder_surface: holder.surface,
           holder_conversation_id: holder.conversationId,
@@ -74,12 +87,15 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         .updateTable("automation_task_locks")
         .set({
           holder_user_id: holder.userId,
+          holder_session_id: sessionIdFor(holder),
           holder_platform: holder.platform,
           holder_surface: holder.surface,
           holder_conversation_id: holder.conversationId,
           updated_at: params.now,
           expires_at: params.expiresAt,
+          generation: sql<number>`${sql.ref("generation")} + 1`,
           steal_requester_user_id: null,
+          steal_requester_session_id: null,
           steal_requester_platform: null,
           steal_requester_surface: null,
           steal_requester_conversation_id: null,
@@ -92,21 +108,32 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
     },
 
     /** Holder-scoped renewal. */
-    async renew(params: { taskId: string; userId: string; expiresAt: string; now: string }): Promise<void> {
+    async renew(params: {
+      taskId: string;
+      userId: string;
+      sessionId?: string;
+      generation?: number;
+      expiresAt: string;
+      now: string;
+    }): Promise<void> {
       await db
         .updateTable("automation_task_locks")
         .set({ updated_at: params.now, expires_at: params.expiresAt })
         .where("task_id", "=", params.taskId)
         .where("holder_user_id", "=", params.userId)
+        .where("holder_session_id", "=", params.sessionId ?? LEGACY_LOCK_SESSION_ID)
+        .where("generation", "=", params.generation ?? 1)
         .execute();
     },
 
     /** Holder-scoped release; idempotent (no-op when not the holder). */
-    async release(params: { taskId: string; userId: string }): Promise<void> {
+    async release(params: { taskId: string; userId: string; sessionId?: string; generation?: number }): Promise<void> {
       await db
         .deleteFrom("automation_task_locks")
         .where("task_id", "=", params.taskId)
         .where("holder_user_id", "=", params.userId)
+        .where("holder_session_id", "=", params.sessionId ?? LEGACY_LOCK_SESSION_ID)
+        .where("generation", "=", params.generation ?? 1)
         .execute();
     },
 
@@ -122,6 +149,7 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         .updateTable("automation_task_locks")
         .set({
           steal_requester_user_id: requester.userId,
+          steal_requester_session_id: sessionIdFor(requester),
           steal_requester_platform: requester.platform,
           steal_requester_surface: requester.surface,
           steal_requester_conversation_id: requester.conversationId,
@@ -129,7 +157,9 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
           steal_expires_at: params.stealExpiresAt,
         })
         .where("task_id", "=", params.taskId)
-        .where("holder_user_id", "<>", requester.userId)
+        .where((eb) =>
+          eb.or([eb("holder_user_id", "<>", requester.userId), eb("holder_session_id", "<>", sessionIdFor(requester))]),
+        )
         .where("expires_at", ">", params.stealRequestedAt)
         .where("steal_requester_user_id", "is", null)
         .execute();
@@ -139,6 +169,8 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
     async approveSteal(params: {
       taskId: string;
       approverUserId: string;
+      approverSessionId?: string;
+      approverGeneration?: number;
       expiresAt: string;
       now: string;
     }): Promise<void> {
@@ -146,10 +178,13 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         .updateTable("automation_task_locks")
         .set({
           holder_user_id: sql.ref("steal_requester_user_id"),
+          holder_session_id: sql.ref("steal_requester_session_id"),
           holder_platform: sql.ref("steal_requester_platform"),
           holder_surface: sql.ref("steal_requester_surface"),
           holder_conversation_id: sql.ref("steal_requester_conversation_id"),
+          generation: sql<number>`${sql.ref("generation")} + 1`,
           steal_requester_user_id: null,
+          steal_requester_session_id: null,
           steal_requester_platform: null,
           steal_requester_surface: null,
           steal_requester_conversation_id: null,
@@ -160,15 +195,24 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         })
         .where("task_id", "=", params.taskId)
         .where("holder_user_id", "=", params.approverUserId)
+        .where("holder_session_id", "=", params.approverSessionId ?? LEGACY_LOCK_SESSION_ID)
+        .where("generation", "=", params.approverGeneration ?? 1)
         .execute();
     },
 
     /** Holder-scoped steal rejection / expiry cleanup. */
-    async clearSteal(params: { taskId: string; holderUserId: string; now: string }): Promise<void> {
+    async clearSteal(params: {
+      taskId: string;
+      holderUserId: string;
+      holderSessionId?: string;
+      holderGeneration?: number;
+      now: string;
+    }): Promise<void> {
       await db
         .updateTable("automation_task_locks")
         .set({
           steal_requester_user_id: null,
+          steal_requester_session_id: null,
           steal_requester_platform: null,
           steal_requester_surface: null,
           steal_requester_conversation_id: null,
@@ -178,11 +222,53 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         })
         .where("task_id", "=", params.taskId)
         .where("holder_user_id", "=", params.holderUserId)
+        .where("holder_session_id", "=", params.holderSessionId ?? LEGACY_LOCK_SESSION_ID)
+        .where("generation", "=", params.holderGeneration ?? 1)
         .execute();
     },
 
     async getByTaskId(taskId: string): Promise<AutomationTaskLockRow | undefined> {
       return db.selectFrom("automation_task_locks").selectAll().where("task_id", "=", taskId).executeTakeFirst();
+    },
+
+    /**
+     * Touches and holds an exact live lease row for the caller's transaction.
+     * The guarded UPDATE obtains the row lock before the caller writes the
+     * automation definition; the read-back is the dialect-neutral match check
+     * and does not rely on affected-row counts.
+     */
+    async touchIfExactHolder(params: {
+      taskId: string;
+      userId: string;
+      sessionId: string;
+      generation: number;
+      now: string;
+    }): Promise<AutomationTaskLockRow | undefined> {
+      await db
+        .updateTable("automation_task_locks")
+        .set({ updated_at: params.now })
+        .where("task_id", "=", params.taskId)
+        .where("holder_user_id", "=", params.userId)
+        .where("holder_session_id", "=", params.sessionId)
+        .where("generation", "=", params.generation)
+        .where("expires_at", ">", params.now)
+        .execute();
+
+      const row = await db
+        .selectFrom("automation_task_locks")
+        .selectAll()
+        .where("task_id", "=", params.taskId)
+        .executeTakeFirst();
+      if (!row) return undefined;
+      if (
+        row.holder_user_id !== params.userId ||
+        row.holder_session_id !== params.sessionId ||
+        row.generation !== params.generation ||
+        row.expires_at <= params.now
+      ) {
+        return undefined;
+      }
+      return row;
     },
 
     /** Removes every lock row for a task (deleteAutomation's transaction). */
@@ -201,6 +287,7 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
         .updateTable("automation_task_locks")
         .set({
           steal_requester_user_id: null,
+          steal_requester_session_id: null,
           steal_requester_platform: null,
           steal_requester_surface: null,
           steal_requester_conversation_id: null,

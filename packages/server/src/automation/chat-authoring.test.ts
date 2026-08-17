@@ -9,6 +9,7 @@ import type { CurrentAutomation } from "../scheduler/types";
 import { createTestDb } from "../test-utils";
 import { createChatAutomationAuthoring } from "./chat-authoring";
 import type { buildAutomationDefinition } from "./definition";
+import { acquireOrRenewLock } from "./lock-service";
 import { createAutomationDefinition } from "./persistence";
 
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
@@ -316,6 +317,7 @@ describe("chat automation authoring orchestration", () => {
         taskId: "automation-edit",
         taskContext: taskContext(),
         currentAutomation: currentAutomation("automation-edit", 0),
+        lease: { sessionId: "agent-session", generation: 1 },
       }),
     ).resolves.toEqual({
       kind: "error",
@@ -414,6 +416,7 @@ describe("chat automation authoring orchestration", () => {
         taskId: "foreign-admin-edit",
         taskContext: { ...taskContext(), createdBy: "admin-id", canManageAnyTask: true },
         currentAutomation: current,
+        lease: { sessionId: "agent-session", generation: 1 },
       }),
     ).resolves.toMatchObject({ kind: "saved", task: { id: "foreign-admin-edit" } });
     expect(edit).toHaveBeenCalledTimes(1);
@@ -507,6 +510,7 @@ describe("chat automation authoring orchestration", () => {
         request: "Rename the brief",
         taskId: "configured-edit-provenance",
         taskContext: { ...taskContext(), origin: { ...taskContext().origin, conversationId: "edit-chat" } },
+        lease: { sessionId: "agent-session", generation: 1 },
       }),
     ).resolves.toMatchObject({ kind: "saved", task: { id: "configured-edit-provenance" } });
 
@@ -573,6 +577,7 @@ describe("chat automation authoring orchestration", () => {
         request: "Tighten the brief",
         taskId: "grantee-edit-task",
         taskContext: { ...taskContext(), createdBy: grantee.id },
+        lease: { sessionId: "agent-session", generation: 1 },
       }),
     ).resolves.toMatchObject({ kind: "saved", task: { id: "grantee-edit-task" } });
     await expect(createScheduledTaskRepository(db).getById("grantee-edit-task")).resolves.toMatchObject({
@@ -623,6 +628,178 @@ describe("chat automation authoring orchestration", () => {
     await expect(createScheduledTaskRepository(db).getById("ungranted-edit-task")).resolves.toMatchObject({
       created_by: owner.id,
       revision: 0,
+    });
+  });
+
+  it("fails safely when configured chat edit has no lease", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "configured-edit-without-lease",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: "user-1",
+        originPlatform: null,
+        originConversationId: null,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      brokerCapable: true,
+    });
+    const edit = vi.fn();
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: { create: vi.fn(), edit },
+      scheduler: { refreshTaskSchedule: vi.fn(), getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Rename the brief",
+        taskId: "configured-edit-without-lease",
+        taskContext: taskContext(),
+      }),
+    ).resolves.toEqual({ kind: "error", message: "Automation editing requires an active authoring lease." });
+    expect(edit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "another live session",
+      holderSessionId: "other-session",
+      requestedGeneration: 1,
+      expectedMessage: "Automation is currently being edited by another session. No changes were saved.",
+    },
+    {
+      name: "a stale fence",
+      holderSessionId: "agent-session",
+      requestedGeneration: 0,
+      expectedMessage: "Automation is currently being edited by another session. No changes were saved.",
+    },
+  ])(
+    "requires the exact configured chat lease for edit: blocked by $name",
+    async ({ holderSessionId, requestedGeneration, expectedMessage }) => {
+      const taskId = `configured-lease-${holderSessionId}`;
+      await createUserRepository(db).create({ id: "user-1", name: "Lease holder", email: `${taskId}@test.com` });
+      await createAutomationDefinition({
+        db,
+        request: definition(),
+        context: {
+          id: taskId,
+          platform: "slack",
+          contextType: "dm",
+          deliveryTarget: "D123",
+          threadTs: null,
+          createdBy: "user-1",
+          originPlatform: null,
+          originConversationId: null,
+          originProviderThreadId: null,
+          originMessageId: null,
+        },
+        brokerCapable: true,
+      });
+      const held = await acquireOrRenewLock(db, {
+        taskId,
+        holder: {
+          userId: "user-1",
+          sessionId: holderSessionId,
+          platform: "slack",
+          surface: "dm",
+          conversationId: "D123",
+        },
+      });
+      expect(held.kind).toBe("held");
+
+      const edit = vi.fn().mockResolvedValue({
+        kind: "definition" as const,
+        definition: definition({ expectedRevision: 0, title: "Should not save" }),
+      });
+      const service = createChatAutomationAuthoring({
+        db,
+        authoring: { create: vi.fn(), edit },
+        scheduler: { refreshTaskSchedule: vi.fn(), getTaskById: vi.fn() },
+        loadIntegrationProvider: async () => null,
+      });
+
+      await expect(
+        service.author({
+          action: "edit",
+          request: "Rename the brief",
+          taskId,
+          taskContext: taskContext(),
+          lease: { sessionId: "agent-session", generation: requestedGeneration },
+        }),
+      ).resolves.toEqual({ kind: "error", message: expectedMessage });
+      expect(edit).toHaveBeenCalledTimes(1);
+      await expect(createScheduledTaskRepository(db).getById(taskId)).resolves.toMatchObject({
+        title: "Daily brief",
+        revision: 0,
+      });
+    },
+  );
+
+  it("passes the exact configured chat lease to persistence for edit", async () => {
+    const taskId = "configured-lease-exact";
+    await createUserRepository(db).create({ id: "user-1", name: "Lease holder", email: "exact-lease@test.com" });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: taskId,
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: "user-1",
+        originPlatform: null,
+        originConversationId: null,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      brokerCapable: true,
+    });
+    const held = await acquireOrRenewLock(db, {
+      taskId,
+      holder: {
+        userId: "user-1",
+        sessionId: "agent-session",
+        platform: "slack",
+        surface: "dm",
+        conversationId: "D123",
+      },
+    });
+    expect(held.kind).toBe("held");
+
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: {
+        create: vi.fn(),
+        edit: vi.fn().mockResolvedValue({
+          kind: "definition" as const,
+          definition: definition({ expectedRevision: 0, title: "Configured edit" }),
+        }),
+      },
+      scheduler: { refreshTaskSchedule: vi.fn().mockResolvedValue({ id: taskId }), getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Rename the brief",
+        taskId,
+        taskContext: taskContext(),
+        lease: { sessionId: "agent-session", generation: 1 },
+      }),
+    ).resolves.toMatchObject({ kind: "saved", task: { id: taskId } });
+    await expect(createScheduledTaskRepository(db).getById(taskId)).resolves.toMatchObject({
+      title: "Configured edit",
+      revision: 1,
     });
   });
 });

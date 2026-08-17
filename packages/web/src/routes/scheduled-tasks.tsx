@@ -509,24 +509,22 @@ export function ScheduledTasksPage() {
           <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
           <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
         </div>
-        {isAdmin ? (
-          <Button
-            type="button"
-            size="sm"
-            className="shrink-0 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-[0_8px_24px_-12px_rgba(234,208,0,0.9)] transition-all hover:-translate-y-0.5 hover:bg-brand-accent/90 hover:shadow-[0_12px_28px_-12px_rgba(234,208,0,1)]"
-            onClick={() => createMutation.mutate()}
-            disabled={createMutation.isPending}
-          >
-            {createMutation.isPending ? (
-              <SpinnerGapIcon size={14} className="animate-spin" />
-            ) : (
-              <PlusIcon size={14} weight="bold" />
-            )}
-            {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          className="shrink-0 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-[0_8px_24px_-12px_rgba(234,208,0,0.9)] transition-all hover:-translate-y-0.5 hover:bg-brand-accent/90 hover:shadow-[0_12px_28px_-12px_rgba(234,208,0,1)]"
+          onClick={() => createMutation.mutate()}
+          disabled={createMutation.isPending}
+        >
+          {createMutation.isPending ? (
+            <SpinnerGapIcon size={14} className="animate-spin" />
+          ) : (
+            <PlusIcon size={14} weight="bold" />
+          )}
+          {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
+        </Button>
       </div>
-      {isAdmin && createMutation.isError ? (
+      {createMutation.isError ? (
         <p role="alert" className="mt-3 text-sm text-destructive">
           {createMutation.error instanceof Error ? createMutation.error.message : "Could not create automation"}
         </p>
@@ -538,11 +536,7 @@ export function ScheduledTasksPage() {
         ) : tasksQuery.isError ? (
           <ErrorState />
         ) : tasks.length === 0 ? (
-          <EmptyState
-            isAdmin={isAdmin}
-            isCreating={createMutation.isPending}
-            onCreate={() => createMutation.mutate()}
-          />
+          <EmptyState isCreating={createMutation.isPending} onCreate={() => createMutation.mutate()} />
         ) : (
           <>
             <AutomationToolbar
@@ -1513,11 +1507,9 @@ function DeleteTaskDialog({
 }
 
 function EmptyState({
-  isAdmin,
   isCreating,
   onCreate,
 }: {
-  isAdmin: boolean;
   isCreating: boolean;
   onCreate: () => void;
 }) {
@@ -1530,19 +1522,17 @@ function EmptyState({
       <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
-      {isAdmin ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="mt-4 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-none hover:bg-brand-accent/90"
-          onClick={onCreate}
-          disabled={isCreating}
-        >
-          {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
-          {isCreating ? "Opening builder…" : "Create with Sketch"}{" "}
-        </Button>
-      ) : null}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="mt-4 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-none hover:bg-brand-accent/90"
+        onClick={onCreate}
+        disabled={isCreating}
+      >
+        {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
+        {isCreating ? "Opening builder…" : "Create with Sketch"}{" "}
+      </Button>
     </div>
   );
 }

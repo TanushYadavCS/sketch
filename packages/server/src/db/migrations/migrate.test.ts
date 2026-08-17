@@ -30,7 +30,7 @@ import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calend
 import * as entityMergeGroupsMigration from "./186-entity-merge-groups";
 import * as entityNameProposalsMigration from "./187-entity-name-proposals";
 
-const EXPECTED_MIGRATION_COUNT = 188;
+const EXPECTED_MIGRATION_COUNT = 190;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -310,29 +310,79 @@ describe("runMigrations — full sequence", () => {
     expect(names[185]).toBe("190-cli-integration-connections");
     expect(names[186]).toBe("191-task-review-fields");
     expect(names[187]).toBe("192-scheduled-task-builder-lock-expires-at");
+    expect(names[188]).toBe("193-automation-lock-sessions");
+    expect(names[189]).toBe("194-remove-scheduled-task-builder-locks");
   });
 
-  it("accepts millisecond builder-lock expiry timestamps on SQLite", async () => {
+  it("adds portable session fencing columns with safe legacy defaults", async () => {
     await runMigrations(db, { quiet: true });
-    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const columns = await sql<{ name: string }>`
+      SELECT name
+      FROM pragma_table_info('automation_task_locks')
+      WHERE name IN ('holder_session_id', 'generation', 'steal_requester_session_id')
+      ORDER BY name
+    `.execute(db);
 
+    expect(columns.rows.map((row) => row.name)).toEqual([
+      "generation",
+      "holder_session_id",
+      "steal_requester_session_id",
+    ]);
+
+    await db.insertInto("users").values({ id: "migration-lock-user", name: "Migration Lock User" }).execute();
     await db
-      .insertInto("scheduled_task_builder_locks")
+      .insertInto("automation_task_locks")
       .values({
-        task_id: "m192-builder-lock",
-        conversation_id: "m192-conversation",
-        transcript_user_id: "m192-user",
-        expires_at: expiresAt,
+        task_id: "migration-lock-task",
+        holder_user_id: "migration-lock-user",
+        holder_platform: "web",
+        holder_surface: "builder",
+        holder_session_id: "legacy",
+        generation: 1,
+        acquired_at: "2026-08-17T10:00:00.000Z",
+        updated_at: "2026-08-17T10:00:00.000Z",
+        expires_at: "2026-08-17T10:15:00.000Z",
       })
       .execute();
 
     await expect(
       db
-        .selectFrom("scheduled_task_builder_locks")
-        .select("expires_at")
-        .where("task_id", "=", "m192-builder-lock")
+        .selectFrom("automation_task_locks")
+        .select(["holder_session_id", "generation", "steal_requester_session_id"])
+        .where("task_id", "=", "migration-lock-task")
         .executeTakeFirstOrThrow(),
-    ).resolves.toEqual({ expires_at: expiresAt });
+    ).resolves.toEqual({ holder_session_id: "legacy", generation: 1, steal_requester_session_id: null });
+  });
+
+  it("backfills legacy pending steal sessions during the upgrade", async () => {
+    const migrator = createMigrator(db);
+    await migrator.migrateTo("192-scheduled-task-builder-lock-expires-at");
+    await db
+      .insertInto("users")
+      .values([
+        { id: "legacy-lock-holder", name: "Legacy Lock Holder" },
+        { id: "legacy-lock-requester", name: "Legacy Lock Requester" },
+      ])
+      .execute();
+    await sql`
+      INSERT INTO automation_task_locks
+        (task_id, holder_user_id, holder_platform, holder_surface, acquired_at, updated_at, expires_at,
+         steal_requester_user_id, steal_requester_platform, steal_requester_surface, steal_requested_at, steal_expires_at)
+      VALUES
+        ('legacy-lock-task', 'legacy-lock-holder', 'web', 'builder', '2026-08-17T10:00:00.000Z',
+         '2026-08-17T10:00:00.000Z', '2026-08-17T10:15:00.000Z', 'legacy-lock-requester', 'web', 'builder',
+         '2026-08-17T10:01:00.000Z', '2026-08-17T10:05:00.000Z')
+    `.execute(db);
+
+    await migrator.migrateToLatest();
+
+    await expect(
+      db
+        .selectFrom("automation_task_locks")
+        .select(["holder_session_id", "generation", "steal_requester_session_id"])
+        .where("task_id", "=", "legacy-lock-task")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ holder_session_id: "legacy", generation: 1, steal_requester_session_id: "legacy" });
   });
 
   it("keeps the automation-sharing migration ledger in order", async () => {
@@ -456,12 +506,11 @@ describe("runMigrations — full sequence", () => {
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master
       WHERE type = 'table'
-        AND name IN ('organization_domains', 'scheduled_task_builder_locks', 'slack_user_sync_state', 'slack_sync_runs')
+      AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
       ORDER BY name
     `.execute(db);
     expect(tables.rows.map((row) => row.name)).toEqual([
       "organization_domains",
-      "scheduled_task_builder_locks",
       "slack_sync_runs",
       "slack_user_sync_state",
     ]);

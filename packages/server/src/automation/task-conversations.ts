@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import {
-  type ScheduledTaskBuilderLockRow,
+  type AutomationTaskLockRow,
+  LEGACY_LOCK_SESSION_ID,
+  createAutomationLocksRepository,
+} from "../db/repositories/automation-locks";
+import {
   type ScheduledTaskConversationKind,
   type ScheduledTaskConversationRow,
   type UpsertScheduledTaskConversationInput,
@@ -9,6 +13,7 @@ import {
 } from "../db/repositories/scheduled-task-conversations";
 import type { DB } from "../db/schema";
 import type { TaskContext } from "../scheduler/types";
+import { acquireOrRenewLock, releaseLock } from "./lock-service";
 
 export type { ScheduledTaskConversationKind } from "../db/repositories/scheduled-task-conversations";
 
@@ -20,6 +25,7 @@ export interface AutomationTaskConversationLockSummary {
   conversationId: string | null;
   owner: "self" | "other" | null;
   expiresAt: string | null;
+  generation: number | null;
 }
 
 export interface AutomationTaskConversationSummary {
@@ -120,39 +126,101 @@ function generatedBuilderConversationId(): string {
 }
 
 function availableBuilderLock(): AutomationTaskConversationLockSummary {
-  return { state: "available", conversationId: null, owner: null, expiresAt: null };
+  return { state: "available", conversationId: null, owner: null, expiresAt: null, generation: null };
 }
 
 function summarizeBuilderLock(
-  row: ScheduledTaskBuilderLockRow | undefined,
+  row: AutomationTaskLockRow | undefined,
   transcriptUserId: string,
+  clientSessionId?: string,
   nowMs = Date.now(),
 ): AutomationTaskConversationLockSummary {
-  if (!row || row.expires_at <= nowMs) return availableBuilderLock();
+  if (!row || Date.parse(row.expires_at) <= nowMs) return availableBuilderLock();
   return {
     state: "held",
-    conversationId: row.conversation_id,
-    owner: row.transcript_user_id === transcriptUserId ? "self" : "other",
-    expiresAt: new Date(row.expires_at).toISOString(),
+    conversationId: row.holder_conversation_id,
+    owner:
+      row.holder_user_id === transcriptUserId &&
+      (clientSessionId === undefined || row.holder_session_id === clientSessionId)
+        ? "self"
+        : "other",
+    expiresAt: row.expires_at,
+    generation: row.generation,
   };
 }
 
-async function claimBuilderLock(
-  repo: ReturnType<typeof createScheduledTaskConversationRepository>,
+async function claimAuthoringLease(
+  db: Kysely<DB>,
   taskId: string,
   conversationId: string,
   transcriptUserId: string,
-): Promise<{ acquired: boolean; lock: AutomationTaskConversationLockSummary }> {
-  const nowMs = Date.now();
-  const result = await repo.acquireBuilderLock({
+  clientSessionId = LEGACY_LOCK_SESSION_ID,
+  generation?: number,
+): Promise<{ acquired: boolean; stale: boolean; lock: AutomationTaskConversationLockSummary }> {
+  const existing = await createAutomationLocksRepository(db).getByTaskId(taskId);
+  if (
+    existing &&
+    Date.parse(existing.expires_at) > Date.now() &&
+    existing.holder_user_id === transcriptUserId &&
+    existing.holder_session_id === clientSessionId &&
+    existing.holder_conversation_id !== null &&
+    existing.holder_conversation_id !== conversationId
+  ) {
+    return {
+      acquired: false,
+      stale: false,
+      lock: summarizeBuilderLock(existing, transcriptUserId, clientSessionId),
+    };
+  }
+  if (
+    existing &&
+    Date.parse(existing.expires_at) > Date.now() &&
+    existing.holder_user_id === transcriptUserId &&
+    existing.holder_session_id === clientSessionId &&
+    generation !== undefined &&
+    generation !== existing.generation
+  ) {
+    return {
+      acquired: false,
+      stale: true,
+      lock: summarizeBuilderLock(existing, transcriptUserId, clientSessionId),
+    };
+  }
+
+  const result = await acquireOrRenewLock(db, {
     taskId,
-    conversationId,
-    transcriptUserId,
-    nowMs,
-    nowIso: new Date(nowMs).toISOString(),
-    expiresAt: nowMs + BUILDER_CHAT_LOCK_LEASE_MS,
+    holder: {
+      userId: transcriptUserId,
+      sessionId: clientSessionId,
+      platform: "web",
+      surface: "builder",
+      conversationId,
+    },
   });
-  return { acquired: result.acquired, lock: summarizeBuilderLock(result.lock, transcriptUserId, nowMs) };
+  if (result.kind === "locked") {
+    return {
+      acquired: false,
+      stale: false,
+      lock: summarizeBuilderLock(result.lock, transcriptUserId, clientSessionId),
+    };
+  }
+
+  if (result.lock.holder_conversation_id !== conversationId) {
+    await db
+      .updateTable("automation_task_locks")
+      .set({ holder_conversation_id: conversationId })
+      .where("task_id", "=", taskId)
+      .where("holder_user_id", "=", transcriptUserId)
+      .where("holder_session_id", "=", clientSessionId)
+      .where("generation", "=", result.lock.generation)
+      .execute();
+  }
+  const bound = await createAutomationLocksRepository(db).getByTaskId(taskId);
+  return {
+    acquired: true,
+    stale: false,
+    lock: summarizeBuilderLock(bound, transcriptUserId, clientSessionId),
+  };
 }
 
 export type BuilderConversationAccessResult =
@@ -163,6 +231,7 @@ export type BuilderConversationAccessResult =
       created: false;
     }
   | { kind: "locked"; lock: AutomationTaskConversationLockSummary }
+  | { kind: "stale"; lock: AutomationTaskConversationLockSummary }
   | { kind: "not_found" | "archived" | "unavailable" };
 
 /**
@@ -225,8 +294,16 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       return summarizeRows(rows);
     },
 
-    async getBuilderLock(taskId: string, transcriptUserId: string): Promise<AutomationTaskConversationLockSummary> {
-      return summarizeBuilderLock(await repo.getBuilderLock(taskId), transcriptUserId);
+    async getBuilderLock(
+      taskId: string,
+      transcriptUserId: string,
+      clientSessionId?: string,
+    ): Promise<AutomationTaskConversationLockSummary> {
+      return summarizeBuilderLock(
+        await createAutomationLocksRepository(db).getByTaskId(taskId),
+        transcriptUserId,
+        clientSessionId,
+      );
     },
 
     async hasAnyAssociation(taskId: string, conversationId: string): Promise<boolean> {
@@ -238,6 +315,7 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       conversationId: string,
       transcriptUserId: string,
       archived: boolean,
+      lease?: { clientSessionId?: string; generation?: number },
     ): Promise<AutomationTaskConversationSummary | undefined> {
       const changed = await db.transaction().execute(async (trx) => {
         const trxRepo = createScheduledTaskConversationRepository(trx);
@@ -247,29 +325,53 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
           transcriptUserId,
           archived,
         );
-        if (updated && archived) await trxRepo.releaseBuilderLock(taskId, conversationId, transcriptUserId);
+        if (updated && archived) {
+          await releaseLock(trx, {
+            taskId,
+            userId: transcriptUserId,
+            sessionId: lease?.clientSessionId,
+            generation: lease?.generation,
+          });
+        }
         return updated;
       });
       if (!changed) return undefined;
       return this.getForTranscriptUser(taskId, conversationId, transcriptUserId, { includeArchived: true });
     },
 
-    async getOrCreateBuilderConversation(taskId: string, transcriptUserId: string) {
+    async getOrCreateBuilderConversation(
+      taskId: string,
+      transcriptUserId: string,
+      lease?: { clientSessionId?: string; generation?: number },
+    ) {
       const existing = await repo.listByTaskAndTranscriptUser(taskId, transcriptUserId, {
         kind: "builder",
       });
       if (existing.length > 0) {
-        return this.selectBuilderConversation(taskId, existing[0].conversation_id, transcriptUserId, "builder");
+        return this.selectBuilderConversation(taskId, existing[0].conversation_id, transcriptUserId, "builder", lease);
       }
 
-      return this.createBuilderConversation(taskId, transcriptUserId);
+      return this.createBuilderConversation(taskId, transcriptUserId, undefined, lease);
     },
 
-    async createBuilderConversation(taskId: string, transcriptUserId: string, conversationId?: string) {
+    async createBuilderConversation(
+      taskId: string,
+      transcriptUserId: string,
+      conversationId?: string,
+      lease?: { clientSessionId?: string; generation?: number },
+    ) {
       return db.transaction().execute(async (trx) => {
         const trxRepo = createScheduledTaskConversationRepository(trx);
         const builderConversationId = conversationId ?? generatedBuilderConversationId();
-        const claimed = await claimBuilderLock(trxRepo, taskId, builderConversationId, transcriptUserId);
+        const claimed = await claimAuthoringLease(
+          trx,
+          taskId,
+          builderConversationId,
+          transcriptUserId,
+          lease?.clientSessionId,
+          lease?.generation,
+        );
+        if (claimed.stale) return { kind: "stale" as const, lock: claimed.lock };
         if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
 
         const association = await trxRepo.upsert({
@@ -287,6 +389,7 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       conversationId: string,
       transcriptUserId: string,
       kind?: ScheduledTaskConversationKind,
+      lease?: { clientSessionId?: string; generation?: number },
     ): Promise<BuilderConversationAccessResult> {
       return db.transaction().execute(async (trx) => {
         const trxRepo = createScheduledTaskConversationRepository(trx);
@@ -302,7 +405,15 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
           return { kind: "not_found" as const };
         }
 
-        const claimed = await claimBuilderLock(trxRepo, taskId, conversationId, transcriptUserId);
+        const claimed = await claimAuthoringLease(
+          trx,
+          taskId,
+          conversationId,
+          transcriptUserId,
+          lease?.clientSessionId,
+          lease?.generation,
+        );
+        if (claimed.stale) return { kind: "stale" as const, lock: claimed.lock };
         if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
         const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
           taskId,
@@ -319,6 +430,7 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       taskId: string,
       conversationId: string,
       transcriptUserId: string,
+      lease?: { clientSessionId?: string; generation?: number },
     ): Promise<BuilderConversationAccessResult> {
       return db.transaction().execute(async (trx) => {
         const trxRepo = createScheduledTaskConversationRepository(trx);
@@ -329,7 +441,15 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
         const activeRows = rows.filter((row) => row.archived_at === null);
         if (activeRows.length === 0) return { kind: "archived" as const };
 
-        const claimed = await claimBuilderLock(trxRepo, taskId, conversationId, transcriptUserId);
+        const claimed = await claimAuthoringLease(
+          trx,
+          taskId,
+          conversationId,
+          transcriptUserId,
+          lease?.clientSessionId,
+          lease?.generation,
+        );
+        if (claimed.stale) return { kind: "stale" as const, lock: claimed.lock };
         if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
         const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
           taskId,
