@@ -2,8 +2,8 @@
  * AutomationLockStealDialog — requester side of the whole-automation edit lock.
  *
  * The viewer (read-only because another member holds the lock) requests a
- * takeover here. The backend only returns `{ status: "pending" }`; whether the
- * request was approved, denied, or expired is learned from the lock view that
+ * takeover here. The backend returns the pending lock snapshot; whether the
+ * request was approved, denied, or expired is then learned from the lock view that
  * the builder polls, so the dialog watches the live `lock` prop:
  *
  * - `lock.isHeldByMe` becomes true  -> approved: toast + close (heartbeat
@@ -50,7 +50,7 @@ export function AutomationLockStealDialog({
   lock: AutomationEditLockView | null;
   clientSessionId: string;
   generation?: number;
-  onRequested?: () => void;
+  onRequested?: (lock: AutomationEditLockView) => void;
 }) {
   const [phase, setPhase] = useState<StealPhase>("confirm");
   const [requestedAt, setRequestedAt] = useState<number | null>(null);
@@ -67,8 +67,8 @@ export function AutomationLockStealDialog({
         clientSessionId,
         ...(generation === undefined ? {} : { generation }),
       }),
-    onSuccess: () => {
-      onRequested?.();
+    onSuccess: ({ lock: nextLock }) => {
+      if (nextLock) onRequested?.(nextLock);
       setRequestedAt(Date.now());
       setPhase("waiting");
     },

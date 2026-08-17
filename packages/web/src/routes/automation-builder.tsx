@@ -617,7 +617,6 @@ export function AutomationBuilderPage() {
   const pendingSaveCountRef = useRef(0);
   const runLeaseRef = useRef<AutomationLeaseRequest | null>(null);
   const testLeaseRef = useRef<AutomationLeaseRequest | null>(null);
-  const takeoverRequestedRef = useRef(false);
 
   const navigateToAutomations = useCallback(() => {
     void navigate({ to: "/scheduled-tasks" });
@@ -651,7 +650,10 @@ export function AutomationBuilderPage() {
     refetchOnWindowFocus: true,
   });
 
-  const editLockQueryKey = useMemo(() => ["automation-edit-lock", taskId] as const, [taskId]);
+  const editLockQueryKey = useMemo(
+    () => ["automation-edit-lock", taskId, clientSessionId] as const,
+    [clientSessionId, taskId],
+  );
   const editLockQuery = useQuery({
     queryKey: editLockQueryKey,
     queryFn: async () => {
@@ -662,6 +664,8 @@ export function AutomationBuilderPage() {
     initialDataUpdatedAt: Date.now(),
     staleTime: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
     refetchInterval: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
     enabled: Boolean(automationQuery.data),
   });
   const definitionLock = automationQuery.data?.lock ?? null;
@@ -875,7 +879,12 @@ export function AutomationBuilderPage() {
   );
 
   const acquireLockMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.acquireLock(taskId, clientSessionId, authoringLease?.generation),
+    mutationFn: () =>
+      api.scheduledTasks.acquireLock(
+        taskId,
+        clientSessionId,
+        authoringLease?.generation ?? (lockView?.isHeldByMe ? lockView.generation : undefined),
+      ),
     onSuccess: ({ lock }) => {
       queryClient.setQueryData(editLockQueryKey, lock);
       setAuthoringLease({ clientSessionId, generation: lock.generation, holder: lock });
@@ -897,8 +906,7 @@ export function AutomationBuilderPage() {
   }, [acquireLock, autoAcquireEnabled]);
 
   useEffect(() => {
-    if (!takeoverRequestedRef.current || authoringLease || !lockView?.isHeldByMe || !lockView.generation) return;
-    takeoverRequestedRef.current = false;
+    if (authoringLease || !lockView?.isHeldByMe || !lockView.generation) return;
     setAuthoringLease({ clientSessionId, generation: lockView.generation, holder: lockView });
   }, [authoringLease, clientSessionId, lockView]);
 
@@ -1284,8 +1292,8 @@ export function AutomationBuilderPage() {
         lock={lockView}
         clientSessionId={clientSessionId}
         generation={authoringLease?.generation}
-        onRequested={() => {
-          takeoverRequestedRef.current = true;
+        onRequested={(nextLock) => {
+          queryClient.setQueryData(editLockQueryKey, nextLock);
         }}
       />
 
@@ -1295,6 +1303,15 @@ export function AutomationBuilderPage() {
         onOpenChange={setHolderResponseDialogOpen}
         lock={lockView}
         lease={authoringLease ? leaseRequest(authoringLease) : null}
+        onResponded={(nextLock) => {
+          queryClient.setQueryData(editLockQueryKey, nextLock);
+          if (nextLock.isHeldByMe) {
+            setAuthoringLease({ clientSessionId, generation: nextLock.generation, holder: nextLock });
+          } else {
+            setAuthoringLease(null);
+          }
+          void queryClient.invalidateQueries({ queryKey: builderConversationQueryKey(taskId, clientSessionId) });
+        }}
       />
     </div>
   );
@@ -1740,6 +1757,9 @@ function BuilderChatSidecar({
         includeArchived: true,
         clientSessionId,
       }),
+    refetchInterval: AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
   const webChatConversationsQuery = useQuery({
     queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
@@ -1873,7 +1893,7 @@ function BuilderChatSidecar({
         newPending={createMutation.isPending}
         newDisabled={!authoringLease}
         onArchive={
-          selectedConversation && !selectedIsArchived
+          selectedConversation && !selectedIsArchived && authoringLease
             ? () => archiveMutation.mutate(selectedConversation.conversationId)
             : undefined
         }
@@ -1888,10 +1908,9 @@ function BuilderChatSidecar({
           <BuilderChatListView
             conversations={visibleConversations}
             builderLock={conversationsQuery.data.builderLock}
-            canSelect={Boolean(authoringLease)}
             summaryById={webChatSummaryById}
             onSelect={(conversation) => {
-              if (conversation.state === "archived") openConversation(conversation.conversationId);
+              if (conversation.state === "archived" || !authoringLease) openConversation(conversation.conversationId);
               else selectMutation.mutate(conversation);
             }}
             selectingConversationId={selectMutation.isPending ? selectMutation.variables?.conversationId : null}
@@ -1903,6 +1922,7 @@ function BuilderChatSidecar({
             onBack={openChatList}
             onRestore={() => restoreMutation.mutate(selectedConversation.conversationId)}
             restoring={restoreMutation.isPending}
+            canRestore={Boolean(authoringLease)}
           />
         ) : (
           <BuilderChatTranscript
@@ -2047,14 +2067,12 @@ function BuilderChatHeader({
 function BuilderChatListView({
   conversations,
   builderLock,
-  canSelect,
   summaryById,
   onSelect,
   selectingConversationId,
 }: {
   conversations: ScheduledTaskConversationSummary[];
   builderLock?: ScheduledTaskConversationLock;
-  canSelect: boolean;
   summaryById: ReadonlyMap<string, WebChatConversationSummary>;
   onSelect: (conversation: ScheduledTaskConversationSummary) => void;
   selectingConversationId: string | null;
@@ -2072,7 +2090,7 @@ function BuilderChatListView({
         aria-label={`Open ${conversation.state === "archived" ? "archived " : ""}chat: ${conversationTitle}`}
         className="group flex w-full min-w-0 items-start gap-2.5 rounded-[9px] px-2.5 py-2.5 text-left outline-none transition-[background-color,color] hover:bg-muted/70 focus-visible:bg-muted/80 focus-visible:ring-2 focus-visible:ring-brand-accent/55 disabled:cursor-wait disabled:opacity-60"
         onClick={() => onSelect(conversation)}
-        disabled={selectingConversationId !== null || (conversation.state === "active" && !canSelect)}
+        disabled={selectingConversationId !== null}
       >
         <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-muted/80 text-brand-accent transition-colors group-hover:bg-brand-accent/12">
           <RobotIcon size={15} weight="fill" />
@@ -2237,10 +2255,12 @@ function BuilderChatArchivedState({
   onBack,
   onRestore,
   restoring,
+  canRestore,
 }: {
   onBack: () => void;
   onRestore: () => void;
   restoring: boolean;
+  canRestore: boolean;
 }) {
   return (
     <div
@@ -2257,7 +2277,7 @@ function BuilderChatArchivedState({
             size="sm"
             className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
             onClick={onRestore}
-            disabled={restoring}
+            disabled={restoring || !canRestore}
           >
             {restoring ? <SpinnerGapIcon size={14} className="animate-spin" /> : <ArrowClockwiseIcon size={14} />}
             Restore chat
@@ -2341,7 +2361,10 @@ function BuilderChatTranscript({
   const selectBuilderConversation = useCallback(
     async (isCancelled?: () => boolean) => {
       setLockStatus("loading");
-      if (!authoringLease) return;
+      if (!authoringLease) {
+        setLockStatus("ready");
+        return;
+      }
       try {
         const { conversation } = await api.scheduledTasks.selectConversation(
           taskId,

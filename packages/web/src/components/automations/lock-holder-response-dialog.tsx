@@ -28,12 +28,14 @@ export function AutomationLockHolderResponseDialog({
   onOpenChange,
   lock,
   lease,
+  onResponded,
 }: {
   taskId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   lock: AutomationEditLockView | null;
   lease: { clientSessionId: string; generation: number } | null;
+  onResponded?: (lock: AutomationEditLockView) => void;
 }) {
   const requesterName = lock?.stealPending?.requesterName ?? "Another member";
   const respondMutation = useMutation({
@@ -41,7 +43,8 @@ export function AutomationLockHolderResponseDialog({
       if (!lease) throw new Error("The editing session is no longer active");
       return api.scheduledTasks.respondToStealRequest(taskId, approve, lease);
     },
-    onSuccess: (_, approve) => {
+    onSuccess: ({ lock: nextLock }, approve) => {
+      if (nextLock) onResponded?.(nextLock);
       toast.success(approve ? `Editing handed over to ${requesterName}` : "Takeover request denied");
       onOpenChange(false);
     },

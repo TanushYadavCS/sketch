@@ -58,6 +58,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       scheduledTasks: {
         get: mocks.getAutomation,
         conversations: mocks.listConversations,
+        conversationMessages: mocks.loadMessages,
         createConversation: mocks.createConversation,
         selectConversation: mocks.selectConversation,
         archiveConversation: mocks.archiveConversation,
@@ -438,6 +439,104 @@ describe("AutomationBuilderPage edit lock", () => {
     expect(within(drawer).getByRole("button", { name: "Save prompt" })).toBeDisabled();
   });
 
+  it("opens an authorized transcript without taking the automation edit lock", async () => {
+    const otherLock = heldByOtherLock();
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: otherLock }));
+    mocks.acquireLock.mockRejectedValue(lockedError(otherLock));
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-member-thread",
+          kinds: ["builder"],
+          createdAt: "2026-08-17T09:00:00.000Z",
+          updatedAt: "2026-08-17T09:00:00.000Z",
+          lastActiveAt: "2026-08-17T09:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Owner Member",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Open chat: Automation chat" }));
+    expect(mocks.selectConversation).not.toHaveBeenCalled();
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/scheduled-tasks/$taskId/edit",
+      params: { taskId: "task-123" },
+      search: { conversationId: "builder-member-thread" },
+      replace: true,
+    });
+  });
+
+  it("loads a directly opened transcript in read-only mode without selecting its builder lease", async () => {
+    const otherLock = heldByOtherLock();
+    mocks.search = { conversationId: "builder-member-thread" };
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: otherLock }));
+    mocks.acquireLock.mockRejectedValue(lockedError(otherLock));
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-member-thread",
+          kinds: ["builder"],
+          createdAt: "2026-08-17T09:00:00.000Z",
+          updatedAt: "2026-08-17T09:00:00.000Z",
+          lastActiveAt: "2026-08-17T09:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+          transcriptUserName: "Owner Member",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+
+    renderBuilder();
+
+    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("task-123", "builder-member-thread"));
+    expect(mocks.selectConversation).not.toHaveBeenCalled();
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+  });
+
+  it("refreshes the conversation list while the builder tab is in the background", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    let conversations: Array<Record<string, unknown>> = [];
+    mocks.listConversations.mockImplementation(async () => ({
+      taskId: "task-123",
+      conversations,
+      transcriptAccess: "owner",
+    }));
+    mocks.acquireLock.mockImplementation(async () => ({ lock: heldByMeLock() }));
+
+    renderBuilder();
+
+    expect(await screen.findByText("No chats yet. Start one when you are ready.")).toBeInTheDocument();
+    document.dispatchEvent(new Event("visibilitychange"));
+    conversations = [
+      {
+        conversationId: "builder-new-thread",
+        kinds: ["builder"],
+        createdAt: "2026-08-17T09:00:00.000Z",
+        updatedAt: "2026-08-17T09:00:00.000Z",
+        lastActiveAt: "2026-08-17T09:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+        transcriptUserName: "Owner Member",
+      },
+    ];
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS);
+    });
+
+    expect(await screen.findByRole("button", { name: "Open chat: Automation chat" })).toBeInTheDocument();
+  });
+
   it("treats another session for the same user as a different editor", async () => {
     const otherSessionLock = heldByOtherLock({
       heldByUserId: "user-1",
@@ -628,6 +727,60 @@ describe("AutomationBuilderPage edit lock", () => {
       }),
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith("Takeover request denied");
+  });
+
+  it("rehydrates the holder lease generation after a page reload", async () => {
+    const resumedLock = heldByMeLock({
+      generation: 7,
+      stealPending: {
+        requesterName: "Carol Davis",
+        expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS).toISOString(),
+      },
+    });
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: resumedLock }));
+    mocks.acquireLock.mockImplementation(async (_taskId: string, _clientSessionId: string, generation?: number) => {
+      if (generation !== 7) throw new ApiRequestError("The editing session changed", 409, "LEASE_STALE", {});
+      return { lock: resumedLock };
+    });
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    await waitFor(() => expect(mocks.acquireLock).toHaveBeenCalledWith("task-123", expect.any(String), 7));
+    await user.click(screen.getByRole("button", { name: /Review request/ }));
+    await user.click(await screen.findByRole("button", { name: "Approve takeover" }));
+    await waitFor(() =>
+      expect(mocks.respondToSteal).toHaveBeenCalledWith("task-123", true, {
+        clientSessionId: expect.any(String),
+        generation: 7,
+      }),
+    );
+  });
+
+  it("discovers takeover requests while the holder tab is in the background", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    let currentLock = heldByMeLock();
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: currentLock }));
+    mocks.acquireLock.mockImplementation(async () => ({ lock: currentLock }));
+
+    renderBuilder();
+
+    expect(await screen.findByText("You're editing")).toBeInTheDocument();
+    document.dispatchEvent(new Event("visibilitychange"));
+    currentLock = heldByMeLock({
+      stealPending: {
+        requesterName: "Carol Davis",
+        expiresAt: new Date(Date.now() + AUTOMATION_EDIT_LOCK_STEAL_REQUEST_TTL_MS).toISOString(),
+      },
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS);
+    });
+
+    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
   });
 
   it("pauses the heartbeat while the tab is not focused", async () => {

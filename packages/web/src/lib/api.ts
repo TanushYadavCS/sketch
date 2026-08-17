@@ -2823,16 +2823,22 @@ export const api = {
       });
     },
     requestSteal(taskId: string, lease: { clientSessionId: string; generation?: number }) {
-      return request<{ status: "pending" }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`, {
-        method: "POST",
-        body: JSON.stringify(lease),
-      });
+      return request<{ status: "pending"; lock: AutomationEditLockView }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal`,
+        {
+          method: "POST",
+          body: JSON.stringify(lease),
+        },
+      );
     },
     respondToStealRequest(taskId: string, approve: boolean, lease: { clientSessionId: string; generation: number }) {
-      return request<{ success: true }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`, {
-        method: "POST",
-        body: JSON.stringify({ approve, ...lease }),
-      });
+      return request<{ status: "approved" | "denied"; lock: AutomationEditLockView }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/lock/steal/response`,
+        {
+          method: "POST",
+          body: JSON.stringify({ approve, ...lease }),
+        },
+      );
     },
     async getStepContent(taskId: string) {
       const res = await request<{ stepContent: AutomationStepContentItem[] }>(
