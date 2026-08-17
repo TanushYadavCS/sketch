@@ -640,7 +640,7 @@ export function AutomationBuilderPage() {
 
   const automationQuery = useQuery({
     queryKey,
-    queryFn: () => api.scheduledTasks.get(taskId),
+    queryFn: () => api.scheduledTasks.get(taskId, { clientSessionId }),
     refetchInterval: (query) =>
       query.state.data?.recentRuns.some((run) => {
         const state = automationRunLifecycleState(run);
@@ -655,7 +655,7 @@ export function AutomationBuilderPage() {
   const editLockQuery = useQuery({
     queryKey: editLockQueryKey,
     queryFn: async () => {
-      const definition = await api.scheduledTasks.get(taskId);
+      const definition = await api.scheduledTasks.get(taskId, { clientSessionId });
       return definition.lock ?? null;
     },
     initialData: automationQuery.data?.lock ?? null,

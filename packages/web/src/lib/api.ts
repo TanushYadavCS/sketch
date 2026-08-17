@@ -202,6 +202,7 @@ export interface AutomationEditLockView {
   expiresAt: string | null;
   generation: number;
   isHeldByMe: boolean;
+  isHeldByMyOtherSession?: boolean;
   stealPending: AutomationEditStealPending | null;
 }
 
@@ -2690,8 +2691,13 @@ export const api = {
       );
       return { run: normalizeAutomationRun(res.run, taskId) };
     },
-    async get(taskId: string) {
-      const res = await request<{ automation: AutomationDefinitionWithLock }>(`/api/scheduled-tasks/${taskId}`);
+    async get(taskId: string, options?: { clientSessionId?: string }) {
+      const params = new URLSearchParams();
+      if (options?.clientSessionId) params.set("clientSessionId", options.clientSessionId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const res = await request<{ automation: AutomationDefinitionWithLock }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}${query}`,
+      );
       return res.automation;
     },
     originChatMessages(taskId: string) {

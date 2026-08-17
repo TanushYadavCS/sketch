@@ -57,6 +57,7 @@ export function AutomationLockStealDialog({
   const sawPendingRef = useRef(false);
   const resolvedRef = useRef(false);
   const holderName = lock?.heldByName ?? "the current editor";
+  const heldByMyOtherSession = lock?.isHeldByMyOtherSession === true;
   const stealPending = lock?.stealPending ?? null;
   const now = useLockNow(phase === "waiting");
 
@@ -134,8 +135,9 @@ export function AutomationLockStealDialog({
           <DialogDescription className="text-xs">
             {phase === "confirm" ? (
               <>
-                {holderName} is currently editing this automation. Sketch will ask them to approve the takeover — until
-                they do, the workflow stays read-only.
+                {heldByMyOtherSession
+                  ? "This automation is open in another one of your sessions. Sketch will ask that session to approve the takeover — until it does, the workflow stays read-only."
+                  : `${holderName} is currently editing this automation. Sketch will ask them to approve the takeover — until they do, the workflow stays read-only.`}
               </>
             ) : phase === "waiting" ? (
               <>Waiting for {holderName} to approve. This automation is still read-only for now.</>
@@ -182,7 +184,7 @@ export function AutomationLockStealDialog({
           {phase === "confirm" ? (
             <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
               <LockKeyIcon size={12} />
-              Only {holderName} can approve
+              {heldByMyOtherSession ? "Only the other session can approve" : `Only ${holderName} can approve`}
             </span>
           ) : null}
           {phase === "confirm" ? (

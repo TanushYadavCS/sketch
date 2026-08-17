@@ -132,7 +132,9 @@ export function AutomationLockBanner({
     >
       <LockIcon size={13} weight="fill" className="shrink-0 text-amber-700 dark:text-amber-300" />
       <span className="min-w-0 truncate">
-        Editing by {lock.heldByName ?? "another member"}
+        {lock.isHeldByMyOtherSession
+          ? "Open in another one of your sessions"
+          : `Editing by ${lock.heldByName ?? "another member"}`}
         {since ? (
           <span data-testid="automation-lock-since" className="text-muted-foreground">
             {" "}

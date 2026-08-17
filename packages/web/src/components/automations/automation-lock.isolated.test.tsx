@@ -385,6 +385,29 @@ describe("AutomationBuilderPage edit lock", () => {
     expect(within(drawer).getByRole("button", { name: "Save prompt" })).toBeDisabled();
   });
 
+  it("treats another session for the same user as a different editor", async () => {
+    const otherSessionLock = heldByOtherLock({
+      heldByUserId: "user-1",
+      heldByName: "Owner Member",
+      isHeldByMyOtherSession: true,
+    });
+    mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: otherSessionLock }));
+    mocks.acquireLock.mockRejectedValue(lockedError(otherSessionLock));
+
+    renderBuilder();
+
+    const banner = await screen.findByTestId("automation-lock-banner");
+    expect(banner).toHaveAttribute("data-lock-state", "held-by-other");
+    expect(screen.queryByText("You're editing")).not.toBeInTheDocument();
+    expect(screen.getByText(/Open in another one of your sessions/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Take over editing/ })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.getAutomation).toHaveBeenCalledWith("task-123", {
+        clientSessionId: expect.any(String),
+      }),
+    );
+  });
+
   it("requests a takeover, waits for approval, then starts heartbeat renewals", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const user = userEvent.setup();
