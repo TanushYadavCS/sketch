@@ -19,6 +19,7 @@ import {
   releaseLock,
   requestSteal,
 } from "../automation/lock-service";
+import type { AuthoringLeaseAuthorization } from "../automation/lock-service";
 import {
   createAutomationDraft,
   deleteAutomation,
@@ -538,19 +539,43 @@ export function scheduledTaskRoutes(
     });
   }
 
-  async function reserveManualRun(taskId: string, triggeredByUserId?: string | null): Promise<string | null> {
+  type ManualRunReservation =
+    | { kind: "reserved"; runId: string }
+    | {
+        kind: "lease_denied";
+        authorization: Extract<AuthoringLeaseAuthorization, { kind: "conflict" | "stale" }>;
+      }
+    | { kind: "failed" };
+
+  async function reserveManualRun(
+    taskId: string,
+    triggeredByUserId: string | null,
+    lease: { clientSessionId: string; generation?: number } | undefined,
+  ): Promise<ManualRunReservation> {
     const runId = randomUUID();
     try {
-      await runsRepo.create({
-        id: runId,
-        taskId,
-        triggerData: { type: "manual" },
-        triggeredByUserId: triggeredByUserId ?? null,
+      return await db.transaction().execute(async (trx) => {
+        const authorization = await authorizeAuthoringLease(trx, {
+          taskId,
+          userId: triggeredByUserId,
+          sessionId: lease?.clientSessionId,
+          generation: lease?.generation,
+        });
+        if (authorization.kind === "conflict" || authorization.kind === "stale") {
+          return { kind: "lease_denied" as const, authorization };
+        }
+
+        await createAutomationRunsRepository(trx).create({
+          id: runId,
+          taskId,
+          triggerData: { type: "manual" },
+          triggeredByUserId,
+        });
+        return { kind: "reserved" as const, runId };
       });
-      return runId;
     } catch (error) {
       logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to reserve manual run");
-      return null;
+      return { kind: "failed" };
     }
   }
 
@@ -927,37 +952,37 @@ export function scheduledTaskRoutes(
     userId: string | null,
     lease: { clientSessionId: string; generation?: number } | undefined,
   ): Promise<Response | null> {
-    const authorization = await authorizeAuthoringLease(db, {
-      taskId,
-      userId,
-      sessionId: lease?.clientSessionId,
-      generation: lease?.generation,
-    });
-    if (authorization.kind === "conflict") {
-      return c.json(
-        {
-          error: {
-            code: "LOCKED",
-            message: "Automation is locked by another editor",
-            lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
-          },
-        },
-        409,
-      );
-    }
-    if (authorization.kind === "stale") {
-      return c.json(
-        {
-          error: {
-            code: "LEASE_STALE",
-            message: "Editing session is stale",
-            lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
-          },
-        },
-        409,
-      );
+    const authorization = await db.transaction().execute((trx) =>
+      authorizeAuthoringLease(trx, {
+        taskId,
+        userId,
+        sessionId: lease?.clientSessionId,
+        generation: lease?.generation,
+      }),
+    );
+    if (authorization.kind === "conflict" || authorization.kind === "stale") {
+      return manualRunLeaseError(c, userId, lease, authorization);
     }
     return null;
+  }
+
+  async function manualRunLeaseError(
+    c: Context,
+    userId: string | null,
+    lease: { clientSessionId: string; generation?: number } | undefined,
+    authorization: Extract<AuthoringLeaseAuthorization, { kind: "conflict" | "stale" }>,
+  ): Promise<Response> {
+    return c.json(
+      {
+        error: {
+          code: authorization.kind === "conflict" ? "LOCKED" : "LEASE_STALE",
+          message:
+            authorization.kind === "conflict" ? "Automation is locked by another editor" : "Editing session is stale",
+          lock: await toLockView(authorization.lock, userId, users, lease?.clientSessionId),
+        },
+      },
+      409,
+    );
   }
 
   function leaseForPersistence(
@@ -1424,16 +1449,17 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const leaseError = await authorizeManualRun(c, id, result.userId, request.lease);
-    if (leaseError) return leaseError;
-
-    const runId = await reserveManualRun(id, result.userId);
-    if (!runId) {
+    const reservation = await reserveManualRun(id, result.userId, request.lease);
+    if (reservation.kind === "lease_denied") {
+      return manualRunLeaseError(c, result.userId, request.lease, reservation.authorization);
+    }
+    if (reservation.kind === "failed") {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
+    const runId = reservation.runId;
     if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }
@@ -1611,16 +1637,17 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    const leaseError = await authorizeManualRun(c, id, result.userId, request.lease);
-    if (leaseError) return leaseError;
-
-    const runId = await reserveManualRun(id, result.userId);
-    if (!runId) {
+    const reservation = await reserveManualRun(id, result.userId, request.lease);
+    if (reservation.kind === "lease_denied") {
+      return manualRunLeaseError(c, result.userId, request.lease, reservation.authorization);
+    }
+    if (reservation.kind === "failed") {
       return c.json(
         { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
         503,
       );
     }
+    const runId = reservation.runId;
     if (!(await enqueueReservedManualRun(id, runId, result.userId))) {
       return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
     }

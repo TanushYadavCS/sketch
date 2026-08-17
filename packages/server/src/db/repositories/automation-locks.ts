@@ -229,6 +229,46 @@ export function createAutomationLocksRepository(db: Kysely<DB>) {
       return db.selectFrom("automation_task_locks").selectAll().where("task_id", "=", taskId).executeTakeFirst();
     },
 
+    /**
+     * Touches and holds an exact live lease row for the caller's transaction.
+     * The guarded UPDATE obtains the row lock before the caller writes the
+     * automation definition; the read-back is the dialect-neutral match check
+     * and does not rely on affected-row counts.
+     */
+    async touchIfExactHolder(params: {
+      taskId: string;
+      userId: string;
+      sessionId: string;
+      generation: number;
+      now: string;
+    }): Promise<AutomationTaskLockRow | undefined> {
+      await db
+        .updateTable("automation_task_locks")
+        .set({ updated_at: params.now })
+        .where("task_id", "=", params.taskId)
+        .where("holder_user_id", "=", params.userId)
+        .where("holder_session_id", "=", params.sessionId)
+        .where("generation", "=", params.generation)
+        .where("expires_at", ">", params.now)
+        .execute();
+
+      const row = await db
+        .selectFrom("automation_task_locks")
+        .selectAll()
+        .where("task_id", "=", params.taskId)
+        .executeTakeFirst();
+      if (!row) return undefined;
+      if (
+        row.holder_user_id !== params.userId ||
+        row.holder_session_id !== params.sessionId ||
+        row.generation !== params.generation ||
+        row.expires_at <= params.now
+      ) {
+        return undefined;
+      }
+      return row;
+    },
+
     /** Removes every lock row for a task (deleteAutomation's transaction). */
     async deleteByTaskId(taskId: string): Promise<void> {
       await db.deleteFrom("automation_task_locks").where("task_id", "=", taskId).execute();

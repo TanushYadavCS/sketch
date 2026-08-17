@@ -92,6 +92,55 @@ describe("automation_task_locks repository on shared Postgres", () => {
     await expect(locks.getByTaskId("pg-task-1")).resolves.toBeUndefined();
   });
 
+  it("guards an exact lease touch and rejects its stale generation after takeover", async () => {
+    const locks = createAutomationLocksRepository(db);
+    const holder = { ...HOLDER_A, sessionId: "pg-tab-a" };
+    await locks.insertIfAbsent(holder, {
+      taskId: "pg-task-guarded",
+      now: "2026-08-01T10:00:00.000Z",
+      expiresAt: "2026-08-01T10:01:00.000Z",
+    });
+
+    await expect(
+      locks.touchIfExactHolder({
+        taskId: "pg-task-guarded",
+        userId: HOLDER_A.userId,
+        sessionId: "pg-tab-a",
+        generation: 1,
+        now: "2026-08-01T10:00:30.000Z",
+      }),
+    ).resolves.toMatchObject({
+      holder_user_id: HOLDER_A.userId,
+      holder_session_id: "pg-tab-a",
+      generation: 1,
+      updated_at: "2026-08-01T10:00:30.000Z",
+    });
+
+    await locks.takeoverExpired(
+      { ...HOLDER_B, sessionId: "pg-tab-b" },
+      {
+        taskId: "pg-task-guarded",
+        now: "2026-08-01T10:02:00.000Z",
+        expiresAt: "2026-08-01T10:17:00.000Z",
+      },
+    );
+
+    await expect(
+      locks.touchIfExactHolder({
+        taskId: "pg-task-guarded",
+        userId: HOLDER_A.userId,
+        sessionId: "pg-tab-a",
+        generation: 1,
+        now: "2026-08-01T10:02:01.000Z",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(locks.getByTaskId("pg-task-guarded")).resolves.toMatchObject({
+      holder_user_id: HOLDER_B.userId,
+      holder_session_id: "pg-tab-b",
+      generation: 2,
+    });
+  });
+
   it("runs the steal CAS chain and guards every transition", async () => {
     const locks = createAutomationLocksRepository(db);
     await locks.insertIfAbsent(HOLDER_A, {

@@ -77,10 +77,12 @@ function iso(nowMs: number): string {
 }
 
 /**
- * Checks an authoring lease without mutating it. A live lease is authoritative
- * only when the authenticated user, client session, and generation all match.
- * The caller may use `no_lease` or `expired` to apply an operation's policy;
- * neither result grants authority to a browser save by itself.
+ * Checks an authoring lease. An exact live lease is touched with a guarded
+ * update so a caller transaction can hold the row lock while it persists a
+ * mutation. A live lease is authoritative only when the authenticated user,
+ * client session, and generation all match. The caller may use `no_lease` or
+ * `expired` to apply an operation's policy; neither result grants authority to
+ * a browser save by itself.
  */
 export async function authorizeAuthoringLease(
   db: Kysely<DB>,
@@ -92,10 +94,23 @@ export async function authorizeAuthoringLease(
     nowMs?: number;
   },
 ): Promise<AuthoringLeaseAuthorization> {
-  const row = await createAutomationLocksRepository(db).getByTaskId(params.taskId);
+  const repo = createAutomationLocksRepository(db);
+  const nowMs = params.nowMs ?? Date.now();
+  const now = iso(nowMs);
+  if (params.userId && params.sessionId && params.generation !== undefined) {
+    const held = await repo.touchIfExactHolder({
+      taskId: params.taskId,
+      userId: params.userId,
+      sessionId: params.sessionId,
+      generation: params.generation,
+      now,
+    });
+    if (held) return { kind: "held", lock: held };
+  }
+
+  const row = await repo.getByTaskId(params.taskId);
   if (!row) return { kind: "no_lease" };
 
-  const now = iso(params.nowMs ?? Date.now());
   if (row.expires_at <= now) return { kind: "expired", lock: row };
 
   if (params.generation !== undefined && row.generation !== params.generation) {
