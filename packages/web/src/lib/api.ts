@@ -1900,12 +1900,19 @@ export const api = {
         method: "DELETE",
       });
     },
-    interrupt(conversationId: string, automationTaskId?: string) {
+    interrupt(
+      conversationId: string,
+      automationTaskId?: string,
+      lease?: { clientSessionId: string; generation: number } | null,
+    ) {
       const query = new URLSearchParams({ conversationId });
       if (automationTaskId) query.set("automationTaskId", automationTaskId);
       return request<{ success: boolean; interrupted: boolean }>(
         `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions?${query.toString()}`,
-        { method: "POST" },
+        {
+          method: "POST",
+          ...(automationTaskId && lease ? { body: JSON.stringify(lease) } : {}),
+        },
       );
     },
     transcribe(audioBlob: Blob, filename = "recording.webm") {

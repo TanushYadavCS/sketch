@@ -2541,10 +2541,10 @@ function BuilderChatTranscript({
     if (stoppingRun) return;
     setStoppingRun(true);
     void api.webChat
-      .interrupt(conversationId, taskId)
+      .interrupt(conversationId, taskId, authoringLease)
       .catch(() => undefined)
       .finally(() => setStoppingRun(false));
-  }, [conversationId, stoppingRun, taskId]);
+  }, [authoringLease, conversationId, stoppingRun, taskId]);
 
   if (lockStatus === "locked" || lockStatus === "error") {
     return (

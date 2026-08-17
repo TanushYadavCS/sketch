@@ -1818,7 +1818,11 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(await screen.findByLabelText("Pause Sketch"));
 
-    expect(mocks.interruptChat).toHaveBeenCalledWith("chat-alpha", "task-123");
+    expect(mocks.interruptChat).toHaveBeenCalledWith(
+      "chat-alpha",
+      "task-123",
+      expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+    );
     expect(mocks.interruptChat).not.toHaveBeenCalledWith("42");
   });
 

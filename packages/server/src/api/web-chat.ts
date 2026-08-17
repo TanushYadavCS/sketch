@@ -371,6 +371,23 @@ function extractAutomationTaskId(body: unknown): string | null {
   return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
 }
 
+type BuilderLease = { clientSessionId: string; generation: number };
+
+function parseBuilderLease(body: unknown): BuilderLease | null {
+  if (!isRecord(body)) return null;
+  const clientSessionId = typeof body.clientSessionId === "string" ? body.clientSessionId.trim() : "";
+  const generation = body.generation;
+  if (
+    clientSessionId.length === 0 ||
+    clientSessionId.length > 200 ||
+    !Number.isSafeInteger(generation) ||
+    (generation as number) < 1
+  ) {
+    return null;
+  }
+  return { clientSessionId, generation: generation as number };
+}
+
 function automationBuilderUrl(config: Config, taskId: string, conversationId: string): string {
   const base = config.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config.PORT}`;
   return `${base}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?conversationId=${encodeURIComponent(conversationId)}`;
@@ -718,6 +735,7 @@ type AutomationBuilderConversationAccess =
   | { kind: "not_found" }
   | { kind: "archived" }
   | { kind: "locked"; lock: AutomationTaskConversationLockSummary }
+  | { kind: "stale"; lock: AutomationTaskConversationLockSummary }
   | { kind: "unavailable" }
   | { kind: "error" };
 
@@ -726,6 +744,7 @@ async function resolveAutomationBuilderConversationAccess(params: {
   taskId: string;
   conversationId: string;
   transcriptUserId: string;
+  lease: BuilderLease;
   logger: Logger;
 }): Promise<AutomationBuilderConversationAccess> {
   try {
@@ -733,8 +752,10 @@ async function resolveAutomationBuilderConversationAccess(params: {
       params.taskId,
       params.conversationId,
       params.transcriptUserId,
+      params.lease,
     );
     if (access.kind === "locked") return access;
+    if (access.kind === "stale") return access;
     if (access.kind === "active") return { kind: "active" as const };
     if (access.kind === "not_found" || access.kind === "archived") return access;
     return { kind: "error" as const };
@@ -2068,6 +2089,11 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
 
     const automationTaskId = extractAutomationTaskId({ automationTaskId: c.req.query("automationTaskId") });
+    const interruptionBody = automationTaskId ? await c.req.json().catch(() => ({})) : {};
+    const interruptionLease = automationTaskId ? parseBuilderLease(interruptionBody) : null;
+    if (automationTaskId && !interruptionLease) {
+      return c.json(badRequest("VALIDATION_ERROR", "clientSessionId and generation are required"), 400);
+    }
     let builderInterruption = false;
     let builderConversationRequest = false;
     if (automationTaskId && deps.scheduler?.getTaskById) {
@@ -2091,7 +2117,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       }
 
       const conversationAccess = await createAutomationTaskConversationService(deps.db)
-        .acquireBuilderConversationLock(accessibleTask.id, conversationId, currentUser.id)
+        .acquireBuilderConversationLock(
+          accessibleTask.id,
+          conversationId,
+          currentUser.id,
+          interruptionLease ?? undefined,
+        )
         .catch((err) => {
           deps.logger.warn(
             { err, taskId: accessibleTask.id, conversationId, userId: currentUser.id },
@@ -2114,6 +2145,18 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             error: {
               code: "BUILDER_CHAT_LOCKED",
               message: "This automation's builder chat is in use by another session",
+              builderLock: conversationAccess.lock,
+            },
+          },
+          409,
+        );
+      }
+      if (conversationAccess.kind === "stale") {
+        return c.json(
+          {
+            error: {
+              code: "LEASE_STALE",
+              message: "This builder session is no longer current",
               builderLock: conversationAccess.lock,
             },
           },
@@ -2407,6 +2450,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
     const message = latestUserMessage.text;
     const automationTaskId = extractAutomationTaskId(body);
+    const builderLease = automationTaskId ? parseBuilderLease(body) : null;
+    if (automationTaskId && !builderLease) {
+      return c.json(badRequest("VALIDATION_ERROR", "clientSessionId and generation are required"), 400);
+    }
     const rawAttachments = isRecord(body) && Array.isArray(body.attachments) ? body.attachments : [];
     let parsedAttachments: ParsedWebChatAttachment[];
     try {
@@ -2439,6 +2486,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         taskId: automationBuilderContext.task.id,
         conversationId,
         transcriptUserId: currentUser.id,
+        lease: builderLease as BuilderLease,
         logger: deps.logger,
       });
       if (conversationAccess.kind === "not_found") {
@@ -2456,6 +2504,18 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             error: {
               code: "BUILDER_CHAT_LOCKED",
               message: "This automation's builder chat is in use by another session",
+              builderLock: conversationAccess.lock,
+            },
+          },
+          409,
+        );
+      }
+      if (conversationAccess.kind === "stale") {
+        return c.json(
+          {
+            error: {
+              code: "LEASE_STALE",
+              message: "This builder session is no longer current",
               builderLock: conversationAccess.lock,
             },
           },
@@ -2835,7 +2895,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         if (activeBuilderTaskId) {
           leaseRenewalTimer = setInterval(() => {
             void createAutomationTaskConversationService(deps.db)
-              .acquireBuilderConversationLock(activeBuilderTaskId, conversationId, currentUser.id)
+              .acquireBuilderConversationLock(
+                activeBuilderTaskId,
+                conversationId,
+                currentUser.id,
+                builderLease ?? undefined,
+              )
               .then((access) => {
                 if (access.kind !== "active") abortController.abort();
               })
