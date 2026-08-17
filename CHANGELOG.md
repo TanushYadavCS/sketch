@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.0] -- 2026-08-17
+
+- Adds a server-driven queue for unnamed WhatsApp contacts, letting admins name them via group context and message excerpts.
+- Enables dismissing or renaming placeholder contacts, with dismissal removing them from the queue and rename confirming their identity.
+- Enforces group-based admin authorization for the identity queue and contact drawer, preventing access to contacts outside shared groups.
+- Replaces mock data and local flags with server-driven visibility for the WhatsApp identity reconciliation UI.
+- Adds comprehensive test coverage for identity queue, group context, and authorization flows.
+
 ## [1.3.1] -- 2026-08-15
 
 - Fixes automation delivery contract to accept structured or empty terminal output for Slack and WhatsApp, replacing strict validation with a compatibility formatter.
