@@ -12,6 +12,8 @@ import {
   AutomationAuthoringGeneratedOutputError,
   AutomationAuthoringValidationError,
 } from "../automation/authoring/service";
+import { createUserRepository } from "../db/repositories/users";
+import { createTestDb } from "../test-utils";
 import type { TaskScheduler } from "./service";
 import type { CurrentAutomation, ScheduledTask, TaskContext } from "./types";
 
@@ -246,7 +248,9 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
     );
   });
 
-  it("routes natural-language editing through the authorer for database-backed ownership validation", async () => {
+  it("routes natural-language editing through the authorer with its acquired lease", async () => {
+    const db = await createTestDb();
+    await createUserRepository(db).create({ id: "U123", name: "Test user", email: "configured-authoring@test.com" });
     const scheduler = makeMockScheduler();
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
@@ -261,19 +265,24 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       }),
     };
 
-    await handleManageScheduledTasks(
-      { action: "update", task_id: "task-1", request: "Make the summary shorter" },
-      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
-    );
+    try {
+      await handleManageScheduledTasks(
+        { action: "update", task_id: "task-1", request: "Make the summary shorter" },
+        { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring, db },
+      );
 
-    expect(scheduler.getTaskById).not.toHaveBeenCalled();
-    expect(chatAuthoring.author).toHaveBeenCalledWith({
-      action: "edit",
-      request: "Make the summary shorter",
-      taskId: "task-1",
-      taskContext: dmContext,
-    });
-    expect(scheduler.updateTask).not.toHaveBeenCalled();
+      expect(scheduler.getTaskById).not.toHaveBeenCalled();
+      expect(chatAuthoring.author).toHaveBeenCalledWith({
+        action: "edit",
+        request: "Make the summary shorter",
+        taskId: "task-1",
+        taskContext: dmContext,
+        lease: { sessionId: expect.stringMatching(/^agent:/), generation: 1 },
+      });
+      expect(scheduler.updateTask).not.toHaveBeenCalled();
+    } finally {
+      await db.destroy();
+    }
   });
 
   it("uses the ambient current automation for an implicit natural-language edit", async () => {

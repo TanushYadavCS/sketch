@@ -1008,6 +1008,7 @@ async function handleConfiguredChatAuthoring(
       ...(targetTaskId ? { taskId: targetTaskId } : {}),
       taskContext: deps.taskContext,
       ...(targetTaskId && currentAutomation?.taskId === targetTaskId ? { currentAutomation } : {}),
+      ...(agentLease ? { lease: agentLease } : {}),
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {

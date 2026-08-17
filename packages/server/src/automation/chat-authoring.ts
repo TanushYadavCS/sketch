@@ -22,6 +22,7 @@ export interface ChatAutomationAuthoringInput {
   taskId?: string;
   taskContext: TaskContext;
   currentAutomation?: CurrentAutomation;
+  lease?: { sessionId: string; generation: number };
 }
 
 export type ChatAutomationAuthoringResult =
@@ -217,6 +218,9 @@ export function createChatAutomationAuthoring(deps: {
     if (!accessibleRow) {
       return { kind: "error", message: "Automation not found." };
     }
+    if (!input.lease) {
+      return { kind: "error", message: "Automation editing requires an active authoring lease." };
+    }
 
     const stepContentRows = await stepContent.getByTask(accessibleRow.id);
     const existing = buildAutomationDefinition({ row: accessibleRow, stepContentRows, runRows: [] });
@@ -265,6 +269,8 @@ export function createChatAutomationAuthoring(deps: {
         actor: {
           userId: input.taskContext.createdBy,
           role: input.taskContext.canManageAnyTask ? "admin" : undefined,
+          source: "agent",
+          lease: input.lease,
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
@@ -283,6 +289,18 @@ export function createChatAutomationAuthoring(deps: {
         kind: "error",
         message: "Automation was changed by another editor. Refresh it and try again.",
       };
+    }
+    if (saved.kind === "locked") {
+      return {
+        kind: "error",
+        message: "Automation is currently being edited by another session. No changes were saved.",
+      };
+    }
+    if (saved.kind === "lease_stale") {
+      return { kind: "error", message: "Automation editing session is stale. Refresh and try again." };
+    }
+    if (saved.kind === "lease_required") {
+      return { kind: "error", message: "Automation editing requires an active authoring lease." };
     }
     return refreshOrError(accessibleRow.id, artifactFromDefinition(result.definition));
   }
