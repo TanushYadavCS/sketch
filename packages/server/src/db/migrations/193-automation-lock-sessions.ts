@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 
 const TABLE = "automation_task_locks";
 
@@ -12,11 +13,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("generation", "integer", (col) => col.notNull().defaultTo(1))
     .execute();
   await db.schema.alterTable(TABLE).addColumn("steal_requester_session_id", "text").execute();
-  await db
-    .updateTable(TABLE)
-    .set({ steal_requester_session_id: "legacy" })
-    .where("steal_requester_user_id", "is not", null)
-    .execute();
+  await sql`
+    UPDATE ${sql.table(TABLE)}
+    SET steal_requester_session_id = ${"legacy"}
+    WHERE steal_requester_user_id IS NOT NULL
+  `.execute(db);
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {

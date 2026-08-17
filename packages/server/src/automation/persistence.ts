@@ -457,7 +457,10 @@ export async function deleteAutomation(params: {
   scheduler: AutomationDeletionScheduler;
   encryptionKey?: string;
 }): Promise<AutomationDeletionResult> {
-  let databaseResult: Extract<AutomationDeletionResult, { kind: "deleted" | "not_found" | "access_denied" }>;
+  let databaseResult: Extract<
+    AutomationDeletionResult,
+    { kind: "deleted" | "not_found" | "access_denied" | "locked" | "lease_stale" }
+  >;
   try {
     databaseResult = await params.db.transaction().execute(async (trx) => {
       const current = await trx

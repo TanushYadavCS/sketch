@@ -87,6 +87,7 @@ describe("scheduled task conversation repository", () => {
   });
 
   it("reuses the active builder association and creates a new one after archival", async () => {
+    await db.insertInto("users").values({ id: "owner-reuse", name: "Owner Reuse" }).execute();
     await db
       .insertInto("scheduled_tasks")
       .values({
@@ -121,6 +122,13 @@ describe("scheduled task conversation repository", () => {
   });
 
   it("locks source-chat authoring without exposing another user's transcript", async () => {
+    await db
+      .insertInto("users")
+      .values([
+        { id: "owner-source", name: "Owner Source" },
+        { id: "admin-source", name: "Admin Source" },
+      ])
+      .execute();
     await db
       .insertInto("scheduled_tasks")
       .values({

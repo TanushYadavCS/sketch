@@ -337,6 +337,8 @@ describe("runMigrations — full sequence", () => {
         holder_user_id: "migration-lock-user",
         holder_platform: "web",
         holder_surface: "builder",
+        holder_session_id: "legacy",
+        generation: 1,
         acquired_at: "2026-08-17T10:00:00.000Z",
         updated_at: "2026-08-17T10:00:00.000Z",
         expires_at: "2026-08-17T10:15:00.000Z",

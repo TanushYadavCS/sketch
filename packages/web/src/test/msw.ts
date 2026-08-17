@@ -16,6 +16,7 @@ interface MockAutomationLockState {
   heldByPlatform: "slack" | "web" | "whatsapp" | null;
   heldBySurface: "builder" | "admin" | null;
   expiresAt: string | null;
+  generation: number;
   stealPending: { requesterName: string; expiresAt: string } | null;
 }
 
@@ -33,6 +34,7 @@ function emptyAutomationLockFixture(): MockAutomationLockState {
     heldByPlatform: null,
     heldBySurface: null,
     expiresAt: null,
+    generation: 1,
     stealPending: null,
   };
 }
@@ -672,6 +674,7 @@ export const handlers = [
       heldByPlatform: "web",
       heldBySurface: "builder",
       expiresAt: new Date(Date.now() + AUTOMATION_LOCK_FIXTURE_TTL_MS).toISOString(),
+      generation: current.generation,
       stealPending: current.stealPending,
     };
     automationLockFixtureState.set(taskId, lock);
@@ -724,6 +727,7 @@ export const handlers = [
         heldByPlatform: "web",
         heldBySurface: "builder",
         expiresAt: new Date(Date.now() + AUTOMATION_LOCK_FIXTURE_TTL_MS).toISOString(),
+        generation: current.generation + 1,
         stealPending: null,
       });
     } else {

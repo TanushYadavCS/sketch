@@ -1517,6 +1517,12 @@ export async function handleManageScheduledTasks(
       if (saved.kind === "locked") {
         return text(await lockedAutomationMessage(deps, saved.lock));
       }
+      if (saved.kind === "lease_required") {
+        return text("Error: automation editing requires an active authoring lease.");
+      }
+      if (saved.kind === "lease_stale") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
+      }
 
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
@@ -1810,6 +1816,12 @@ export async function handleManageScheduledTasks(
         );
       }
       if (saved.kind === "locked") {
+        return text(await lockedAutomationMessage(deps, saved.lock));
+      }
+      if (saved.kind === "lease_required") {
+        return text("Error: automation editing requires an active authoring lease.");
+      }
+      if (saved.kind === "lease_stale") {
         return text(await lockedAutomationMessage(deps, saved.lock));
       }
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
