@@ -429,6 +429,8 @@ describe("AutomationBuilderPage edit lock", () => {
 
     expect(screen.getByTestId("automation-flow")).toHaveAttribute("data-nodes-draggable", "false");
     expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Share" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete automation" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Check rating" }));
     const drawer = await screen.findByTestId("automation-builder-drawer");
@@ -438,6 +440,7 @@ describe("AutomationBuilderPage edit lock", () => {
       expect(textbox).toHaveAttribute("readonly");
     }
     expect(within(drawer).getByRole("button", { name: "Save prompt" })).toBeDisabled();
+    expect(within(drawer).getByRole("button", { name: "Test" })).toBeDisabled();
   });
 
   it("opens an authorized transcript without taking the automation edit lock", async () => {

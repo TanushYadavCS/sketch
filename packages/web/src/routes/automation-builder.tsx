@@ -805,7 +805,10 @@ export function AutomationBuilderPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => api.scheduledTasks.remove(taskId),
+    mutationFn: () => {
+      if (!authoringLease) throw new Error("Acquire the automation editing session before deleting");
+      return api.scheduledTasks.remove(taskId, leaseRequest(authoringLease));
+    },
     onSuccess: async () => {
       await invalidateAutomationQueries(queryClient, [taskId]);
       setDeleteDialogOpen(false);
@@ -1177,6 +1180,7 @@ export function AutomationBuilderPage() {
                 variant="outline"
                 className={cn(canvasToolbarButtonClass, "gap-1.5")}
                 onClick={() => setShareDialogOpen(true)}
+                disabled={builderReadOnly}
               >
                 <ShareNetworkIcon size={14} />
                 Share{automation.shares && automation.shares.length > 0 ? ` · ${automation.shares.length}` : ""}
@@ -1206,7 +1210,7 @@ export function AutomationBuilderPage() {
                 className="h-8 gap-1.5 rounded-[7px] border-destructive/35 px-2.5 text-[12px] text-destructive hover:bg-destructive/10 hover:text-destructive"
                 aria-label="Delete automation"
                 onClick={() => setDeleteDialogOpen(true)}
-                disabled={deleteMutation.isPending}
+                disabled={deleteMutation.isPending || builderReadOnly}
               >
                 <TrashIcon size={14} />
                 <span>Delete</span>
@@ -1295,7 +1299,8 @@ export function AutomationBuilderPage() {
         taskId={taskId}
         taskName={automationTitle}
         ownerUserId={automation.createdBy}
-        canShare={canShareAutomation}
+        canShare={canShareAutomation && !builderReadOnly}
+        lease={authoringLease ? leaseRequest(authoringLease) : null}
         open={shareDialogOpen}
         onOpenChange={setShareDialogOpen}
       />
@@ -3651,7 +3656,7 @@ function NodeDrawer({
             size="sm"
             variant="secondary"
             className="h-7 gap-1.5 rounded-[6px] bg-muted font-mono text-[11px] uppercase tracking-[0.08em] text-foreground/75 shadow-none hover:bg-accent hover:text-accent-foreground"
-            disabled={isTesting}
+            disabled={readOnly || isTesting}
             aria-busy={isTesting}
             onClick={() => onTest(step.id)}
           >

@@ -2673,16 +2673,16 @@ export const api = {
     listShares(taskId: string) {
       return request<{ shares: AutomationShare[] }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares`);
     },
-    grantShare(taskId: string, userId: string) {
+    grantShare(taskId: string, userId: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: boolean }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
-        { method: "PUT" },
+        { method: "PUT", ...(lease ? { body: JSON.stringify(lease) } : {}) },
       );
     },
-    revokeShare(taskId: string, userId: string) {
+    revokeShare(taskId: string, userId: string, lease?: { clientSessionId: string; generation: number }) {
       return request<{ success: boolean }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/shares/${encodeURIComponent(userId)}`,
-        { method: "DELETE" },
+        { method: "DELETE", ...(lease ? { body: JSON.stringify(lease) } : {}) },
       );
     },
     async getRun(taskId: string, runId: string) {

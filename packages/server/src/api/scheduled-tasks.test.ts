@@ -1420,6 +1420,72 @@ describe("Scheduled Tasks API", () => {
     await expect(tasks.getById("task-share")).resolves.toMatchObject({ revision: 0 });
   });
 
+  it("fences share grants and revocations behind the exact authoring lease", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-share-lock@test.com" });
+    const member = await users.create({ name: "Member", email: "member-share-lock@test.com" });
+
+    await tasks.add({
+      id: "task-share-lock",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Locked shared task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await acquireOrRenewLock(db, {
+      taskId: "task-share-lock",
+      holder: { userId: owner.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const ownerCookie = await getMemberCookie(db, owner.id);
+    const path = `/api/scheduled-tasks/task-share-lock/shares/${member.id}`;
+
+    const missingLease = await app.request(path, { method: "PUT", headers: { Cookie: ownerCookie } });
+    expect(missingLease.status).toBe(409);
+    await expect(missingLease.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    const staleLease = await app.request(path, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: 1 }),
+    });
+    expect(staleLease.status).toBe(409);
+    await expect(staleLease.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+
+    const exactLease = { clientSessionId: "tab-a", generation: 1 };
+    const grant = await app.request(path, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(exactLease),
+    });
+    expect(grant.status).toBe(200);
+
+    const revoke = await app.request(path, {
+      method: "DELETE",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(exactLease),
+    });
+    expect(revoke.status).toBe(200);
+  });
+
   it("rejects self-grants and unknown grant targets with INVALID_TARGET", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

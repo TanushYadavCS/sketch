@@ -1255,6 +1255,10 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const result = await loadOwnedTask(c, id);
     if ("response" in result) return result.response;
+    const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
+    if ("response" in request) return request.response;
+    const leaseConflict = await authorizeTaskMutationLease(id, result.userId, request.lease);
+    if (leaseConflict) return taskMutationLeaseError(c, result.userId, request.lease, leaseConflict);
     const targetUserId = c.req.param("userId");
     if (targetUserId === result.userId) {
       return c.json({ error: { code: "INVALID_TARGET", message: "Cannot share an automation with yourself" } }, 400);
@@ -1271,6 +1275,10 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const result = await loadOwnedTask(c, id);
     if ("response" in result) return result.response;
+    const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
+    if ("response" in request) return request.response;
+    const leaseConflict = await authorizeTaskMutationLease(id, result.userId, request.lease);
+    if (leaseConflict) return taskMutationLeaseError(c, result.userId, request.lease, leaseConflict);
     await sharesRepo.revoke({ taskId: id, userId: c.req.param("userId") });
     return c.json({ success: true });
   });

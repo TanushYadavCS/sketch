@@ -708,7 +708,12 @@ describe("AutomationBuilderPage", () => {
     expect(dialog).toHaveTextContent("Daily account brief");
     await user.click(within(dialog).getByRole("button", { name: "Delete automation" }));
 
-    await waitFor(() => expect(mocks.removeAutomation).toHaveBeenCalledWith("task-123"));
+    await waitFor(() =>
+      expect(mocks.removeAutomation).toHaveBeenCalledWith(
+        "task-123",
+        expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+      ),
+    );
     await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" }));
   });
 
