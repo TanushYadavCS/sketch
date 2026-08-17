@@ -474,6 +474,44 @@ describe("createSketchMcpServer", () => {
     });
   });
 
+  it("clamps sentinel row-id bounds to the storable range without a trigger message", async () => {
+    const collector = new UploadCollector();
+    const searchMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
+    const listMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      conversationRepo: { searchMessages, listMessages } as never,
+      conversationContext: { conversationId: 1, currentMessageId: undefined },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: {
+              query?: string;
+              afterMessageId?: number;
+              beforeMessageId?: number;
+            }) => Promise<{ content: { text: string }[] }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    await tools.SearchChatHistory.handler({ query: "test", beforeMessageId: Number.MAX_SAFE_INTEGER });
+    await tools.ReadChatHistory.handler({
+      afterMessageId: Number.MAX_SAFE_INTEGER,
+      beforeMessageId: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(searchMessages).toHaveBeenCalledWith(1, expect.objectContaining({ beforeMessageId: 2_147_483_647 }));
+    expect(listMessages).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ afterMessageId: 2_147_483_647, beforeMessageId: 2_147_483_647 }),
+    );
+  });
+
   it("does not expose TranscribeAudio when transcription is disabled", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });

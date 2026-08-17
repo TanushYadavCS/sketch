@@ -495,6 +495,7 @@ describe("AutomationBuilderPage", () => {
     mocks.clearError.mockClear();
     mocks.chatError = undefined;
     mocks.navigate.mockClear();
+    mocks.runTask.mockClear();
     mocks.runTask.mockResolvedValue({ status: "triggered", runId: "run-test" });
     mocks.getRun.mockClear();
     mocks.getRun.mockResolvedValue({ run: null });
@@ -785,6 +786,10 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "Run" }));
     await waitFor(() => expect(mocks.runTask).toHaveBeenCalledTimes(1));
+    expect(mocks.runTask).toHaveBeenCalledWith("task-123", "manual", {
+      clientSessionId: expect.any(String),
+      generation: 1,
+    });
     expect(mocks.navigate).toHaveBeenCalledWith(
       expect.objectContaining({
         search: { conversationId: "chat-alpha", runId: "run-test" },
@@ -795,6 +800,29 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Running" }));
     expect(mocks.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a full test run from the builder without depending on the delivery platform", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({ ...automation, platform: "whatsapp", contextType: "group" });
+
+    renderBuilder();
+
+    const testButton = await screen.findByRole("button", { name: "Test automation" });
+    expect(testButton).toHaveAttribute("title", "Run without sending output to configured channels");
+    await user.click(testButton);
+
+    await waitFor(() =>
+      expect(mocks.runTask).toHaveBeenCalledWith("task-123", "test", {
+        clientSessionId: expect.any(String),
+        generation: 1,
+      }),
+    );
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        search: { conversationId: "chat-alpha", runId: "run-test" },
+      }),
+    );
   });
 
   it("shows the three execution modes and leaves the recommendation advisory", async () => {

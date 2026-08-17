@@ -284,6 +284,63 @@ describe("Scheduled Tasks API", () => {
     });
   });
 
+  it("queues test runs without exposing production mode", async () => {
+    const admin = await seedAdmin(db);
+    await createScheduledTaskRepository(db).add({
+      id: "test-task",
+      platform: "whatsapp",
+      context_type: "group",
+      delivery_target: "999@g.us",
+      thread_ts: null,
+      prompt: "Run the brief",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: admin.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await loginAdmin(app);
+    const response = await app.request("/api/scheduled-tasks/test-task/runs", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "test" }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("test-task", {
+      preserveTaskState: true,
+      runMode: "test",
+      runId: body.runId,
+      triggeredByUserId: admin.id,
+    });
+    await expect(createAutomationRunsRepository(db).getById(body.runId)).resolves.toMatchObject({
+      trigger_data: JSON.stringify({ type: "test" }),
+      triggered_by_user_id: admin.id,
+    });
+
+    const invalid = await app.request("/api/scheduled-tasks/test-task/runs", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "production" }),
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({
+      error: { code: "INVALID_RUN_MODE", message: "Run mode must be manual or test" },
+    });
+    expect(scheduler.executeTaskById).toHaveBeenCalledTimes(1);
+  });
+
   it("fences manual runs by the active authoring session and generation", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

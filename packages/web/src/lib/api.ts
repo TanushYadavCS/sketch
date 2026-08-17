@@ -2793,10 +2793,10 @@ export const api = {
       );
       return res.automation;
     },
-    run(taskId: string, lease: { clientSessionId: string; generation: number }) {
+    run(taskId: string, mode: "manual" | "test", lease: { clientSessionId: string; generation: number }) {
       return request<{ status: "triggered"; runId: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
         method: "POST",
-        body: JSON.stringify(lease),
+        body: JSON.stringify({ mode, ...lease }),
       });
     },
     testStep(
