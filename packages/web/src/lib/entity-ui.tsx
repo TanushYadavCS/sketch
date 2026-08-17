@@ -8,7 +8,7 @@
  * deeper view and the header's Back chip can pop.
  */
 import { cn } from "@sketch/ui/lib/utils";
-import { type ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
+import { type CSSProperties, type ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { DrawerEntityType } from "./api";
 
 export interface EntityIdentity {
@@ -139,6 +139,16 @@ function entityInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+/** Blend a hex colour toward white by `amount` (0–1). Used to lift the dark
+ * light-mode accents into legible ink on the near-black dark surface. */
+function lighten(hex: string, amount: number): string {
+  const h = hex.replace("#", "");
+  const channel = (i: number) => Number.parseInt(h.slice(i, i + 2), 16);
+  const mix = (c: number) => Math.round(c + (255 - c) * amount);
+  const toHex = (c: number) => mix(c).toString(16).padStart(2, "0");
+  return `#${toHex(channel(0))}${toHex(channel(2))}${toHex(channel(4))}`;
+}
+
 const AVATAR_SIZES = {
   xs: "h-4 w-4 text-[8px]",
   sm: "h-6 w-6 text-[10px]",
@@ -156,14 +166,24 @@ interface EntityAvatarProps {
 
 export function EntityAvatar({ entity, size = "md", className }: EntityAvatarProps) {
   const accent = entityAccent(entity);
+  const inkDark = lighten(accent, 0.58);
   return (
     <span
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-full font-medium",
         AVATAR_SIZES[size],
+        "[background-color:var(--ea-bg)] [color:var(--ea-ink)]",
+        "dark:[background-color:var(--ea-bg-dark)] dark:[color:var(--ea-ink-dark)]",
         className,
       )}
-      style={{ backgroundColor: `${accent}1a`, color: accent }}
+      style={
+        {
+          "--ea-bg": `${accent}1f`,
+          "--ea-ink": accent,
+          "--ea-bg-dark": `${inkDark}2b`,
+          "--ea-ink-dark": inkDark,
+        } as CSSProperties
+      }
       aria-label={entity.name}
     >
       {entityInitials(entity.name)}

@@ -12,11 +12,15 @@
  * match reason, and pick-a-different-existing all live there.
  */
 import { BirthInspectSheet, ReviewDetailSheet } from "@/components/entity-review/review-band";
+import {
+  WhatsAppIdentityDrawer,
+  WhatsAppIdentityRow,
+  useWhatsAppIdentityReview,
+} from "@/components/entity-review/whatsapp-identity-review";
 import { useReviewMutations } from "@/components/review-actions";
 import type { EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar } from "@/lib/entity-ui";
-import { CaretRightIcon } from "@phosphor-icons/react";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
@@ -112,23 +116,18 @@ export function ReviewRowCompact({
       : null;
   return (
     <div className="border-b border-border/60 last:border-b-0" data-testid={`org-review-row-${row.id}`}>
-      <div className="flex w-full items-center">
+      <div className="flex w-full items-center transition-colors hover:bg-foreground/10">
         <button
           type="button"
           onClick={() => onOpen(row)}
-          className="group flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left"
+          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left"
         >
-          <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="xs" />
+          <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="sm" />
           <span className="shrink-0 truncate text-[12.5px] font-medium">{row.proposed_name}</span>
           <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">{suggestion}</span>
           {evidence ? (
             <span className="hidden shrink-0 text-[10.5px] text-muted-foreground/70 sm:inline">{evidence}</span>
           ) : null}
-          <CaretRightIcon
-            size={12}
-            aria-hidden
-            className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
-          />
         </button>
         <span className="flex shrink-0 items-center gap-0.5 pr-3">
           <CompactAction
@@ -162,16 +161,19 @@ export function ReviewBandCapped({ types, onSeeAll }: { types: string[]; onSeeAl
     refetchInterval: 30000,
   });
   const rows = data?.rows ?? [];
-  const total = data?.total ?? rows.length;
+  const realTotal = data?.total ?? rows.length;
   const { openRow, sheets, refresh } = useReviewRowSheets();
 
-  if (rows.length === 0) return null;
+  const wa = useWhatsAppIdentityReview(types);
+  const [waSelected, setWaSelected] = useState<string | null>(null);
+
+  if (rows.length === 0 && wa.items.length === 0) return null;
 
   return (
     <section className="mb-6 overflow-hidden rounded-xl border border-amber-300/60 bg-amber-50/40 dark:border-amber-700/50 dark:bg-amber-950/20">
       <div className="flex items-baseline justify-between border-b border-amber-300/50 px-3 py-2 dark:border-amber-700/40">
         <span className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-amber-700 dark:text-amber-400">
-          Needs your review · {total}
+          Needs your review · {realTotal + wa.items.length}
         </span>
         <button
           type="button"
@@ -184,16 +186,29 @@ export function ReviewBandCapped({ types, onSeeAll }: { types: string[]; onSeeAl
       {rows.slice(0, 3).map((row) => (
         <ReviewRowCompact key={row.id} row={row} onOpen={openRow} onResolved={refresh} />
       ))}
-      {rows.length > 3 ? (
+      {wa.items.map((item) => (
+        <WhatsAppIdentityRow
+          key={item.id}
+          item={item}
+          onOpen={() => setWaSelected(item.id)}
+          onResolve={(message) => wa.resolve(item.id, message)}
+        />
+      ))}
+      {realTotal > 3 ? (
         <button
           type="button"
           onClick={onSeeAll}
           className="w-full border-t border-amber-300/40 px-3 py-2 text-left font-mono text-[10px] uppercase tracking-[0.08em] text-amber-700/70 hover:text-amber-800 dark:border-amber-700/30 dark:text-amber-400/70"
         >
-          {total - 3} more in Review →
+          {realTotal - 3} more in Review →
         </button>
       ) : null}
       {sheets}
+      <WhatsAppIdentityDrawer
+        item={wa.items.find((item) => item.id === waSelected) ?? null}
+        onClose={() => setWaSelected(null)}
+        onResolve={wa.resolve}
+      />
     </section>
   );
 }

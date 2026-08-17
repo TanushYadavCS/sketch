@@ -32,6 +32,7 @@ import { formatRelativeTime } from "@/routes/files/file-list";
 import {
   ArrowLeftIcon,
   ArrowSquareOutIcon,
+  ArrowsLeftRightIcon,
   CheckIcon,
   CubeIcon,
   PlugsConnectedIcon,
@@ -161,7 +162,7 @@ function OriginChip({ row }: { row: EntityReviewQueueRow }) {
 /**
  * A birth row (proposed entity with no candidate match). It resolves inline —
  * Confirm creates the entity from its seed, Dismiss drops it without creating
- * anything, Merge… opens a search-only picker for the "actually a duplicate"
+ * anything, Merge opens a search-only picker for the "actually a duplicate"
  * escape hatch. The actions only appear on hover/focus to keep the list calm;
  * clicking the row body opens a read-only inspect sheet (origin + linked files).
  * No reconcile drawer: a birth is not a merge, so there's nothing to compare.
@@ -228,7 +229,8 @@ function BirthRow({
             className="h-7 gap-1"
             data-testid="birth-merge"
           >
-            Merge…
+            <ArrowsLeftRightIcon size={12} />
+            Merge
           </Button>
           <Button
             size="sm"
@@ -275,7 +277,7 @@ function inspectActivityLine(childTaskCount: number, fileCount: number): string 
  * so a proposed entity reads like a real one: accent top-stripe header, avatar,
  * serif name, and `font-mono` section labels in accent-tinted cards. Shows
  * where the proposal came from + the tasks/files behind it, plus the same
- * Confirm / Merge… / Dismiss actions. One column — a birth has no candidate to
+ * Confirm / Merge / Dismiss actions. One column — a birth has no candidate to
  * compare against, so the reconcile layout doesn't apply.
  */
 export function BirthInspectSheet({
@@ -491,7 +493,8 @@ function BirthInspectBody({
           className="h-7 gap-1 text-[11px]"
           data-testid="birth-inspect-merge"
         >
-          Merge…
+          <ArrowsLeftRightIcon size={12} />
+          Merge
         </Button>
         <Button
           size="sm"
@@ -520,7 +523,7 @@ function BirthInspectBody({
 }
 
 /**
- * Search-only picker for the birth-row "Merge…" escape hatch. Wraps the shared
+ * Search-only picker for the birth-row "Merge" escape hatch. Wraps the shared
  * {@link EntityPicker} scoped to the row's type. Deliberately NOT the full
  * reconcile sheet — a birth merge only needs a target, no evidence compare.
  */

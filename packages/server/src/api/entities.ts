@@ -7,6 +7,7 @@ import { createEntityMergeRoutes } from "./entities/merge-routes";
 import { createEntityProfileRoutes } from "./entities/profile-routes";
 import { createTaskRoutes } from "./entities/task-routes";
 import type { EntityRoutesDeps } from "./entities/types";
+import { createEntityWhatsAppContextRoutes } from "./entities/whatsapp-context-routes";
 
 export { _setCurrentReenrichJobForTests, _setCurrentResetJobForTests } from "./entities/jobs";
 export type { EntityRoutesDeps } from "./entities/types";
@@ -18,5 +19,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   routes.route("/", createEntityBindingRoutes(db));
   routes.route("/", createEntityProfileRoutes(db, deps));
   routes.route("/", createTaskRoutes(db));
+  routes.route("/", createEntityWhatsAppContextRoutes(db));
   return routes;
 }

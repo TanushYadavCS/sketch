@@ -604,6 +604,66 @@ export interface EntityContactPoint {
   verifiedAt: string | null;
 }
 
+/** One WhatsApp group an unidentified contact has been seen in, with a recent excerpt to help place them. */
+export interface WhatsAppGroupSighting {
+  groupJid: string;
+  groupName: string;
+  messageCount: number;
+  lastMessageAt: string;
+  snippet: string | null;
+}
+
+/** Our best guess at who this identity is — an existing entity (merge target) or just a name. */
+export interface WhatsAppIdentitySuggestion {
+  entityId: string | null;
+  name: string;
+  confidence: "likely" | "possibly";
+  reason: string;
+}
+
+/** A WhatsApp person entity still named after its phone or LID, awaiting a human name. */
+export interface WhatsAppIdentityReviewItem {
+  id: string;
+  entityId: string;
+  phoneE164: string | null;
+  lid: string | null;
+  groups: WhatsAppGroupSighting[];
+  suggestion: WhatsAppIdentitySuggestion | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export type WhatsAppContextMessageRole = "self" | "known" | "unknown";
+
+export interface WhatsAppContextMessage {
+  id: number;
+  at: string;
+  role: WhatsAppContextMessageRole;
+  entityId: string | null;
+  senderName: string;
+  text: string;
+}
+
+export interface WhatsAppContextGroup {
+  groupJid: string;
+  name: string;
+  indexEnabled: boolean;
+  membership: "roster" | "messages" | "both";
+  messageCount: number;
+  firstSpokeAt: string | null;
+  lastSpokeAt: string | null;
+  excerpts: Array<{ startedAt: string; endedAt: string; messages: WhatsAppContextMessage[] }>;
+}
+
+export interface WhatsAppEntityContext {
+  entityId: string;
+  viewerHasWhatsAppIdentity: boolean;
+  entityHasWhatsAppIdentity: boolean;
+  groups: WhatsAppContextGroup[];
+  totalGroups: number;
+  truncated: boolean;
+}
+
 export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "tool" | "system" | "other";
 
 export interface EntityProfileSummary {
@@ -3109,6 +3169,36 @@ export const api = {
     },
     clearMembership(id: string, fileId: string) {
       return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, { method: "DELETE" });
+    },
+    rename(id: string, name: string) {
+      return request<{ entity: { id: string; name: string } }>(`/api/entities/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      });
+    },
+    /**
+     * WhatsApp contacts still carrying a placeholder name, restricted to groups
+     * the caller is a participant of — so the queue only offers people the
+     * caller has the evidence to identify.
+     */
+    whatsappIdentities(opts?: { limit?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      const query = params.toString();
+      return request<{ items: WhatsAppIdentityReviewItem[]; viewerHasWhatsAppIdentity: boolean }>(
+        `/api/entities/whatsapp/identities${query ? `?${query}` : ""}`,
+      );
+    },
+    whatsappContext(id: string, opts?: { groups?: number; messagesPerGroup?: number; excerptsPerGroup?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.groups) params.set("groups", String(opts.groups));
+      if (opts?.messagesPerGroup) params.set("messagesPerGroup", String(opts.messagesPerGroup));
+      if (opts?.excerptsPerGroup) params.set("excerptsPerGroup", String(opts.excerptsPerGroup));
+      const query = params.toString();
+      return request<WhatsAppEntityContext>(`/api/entities/${id}/whatsapp-context${query ? `?${query}` : ""}`);
+    },
+    dismissWhatsAppIdentity(id: string) {
+      return request<{ success: true }>(`/api/entities/${id}/whatsapp-identity/dismissal`, { method: "POST" });
     },
     previewMerge(survivorId: string, loserId: string) {
       return request<EntityMergePreview>(

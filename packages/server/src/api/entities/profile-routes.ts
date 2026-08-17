@@ -1044,8 +1044,17 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   /**
    * PATCH /api/entities/:id
    * Update entity name, source_type, status, or aliases.
+   *
+   * Admin-gated like every other write on an entity — `DELETE /:id` and all
+   * three contact-point routes already are. This one was not, so any signed-in
+   * member could rename or re-status any entity in the graph by calling the
+   * endpoint directly. No product flow relied on that: the only caller is the
+   * admin-only identity review surface.
    */
   routes.patch("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const entity = await repo.getEntity(c.req.param("id"));
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
@@ -1077,8 +1086,44 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       }
     }
 
+    /**
+     * Renaming a placeholder is what confirms it. A WhatsApp-minted person is
+     * named after their own phone or LID until someone puts a real name to
+     * them; without flipping `name_status` here the entity keeps rendering a
+     * proposed name beside its new one and never leaves the identity review
+     * queue. Pending proposals resolve with it, since the question they asked
+     * has now been answered by a human.
+     */
+    const namingAPlaceholder =
+      typeof body.name === "string" &&
+      body.name.trim().length > 0 &&
+      (entity.name_status === "placeholder" || entity.name_status === "dismissed");
+    if (namingAPlaceholder) updates.name_status = "confirmed";
+
     if (Object.keys(updates).length > 0) {
       await repo.updateEntity(entity.id, updates);
+    }
+    if (namingAPlaceholder) {
+      /**
+       * Guarded on the entity still being confirmed by this request. A
+       * concurrent dismissal can land between the update above and this write,
+       * and without the guard we would accept proposals on an entity the other
+       * writer just retired.
+       */
+      await db
+        .updateTable("entity_name_proposals")
+        .set({ status: "accepted", resolved_by_user_id: c.get("sub") as string, resolved_at: new Date().toISOString() })
+        .where("entity_id", "=", entity.id)
+        .where("status", "=", "pending")
+        .where(({ exists, selectFrom }) =>
+          exists(
+            selectFrom("entities")
+              .select("id")
+              .whereRef("entities.id", "=", "entity_name_proposals.entity_id")
+              .where("entities.name_status", "=", "confirmed"),
+          ),
+        )
+        .execute();
     }
 
     const updated = await repo.getEntity(entity.id);

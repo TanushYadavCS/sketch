@@ -303,16 +303,17 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
     it("persists valid history with event identity, provenance, connection key, and idempotent redelivery", async () => {
       const groupJid = `${randomUUID()}@g.us`;
       const harness = await createHarness(db, dataDir);
+      const sentAt = recentHistoryTimestamp(30);
       const first = groupMessage({
         groupJid,
         providerMessageId: "history-event-key",
-        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        providerTimestamp: sentAt,
         connectionKey: "000000000007:000000000019",
       });
       const redelivery = groupMessage({
         groupJid,
         providerMessageId: "history-event-key",
-        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        providerTimestamp: sentAt,
         senderPhoneE164: "+15550002000",
         connectionKey: "000000000007:000000000019",
       });
@@ -334,7 +335,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
           provider_message_id: "history-event-key",
           event_key: "event-history-event-key",
           source: "history",
-          effective_at: "2026-07-17T09:00:00.000Z",
+          effective_at: sentAt,
           connection_key: "000000000007:000000000019",
           attachments: null,
         }),
@@ -347,7 +348,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
       const missingId = groupMessage({
         groupJid,
         providerMessageId: "",
-        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        providerTimestamp: recentHistoryTimestamp(30),
       });
       const missingTimestamp = groupMessage({
         groupJid,
@@ -370,7 +371,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
       const fromMe = groupMessage({
         groupJid,
         providerMessageId: "history-from-me",
-        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        providerTimestamp: recentHistoryTimestamp(30),
         fromMe: true,
       });
 

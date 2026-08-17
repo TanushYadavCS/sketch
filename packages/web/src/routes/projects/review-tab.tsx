@@ -9,6 +9,11 @@
  * dismiss (only `confirm-batch` / `reject-batch` + single-row `dismiss`), so a
  * bulk control would fan out N calls. Omitted until a batch dismiss lands.
  */
+import {
+  WhatsAppIdentityDrawer,
+  WhatsAppIdentityRow,
+  useWhatsAppIdentityReview,
+} from "@/components/entity-review/whatsapp-identity-review";
 import { api } from "@/lib/api";
 import { MagnifyingGlassIcon } from "@phosphor-icons/react";
 import { Input } from "@sketch/ui/components/input";
@@ -39,6 +44,10 @@ export function ReviewTab() {
   const rows = data?.rows ?? [];
   const { openRow, sheets, refresh } = useReviewRowSheets();
 
+  const wa = useWhatsAppIdentityReview([]);
+  const [waSelected, setWaSelected] = useState<string | null>(null);
+  const showWa = !debouncedSearch && wa.items.length > 0;
+
   const bands = new Map<string, typeof rows>();
   for (const row of rows) {
     const label = reviewBandLabel(row);
@@ -66,7 +75,7 @@ export function ReviewTab() {
             <Skeleton key={k} className="h-14 rounded-lg" />
           ))}
         </div>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && !showWa ? (
         <div className="mt-4">
           <ReviewEmpty>
             {debouncedSearch
@@ -76,6 +85,26 @@ export function ReviewTab() {
         </div>
       ) : (
         <div className="mt-4 space-y-6">
+          {showWa ? (
+            <section
+              className="overflow-hidden rounded-xl border border-amber-300/60 bg-amber-50/30 dark:border-amber-700/50 dark:bg-amber-950/20"
+              data-testid="review-band-whatsapp-identities"
+            >
+              <div className="flex items-baseline justify-between border-b border-amber-300/50 px-3 py-2 dark:border-amber-700/40">
+                <span className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-amber-700 dark:text-amber-400">
+                  Unidentified WhatsApp contacts · {wa.items.length}
+                </span>
+              </div>
+              {wa.items.map((item) => (
+                <WhatsAppIdentityRow
+                  key={item.id}
+                  item={item}
+                  onOpen={() => setWaSelected(item.id)}
+                  onResolve={(message) => wa.resolve(item.id, message)}
+                />
+              ))}
+            </section>
+          ) : null}
           {orderedBands.map(([label, bandRows]) => (
             <section
               key={label}
@@ -95,6 +124,11 @@ export function ReviewTab() {
         </div>
       )}
       {sheets}
+      <WhatsAppIdentityDrawer
+        item={wa.items.find((item) => item.id === waSelected) ?? null}
+        onClose={() => setWaSelected(null)}
+        onResolve={wa.resolve}
+      />
     </div>
   );
 }

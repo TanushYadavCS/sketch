@@ -15,13 +15,20 @@ export function SectionLabel({ children, className }: { children: ReactNode; cla
   );
 }
 
-/** Accent-tinted bordered card with a {@link SectionLabel} header. */
+/**
+ * A {@link SectionLabel} eyebrow sitting ABOVE an accent-tinted bordered content
+ * box — the label is outside the border, matching every other labelled section
+ * in the drawer (SectionLabel + EntryList / input). Keeps content visually
+ * grouped without burying the eyebrow inside the box.
+ */
 export function SectionCard({ accent, label, children }: { accent: string; label: string; children: ReactNode }) {
   return (
-    <section className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
-      <SectionLabel className="mb-2">{label}</SectionLabel>
-      {children}
-    </section>
+    <div className="flex flex-col">
+      <SectionLabel className="mb-1.5 font-medium">{label}</SectionLabel>
+      <section className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
+        {children}
+      </section>
+    </div>
   );
 }
 
