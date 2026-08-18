@@ -733,9 +733,8 @@ describe("AutomationBuilderPage edit lock", () => {
 
     const banner = await screen.findByTestId("automation-lock-banner");
     expect(banner).toHaveAttribute("data-lock-state", "held-by-me");
-    expect(screen.getByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    expect(within(banner).getByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Review request/ }));
     expect(await screen.findByTestId("automation-lock-holder-response-dialog")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Approve takeover" }));
     await waitFor(() =>
@@ -775,9 +774,8 @@ describe("AutomationBuilderPage edit lock", () => {
 
     renderBuilder();
 
-    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    expect(await screen.findByTestId("automation-lock-holder-response-dialog")).toBeInTheDocument();
     await waitFor(() => expect(mocks.acquireLock).toHaveBeenCalledWith("task-123", expect.any(String), 7));
-    await user.click(screen.getByRole("button", { name: /Review request/ }));
     await user.click(await screen.findByRole("button", { name: "Approve takeover" }));
     await waitFor(() =>
       expect(mocks.respondToSteal).toHaveBeenCalledWith("task-123", true, {
@@ -794,7 +792,7 @@ describe("AutomationBuilderPage edit lock", () => {
     mocks.getAutomation.mockImplementation(async () => ({ ...automation, lock: currentLock }));
     mocks.acquireLock.mockImplementation(async () => ({ lock: currentLock }));
 
-    renderBuilder();
+    const view = renderBuilder();
 
     expect(await screen.findByText("You're editing")).toBeInTheDocument();
     document.dispatchEvent(new Event("visibilitychange"));
@@ -809,7 +807,8 @@ describe("AutomationBuilderPage edit lock", () => {
       await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS);
     });
 
-    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    expect(await screen.findByTestId("automation-lock-holder-response-dialog")).toBeInTheDocument();
+    await act(async () => view.unmount());
   });
 
   it("discovers takeover requests while the holder is inside an automation chat", async () => {
@@ -863,8 +862,9 @@ describe("AutomationBuilderPage edit lock", () => {
       await vi.advanceTimersByTimeAsync(AUTOMATION_EDIT_LOCK_POLL_INTERVAL_MS);
     });
 
-    expect(await screen.findByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Review request/ })).toBeInTheDocument();
+    const banner = await screen.findByTestId("automation-lock-banner");
+    expect(within(banner).getByText(/Carol Davis wants to take over editing/)).toBeInTheDocument();
+    expect(await screen.findByTestId("automation-lock-holder-response-dialog")).toBeInTheDocument();
   });
 
   it("keeps the presence lease alive while the tab is in the background", async () => {

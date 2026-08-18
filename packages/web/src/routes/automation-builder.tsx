@@ -610,6 +610,7 @@ export function AutomationBuilderPage() {
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [holderResponseDialogOpen, setHolderResponseDialogOpen] = useState(false);
   const [authoringLease, setAuthoringLease] = useState<AutomationAuthoringLease | null>(null);
+  const surfacedStealRequestRef = useRef<string | null>(null);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
@@ -692,6 +693,17 @@ export function AutomationBuilderPage() {
   useEffect(() => {
     lockHolderRef.current = authoringLease;
   }, [authoringLease]);
+
+  useEffect(() => {
+    const requestId = lockView?.isHeldByMe ? lockView.stealPending?.expiresAt : null;
+    if (!requestId) {
+      setHolderResponseDialogOpen(false);
+      return;
+    }
+    if (surfacedStealRequestRef.current === requestId) return;
+    surfacedStealRequestRef.current = requestId;
+    setHolderResponseDialogOpen(true);
+  }, [lockView?.isHeldByMe, lockView?.stealPending?.expiresAt]);
 
   const leaseIsCurrent = useCallback((lease: AutomationLeaseRequest) => {
     const current = lockHolderRef.current;

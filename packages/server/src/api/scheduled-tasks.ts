@@ -45,7 +45,6 @@ import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import type { SlackBot } from "../slack/bot";
 import { notifyStealRequested } from "../whatsapp/lock-confirmations";
-import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -864,30 +863,7 @@ export function scheduledTaskRoutes(
     });
   });
 
-  // --- Edit-lock endpoints (pessimistic whole-automation locks) ---
-  // Lock holders carry their known chat surface when they have one so steal
-  // notifications can be delivered; pure web builders stay on the builder
-  // surface, whose polling owns approval.
-
-  /**
-   * Lock-holder surface for web API lock acquisition. Web users with a chat
-   * identity record that surface (so steal notifications and outcomes can be
-   * delivered); pure web users stay on the builder surface, whose polling owns
-   * approval.
-   */
-  async function webLockHolderFor(userId: string): Promise<LockHolderFields> {
-    const user = await users.findById(userId);
-    if (user?.slack_user_id) {
-      return { userId, platform: "slack", surface: "dm", conversationId: user.slack_user_id };
-    }
-    if (user?.whatsapp_number) {
-      return {
-        userId,
-        platform: "whatsapp",
-        surface: "dm",
-        conversationId: phoneE164ToWhatsAppJid(user.whatsapp_number),
-      };
-    }
+  function webLockHolderFor(userId: string): LockHolderFields {
     return { userId, platform: "web", surface: "builder", conversationId: null };
   }
 
@@ -1078,7 +1054,7 @@ export function scheduledTaskRoutes(
     }
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
-      holder: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
+      holder: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
     });
     const lock = await toLockView(acquired.lock, result.userId, users, leaseRequest.clientSessionId);
     if (acquired.kind === "locked") {
@@ -1147,7 +1123,7 @@ export function scheduledTaskRoutes(
     if ("response" in leaseRequest) return leaseRequest.response;
     const stolen = await requestSteal(db, {
       taskId: id,
-      requester: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
+      requester: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
     });
     if (stolen.kind === "not_locked") {
       return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);

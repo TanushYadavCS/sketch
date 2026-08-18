@@ -256,7 +256,7 @@ describe("scheduled task conversation API", () => {
     expect(admin.id).not.toBe(owner.id);
   });
 
-  it("lets an exact lease holder create chats without overwriting its Slack notification route", async () => {
+  it("lets an exact browser lease holder create chats while keeping its builder notification route", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({
       name: "Slack owner",
@@ -304,9 +304,9 @@ describe("scheduled task conversation API", () => {
     await expect(createAutomationLocksRepository(db).getByTaskId("slack-chat-task")).resolves.toMatchObject({
       holder_user_id: owner.id,
       holder_session_id: clientSessionId,
-      holder_platform: "slack",
-      holder_surface: "dm",
-      holder_conversation_id: "UOWNERCHAT",
+      holder_platform: "web",
+      holder_surface: "builder",
+      holder_conversation_id: secondBody.conversation.conversationId,
       generation: lock.generation,
     });
   });
