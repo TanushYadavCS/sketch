@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.1] -- 2026-08-18
+
+- Adds delivery-suppressed test runs to the automation builder, executing through the run path while suppressing configured Slack and WhatsApp delivery.
+- Enables automation sharing for org members with unified session- and generation-fenced authoring leases, dynamic editing presence, and read-only access for authorized users.
+- Fixes out-of-range chat-history row-id bounds for automations by clamping to the integer ceiling, preventing PostgreSQL errors that caused successful-looking failures.
+- Allows the current automation lease holder to create or switch builder chats without conflicting notification destinations, preserving cross-session locking.
+
 ## [1.4.0] -- 2026-08-17
 
 - Adds a server-driven queue for unnamed WhatsApp contacts, letting admins name them via group context and message excerpts.
