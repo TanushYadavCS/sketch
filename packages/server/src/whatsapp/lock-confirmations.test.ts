@@ -20,7 +20,13 @@ import {
   renderWhatsAppStealRequest,
 } from "./lock-confirmations";
 
-const HOLDER_ALICE: LockHolderFields = { userId: "u1", platform: "slack", surface: "dm", conversationId: "C1" };
+const HOLDER_ALICE: LockHolderFields = {
+  userId: "u1",
+  sessionId: "agent-session-alice",
+  platform: "slack",
+  surface: "dm",
+  conversationId: "C1",
+};
 const REQUESTER_BOB: LockHolderFields = { userId: "u2", platform: "slack", surface: "dm", conversationId: "D2" };
 
 function futureIso(msFromNow: number): string {
@@ -293,6 +299,7 @@ describe("handleStealResponse", () => {
 
   it("approves the steal, flips the holder, and delivers the outcome to the requester", async () => {
     await seedPendingSteal(db);
+    await db.updateTable("automation_task_locks").set({ generation: 7 }).where("task_id", "=", "task-1").execute();
     const senders = makeSenders();
     const logger = { warn: vi.fn() };
 
