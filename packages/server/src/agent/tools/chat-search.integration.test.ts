@@ -1719,89 +1719,78 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       it("authorizes a WhatsApp group on a direct phone match and no conversations row", async () => {
         const groupJid = `${randomUUID()}@g.us`;
         await upsertGroup(groupJid);
-        await db
-          .insertInto("whatsapp_group_participants")
-          .values({
+        await insertWhatsAppParticipantFixtures(db, [
+          {
             group_jid: groupJid,
             participant_jid: "15550001234@s.whatsapp.net",
             phone_e164: USER_WHATSAPP_NUMBER,
             lid: null,
             admin_role: null,
             last_seen_at: "2026-07-17T09:00:00.000Z",
-          })
-          .execute();
+          },
+        ]);
 
         const granted = await authorize([{ platform: "whatsapp", targetId: groupJid }]);
 
         expect([...granted]).toEqual([`whatsapp:${groupJid}`]);
       });
 
-      it("authorizes a WhatsApp group through a trusted one-to-one LID mapping", async () => {
-        const mappingGroup = `${randomUUID()}@g.us`;
+      it("authorizes a WhatsApp group through a linked LID alias", async () => {
         const targetGroup = `${randomUUID()}@g.us`;
-        await upsertGroup(mappingGroup);
         await upsertGroup(targetGroup);
         await db
-          .insertInto("whatsapp_group_participants")
-          .values([
-            {
-              group_jid: mappingGroup,
-              participant_jid: "86702773280883@lid",
-              phone_e164: USER_WHATSAPP_NUMBER,
-              lid: "86702773280883@lid",
-              admin_role: null,
-              last_seen_at: "2026-07-17T09:00:00.000Z",
-            },
-            {
-              group_jid: targetGroup,
-              participant_jid: "86702773280883@lid",
-              phone_e164: null,
-              lid: "86702773280883@lid",
-              admin_role: null,
-              last_seen_at: "2026-07-17T09:00:00.000Z",
-            },
-          ])
+          .insertInto("user_whatsapp_lids")
+          .values({
+            user_id: USER_ID,
+            lid: "86702773280883@lid",
+            first_seen_at: "2026-07-17T09:00:00.000Z",
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
           .execute();
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: targetGroup,
+            participant_jid: "86702773280883@lid",
+            phone_e164: null,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
 
         const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
 
         expect([...granted]).toEqual([`whatsapp:${targetGroup}`]);
       });
 
-      it("denies a WhatsApp group reached only through an ambiguous LID mapping", async () => {
-        const mappingGroup = `${randomUUID()}@g.us`;
+      it("denies a WhatsApp group reached only through a LID that is not linked to the requester", async () => {
         const targetGroup = `${randomUUID()}@g.us`;
-        await upsertGroup(mappingGroup);
         await upsertGroup(targetGroup);
+        const otherUserId = `user-other-lid-${randomUUID()}`;
+        await createUserRepository(db).create({
+          id: otherUserId,
+          name: "Other",
+          email: `${otherUserId}@example.com`,
+        });
         await db
-          .insertInto("whatsapp_group_participants")
-          .values([
-            {
-              group_jid: mappingGroup,
-              participant_jid: "lid-one@lid",
-              phone_e164: USER_WHATSAPP_NUMBER,
-              lid: "lid-one@lid",
-              admin_role: null,
-              last_seen_at: "2026-07-17T09:00:00.000Z",
-            },
-            {
-              group_jid: mappingGroup,
-              participant_jid: "lid-two@lid",
-              phone_e164: USER_WHATSAPP_NUMBER,
-              lid: "lid-two@lid",
-              admin_role: null,
-              last_seen_at: "2026-07-17T09:00:00.000Z",
-            },
-            {
-              group_jid: targetGroup,
-              participant_jid: "lid-one@lid",
-              phone_e164: null,
-              lid: "lid-one@lid",
-              admin_role: null,
-              last_seen_at: "2026-07-17T09:00:00.000Z",
-            },
-          ])
+          .insertInto("user_whatsapp_lids")
+          .values({
+            user_id: otherUserId,
+            lid: "lid-one@lid",
+            first_seen_at: "2026-07-17T09:00:00.000Z",
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
           .execute();
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: targetGroup,
+            participant_jid: "lid-one@lid",
+            phone_e164: null,
+            lid: "lid-one@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
 
         const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
 
@@ -1812,17 +1801,16 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         const groupJid = `${randomUUID()}@g.us`;
         await upsertGroup(groupJid);
         await insertSlackMember("C-SEND-NO-IDENTITY", new Date().toISOString());
-        await db
-          .insertInto("whatsapp_group_participants")
-          .values({
+        await insertWhatsAppParticipantFixtures(db, [
+          {
             group_jid: groupJid,
             participant_jid: "15550001234@s.whatsapp.net",
             phone_e164: USER_WHATSAPP_NUMBER,
             lid: null,
             admin_role: null,
             last_seen_at: "2026-07-17T09:00:00.000Z",
-          })
-          .execute();
+          },
+        ]);
         const unlinkedId = `user-unlinked-${randomUUID()}`;
         await createUserRepository(db).create({
           id: unlinkedId,

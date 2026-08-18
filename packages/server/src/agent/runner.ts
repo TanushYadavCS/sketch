@@ -95,8 +95,8 @@ import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
   QuestionCollector,
-  UploadCollector,
   type SendTargetMessage,
+  UploadCollector,
 } from "./tools/types";
 
 /**
