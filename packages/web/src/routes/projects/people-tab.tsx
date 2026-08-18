@@ -35,7 +35,7 @@ interface CompanyInfo {
   subtype: string | null;
 }
 
-export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
+export function PeopleTab() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [needsPlacementOnly, setNeedsPlacementOnly] = useState(false);
@@ -147,7 +147,7 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
 
   return (
     <div className="space-y-4">
-      <ReviewBandCapped types={["person"]} onSeeAll={onSeeAllReview} />
+      <ReviewBandCapped types={["person"]} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-0 flex-1">

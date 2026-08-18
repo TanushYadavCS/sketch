@@ -158,18 +158,21 @@ function InternalNavItem({
   item,
   active,
   badge,
+  search,
   onSelect,
 }: {
   item: NavItem;
   active: boolean;
   badge?: number;
+  /** Optional search params — the Your org badge lands on the tab with pending review work. */
+  search?: Record<string, string>;
   onSelect: () => void;
 }) {
   const Icon = item.icon;
   return (
     <SidebarMenuItem>
       <SidebarMenuButton asChild isActive={active} tooltip={item.label} className={NAV_ROW}>
-        <Link to={item.href} onClick={onSelect}>
+        <Link to={item.href} search={search} onClick={onSelect}>
           <Icon size={16} aria-hidden />
           <span className="flex-1 truncate text-[13px] group-data-[collapsible=icon]:hidden">{item.label}</span>
         </Link>
@@ -444,7 +447,7 @@ export function AppSidebar({
   const setupStatus = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
   const yourOrgReview = useQuery({
     queryKey: ["entity-review", "count", "all"],
-    queryFn: () => api.entityReview.list({ limit: 0 }),
+    queryFn: () => api.entityReview.list({ limit: 200 }),
     enabled: role === "admin",
     refetchInterval: 30_000,
   });
@@ -456,6 +459,22 @@ export function AppSidebar({
     refetchInterval: 30_000,
   });
   const yourOrgBadgeCount = (yourOrgReview.data?.total ?? 0) + (yourOrgVerdicts.data?.verdicts.length ?? 0);
+  /**
+   * Review now lives per-tab, so the badge link must land where the work is:
+   * the first type tab with pending rows, or Projects when only mint dossiers
+   * are waiting. Defaults to People (the tab default) when nothing is pending.
+   */
+  const reviewRows = yourOrgReview.data?.rows ?? [];
+  const tabForType: Array<[string, string]> = [
+    ["person", "people"],
+    ["company", "companies"],
+    ["team", "teams"],
+    ["project", "projects"],
+    ["product", "products"],
+  ];
+  const yourOrgTargetTab =
+    tabForType.find(([type]) => reviewRows.some((row) => row.entity_type === type))?.[1] ??
+    ((yourOrgVerdicts.data?.verdicts.length ?? 0) > 0 ? "projects" : "people");
   const logout = useMutation({
     mutationFn: () => api.auth.logout(),
     onSuccess: () => {
@@ -520,6 +539,7 @@ export function AppSidebar({
                 item={item}
                 active={isNavItemActive(location.pathname, item.href)}
                 badge={item.yourOrgBadge ? yourOrgBadgeCount : undefined}
+                search={item.yourOrgBadge && yourOrgBadgeCount > 0 ? { tab: yourOrgTargetTab } : undefined}
                 onSelect={closeMobile}
               />
             ))}

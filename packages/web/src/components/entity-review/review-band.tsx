@@ -48,7 +48,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { birthOrigin, entityEmail, humanSourceType } from "./entity-format";
+import { birthOrigin, entityEmail, humanSourceType, isWeeklyPassProjectRow } from "./entity-format";
 
 /**
  * Self-contained review band scoped to a set of entity types. Fetches the
@@ -475,16 +475,22 @@ function BirthInspectBody({
       </div>
 
       <div className="flex items-center gap-2 border-t bg-background px-6 py-3">
-        <Button
-          size="sm"
-          onClick={() => mutations.confirm({ nameOverride })}
-          disabled={mutations.isPending || trimmedName.length === 0}
-          className="h-7 gap-1 bg-emerald-600 text-[11px] text-white hover:bg-emerald-700"
-          data-testid="birth-inspect-confirm"
-        >
-          <CheckIcon size={12} weight="bold" />
-          Confirm new
-        </Button>
+        {isWeeklyPassProjectRow(row) ? (
+          <span className="text-[11px] text-muted-foreground">
+            Projects are only created by the weekly mint pass — merge, dismiss, or leave it pooling.
+          </span>
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => mutations.confirm({ nameOverride })}
+            disabled={mutations.isPending || trimmedName.length === 0}
+            className="h-7 gap-1 bg-emerald-600 text-[11px] text-white hover:bg-emerald-700"
+            data-testid="birth-inspect-confirm"
+          >
+            <CheckIcon size={12} weight="bold" />
+            Confirm new
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"
@@ -1017,22 +1023,30 @@ function ChooserView({
             />
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="h-px flex-1 bg-border" />
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">or</span>
-          <div className="h-px flex-1 bg-border" />
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onCreateNew}
-          disabled={isPending}
-          className="gap-1.5"
-          data-testid="create-new"
-        >
-          <PlusIcon size={14} />
-          Create as new {row.entity_type}
-        </Button>
+        {isWeeklyPassProjectRow(row) ? (
+          <p className="text-[11px] text-muted-foreground">
+            Projects are only created by the weekly mint pass — link or merge into an existing one, or leave it pooling.
+          </p>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <div className="h-px flex-1 bg-border" />
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">or</span>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onCreateNew}
+              disabled={isPending}
+              className="gap-1.5"
+              data-testid="create-new"
+            >
+              <PlusIcon size={14} />
+              Create as new {row.entity_type}
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

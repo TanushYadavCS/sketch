@@ -1202,6 +1202,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const app = createApp(db, config, {
     whatsapp,
     whatsappRuntime,
+    weeklyMint,
     /**
      * `forceSweep` bypasses the 5-minute interval so a group enabled seconds
      * after the socket connected does not wait for the next scheduled sweep to

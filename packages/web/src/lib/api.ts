@@ -685,6 +685,7 @@ export type EntityReviewErrorCode =
   | "ALREADY_CONFIRMING"
   | "EVIDENCE_TOO_LARGE"
   | "TYPE_MISMATCH"
+  | "PROJECT_BIRTH_BLOCKED"
   | "ROW_NOT_FOUND"
   | "OWNER_SCOPE_DENIED";
 
@@ -699,6 +700,7 @@ export function isEntityReviewErrorCode(code: string | undefined): code is Entit
     code === "ALREADY_CONFIRMING" ||
     code === "EVIDENCE_TOO_LARGE" ||
     code === "TYPE_MISMATCH" ||
+    code === "PROJECT_BIRTH_BLOCKED" ||
     code === "ROW_NOT_FOUND" ||
     code === "OWNER_SCOPE_DENIED"
   );
@@ -3756,6 +3758,9 @@ export const api = {
     },
     getPass(id: string) {
       return request<{ run: ProjectMintingPassRun }>(`/api/project-minting/passes/${id}`);
+    },
+    runNow() {
+      return request<{ run: { status: string } }>("/api/project-minting/runs", { method: "POST" });
     },
   },
   entityReview: {

@@ -579,6 +579,10 @@ export const handlers = [
     return HttpResponse.json({ rows: [], total: 0 });
   }),
 
+  http.get("/api/entities/whatsapp/identities", () => {
+    return HttpResponse.json({ items: [], viewerHasWhatsAppIdentity: false });
+  }),
+
   http.get("/api/web-chat/conversations", () => {
     return HttpResponse.json({ conversations: [] });
   }),

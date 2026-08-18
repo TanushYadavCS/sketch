@@ -40,6 +40,7 @@ import { setupRoutes } from "./api/setup";
 import { skillsRoutes } from "./api/skills";
 import { verifyJwt } from "./auth/jwt";
 import type { GeminiGenerator } from "./connectors/gemini-generate";
+import type { WeeklyMintService } from "./connectors/weekly-mint";
 import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes, resolveOrigin } from "./api/oauth";
@@ -164,6 +165,8 @@ interface AppDeps {
   /** Injected so the dev trace route, and its tests, can drive a specific model. */
   enrichmentGenerator?: GeminiGenerator;
   taskMintingGenerator?: GeminiGenerator;
+  /** Bootstrap's weekly mint service, so the manual "Run now" route shares its in-flight latch. */
+  weeklyMint?: WeeklyMintService | null;
 }
 
 /**
@@ -507,6 +510,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       openRouterApiKey: config.OPENROUTER_API_KEY,
       projectMintingModel: config.PROJECT_MINTING_MODEL,
       passesEnabled: config.DEV_TOOLS_ENABLED,
+      weeklyMint: deps?.weeklyMint ?? null,
     }),
   );
   app.route(

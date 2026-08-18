@@ -8,6 +8,7 @@ import {
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
+import { WEEKLY_PASS_PROJECT_SOURCES } from "../entities/resolve";
 import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
@@ -42,21 +43,20 @@ const INTERNAL_COMPANY_NAME = "Internal";
 const GITHUB_REPO_PATTERN = /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
 
 /**
- * Weekly minting only claims content-extraction project pool rows. The list is
+ * Weekly minting only claims content-extraction project pool rows. The set is
  * intentionally positive and narrow so structural connector seeds,
  * user_entity_link reviews, and any future review source stay invisible until
- * deliberately admitted here. `llm_relation` was historically excluded for its
+ * deliberately admitted. `llm_relation` was historically excluded for its
  * leak record, but the weekly pass carries the machinery that era lacked — the
  * recurrence floor, dedup against accepted projects, and a human accept gate —
  * and excluding it dropped real candidates (Traveller Segmentation Dashboard
  * only ever arrived through it).
+ *
+ * Derived from WEEKLY_PASS_PROJECT_SOURCES in entities/resolve.ts, where the
+ * same set gates one-row project births — the rows this pass consumes and the
+ * rows the review API refuses to birth must never drift apart.
  */
-export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST = [
-  "llm_extraction",
-  "llm_relation",
-  "candidate_promotion",
-  "entity_candidate_promotion",
-] as const;
+export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST: readonly string[] = [...WEEKLY_PASS_PROJECT_SOURCES];
 
 type WeeklyMintMode = "shadow" | "live";
 
@@ -69,10 +69,16 @@ export interface WeeklyMintResult {
   verdictsStored: number;
   agedOut: number;
   skippedGroups: number;
+  skippedCompanies: number;
 }
+
+export type ManualRunOutcome =
+  | { started: false; reason: "in_flight" }
+  | { started: true; completion: Promise<WeeklyMintResult> };
 
 export interface WeeklyMintService {
   runOnce(clock?: Date): Promise<WeeklyMintResult>;
+  tryRunManual(clock?: Date): ManualRunOutcome;
   start(): void;
   stop(): Promise<void>;
 }
@@ -210,6 +216,7 @@ function resultFromRun(run: RunRow): WeeklyMintResult {
     verdictsStored: run.verdicts_stored,
     agedOut: run.aged_out,
     skippedGroups: 0,
+    skippedCompanies: 0,
   };
 }
 
@@ -932,6 +939,23 @@ async function ageOutStaleCandidates(db: Kysely<DB>, companyKey: string, clock: 
   return rows.length;
 }
 
+/**
+ * storePending supersedes ALL of a company's pending verdicts, so a manual
+ * re-run that judges only uncovered groups would silently wipe an unreviewed
+ * dossier covering other groups. Manual runs skip such companies entirely.
+ */
+async function hasPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: string | null): Promise<boolean> {
+  const row = await db
+    .selectFrom("project_minting_verdicts")
+    .select("id")
+    .$if(companyEntityId === null, (qb) => qb.where("company_entity_id", "is", null))
+    .$if(companyEntityId !== null, (qb) => qb.where("company_entity_id", "=", companyEntityId))
+    .where("status", "=", "pending")
+    .where("superseded_at", "is", null)
+    .executeTakeFirst();
+  return row != null;
+}
+
 async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: string | null): Promise<Set<string>> {
   const row = await db
     .selectFrom("project_minting_verdicts")
@@ -1611,7 +1635,50 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
     return inflight;
   }
 
-  async function runSweep(clock: Date): Promise<WeeklyMintResult> {
+  /**
+   * Admin "Run now": forces THIS week's run under the same weekly key instead
+   * of minting a parallel run identity. A completed row is reset and re-run;
+   * a not-yet-run week simply runs early (the scheduled sweep then
+   * short-circuits on COMPLETED). The latch is claimed synchronously so a
+   * concurrent scheduled sweep can never interleave with the reset.
+   */
+  function tryRunManual(clock = deps.now?.() ?? new Date()): ManualRunOutcome {
+    if (inflight) return { started: false, reason: "in_flight" };
+    inflight = (async () => {
+      const week = clockWeek(clock);
+      const current = await ensureRun(deps.db, week);
+      if (current.status === COMPLETED) {
+        await deps.db
+          .updateTable("weekly_mint_runs")
+          .set({
+            status: QUEUED,
+            stage: COMPANIES_STAGE,
+            company_cursor: null,
+            lease_token: null,
+            heartbeat_at: null,
+            completed_at: null,
+            error: null,
+            candidates_grouped: 0,
+            verdicts_requested: 0,
+            verdicts_stored: 0,
+            aged_out: 0,
+            updated_at: timestamp(deps.now),
+          })
+          .where("id", "=", current.id)
+          .where("status", "=", COMPLETED)
+          .execute();
+      }
+      return runSweep(clock, { skipCompaniesWithPendingVerdicts: true });
+    })().finally(() => {
+      inflight = null;
+    });
+    return { started: true, completion: inflight };
+  }
+
+  async function runSweep(
+    clock: Date,
+    opts?: { skipCompaniesWithPendingVerdicts?: boolean },
+  ): Promise<WeeklyMintResult> {
     const week = clockWeek(clock);
     const current = await ensureRun(deps.db, week);
     if (current.status === COMPLETED) return resultFromRun(current);
@@ -1671,6 +1738,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       vendorsSkipped: 0,
       skippedGroups: 0,
       companyMatchedSkips: 0,
+      skippedCompanies: 0,
     };
     const dbCounters = () => ({
       candidates_grouped: counters.candidatesGrouped,
@@ -1692,6 +1760,29 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       const companyGuards = await loadCompanyGuards(deps.db);
       for (const container of containers) {
         if (companyCursor && container.key <= companyCursor) continue;
+        if (
+          opts?.skipCompaniesWithPendingVerdicts &&
+          (await hasPendingWeeklyVerdict(deps.db, container.companyEntityId))
+        ) {
+          counters.skippedCompanies += 1;
+          deps.logger.info(
+            {
+              companyEntityId: container.companyEntityId,
+              containerKey: container.key,
+              companyName: container.companyName,
+            },
+            "Weekly mint manual run skipped company with unresolved pending verdict",
+          );
+          companyCursor = container.key;
+          await updateOwnedRun({
+            stage: COMPANIES_STAGE,
+            company_cursor: companyCursor,
+            heartbeat_at: timestamp(deps.now),
+            ...dbCounters(),
+            updated_at: timestamp(deps.now),
+          });
+          continue;
+        }
         const declaration = container.cluster
           ? resolveDeclaration(
               container.cluster.groupMembers
@@ -1882,7 +1973,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       });
       ownedRunId = null;
       ownedLeaseToken = null;
-      return { ...resultFromRun(completed), skippedGroups: counters.skippedGroups };
+      return {
+        ...resultFromRun(completed),
+        skippedGroups: counters.skippedGroups,
+        skippedCompanies: counters.skippedCompanies,
+      };
     } catch (error) {
       ownedRunId = null;
       ownedLeaseToken = null;
@@ -1904,6 +1999,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
 
   return {
     runOnce,
+    tryRunManual,
     start() {
       if (timer) return;
       void runOnce().catch((error) => deps.logger.error({ err: error }, "Weekly mint pass failed"));

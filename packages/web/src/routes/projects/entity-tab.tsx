@@ -12,22 +12,8 @@ import { Badge } from "@sketch/ui/components/badge";
 import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ReviewBandCapped } from "./org-review";
-
-function useDebouncedSearch(delay = 300) {
-  const [search, setSearch] = useState("");
-  const [debounced, setDebounced] = useState("");
-  const ref = useRef<ReturnType<typeof setTimeout>>(null);
-  useEffect(() => {
-    if (ref.current) clearTimeout(ref.current);
-    ref.current = setTimeout(() => setDebounced(search.trim()), delay);
-    return () => {
-      if (ref.current) clearTimeout(ref.current);
-    };
-  }, [search, delay]);
-  return { search, setSearch, debounced };
-}
+import { type ReactNode, useState } from "react";
+import { ReviewBandCapped, useDebouncedSearch } from "./org-review";
 
 function SearchInput({
   value,
@@ -62,14 +48,15 @@ function useEntityList(type: string, search: string) {
 export function OrgEntityTab({
   type,
   typeLabel,
-  onSeeAllReview,
+  isAdmin = false,
   renderEmpty,
   renderList,
 }: {
   type: string;
   typeLabel: string;
-  onSeeAllReview: () => void;
-  renderEmpty?: (search: string) => ReactNode;
+  isAdmin?: boolean;
+  /** `expandReview` opens the review band in place (the old "See all → Review" destination). */
+  renderEmpty?: (search: string, expandReview: () => void) => ReactNode;
   /** Replaces the default flat EntityTable — the Projects tab renders its tree here. */
   renderList?: (entities: EntityListItem[], search: string) => ReactNode;
 }) {
@@ -77,10 +64,16 @@ export function OrgEntityTab({
   const { openEntity } = useEntityUi();
   const { data, isLoading } = useEntityList(type, debounced);
   const entities = data?.entities ?? [];
+  const [reviewExpanded, setReviewExpanded] = useState(false);
 
   return (
     <div className="space-y-4">
-      <ReviewBandCapped types={[type]} onSeeAll={onSeeAllReview} />
+      <ReviewBandCapped
+        types={[type]}
+        isAdmin={isAdmin}
+        expanded={reviewExpanded}
+        onExpandedChange={setReviewExpanded}
+      />
       <SearchInput value={search} onChange={setSearch} placeholder={`Search ${typeLabel.toLowerCase()}…`} />
       {isLoading ? (
         <div className="space-y-2">
@@ -90,7 +83,7 @@ export function OrgEntityTab({
         </div>
       ) : entities.length === 0 ? (
         renderEmpty ? (
-          renderEmpty(debounced)
+          renderEmpty(debounced, () => setReviewExpanded(true))
         ) : (
           <OrgEmpty>
             {debounced ? `No ${typeLabel.toLowerCase()} match your search.` : `No ${typeLabel.toLowerCase()} yet.`}
@@ -105,13 +98,7 @@ export function OrgEntityTab({
   );
 }
 
-export function ProductsTab({
-  onSeeAllReview,
-  onDeclare,
-}: {
-  onSeeAllReview: () => void;
-  onDeclare: () => void;
-}) {
+export function ProductsTab({ onDeclare }: { onDeclare: () => void }) {
   const { openEntity } = useEntityUi();
   const ours = useQuery({ queryKey: ["products"], queryFn: () => api.products.list() });
   const tools = useEntityList("tool", "");
@@ -120,7 +107,7 @@ export function ProductsTab({
 
   return (
     <div className="space-y-4">
-      <ReviewBandCapped types={["product"]} onSeeAll={onSeeAllReview} />
+      <ReviewBandCapped types={["product"]} />
 
       <section>
         <SectionLabel label="Ours" note={`${products.length} declared`} accent />
@@ -229,7 +216,7 @@ export function OrgEmpty({ children }: { children: ReactNode }) {
   );
 }
 
-export function TeamsEmpty({ pendingCount, onSeeAllReview }: { pendingCount: number; onSeeAllReview: () => void }) {
+export function TeamsEmpty({ pendingCount, onExpandReview }: { pendingCount: number; onExpandReview: () => void }) {
   return (
     <OrgEmpty>
       Teams appear from Linear &amp; ClickUp
@@ -238,10 +225,10 @@ export function TeamsEmpty({ pendingCount, onSeeAllReview }: { pendingCount: num
           {" — "}
           <button
             type="button"
-            onClick={onSeeAllReview}
+            onClick={onExpandReview}
             className="font-medium text-foreground underline-offset-2 hover:underline"
           >
-            {pendingCount} waiting in Review →
+            {pendingCount} waiting for review ↑
           </button>
         </>
       ) : (

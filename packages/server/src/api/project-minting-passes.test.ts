@@ -4,13 +4,17 @@
  * be reached by someone or something that should not have reached it, checked
  * over HTTP because that is the only surface a browser can hit.
  */
+import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
+import { normalizeName } from "../connectors/name-normalize";
+import type { ManualRunOutcome, WeeklyMintResult, WeeklyMintService } from "../connectors/weekly-mint";
 import { createGraphPassRunRepository } from "../db/repositories/graph-pass-runs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { confirmReview } from "../entities/resolve";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
@@ -252,5 +256,90 @@ describe("project minting pass route", () => {
       status: "failed",
       errorMessage: "project minting pass interrupted by restart",
     });
+  });
+
+  /**
+   * The manual "Run now" surface and the server half of the project no-create
+   * rule together: only an admin can force a run, the in-flight latch answers
+   * 409, an app without the bootstrap service answers 503, and a one-row
+   * confirm can never birth a project from file evidence.
+   */
+  it("guards the manual run route and refuses one-row project births", async () => {
+    const emptyResult: WeeklyMintResult = {
+      status: "completed",
+      stage: "completed",
+      clockWeek: "2026-08-17",
+      candidatesGrouped: 0,
+      verdictsRequested: 0,
+      verdictsStored: 0,
+      agedOut: 0,
+      skippedGroups: 0,
+      skippedCompanies: 0,
+    };
+    const outcomes: ManualRunOutcome[] = [
+      { started: true, completion: Promise.resolve(emptyResult) },
+      { started: false, reason: "in_flight" },
+    ];
+    let manualCalls = 0;
+    const weeklyMint: WeeklyMintService = {
+      runOnce: () => Promise.resolve(emptyResult),
+      tryRunManual: () => {
+        const outcome = outcomes[Math.min(manualCalls, outcomes.length - 1)];
+        manualCalls += 1;
+        return outcome;
+      },
+      start() {},
+      stop: () => Promise.resolve(),
+    };
+    const app = createApp(db, createTestConfig({}), { logger, weeklyMint });
+    const runNow = (cookie: string) =>
+      app.request("/api/project-minting/runs", { method: "POST", headers: { Cookie: cookie } });
+
+    const memberRes = await runNow(await login(app, MEMBER_EMAIL));
+    expect(memberRes.status).toBe(403);
+    expect(manualCalls).toBe(0);
+
+    const adminCookie = await login(app, ADMIN_EMAIL);
+    const started = await runNow(adminCookie);
+    expect(started.status).toBe(202);
+    const inFlight = await runNow(adminCookie);
+    expect(inFlight.status).toBe(409);
+    expect((await inFlight.json()) as object).toMatchObject({ error: { code: "RUN_IN_FLIGHT" } });
+
+    const bareApp = createApp(db, createTestConfig({}), { logger });
+    const unavailable = await bareApp.request("/api/project-minting/runs", {
+      method: "POST",
+      headers: { Cookie: await login(bareApp, ADMIN_EMAIL) },
+    });
+    expect(unavailable.status).toBe(503);
+
+    const reviewId = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id: reviewId,
+        proposed_name: "Falcon Dashboard",
+        normalized_name: normalizeName("Falcon Dashboard"),
+        entity_type: "project",
+        candidate_entity_id: null,
+        candidate_score: null,
+        candidate_reason: "birth-gated",
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 3,
+        status: "pending",
+        triggered_by_user_id: "admin-user",
+        source: "llm_extraction",
+        source_id: "file-1:project:falcon-dashboard",
+      })
+      .execute();
+
+    await expect(
+      confirmReview({ db, userId: "admin-user" }, reviewId, { candidateGeneratedAt: now }),
+    ).rejects.toMatchObject({ code: "PROJECT_BIRTH_BLOCKED" });
+    const projectEntities = await db.selectFrom("entities").select("id").where("source_type", "=", "project").execute();
+    expect(projectEntities).toHaveLength(0);
   });
 });

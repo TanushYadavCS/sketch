@@ -47,6 +47,30 @@ export function birthOrigin(row: EntityReviewQueueRow): { kind: "tracker" | "ai"
   return null;
 }
 
+/**
+ * Project queue rows the weekly mint pass owns: file-evidence candidates
+ * (LLM extraction sources, mirroring the server's WEEKLY_PASS_PROJECT_SOURCES)
+ * with no structural seed. These never get a create-new path in the UI — the
+ * server refuses the birth too (PROJECT_BIRTH_BLOCKED); the dossier is the
+ * only way a project is born from file evidence. Structural connector rows
+ * (tracker containers, seeded rows) keep the standard actions.
+ */
+const WEEKLY_PASS_PROJECT_SOURCES = new Set([
+  "llm_extraction",
+  "llm_relation",
+  "candidate_promotion",
+  "entity_candidate_promotion",
+]);
+
+export function isWeeklyPassProjectRow(row: EntityReviewQueueRow): boolean {
+  return (
+    row.entity_type === "project" &&
+    !row.seed_source &&
+    row.source !== null &&
+    WEEKLY_PASS_PROJECT_SOURCES.has(row.source)
+  );
+}
+
 /** Read an entity's email out of its metadata blob, if present. */
 export function entityEmail(entity: EntityListItem | null): string | null {
   const value = entity?.metadata?.email;

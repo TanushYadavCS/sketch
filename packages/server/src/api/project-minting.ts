@@ -17,6 +17,7 @@ import {
   parseStoredAcceptedResult,
   rejectProjectMintingVerdict,
 } from "../connectors/project-minting-acceptance";
+import type { WeeklyMintService } from "../connectors/weekly-mint";
 import {
   type ClientStage,
   assertStageMatchesKind,
@@ -43,6 +44,13 @@ export interface ProjectMintingRouteConfig {
   projectMintingModel?: string | null;
   /** Running a pass calls a reasoning model per cluster, so it is gated with the dev surface it is driven from. */
   passesEnabled: boolean;
+  /**
+   * The weekly mint service lives in bootstrap (background lifecycle), so the
+   * manual "Run now" route gets a handle injected rather than constructing its
+   * own — a second instance would have its own in-flight latch and race the
+   * scheduled sweep. Absent in processes that don't run background work.
+   */
+  weeklyMint?: WeeklyMintService | null;
 }
 
 function requireAdmin(c: Context) {
@@ -342,6 +350,31 @@ export function projectMintingRoutes(
         snapshot: run.inputSnapshot,
       },
     });
+  });
+
+  /**
+   * Admin "Run now": forces this week's mint pass early instead of waiting for
+   * Monday. Responds 202 immediately — a live pass calls the model once per
+   * company and can take minutes; the UI polls the verdicts query for the
+   * outcome. Companies with an unresolved pending dossier are skipped inside
+   * the service so a re-run can never supersede unreviewed work.
+   */
+  routes.post("/runs", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    const weeklyMint = routeConfig.weeklyMint;
+    if (!weeklyMint) {
+      return c.json(
+        { error: { code: "WEEKLY_MINT_UNAVAILABLE", message: "Weekly mint is not running in this process" } },
+        503,
+      );
+    }
+    const outcome = weeklyMint.tryRunManual();
+    if (!outcome.started) {
+      return c.json({ error: { code: "RUN_IN_FLIGHT", message: "A mint pass is already running" } }, 409);
+    }
+    outcome.completion.catch((err) => logger.error({ err }, "Manual weekly mint run failed"));
+    return c.json({ run: { status: "started" } }, 202);
   });
 
   routes.get("/verdicts", async (c) => {

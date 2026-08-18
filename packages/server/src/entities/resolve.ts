@@ -59,7 +59,35 @@ export type ResolveErrorCode =
   | "MULTIPLE_STALE_CANDIDATES"
   | "MULTIPLE_RE_RESOLVE_MATCHES"
   | "TYPE_RECLASSIFY_COLLISION"
+  | "PROJECT_BIRTH_BLOCKED"
   | "ROW_NOT_FOUND";
+
+/**
+ * File-evidence project candidates (LLM extraction sources — the same set the
+ * weekly mint pass claims) are only ever born through the weekly dossier: a
+ * one-row confirm or reject-with-create would produce a bare project with no
+ * engagement_for and no parent — section-less Internal junk. Structural
+ * connector rows (tracker containers, seeded rows) stay confirmable.
+ *
+ * This is the single source of truth for the set — the weekly pass's claim
+ * queries (WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST) derive from it, so the rows
+ * the guard blocks and the rows the pass consumes can never drift apart.
+ */
+export const WEEKLY_PASS_PROJECT_SOURCES: ReadonlySet<string> = new Set([
+  "llm_extraction",
+  "llm_relation",
+  "candidate_promotion",
+  "entity_candidate_promotion",
+]);
+
+function isWeeklyPassOwnedProjectRow(row: { entity_type: string; source: string | null; seed_source: string | null }) {
+  return (
+    row.entity_type === "project" &&
+    row.seed_source === null &&
+    row.source !== null &&
+    WEEKLY_PASS_PROJECT_SOURCES.has(row.source)
+  );
+}
 
 export class ResolveError extends Error {
   constructor(
@@ -752,6 +780,11 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     if (!targetId) {
       if (!row.seed_source || !row.seed_source_id) {
         if (row.candidate_reason === "birth-gated" && row.source && row.source_id) {
+          if (isWeeklyPassOwnedProjectRow(row)) {
+            throw new ResolveError("PROJECT_BIRTH_BLOCKED", "projects are only born via the weekly mint dossier", {
+              currentRow: row,
+            });
+          }
           target = await trxCtx.entityRepo.upsertEntityFromTool({
             name: createName,
             sourceType: row.entity_type,
@@ -1004,6 +1037,11 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (reResolvedToExisting) {
       target = matches[0];
     } else {
+      if (isWeeklyPassOwnedProjectRow(row)) {
+        throw new ResolveError("PROJECT_BIRTH_BLOCKED", "projects are only born via the weekly mint dossier", {
+          currentRow: row,
+        });
+      }
       // 3. Create new entity. Connector-backed queue rows carry source/sourceId
       // from proposal time; older rows fall back to the evidence source and a
       // synthetic review id.
