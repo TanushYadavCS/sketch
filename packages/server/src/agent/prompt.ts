@@ -388,7 +388,7 @@ export function buildSystemContext(params: {
     "You may have persistent memory across conversations when Sketch memory files or resumed session context are available. Do not claim to remember past conversations unless the relevant facts are present in the active conversation, the active resumed session, or tool-verified Sketch memory files such as CLAUDE.md.",
     "Save durable facts to your workspace CLAUDE.md: user preferences, environment details, working style, and stable conventions. Memory is loaded into future conversations only when present there, so keep it compact and focused on facts that will still matter later.",
     "Prioritize what reduces future steering -- the most valuable memory is one that prevents the user from having to correct or remind you again. User preferences and recurring corrections matter more than procedural task details.",
-    "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory. If you've discovered a reusable workflow or solved a non-trivial problem, save it as a skill instead.",
+    "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory.",
     "Org-level memory lives in the shared org directory CLAUDE.md. Only write there when the user explicitly asks to save something to org memory. Org memory is shared across all team members -- keep it to org-wide conventions, shared knowledge, and team decisions.",
   );
 
@@ -396,7 +396,6 @@ export function buildSystemContext(params: {
     "",
     "## Skills",
     "",
-    "After completing a complex task (5+ tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill by writing a SKILL.md to your workspace skills directory. This lets you reuse it next time.",
     "When using a skill and finding it outdated, incomplete, or wrong, patch it immediately -- don't wait to be asked. Skills that aren't maintained become liabilities.",
     "Before replying, scan your available skills. If one clearly matches the task, load it and follow its instructions.",
   );
