@@ -9,6 +9,7 @@ import { createAutomationSharesRepository } from "../../db/repositories/automati
 import { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
+import { createUserRepository } from "../../db/repositories/users";
 import type { TaskScheduler } from "../../scheduler/service";
 import { createTestDb } from "../../test-utils";
 import { agentLockSessionIdFor, handleManageScheduledTasks, requiresAutomationBuilder } from "./scheduled-tasks";
@@ -462,6 +463,11 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
   );
 
   it("creates the complete definition atomically and refreshes scheduler state after commit", async () => {
+    await db.updateTable("users").set({ slack_user_id: "U-OWNER" }).where("id", "=", "owner-1").execute();
+    await db
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C123", slack_user_id: "U-OWNER" })
+      .execute();
     const scheduler = schedulerFor("new-task");
     const result = await handleManageScheduledTasks(
       {
@@ -485,6 +491,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       {
         db,
         scheduler,
+        userRepo: createUserRepository(db),
         taskContext: {
           ...taskContextFor("new-task"),
           origin: {
@@ -526,6 +533,57 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         apps: JSON.stringify(["clickup", "slack"]),
       }),
     ]);
+  });
+
+  it("rejects a scheduled shared target when the creator is not a member", async () => {
+    await db
+      .updateTable("users")
+      .set({ email: "owner@example.com", slack_user_id: "U-OWNER" })
+      .where("id", "=", "owner-1")
+      .execute();
+    await db
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C-OTHER", slack_user_id: "U-OTHER" })
+      .execute();
+
+    const scheduler = schedulerFor("not-saved");
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Unauthorized target",
+        prompt: "Send a report.",
+        schedule_type: "interval",
+        schedule_value: "120",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Every two minutes",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule" },
+          },
+          {
+            id: "agent",
+            type: "agent",
+            label: "Send report",
+            icon: "sketch-ai",
+            position: { x: 260, y: 0 },
+            agentPrompt: "Send a report.",
+          },
+        ],
+        delivery: { platform: "slack", targetType: "channel", targetId: "C-OTHER" },
+      },
+      {
+        db,
+        scheduler,
+        userRepo: createUserRepository(db),
+        taskContext: taskContextFor("not-saved"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("not a member");
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
   });
 
   it("creates native webhook definitions with external webhook schedule fields", async () => {

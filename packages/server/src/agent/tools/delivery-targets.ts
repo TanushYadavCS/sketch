@@ -1,6 +1,8 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { sql } from "kysely";
 import { z } from "zod/v4";
+import { authorizedTargets } from "../../access/membership";
+import { resolveViewerPrincipals } from "../../access/principals";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 const searchDeliveryTargetsSchema = {
@@ -74,7 +76,18 @@ function decodeCursor(cursor: string | undefined): DeliveryTargetCursor | null {
 
 export async function handleSearchDeliveryTargets(
   params: SearchDeliveryTargetsParams,
-  deps: Pick<SketchMcpDeps, "db" | "getSlack">,
+  deps: Pick<
+    SketchMcpDeps,
+    | "db"
+    | "getSlack"
+    | "sendTargetMessage"
+    | "getWhatsApp"
+    | "currentUserId"
+    | "userRepo"
+    | "publicMcp"
+    | "slackEntitySyncEnabled"
+    | "logger"
+  >,
 ): Promise<ToolResult> {
   if (!deps.db) {
     return { content: [{ type: "text", text: "Delivery target search is not available in this context." }] };
@@ -92,13 +105,23 @@ export async function handleSearchDeliveryTargets(
   const offset = cursor?.offset ?? 0;
   const pageEnd = offset + limit;
   const matches: DeliveryTargetMatch[] = [];
+  const viewerPrincipals = await resolveViewerPrincipals(deps).catch((error) => {
+    deps.logger?.warn({ err: error }, "Delivery target principal resolution failed closed");
+    return [];
+  });
 
   if ((!platform || platform === "slack") && (!targetType || targetType === "channel")) {
     const slack = deps.getSlack?.() ?? null;
     if (slack) {
       const channels = await slack.listChannels();
+      const authorized = await authorizedTargets(
+        deps.db,
+        viewerPrincipals,
+        channels.map((channel) => ({ platform: "slack" as const, targetId: channel.id })),
+        deps.logger,
+      );
       for (const channel of channels) {
-        if (!channel.isMember || !matchesQuery(channel.name, query)) continue;
+        if (!channel.isMember || !authorized.has(`slack:${channel.id}`) || !matchesQuery(channel.name, query)) continue;
         matches.push({
           platform: "slack",
           targetType: "channel",
@@ -111,30 +134,32 @@ export async function handleSearchDeliveryTargets(
   }
 
   if ((!platform || platform === "slack") && (!targetType || targetType === "dm")) {
-    const rows = await deps.db
-      .selectFrom("users")
-      .select(["name", "email", "slack_user_id"])
-      .where("type", "!=", "agent")
-      .where("slack_user_id", "is not", null)
-      .where((eb) =>
-        eb.or([
-          eb(sql`lower(name)`, "like", `%${query}%`),
-          eb(sql`lower(coalesce(email, ''))`, "like", `%${query}%`),
-          eb(sql`lower(coalesce(slack_user_id, ''))`, "like", `%${query}%`),
-        ]),
-      )
-      .orderBy("name", "asc")
-      .limit(pageEnd + 1)
-      .execute();
+    const slack = deps.getSlack?.() ?? null;
+    if (slack) {
+      const rows = await deps.db
+        .selectFrom("users")
+        .select(["name", "email", "slack_user_id"])
+        .where("type", "!=", "agent")
+        .where("slack_user_id", "is not", null)
+        .where((eb) =>
+          eb.or([
+            eb(sql`lower(name)`, "like", `%${query}%`),
+            eb(sql`lower(coalesce(email, ''))`, "like", `%${query}%`),
+            eb(sql`lower(coalesce(slack_user_id, ''))`, "like", `%${query}%`),
+          ]),
+        )
+        .orderBy("name", "asc")
+        .execute();
 
-    for (const row of rows) {
-      matches.push({
-        platform: "slack",
-        targetType: "dm",
-        targetId: row.slack_user_id as string,
-        label: row.email ? `${row.name} <${row.email}>` : row.name,
-        canDeliver: true,
-      });
+      for (const row of rows) {
+        matches.push({
+          platform: "slack",
+          targetType: "dm",
+          targetId: row.slack_user_id as string,
+          label: row.email ? `${row.name} <${row.email}>` : row.name,
+          canDeliver: true,
+        });
+      }
     }
   }
 
@@ -150,16 +175,22 @@ export async function handleSearchDeliveryTargets(
         ]),
       )
       .orderBy("name", "asc")
-      .limit(pageEnd + 1)
       .execute();
 
+    const authorized = await authorizedTargets(
+      deps.db,
+      viewerPrincipals,
+      rows.map((row) => ({ platform: "whatsapp" as const, targetId: row.jid })),
+      deps.logger,
+    );
     for (const row of rows) {
+      if (!authorized.has(`whatsapp:${row.jid}`)) continue;
       matches.push({
         platform: "whatsapp",
         targetType: "group",
         targetId: row.jid,
         label: row.name,
-        canDeliver: true,
+        canDeliver: deps.getWhatsApp ? Boolean(deps.getWhatsApp()?.isConnected) : Boolean(deps.sendTargetMessage),
       });
     }
   }

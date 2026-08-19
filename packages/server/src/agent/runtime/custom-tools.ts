@@ -212,6 +212,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    getWhatsApp: params.getWhatsApp,
     currentUserEmail: params.userEmail ?? null,
     currentUserName: params.userName,
     slackEntitySyncEnabled: params.slackEntitySyncEnabled,

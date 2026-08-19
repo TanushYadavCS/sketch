@@ -471,7 +471,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("fails closed when passive Slack membership is stale", async () => {
+    it("retains Slack membership when the roster row is old", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",
         text: "provider failure secret",
@@ -486,7 +486,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const outcome = await handleAllChatsSearch({ query: "provider failure secret" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
+      expect(outcome.body.messages).toHaveLength(1);
     });
 
     it("revokes passive Slack history access when disconnect clears the roster", async () => {
@@ -1540,6 +1540,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(anonymous.ok).toBe(false);
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
+      await db.updateTable("users").set({ email: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ slack_user_id: null }).where("id", "=", USER_ID).execute();
       const unverified = await handleAllChatsSearch({ query: "gated content" }, depsFor(db));
@@ -1693,12 +1694,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         expect([...granted]).toEqual(["slack:C-SEND-FRESH"]);
       });
 
-      it("denies a Slack channel whose membership is older than the freshness window", async () => {
+      it("authorizes a Slack channel whose membership is older than the former freshness window", async () => {
         await insertSlackMember("C-SEND-STALE", new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString());
 
         const granted = await authorize([{ platform: "slack", targetId: "C-SEND-STALE" }]);
 
-        expect(granted.size).toBe(0);
+        expect(granted.size).toBe(1);
       });
 
       it("denies a Slack channel the requester is not in", async () => {

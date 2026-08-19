@@ -379,6 +379,7 @@ export interface RunAgentParams {
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
+  getWhatsApp?: () => { isConnected: boolean } | null;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   sendDm?: (params: {

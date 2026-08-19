@@ -319,6 +319,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
   const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
   let chatAutomationAuthoring: ReturnType<typeof createChatAutomationAuthoring> | undefined;
+  const whatsappRuntimeRef: { current: ReturnType<typeof createWhatsAppRuntime> | null } = { current: null };
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -353,6 +354,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         : null;
     const enrichedParams = {
       ...params,
+      getWhatsApp: params.getWhatsApp ?? (() => whatsappRuntimeRef.current),
       loadTranscriptionSettings,
       visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
       geminiConfig: params.geminiConfig ?? {
@@ -615,6 +617,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     ],
     logger,
   });
+  whatsappRuntimeRef.current = whatsappRuntime;
   const whatsappUserLidRefresh = new WhatsAppUserLidRefresh({
     whatsapp,
     store: userWhatsAppLids,

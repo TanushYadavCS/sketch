@@ -165,6 +165,7 @@ export interface SketchMcpDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
+  getWhatsApp?: () => { isConnected: boolean } | null;
   currentUserEmail?: string | null;
   currentUserName?: string | null;
   slackEntitySyncEnabled?: boolean;

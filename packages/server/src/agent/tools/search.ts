@@ -1,10 +1,9 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
+import { resolveViewerPrincipals } from "../../access/principals";
 import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "../../connectors/search";
-import { type AccessPrincipal, normalizeAccessPrincipals } from "../../connectors/types";
-import { viewerPrincipals } from "../../db/repositories/connectors";
+import type { AccessPrincipal } from "../../connectors/types";
 import { createEntityRepository } from "../../db/repositories/entities";
-import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const searchToolDescription = `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
@@ -96,22 +95,10 @@ export type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSc
 export type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
 export type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
+export { resolveViewerPrincipals } from "../../access/principals";
+
 export async function resolveUserPrincipals(deps: SketchMcpDeps): Promise<AccessPrincipal[]> {
-  if (deps.publicMcp?.userPrincipals) return normalizeAccessPrincipals(deps.publicMcp.userPrincipals);
-  if (!deps.currentUserId || !deps.userRepo?.findById || !deps.userRepo.getAllEmailsForUser) return [];
-  const user = await deps.userRepo.findById(deps.currentUserId);
-  if (!user) return [];
-  const emails = await deps.userRepo.getAllEmailsForUser(deps.currentUserId);
-  return viewerPrincipals({
-    email: user.email,
-    emails,
-    phone: user.whatsapp_number,
-    slackUserId: user.slack_user_id,
-    whatsappLid: user.whatsapp_lid,
-    whatsappLids: deps.db ? await getWhatsAppLidsForUser(deps.db, user.id) : [],
-    isAdmin: false,
-    slackEntitySyncEnabled: deps.slackEntitySyncEnabled,
-  });
+  return resolveViewerPrincipals(deps);
 }
 
 async function filterEntityRowsForPublic<

@@ -10,6 +10,8 @@ import {
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
+import { authorizedTargets } from "../../access/membership";
+import { resolveViewerPrincipals } from "../../access/principals";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
@@ -703,7 +705,19 @@ function automationPersistenceError(error: unknown): string | null {
   return null;
 }
 
-function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContext) {
+async function buildDeliveryFields(
+  params: ManageScheduledTasksParams,
+  ctx: TaskContext,
+  deps: ManageScheduledTasksDeps,
+): Promise<
+  | {
+      outputTarget: string | undefined;
+      outputPlatform: "slack" | "whatsapp" | undefined;
+      outputThreadTs: string | null | undefined;
+      outputMode: "deliver" | "silent" | undefined;
+    }
+  | { error: string }
+> {
   const delivery = params.delivery;
   let outputPlatform = delivery?.platform ?? params.output_platform;
   let outputTarget = delivery?.targetId ?? params.output_target;
@@ -719,6 +733,32 @@ function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContex
     outputThreadTs = ctx.threadTs ?? null;
   } else if (hasDeliveryTarget) {
     outputThreadTs = null;
+  }
+
+  const targetType =
+    delivery?.targetType ?? (outputThreadTs ? "thread" : ctx.contextType === "channel" ? "channel" : ctx.contextType);
+  const validationPlatform =
+    outputPlatform ?? (ctx.platform === "slack" || ctx.platform === "whatsapp" ? ctx.platform : undefined);
+  if (
+    outputTarget &&
+    validationPlatform &&
+    (targetType === "channel" || targetType === "group" || targetType === "thread")
+  ) {
+    const principals =
+      deps.db && deps.userRepo && ctx.createdBy
+        ? await resolveViewerPrincipals({ db: deps.db, currentUserId: ctx.createdBy, userRepo: deps.userRepo }).catch(
+            () => [],
+          )
+        : [];
+    const authorized = deps.db
+      ? await authorizedTargets(deps.db, principals, [{ platform: validationPlatform, targetId: outputTarget }])
+      : new Set<string>();
+    if (!authorized.has(`${validationPlatform}:${outputTarget}`)) {
+      const targetLabel = targetType === "thread" ? "channel or group" : targetType;
+      return {
+        error: `Error: delivery target ${outputTarget} is not a member-authorized ${targetLabel}. No changes were saved.`,
+      };
+    }
   }
 
   return {
@@ -1363,7 +1403,8 @@ export async function handleManageScheduledTasks(
       }
 
       const sessionMode = "fresh";
-      const deliveryFields = buildDeliveryFields(params, ctx);
+      const deliveryFields = await buildDeliveryFields(params, ctx, deps);
+      if ("error" in deliveryFields) return text(deliveryFields.error);
 
       // Strip content from steps (stored separately in automation_step_content)
       const steps = params.steps as NonNullable<typeof params.steps>;

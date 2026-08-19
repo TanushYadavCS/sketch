@@ -2,7 +2,10 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createChannelRepository } from "../../db/repositories/channels";
 import { createUserRepository } from "../../db/repositories/users";
-import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
+import {
+  createWhatsAppGroupRepository,
+  whatsappParticipantObservationKey,
+} from "../../db/repositories/whatsapp-groups";
 import type { DB } from "../../db/schema";
 import type { SlackBot } from "../../slack/bot";
 import { createTestDb } from "../../test-utils";
@@ -41,6 +44,15 @@ function parseMatches(result: Awaited<ReturnType<typeof handleSearchDeliveryTarg
   }>;
 }
 
+async function seedSlackMemberships(ids: string[]): Promise<void> {
+  await db
+    .insertInto("slack_channel_participants")
+    .values(ids.map((channel_id) => ({ channel_id, slack_user_id: "U-REQUESTER" })))
+    .execute();
+}
+
+const requesterPrincipals = { publicMcp: { userPrincipals: [{ type: "slack_user" as const, value: "U-REQUESTER" }] } };
+
 describe("handleSearchDeliveryTargets", () => {
   it("lists deliverable Slack channels when no query is provided", async () => {
     const slack = {
@@ -50,9 +62,10 @@ describe("handleSearchDeliveryTargets", () => {
         { id: "CRANDOM", name: "random", type: "public_channel", isMember: false },
       ],
     } as SlackBot;
+    await seedSlackMemberships(["CGENERAL", "CENG"]);
 
     const matches = parseMatches(
-      await handleSearchDeliveryTargets({ platform: "slack" }, { db, getSlack: () => slack }),
+      await handleSearchDeliveryTargets({ platform: "slack" }, { db, getSlack: () => slack, ...requesterPrincipals }),
     );
 
     expect(matches).toEqual([
@@ -79,9 +92,10 @@ describe("handleSearchDeliveryTargets", () => {
     const slack = {
       listChannels: async () => [{ id: "CGENERAL", name: "general", type: "public_channel", isMember: true }],
     } as SlackBot;
+    await seedSlackMemberships(["CGENERAL"]);
 
     const matches = parseMatches(
-      await handleSearchDeliveryTargets({ platform: "slack" }, { db, getSlack: () => slack }),
+      await handleSearchDeliveryTargets({ platform: "slack" }, { db, getSlack: () => slack, ...requesterPrincipals }),
     );
 
     expect(matches).toEqual([
@@ -112,9 +126,13 @@ describe("handleSearchDeliveryTargets", () => {
           isMember: true,
         })),
     } as SlackBot;
+    await seedSlackMemberships(Array.from({ length: 12 }, (_, index) => `C${String(index + 1).padStart(2, "0")}`));
 
     const firstPage = parseResult(
-      await handleSearchDeliveryTargets({ platform: "slack", targetType: "channel" }, { db, getSlack: () => slack }),
+      await handleSearchDeliveryTargets(
+        { platform: "slack", targetType: "channel" },
+        { db, getSlack: () => slack, ...requesterPrincipals },
+      ),
     );
     expect(firstPage.matches.map((match) => match.targetId)).toEqual([
       "C01",
@@ -131,7 +149,10 @@ describe("handleSearchDeliveryTargets", () => {
     expect(firstPage.nextCursor).toEqual(expect.any(String));
 
     const secondPage = parseResult(
-      await handleSearchDeliveryTargets({ cursor: firstPage.nextCursor ?? undefined }, { db, getSlack: () => slack }),
+      await handleSearchDeliveryTargets(
+        { cursor: firstPage.nextCursor ?? undefined },
+        { db, getSlack: () => slack, ...requesterPrincipals },
+      ),
     );
     expect(secondPage.matches.map((match) => match.targetId)).toEqual(["C11", "C12"]);
     expect(secondPage.nextCursor).toBeNull();
@@ -146,9 +167,36 @@ describe("handleSearchDeliveryTargets", () => {
         description: null,
         updated_at: "2026-06-02T00:00:00.000Z",
       });
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values({
+          id: `participant-${index}`,
+          group_jid: `12036300000000${index}@g.us`,
+          observation_key: whatsappParticipantObservationKey(`+1555000000${index}`, null),
+          participant_jid: `1555000000${index}@s.whatsapp.net`,
+          phone_e164: `+1555000000${index}`,
+          lid: null,
+          admin_role: null,
+        })
+        .execute();
     }
 
-    const result = parseResult(await handleSearchDeliveryTargets({ platform: "whatsapp", limit: 2 }, { db }));
+    const result = parseResult(
+      await handleSearchDeliveryTargets(
+        { platform: "whatsapp", limit: 2 },
+        {
+          db,
+          sendTargetMessage: async () => ({ messageRef: "sent" }),
+          publicMcp: {
+            userPrincipals: [
+              { type: "phone", value: "+15550000001" },
+              { type: "phone", value: "+15550000002" },
+              { type: "phone", value: "+15550000003" },
+            ],
+          },
+        },
+      ),
+    );
 
     expect(result.matches.map((match) => match.label)).toEqual(["Group 1", "Group 2"]);
     expect(result.nextCursor).toEqual(expect.any(String));
@@ -161,9 +209,13 @@ describe("handleSearchDeliveryTargets", () => {
         { id: "CENGPRIVATE", name: "engineering-private", type: "private_channel", isMember: false },
       ],
     } as SlackBot;
+    await seedSlackMemberships(["CENG"]);
 
     const matches = parseMatches(
-      await handleSearchDeliveryTargets({ query: "#eng", platform: "slack" }, { db, getSlack: () => slack }),
+      await handleSearchDeliveryTargets(
+        { query: "#eng", platform: "slack" },
+        { db, getSlack: () => slack, ...requesterPrincipals },
+      ),
     );
 
     expect(matches).toEqual([
@@ -175,6 +227,28 @@ describe("handleSearchDeliveryTargets", () => {
         canDeliver: true,
       },
     ]);
+  });
+
+  it("lists only Slack channels the requester belongs to", async () => {
+    const slack = {
+      listChannels: async () => [
+        { id: "C-MEMBER", name: "member", type: "public_channel", isMember: true },
+        { id: "C-NON-MEMBER", name: "non-member", type: "public_channel", isMember: true },
+      ],
+    } as SlackBot;
+    await db
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C-MEMBER", slack_user_id: "U-REQUESTER" })
+      .execute();
+
+    const matches = parseMatches(
+      await handleSearchDeliveryTargets(
+        { platform: "slack", targetType: "channel" },
+        { db, getSlack: () => slack, publicMcp: { userPrincipals: [{ type: "slack_user", value: "U-REQUESTER" }] } },
+      ),
+    );
+
+    expect(matches.map((match) => match.targetId)).toEqual(["C-MEMBER"]);
   });
 
   it("does not return cached Slack channels when live Slack is unavailable", async () => {
@@ -193,7 +267,12 @@ describe("handleSearchDeliveryTargets", () => {
     await users.create({ name: "Roopak Nijhara", email: "roopak@canvasx.ai", slackUserId: "UROOPAK" });
     await users.create({ name: "Sketch Agent", type: "agent", slackUserId: "UAGENT" });
 
-    const matches = parseMatches(await handleSearchDeliveryTargets({ query: "roopak", platform: "slack" }, { db }));
+    const matches = parseMatches(
+      await handleSearchDeliveryTargets(
+        { query: "roopak", platform: "slack" },
+        { db, getSlack: () => ({ listChannels: async () => [] }) as unknown as SlackBot },
+      ),
+    );
 
     expect(matches).toEqual([
       {
@@ -211,7 +290,12 @@ describe("handleSearchDeliveryTargets", () => {
     await users.create({ name: "Alice", email: "alice@test.com", slackUserId: "UALICE" });
     await users.create({ name: "Bob", slackUserId: "UBOB" });
 
-    const matches = parseMatches(await handleSearchDeliveryTargets({ platform: "slack", targetType: "dm" }, { db }));
+    const matches = parseMatches(
+      await handleSearchDeliveryTargets(
+        { platform: "slack", targetType: "dm" },
+        { db, getSlack: () => ({ listChannels: async () => [] }) as unknown as SlackBot },
+      ),
+    );
 
     expect(matches).toEqual([
       {
@@ -239,9 +323,28 @@ describe("handleSearchDeliveryTargets", () => {
       description: "incident room",
       updated_at: "2026-06-02T00:00:00.000Z",
     });
+    await db
+      .insertInto("whatsapp_group_participants")
+      .values({
+        id: "ops-participant",
+        group_jid: "120363000000001@g.us",
+        observation_key: whatsappParticipantObservationKey("+15550000001", null),
+        participant_jid: "15550000001@s.whatsapp.net",
+        phone_e164: "+15550000001",
+        lid: null,
+        admin_role: null,
+      })
+      .execute();
 
     const matches = parseMatches(
-      await handleSearchDeliveryTargets({ query: "incident", platform: "whatsapp" }, { db }),
+      await handleSearchDeliveryTargets(
+        { query: "incident", platform: "whatsapp" },
+        {
+          db,
+          sendTargetMessage: async () => ({ messageRef: "sent" }),
+          publicMcp: { userPrincipals: [{ type: "phone", value: "+15550000001" }] },
+        },
+      ),
     );
 
     expect(matches).toEqual([
@@ -253,5 +356,46 @@ describe("handleSearchDeliveryTargets", () => {
         canDeliver: true,
       },
     ]);
+  });
+
+  it("lists only WhatsApp groups the requester belongs to", async () => {
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Member group",
+      description: null,
+      updated_at: "2026-06-02T00:00:00.000Z",
+    });
+    await groups.upsert({
+      jid: "120363000000002@g.us",
+      name: "Other group",
+      description: null,
+      updated_at: "2026-06-02T00:00:00.000Z",
+    });
+    await db
+      .insertInto("whatsapp_group_participants")
+      .values({
+        id: "member-participant",
+        group_jid: "120363000000001@g.us",
+        observation_key: whatsappParticipantObservationKey("+15550000001", null),
+        participant_jid: "15550000001@s.whatsapp.net",
+        phone_e164: "+15550000001",
+        lid: null,
+        admin_role: null,
+      })
+      .execute();
+
+    const matches = parseMatches(
+      await handleSearchDeliveryTargets(
+        { platform: "whatsapp" },
+        {
+          db,
+          sendTargetMessage: async () => ({ messageRef: "sent" }),
+          publicMcp: { userPrincipals: [{ type: "phone", value: "+15550000001" }] },
+        },
+      ),
+    );
+
+    expect(matches.map((match) => match.targetId)).toEqual(["120363000000001@g.us"]);
   });
 });

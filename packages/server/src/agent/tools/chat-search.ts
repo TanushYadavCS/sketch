@@ -1,11 +1,11 @@
 import type { Expression, Kysely } from "kysely";
+import { authorizedTargets } from "../../access/membership";
+import { resolveViewerPrincipals } from "../../access/principals";
+import type { AccessPrincipal } from "../../connectors/types";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
-import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../../identity-normalization";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
-import { SLACK_MEMBERSHIP_FRESHNESS_MS } from "../../slack/membership-reconciler";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
-import { whatsappJidToPhoneE164 } from "../../whatsapp/provider";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
 import { parseWhatsAppGroupRosterSnapshot, renderWhatsAppGroupHistoryMessages } from "./whatsapp-group-history";
@@ -32,18 +32,15 @@ export type AllChatsSearchOutcome =
     }
   | { ok: false; message: string };
 
-export interface ChatHistoryAccessIdentity {
-  slackUserId: string | null;
-  whatsappPhone: string | null;
-  whatsappLids: string[];
-}
-
 /**
  * The resolver only reads identity and membership, so it accepts this narrow
  * slice instead of the whole tool dependency bag. Callers that hold a full
  * SketchMcpDeps still satisfy it.
  */
-export type ChatHistoryAccessDeps = Pick<SketchMcpDeps, "db" | "currentUserId" | "userRepo" | "conversationContext">;
+export type ChatHistoryAccessDeps = Pick<
+  SketchMcpDeps,
+  "db" | "currentUserId" | "userRepo" | "conversationContext" | "slackEntitySyncEnabled" | "publicMcp" | "logger"
+>;
 
 /** A channel or group addressed by its provider ID rather than a conversations row. */
 export interface ProviderTargetRef {
@@ -53,29 +50,6 @@ export interface ProviderTargetRef {
 
 export function providerTargetKey(target: ProviderTargetRef): string {
   return `${target.platform}:${target.targetId}`;
-}
-
-export async function resolveChatHistoryAccessIdentity(
-  deps: ChatHistoryAccessDeps,
-): Promise<ChatHistoryAccessIdentity> {
-  if (!deps.currentUserId || !deps.userRepo) {
-    return { slackUserId: null, whatsappPhone: null, whatsappLids: [] };
-  }
-  const user = await deps.userRepo.findById(deps.currentUserId);
-  const lids = deps.db
-    ? await deps.db.selectFrom("user_whatsapp_lids").select("lid").where("user_id", "=", deps.currentUserId).execute()
-    : [];
-  return {
-    slackUserId: user?.slack_user_id?.trim() || null,
-    whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
-    whatsappLids: [
-      ...new Set(
-        [...(user?.whatsapp_lid ? [user.whatsapp_lid] : []), ...lids.map((row) => row.lid)]
-          .map((lid) => normalizeWhatsAppIdentityLid(lid))
-          .filter((lid): lid is string => lid !== null),
-      ),
-    ],
-  };
 }
 
 export function authorizedSearchableConversationIds(db: Kysely<DB>, conversationIds: number[]): Expression<unknown> {
@@ -92,21 +66,16 @@ type ConversationAccessRow = {
   providerConversationId: string;
 };
 
-function phoneFromParticipantJid(jid: string): string | null {
-  if (!jid.endsWith("@s.whatsapp.net")) return null;
-  return normalizeWhatsAppIdentityPhone(whatsappJidToPhoneE164(jid));
-}
-
-function lidFromParticipantRow(row: { participant_jid: string; lid: string | null }): string | null {
-  return normalizeWhatsAppIdentityLid(row.lid ?? (row.participant_jid.endsWith("@lid") ? row.participant_jid : null));
-}
-
 export class ChatHistoryAccessResolver {
   constructor(private readonly deps: ChatHistoryAccessDeps) {}
 
   async hasUsableIdentity(): Promise<boolean> {
-    const identity = await this.loadIdentity();
-    return Boolean(identity.slackUserId || identity.whatsappPhone || identity.whatsappLids.length > 0);
+    try {
+      return (await resolveViewerPrincipals(this.deps)).length > 0;
+    } catch (error) {
+      this.deps.logger?.warn({ err: error }, "Chat history principal resolution failed closed");
+      return false;
+    }
   }
 
   async isConversationAuthorized(conversationId: number, _refresh = false): Promise<boolean> {
@@ -135,90 +104,44 @@ export class ChatHistoryAccessResolver {
 
   /**
    * Authorizes channels and groups by their provider ID, so a send target can
-   * be checked before any message from it has been captured. Same membership
-   * rules as the conversation-ID path: fresh Slack roster membership, or a
-   * WhatsApp phone match (direct, or through one of the identity's LID aliases).
+   * be checked before any message from it has been captured. The same resolved
+   * principal set and roster gate serves both chat reads and shared-target sends.
    */
   async authorizedProviderTargets(targets: ProviderTargetRef[]): Promise<Set<string>> {
     if (!this.deps.db || !this.deps.currentUserId || targets.length === 0) return new Set();
-    const authorized = await this.resolveProviderIds(
-      targets.filter((target) => target.platform === "slack").map((target) => target.targetId),
-      targets.filter((target) => target.platform === "whatsapp").map((target) => target.targetId),
-    );
+    let principals: AccessPrincipal[] = [];
+    try {
+      principals = await resolveViewerPrincipals(this.deps);
+    } catch (error) {
+      this.deps.logger?.warn({ err: error }, "Chat history principal resolution failed closed");
+    }
+    const authorized = await authorizedTargets(this.deps.db, principals, targets, this.deps.logger);
     const granted = new Set<string>();
     for (const target of targets) {
-      const ids = target.platform === "slack" ? authorized.slack : authorized.whatsapp;
-      if (ids.has(target.targetId)) granted.add(providerTargetKey(target));
+      if (authorized.has(providerTargetKey(target))) granted.add(providerTargetKey(target));
     }
     return granted;
   }
 
   private async resolveRows(rows: ConversationAccessRow[]): Promise<Set<number>> {
     if (!this.deps.db) return new Set();
-    const slackRows = rows.filter((row) => row.platform === "slack");
-    const whatsappRows = rows.filter((row) => row.platform === "whatsapp");
-    const authorized = await this.resolveProviderIds(
-      slackRows.map((row) => row.providerConversationId),
-      whatsappRows.map((row) => row.providerConversationId),
-    );
-
     const authorizedIds = new Set<number>();
-    for (const row of slackRows) {
-      if (authorized.slack.has(row.providerConversationId)) authorizedIds.add(row.id);
-    }
-    for (const row of whatsappRows) {
-      if (authorized.whatsapp.has(row.providerConversationId)) authorizedIds.add(row.id);
-    }
-    return authorizedIds;
-  }
-
-  private async resolveProviderIds(
-    slackChannelIds: string[],
-    whatsappGroupIds: string[],
-  ): Promise<{ slack: Set<string>; whatsapp: Set<string> }> {
-    const slack = new Set<string>();
-    const whatsapp = new Set<string>();
-    if (!this.deps.db) return { slack, whatsapp };
-    const identity = await this.loadIdentity();
-
-    if (identity.slackUserId && slackChannelIds.length > 0) {
-      const freshAfter = new Date(Date.now() - SLACK_MEMBERSHIP_FRESHNESS_MS).toISOString();
-      const memberChannels = await this.deps.db
-        .selectFrom("slack_channel_participants")
-        .select("channel_id")
-        .where("channel_id", "in", [...new Set(slackChannelIds)])
-        .where("slack_user_id", "=", identity.slackUserId)
-        .where("last_seen_at", ">=", freshAfter)
-        .execute();
-      for (const row of memberChannels) slack.add(row.channel_id);
-    }
-
-    if ((identity.whatsappPhone || identity.whatsappLids.length > 0) && whatsappGroupIds.length > 0) {
-      const participants = await this.deps.db
-        .selectFrom("whatsapp_group_participants")
-        .select(["group_jid", "participant_jid", "phone_e164", "lid"])
-        .where("group_jid", "in", [...new Set(whatsappGroupIds)])
-        .execute();
-      const aliases = new Set(identity.whatsappLids);
-      for (const row of participants) {
-        const matchesPhone =
-          identity.whatsappPhone !== null &&
-          (normalizeWhatsAppIdentityPhone(row.phone_e164) === identity.whatsappPhone ||
-            phoneFromParticipantJid(row.participant_jid) === identity.whatsappPhone);
-        if (matchesPhone) {
-          whatsapp.add(row.group_jid);
-          continue;
-        }
-        const lid = lidFromParticipantRow(row);
-        if (lid !== null && aliases.has(lid)) whatsapp.add(row.group_jid);
+    const authorized = await this.authorizedProviderTargets(
+      rows.map((row) => ({
+        platform: row.platform as ChatSearchPlatform,
+        targetId: row.providerConversationId,
+      })),
+    );
+    for (const row of rows) {
+      if (
+        authorized.has(
+          providerTargetKey({ platform: row.platform as ChatSearchPlatform, targetId: row.providerConversationId }),
+        )
+      ) {
+        authorizedIds.add(row.id);
       }
     }
-
-    return { slack, whatsapp };
-  }
-
-  private loadIdentity(): Promise<ChatHistoryAccessIdentity> {
-    return resolveChatHistoryAccessIdentity(this.deps);
+    return authorizedIds;
   }
 }
 
@@ -377,13 +300,11 @@ export async function renderAllChatsSearchResults(
 
 /**
  * Availability contract: all_chats is authorized from passive provider
- * membership snapshots and is allowed from any run context including shared
- * channels and groups. Slack snapshots expire after the reconciliation
- * validity window. WhatsApp retains the last successfully persisted roster
- * across disconnects or loss of bot group access. Results may surface in
- * shared destinations because the caller's membership is the sole boundary,
- * matching how the user could quote the same content by hand. Runs without an
- * authenticated requesting user are denied.
+ * membership rows and is allowed from any run context including shared
+ * channels and groups. Results may surface in shared destinations because the
+ * caller's membership is the sole boundary, matching how the user could quote
+ * the same content by hand. Runs without an authenticated requesting user are
+ * denied.
  *
  * The current conversation is additionally always searchable regardless of the
  * scope join: whoever triggered the run can already read it via
