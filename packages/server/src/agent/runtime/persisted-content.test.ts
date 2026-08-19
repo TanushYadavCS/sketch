@@ -34,6 +34,23 @@ describe("capPersistedRuntimeMessages", () => {
     expect(byteLength(serialized)).toBeLessThan(byteLength(big));
   });
 
+  it("supports a tighter per-output cap for builder turns", () => {
+    const big = "x".repeat(40_000);
+    const message: AgentRuntimeMessageAppend = {
+      role: "tool",
+      content: {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "t1", toolName: "Search", output: { type: "text", value: big } }],
+      },
+    };
+
+    const [out] = capPersistedRuntimeMessages([message], 24 * 1024);
+    const serialized = JSON.stringify(out);
+
+    expect(serialized).toContain("persisted history truncated");
+    expect(byteLength(serialized)).toBeLessThan(26 * 1024);
+  });
+
   it("replaces an oversized base64 image tool result with a media-type reference", () => {
     const base64 = "A".repeat(400_000);
     const message: AgentRuntimeMessageAppend = {

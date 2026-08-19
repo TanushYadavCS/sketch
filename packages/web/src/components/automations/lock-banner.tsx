@@ -7,7 +7,7 @@ import type { AutomationEditLockView } from "@/lib/api";
  * derived as `expiresAt - TTL`. The banner renders three states:
  *
  * - held by another member: read-only hint + "Take over editing" entry point
- * - held by the viewer: "You're editing" + live lease countdown
+ * - held by the viewer: "You're editing"
  * - held by the viewer with a pending steal request: prompt that opens the
  *   holder response dialog (approve/deny)
  *
@@ -78,11 +78,9 @@ export function AutomationLockBanner({
   onRequestTakeover: () => void;
   onReviewStealRequest: () => void;
 }) {
-  const now = useLockNow(Boolean(lock?.heldByUserId));
   if (!lock?.heldByUserId) return null;
 
   if (lock.isHeldByMe) {
-    const lease = lockRemainingLabel(lock.expiresAt, now);
     const stealPending = lock.stealPending;
     return (
       <div
@@ -92,14 +90,6 @@ export function AutomationLockBanner({
       >
         <LockSimpleIcon size={13} weight="fill" className="shrink-0 text-emerald-700 dark:text-emerald-300" />
         <span>You're editing</span>
-        {lease ? (
-          <span
-            data-testid="automation-lock-lease"
-            className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
-          >
-            {lease} left
-          </span>
-        ) : null}
         {stealPending ? (
           <>
             <span aria-hidden className="text-muted-foreground/60">

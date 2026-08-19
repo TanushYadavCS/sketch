@@ -68,14 +68,6 @@ export const configSchema = z.object({
   VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_PRICE_TTL_HOURS: z.coerce.number().min(1).default(12),
-  AUTOMATION_AUTHORING_MODEL: z.preprocess(
-    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
-    z
-      .string()
-      .trim()
-      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
-      .optional(),
-  ),
   TASK_MINTING_MODEL: z.preprocess(
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z

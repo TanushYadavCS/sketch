@@ -33,6 +33,7 @@ export interface RunAgentRuntimeCoreParams {
   systemPrompt: string;
   tools?: ToolSet;
   maxTurns: number;
+  maxPersistedTextBytes?: number;
   stopAfterToolNames?: readonly string[];
   stopAfterToolCall?: (tool: { name: string; input: unknown; output: unknown }) => boolean;
   abortSignal?: AbortSignal;
@@ -327,7 +328,10 @@ export async function runAgentRuntimeCore(params: RunAgentRuntimeCoreParams): Pr
   if (params.persistSession && params.sessionStore && responseMessages.length > 0) {
     await params.sessionStore.appendTransactional(
       sessionId,
-      capPersistedRuntimeMessages(toPersistedMessages({ currentUserMessage, responseMessages })),
+      capPersistedRuntimeMessages(
+        toPersistedMessages({ currentUserMessage, responseMessages }),
+        params.maxPersistedTextBytes,
+      ),
     );
   }
   const usage = await usageFromResult({

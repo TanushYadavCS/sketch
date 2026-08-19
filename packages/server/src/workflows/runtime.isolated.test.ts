@@ -428,6 +428,18 @@ describe("executeAutomation agent steps", () => {
     expect(params.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("does not deliver failure notifications for silent workflows", async () => {
+    const params = makeParams({
+      runAgent: vi.fn().mockRejectedValue(new Error("private failure")),
+      task: makeTask({ output_mode: "silent" }),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(params.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("routes sketch-mode agent steps through runAgent with workflow context", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],

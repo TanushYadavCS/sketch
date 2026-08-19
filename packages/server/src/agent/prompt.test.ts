@@ -238,7 +238,8 @@ describe("buildSystemContext", () => {
       expect(result).toContain("pass the user's requested change as a natural-language request");
       expect(result).toContain("Do not construct or pass automation definition fields");
       expect(result).toContain("Never use updateStepContent");
-      expect(result).toContain("list, pause, resume, run, delete, and inspect run history");
+      expect(result).toContain("list, pause, resume, mute, unmute, run, delete, and inspect run history");
+      expect(result).toContain("Admins may mute any automation; members may mute only automations they created");
       expect(result).toContain("include the resolved target ID and label in the natural-language");
       expect(result).toContain("call SearchDeliveryTargets with platform='slack' and targetType='channel' first");
       expect(result).toContain("never invent a channel ID");

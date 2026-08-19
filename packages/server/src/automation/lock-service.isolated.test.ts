@@ -104,7 +104,7 @@ describe("automation lock service", () => {
       expect(result.lock.holder_user_id).toBe("user-a");
     });
 
-    it("blocks a second session for the same user and fences its renew/release", async () => {
+    it("shares one lease generation across sessions for the same user", async () => {
       const firstSession: LockHolderFields = { ...HOLDER_A, sessionId: "tab-a" };
       const secondSession: LockHolderFields = { ...HOLDER_A, sessionId: "tab-b" };
 
@@ -114,18 +114,22 @@ describe("automation lock service", () => {
       expect(first.lock).toMatchObject({ holder_session_id: "tab-a", generation: 1 });
 
       const second = await acquireOrRenewLock(db, { taskId: "task-session", holder: secondSession });
-      expect(second.kind).toBe("locked");
-      if (second.kind !== "locked") return;
-      expect(second.lock).toMatchObject({ holder_user_id: "user-a", holder_session_id: "tab-a", generation: 1 });
-
-      await expect(
-        renewLock(db, { taskId: "task-session", userId: "user-a", sessionId: "tab-b", generation: 1 }),
-      ).resolves.toEqual({ kind: "not_holder" });
-      await releaseLock(db, { taskId: "task-session", userId: "user-a", sessionId: "tab-b", generation: 1 });
-      await expect(createAutomationLocksRepository(db).getByTaskId("task-session")).resolves.toMatchObject({
-        holder_session_id: "tab-a",
+      expect(second.kind).toBe("held");
+      if (second.kind !== "held") return;
+      expect(second.lock).toMatchObject({
+        holder_user_id: "user-a",
+        holder_session_id: "tab-b",
         generation: 1,
       });
+
+      const firstHeartbeat = await acquireOrRenewLock(db, {
+        taskId: "task-session",
+        holder: firstSession,
+        requestedGeneration: 1,
+      });
+      expect(firstHeartbeat.kind).toBe("held");
+      if (firstHeartbeat.kind !== "held") return;
+      expect(firstHeartbeat.lock).toMatchObject({ holder_session_id: "tab-a", generation: 1 });
     });
 
     it("takes over an expired lock and clears pending steals", async () => {
@@ -244,35 +248,13 @@ describe("automation lock service", () => {
       });
     });
 
-    it("allows a different session of the same user to request a takeover", async () => {
+    it("does not create a takeover request between sessions for the same user", async () => {
       const holder = { ...HOLDER_A, sessionId: "tab-a" };
       const requester = { ...HOLDER_A, sessionId: "tab-b" };
       await acquireOrRenewLock(db, { taskId: "task-same-user-steal", holder });
 
-      const requested = await requestSteal(db, { taskId: "task-same-user-steal", requester });
-
-      expect(requested.kind).toBe("pending");
-      if (requested.kind !== "pending") return;
-      expect(requested.lock).toMatchObject({
-        holder_user_id: "user-a",
-        holder_session_id: "tab-a",
-        steal_requester_user_id: "user-a",
-        steal_requester_session_id: "tab-b",
-      });
-
-      const approved = await approveSteal(db, {
-        taskId: "task-same-user-steal",
-        approverUserId: "user-a",
-        approverSessionId: "tab-a",
-        approverGeneration: requested.lock.generation,
-      });
-
-      expect(approved.kind).toBe("approved");
-      if (approved.kind !== "approved") return;
-      expect(approved.lock).toMatchObject({
-        holder_user_id: "user-a",
-        holder_session_id: "tab-b",
-        generation: requested.lock.generation + 1,
+      await expect(requestSteal(db, { taskId: "task-same-user-steal", requester })).resolves.toEqual({
+        kind: "not_locked",
       });
     });
 
@@ -660,6 +642,15 @@ describe("automation lock service", () => {
           generation: 1,
         }),
       ).resolves.toMatchObject({ kind: "held", lock: { holder_session_id: "tab-a", generation: 1 } });
+
+      await expect(
+        authorizeAuthoringLease(db, {
+          taskId: "task-authorization",
+          userId: "user-a",
+          sessionId: "tab-b",
+          generation: 1,
+        }),
+      ).resolves.toMatchObject({ kind: "held", lock: { generation: 1 } });
 
       await expect(
         authorizeAuthoringLease(db, {

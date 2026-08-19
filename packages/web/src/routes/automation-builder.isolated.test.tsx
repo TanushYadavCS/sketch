@@ -41,6 +41,8 @@ const mocks = vi.hoisted(() => ({
   saveAutomation: vi.fn(),
   selectSetupExecutionMode: vi.fn(),
   removeAutomation: vi.fn(),
+  pauseAutomation: vi.fn(),
+  resumeAutomation: vi.fn(),
   testStep: vi.fn(),
   sendMessage: vi.fn(),
   setMessages: vi.fn(),
@@ -73,6 +75,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         save: mocks.saveAutomation,
         selectSetupExecutionMode: mocks.selectSetupExecutionMode,
         remove: mocks.removeAutomation,
+        pause: mocks.pauseAutomation,
+        resume: mocks.resumeAutomation,
         testStep: mocks.testStep,
       },
       webChat: {
@@ -509,6 +513,10 @@ describe("AutomationBuilderPage", () => {
     mocks.selectSetupExecutionMode.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
     mocks.removeAutomation.mockClear();
     mocks.removeAutomation.mockResolvedValue(undefined);
+    mocks.pauseAutomation.mockClear();
+    mocks.pauseAutomation.mockResolvedValue({ id: "task-123", status: "paused" });
+    mocks.resumeAutomation.mockClear();
+    mocks.resumeAutomation.mockResolvedValue({ id: "task-123", status: "active" });
     mocks.testStep.mockResolvedValue({ run: null });
     mocks.sendMessage.mockClear();
     mocks.setMessages.mockClear();
@@ -735,6 +743,20 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" });
   });
 
+  it("opens the existing builder chat as a drawer on smaller viewports", async () => {
+    const user = userEvent.setup();
+    renderBuilder();
+
+    const sidecar = await screen.findByTestId("automation-builder-chat-sidecar");
+    expect(sidecar).toHaveClass("absolute", "inset-0", "flex", "lg:static");
+
+    await user.click(screen.getByRole("button", { name: "Close automation chat" }));
+    expect(sidecar).toHaveClass("hidden", "lg:flex");
+
+    await user.click(screen.getByRole("button", { name: "Open automation chat" }));
+    expect(sidecar).toHaveClass("absolute", "inset-0", "flex", "lg:static");
+  });
+
   it("resolves an old run by exact ID without falling back to latest", async () => {
     const latestRun = automationWithStepOutput("latest output").latestRun;
     const oldRun = automationWithStepOutput("old exact output").latestRun;
@@ -800,6 +822,50 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Running" }));
     expect(mocks.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses an active owned automation from the builder", async () => {
+    renderBuilder();
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Pause automation" }));
+
+    await waitFor(() =>
+      expect(mocks.pauseAutomation).toHaveBeenCalledWith("task-123", {
+        clientSessionId: expect.any(String),
+        generation: 1,
+      }),
+    );
+    expect(mocks.resumeAutomation).not.toHaveBeenCalled();
+  });
+
+  it("resumes a paused owned automation from the builder", async () => {
+    mocks.getAutomation.mockResolvedValue({ ...automation, status: "paused" });
+    renderBuilder();
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Resume automation" }));
+
+    await waitFor(() =>
+      expect(mocks.resumeAutomation).toHaveBeenCalledWith("task-123", {
+        clientSessionId: expect.any(String),
+        generation: 1,
+      }),
+    );
+    expect(mocks.pauseAutomation).not.toHaveBeenCalled();
+  });
+
+  it("does not offer status controls to a member viewing someone else's automation", async () => {
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      createdBy: "user-2",
+      createdByName: "Another Member",
+      isOwner: false,
+      canEdit: true,
+    });
+    renderBuilder();
+
+    await screen.findByTestId("automation-builder-canvas");
+    expect(screen.queryByRole("button", { name: "Pause automation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume automation" })).not.toBeInTheDocument();
   });
 
   it("starts a full test run from the builder without depending on the delivery platform", async () => {

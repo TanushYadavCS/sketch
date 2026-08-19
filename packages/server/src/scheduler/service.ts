@@ -539,6 +539,7 @@ export class TaskScheduler {
 
       if (delivery.threadTs) {
         return async (text) => {
+          if ((await this.repo.getById(task.id))?.output_mode === "silent") return;
           const messageRef = await slack.postThreadReply(delivery.targetId, delivery.threadTs as string, text);
           await this.deliveryCapture.captureSlack({
             deliveryTarget: delivery.targetId,
@@ -550,6 +551,7 @@ export class TaskScheduler {
       }
 
       return async (text) => {
+        if ((await this.repo.getById(task.id))?.output_mode === "silent") return;
         let targetId = delivery.targetId;
         if (delivery.targetType === "dm" && isSlackUserId(targetId) && !isSlackDmChannelId(targetId)) {
           const settings = await this.deps.settingsRepo.get();
@@ -576,6 +578,7 @@ export class TaskScheduler {
     }
 
     return async (text) => {
+      if ((await this.repo.getById(task.id))?.output_mode === "silent") return;
       const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
       const result =
         target.kind === "dm"

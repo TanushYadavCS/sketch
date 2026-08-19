@@ -1293,7 +1293,7 @@ describe("automation persistence", () => {
     });
   });
 
-  it("requires the exact active session and generation for browser persistence mutations", async () => {
+  it("requires the active user's lease generation for browser persistence mutations", async () => {
     await addUser("user-1");
     await createAutomationDefinition({
       db,
@@ -1323,15 +1323,15 @@ describe("automation persistence", () => {
       actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-b", generation: 1 } },
       brokerCapable: true,
     });
-    expect(otherSession.kind).toBe("locked");
+    expect(otherSession).toMatchObject({ kind: "saved", row: { title: "Other session", revision: 1 } });
 
     const exactSession = await replaceAutomationDefinition({
       db,
       taskId: "automation-browser-lease",
-      request: makeDefinition({ expectedRevision: 0, title: "Exact session" }),
+      request: makeDefinition({ expectedRevision: 1, title: "Exact session" }),
       actor: { userId: "user-1", source: "web", lease: { sessionId: "tab-a", generation: 1 } },
       brokerCapable: true,
     });
-    expect(exactSession).toMatchObject({ kind: "saved", row: { title: "Exact session", revision: 1 } });
+    expect(exactSession).toMatchObject({ kind: "saved", row: { title: "Exact session", revision: 2 } });
   });
 });

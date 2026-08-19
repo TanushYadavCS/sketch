@@ -116,6 +116,8 @@ interface ScheduledTaskListItem {
   scheduleLabel: string;
   canPause: boolean;
   canResume: boolean;
+  canMuteResponses: boolean;
+  canUnmuteResponses: boolean;
   canDelete: boolean;
   isOwner: boolean;
   sharedWithMe: boolean;
@@ -421,6 +423,8 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
+      canMuteResponses: (isOwner || isAdmin) && delivery.mode === "deliver",
+      canUnmuteResponses: (isOwner || isAdmin) && delivery.mode === "silent",
       canDelete: isOwner || isAdmin,
       isOwner,
       sharedWithMe,
@@ -489,7 +493,7 @@ async function toLockView(
   row: AutomationTaskLockRow,
   viewerUserId: string | null,
   usersRepo: ReturnType<typeof createUserRepository>,
-  viewerSessionId?: string,
+  _viewerSessionId?: string,
 ): Promise<AutomationLockView> {
   const [holder, requester] = await Promise.all([
     usersRepo.findById(row.holder_user_id),
@@ -509,8 +513,8 @@ async function toLockView(
     heldBySurface: row.holder_surface,
     generation: row.generation,
     expiresAt: row.expires_at,
-    isHeldByMe: sameUser && (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
-    isHeldByMyOtherSession: sameUser && viewerSessionId !== undefined && row.holder_session_id !== viewerSessionId,
+    isHeldByMe: sameUser,
+    isHeldByMyOtherSession: false,
     stealPending,
   };
 }
@@ -679,7 +683,7 @@ export function scheduledTaskRoutes(
     return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
   }
 
-  async function loadDeletableTask(
+  async function loadOwnerOrAdminTask(
     c: Context,
     id: string,
   ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
@@ -1023,22 +1027,16 @@ export function scheduledTaskRoutes(
     const leaseRequest = await readLeaseRequest(c);
     if ("response" in leaseRequest) return leaseRequest.response;
     const existing = await createAutomationLocksRepository(db).getByTaskId(id);
-    const exactSessionIsActive =
-      existing &&
-      existing.expires_at > new Date().toISOString() &&
-      existing.holder_user_id === result.userId &&
-      existing.holder_session_id === leaseRequest.clientSessionId;
+    const sameUserIsActive =
+      existing && existing.expires_at > new Date().toISOString() && existing.holder_user_id === result.userId;
+    const exactSessionIsActive = sameUserIsActive && existing.holder_session_id === leaseRequest.clientSessionId;
     if (exactSessionIsActive && leaseRequest.generation === undefined) {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "generation is required to renew an active lease" } },
         400,
       );
     }
-    if (
-      exactSessionIsActive &&
-      leaseRequest.generation !== undefined &&
-      existing.generation !== leaseRequest.generation
-    ) {
+    if (sameUserIsActive && leaseRequest.generation !== undefined && existing.generation !== leaseRequest.generation) {
       const lock = await toLockView(existing, result.userId, users, leaseRequest.clientSessionId);
       logger?.warn(
         {
@@ -1055,6 +1053,7 @@ export function scheduledTaskRoutes(
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
       holder: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
+      requestedGeneration: leaseRequest.generation,
     });
     const lock = await toLockView(acquired.lock, result.userId, users, leaseRequest.clientSessionId);
     if (acquired.kind === "locked") {
@@ -1594,9 +1593,36 @@ export function scheduledTaskRoutes(
     });
   });
 
+  routes.put("/:id/response-delivery", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnerOrAdminTask(c, id);
+    if ("response" in result) return result.response;
+
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.muted !== "boolean") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "muted must be a boolean" } }, 400);
+    }
+
+    const outputMode = body.muted ? "silent" : "deliver";
+    const updated =
+      result.row.output_mode === outputMode
+        ? result.row
+        : ((await repo.update(id, { output_mode: outputMode })) ?? result.row);
+    return c.json({
+      task: (
+        await buildTaskListItems(db, [updated], {
+          baseUrl: options.baseUrl,
+          port: options.port,
+          encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
+        })
+      )[0],
+    });
+  });
+
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadDeletableTask(c, id);
+    const access = await loadOwnerOrAdminTask(c, id);
     if ("response" in access) return access.response;
     const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
     if ("response" in request) return request.response;

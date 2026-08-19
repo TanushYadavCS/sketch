@@ -16,6 +16,7 @@ import {
 } from "@sketch/ui/components/dropdown-menu";
 import { cn } from "@sketch/ui/lib/utils";
 import { Link } from "@tanstack/react-router";
+import type { ComponentProps } from "react";
 
 export type ConversationChannel = "web" | "slack" | "whatsapp";
 
@@ -26,6 +27,7 @@ export interface ConversationRowProps {
   occurredAt: string;
   now?: Date;
   onConversationIntent?: (conversationId: string) => void;
+  builderTaskId?: string;
   isActive?: boolean;
   onSelect?: () => void;
 }
@@ -76,6 +78,7 @@ export function ConversationRow({
   onDelete,
   isDeleting,
   onConversationIntent,
+  builderTaskId,
   isActive = false,
   onSelect,
 }: ConversationRowProps & ConversationRowActionProps) {
@@ -95,12 +98,11 @@ export function ConversationRow({
 
   if (!onDelete) {
     return (
-      <Link
-        to="/chat/$conversationId"
-        params={{ conversationId: id }}
+      <ConversationLink
+        conversationId={id}
+        builderTaskId={builderTaskId}
         viewTransition={shouldUseChatViewTransition()}
-        onMouseEnter={() => onConversationIntent?.(id)}
-        onFocus={() => onConversationIntent?.(id)}
+        onConversationIntent={onConversationIntent}
         onClick={onSelect}
         aria-current={isActive ? "page" : undefined}
         className={cn(
@@ -110,7 +112,7 @@ export function ConversationRow({
         )}
       >
         {content}
-      </Link>
+      </ConversationLink>
     );
   }
 
@@ -121,18 +123,17 @@ export function ConversationRow({
         "transition-colors duration-100 ease-out hover:bg-accent",
       )}
     >
-      <Link
-        to="/chat/$conversationId"
-        params={{ conversationId: id }}
+      <ConversationLink
+        conversationId={id}
+        builderTaskId={builderTaskId}
         viewTransition={shouldUseChatViewTransition()}
-        onMouseEnter={() => onConversationIntent?.(id)}
-        onFocus={() => onConversationIntent?.(id)}
+        onConversationIntent={onConversationIntent}
         onClick={onSelect}
         aria-current={isActive ? "page" : undefined}
         className="flex min-w-0 flex-1 items-center gap-[12px]"
       >
         {content}
-      </Link>
+      </ConversationLink>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -154,5 +155,37 @@ export function ConversationRow({
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  );
+}
+
+function ConversationLink({
+  conversationId,
+  builderTaskId,
+  onConversationIntent,
+  ...props
+}: Omit<ComponentProps<typeof Link>, "to" | "params" | "search" | "onMouseEnter" | "onFocus"> & {
+  conversationId: string;
+  builderTaskId?: string;
+  onConversationIntent?: (conversationId: string) => void;
+}) {
+  if (builderTaskId) {
+    return (
+      <Link
+        {...props}
+        to="/scheduled-tasks/$taskId/edit"
+        params={{ taskId: builderTaskId }}
+        search={{ conversationId }}
+      />
+    );
+  }
+
+  return (
+    <Link
+      {...props}
+      to="/chat/$conversationId"
+      params={{ conversationId }}
+      onMouseEnter={() => onConversationIntent?.(conversationId)}
+      onFocus={() => onConversationIntent?.(conversationId)}
+    />
   );
 }
