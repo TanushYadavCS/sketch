@@ -11,12 +11,14 @@ export type ViewerPrincipalDeps = Pick<
 
 export async function resolveViewerPrincipals(deps: ViewerPrincipalDeps): Promise<AccessPrincipal[]> {
   if (deps.publicMcp?.userPrincipals) return normalizeAccessPrincipals(deps.publicMcp.userPrincipals);
-  if (!deps.currentUserId || !deps.userRepo?.findById || !deps.userRepo.getAllEmailsForUser) return [];
+  if (!deps.currentUserId || !deps.userRepo?.findById || !deps.userRepo.getVerifiedEmailsForUser) {
+    return [];
+  }
   const user = await deps.userRepo.findById(deps.currentUserId);
   if (!user) return [];
-  const emails = await deps.userRepo.getAllEmailsForUser(deps.currentUserId);
+  const emails = await deps.userRepo.getVerifiedEmailsForUser(deps.currentUserId);
   return viewerPrincipals({
-    email: user.email,
+    email: null,
     emails,
     phone: user.whatsapp_number,
     slackUserId: user.slack_user_id,

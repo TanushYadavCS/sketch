@@ -14,8 +14,21 @@ async function insertSlackParticipant(db: Kysely<DB>, channelId: string, slackUs
     .execute();
 }
 
-async function insertSlackUserSyncState(db: Kysely<DB>, slackUserId: string, email: string): Promise<void> {
-  await db.insertInto("slack_user_sync_state").values({ team_id: "T1", slack_user_id: slackUserId, email }).execute();
+async function insertSlackUserSyncState(
+  db: Kysely<DB>,
+  slackUserId: string,
+  email: string,
+  options: { teamId?: string; inactiveAt?: string | null } = {},
+): Promise<void> {
+  await db
+    .insertInto("slack_user_sync_state")
+    .values({
+      team_id: options.teamId ?? "T1",
+      slack_user_id: slackUserId,
+      email,
+      inactive_at: options.inactiveAt ?? null,
+    })
+    .execute();
 }
 
 async function insertWhatsAppParticipant(
@@ -46,6 +59,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
     beforeEach(async () => {
       db = await createDb();
+      await db.insertInto("settings").values({ id: "default", slack_team_id: "T1" }).execute();
     });
 
     afterEach(async () => {
@@ -77,12 +91,43 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ).resolves.toEqual(new Set(["whatsapp:group-phone@g.us"]));
     });
 
-    it("grants WhatsApp membership from a linked LID principal", async () => {
-      await insertWhatsAppParticipant(db, "group-lid@g.us", "12345@lid", null, "12345@lid");
+    it("grants WhatsApp membership from a populated lid column", async () => {
+      await insertWhatsAppParticipant(db, "group-lid-col@g.us", "9999@s.whatsapp.net", null, "12345@lid");
+
+      await expect(
+        authorizedTargets(db, [{ type: "whatsapp_lid", value: "12345@lid" }], [whatsappTarget("group-lid-col@g.us")]),
+      ).resolves.toEqual(new Set(["whatsapp:group-lid-col@g.us"]));
+    });
+
+    it("grants WhatsApp membership from a LID-JID when the lid column is null", async () => {
+      await insertWhatsAppParticipant(db, "group-lid@g.us", "12345@lid", null, null);
 
       await expect(
         authorizedTargets(db, [{ type: "whatsapp_lid", value: "12345@lid" }], [whatsappTarget("group-lid@g.us")]),
       ).resolves.toEqual(new Set(["whatsapp:group-lid@g.us"]));
+    });
+
+    it("does not grant Slack membership from an inactive sync row in another team", async () => {
+      await insertSlackParticipant(db, "C-SLACK-STALE", "U-SLACK-STALE");
+      await insertSlackUserSyncState(db, "U-SLACK-STALE", "member@example.com", {
+        teamId: "T-OLD",
+        inactiveAt: "2026-08-18T00:00:00.000Z",
+      });
+      await db.updateTable("settings").set({ slack_team_id: "T1" }).where("id", "=", "default").execute();
+
+      await expect(
+        authorizedTargets(db, [{ type: "email", value: "member@example.com" }], [slackTarget("C-SLACK-STALE")]),
+      ).resolves.toEqual(new Set());
+    });
+
+    it("fails closed for Slack email membership when the active team is unknown", async () => {
+      await insertSlackParticipant(db, "C-SLACK-UNKNOWN-TEAM", "U-SLACK-UNKNOWN-TEAM");
+      await insertSlackUserSyncState(db, "U-SLACK-UNKNOWN-TEAM", "member@example.com");
+      await db.updateTable("settings").set({ slack_team_id: null }).where("id", "=", "default").execute();
+
+      await expect(
+        authorizedTargets(db, [{ type: "email", value: "member@example.com" }], [slackTarget("C-SLACK-UNKNOWN-TEAM")]),
+      ).resolves.toEqual(new Set());
     });
 
     it("denies all targets for zero principals and non-members", async () => {

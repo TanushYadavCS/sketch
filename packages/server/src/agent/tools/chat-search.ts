@@ -80,7 +80,24 @@ export class ChatHistoryAccessResolver {
 
   async isConversationAuthorized(conversationId: number, _refresh = false): Promise<boolean> {
     if (!this.deps.db || !this.deps.currentUserId) return false;
-    if (this.deps.conversationContext?.conversationId === conversationId) return true;
+    if (this.deps.conversationContext?.conversationId === conversationId) {
+      const conversation = await this.deps.db
+        .selectFrom("conversations")
+        .select(["platform", "kind", "provider_conversation_id as providerConversationId"])
+        .where("id", "=", conversationId)
+        .executeTakeFirst();
+      if (!conversation) return false;
+      if (conversation.kind === "dm") return true;
+      const authorized = await this.authorizedProviderTargets([
+        { platform: conversation.platform as ChatSearchPlatform, targetId: conversation.providerConversationId },
+      ]);
+      return authorized.has(
+        providerTargetKey({
+          platform: conversation.platform as ChatSearchPlatform,
+          targetId: conversation.providerConversationId,
+        }),
+      );
+    }
     return (await this.authorizedConversationIds([conversationId])).includes(conversationId);
   }
 
@@ -306,11 +323,9 @@ export async function renderAllChatsSearchResults(
  * the same content by hand. Runs without an authenticated requesting user are
  * denied.
  *
- * The current conversation is additionally always searchable regardless of the
- * scope join: whoever triggered the run can already read it via
- * conversation-scope search, so including it (DM, channel, or group, even an
- * index-disabled WhatsApp group) discloses nothing new. The platform filter
- * still applies to it.
+ * The current DM remains searchable from its run context. Current channels and
+ * groups must also pass the provider membership gate before they are included.
+ * The platform filter still applies to the current conversation.
  */
 export async function handleAllChatsSearch(
   args: AllChatsSearchArgs,
@@ -349,10 +364,13 @@ export async function handleAllChatsSearch(
   const authorizedConversationIds = await access.authorizedConversationIds(
     candidateConversationIds.filter((id) => id !== currentConversationId),
   );
+  const currentConversationAuthorized = currentConversationId
+    ? await access.isConversationAuthorized(currentConversationId)
+    : false;
   const result = await conversationRepo.searchMessagesAcrossConversations({
     query: args.query,
     authorizedConversationIds: authorizedSearchableConversationIds(deps.db, authorizedConversationIds),
-    currentConversationId,
+    currentConversationId: currentConversationAuthorized ? currentConversationId : undefined,
     afterMessageId: args.afterMessageId,
     beforeMessageId: effectiveBeforeMessageId,
     limit: args.limit,

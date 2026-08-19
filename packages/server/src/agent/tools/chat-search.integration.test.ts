@@ -68,6 +68,10 @@ async function seedUser(db: Kysely<DB>, options: { emailVerified?: boolean } = {
     slackUserId: USER_SLACK_ID,
     whatsappNumber: USER_WHATSAPP_NUMBER,
   });
+  await db
+    .insertInto("slack_user_sync_state")
+    .values({ team_id: "T1", slack_user_id: USER_SLACK_ID, email: USER_EMAIL })
+    .execute();
 }
 
 async function seedConnectorConfig(db: Kysely<DB>, connectorType: "slack" | "whatsapp"): Promise<string> {
@@ -345,6 +349,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       } else {
         db = await getDb();
       }
+      await db.insertInto("settings").values({ id: "default", slack_team_id: "T1" }).execute();
       await seedUser(db);
       slackConfigId = await seedConnectorConfig(db, "slack");
       whatsappConfigId = await seedConnectorConfig(db, "whatsapp");
@@ -1099,6 +1104,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-SAME-CONVERSATION",
       });
+      await db
+        .insertInto("slack_channel_participants")
+        .values({ channel_id: "C-SAME-CONVERSATION", slack_user_id: USER_SLACK_ID })
+        .execute();
       const otherRoot = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "other-root",
@@ -1555,6 +1564,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: slackConfigId,
       });
       const conversations = createConversationRepository(db);
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: "888800001111222233@g.us",
+        name: "WhatsApp group",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
       const currentGroup = await conversations.getOrCreate({
         platform: "whatsapp",
         kind: "group",
@@ -1568,6 +1583,16 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         text: "shared context marker in this group",
         receivedAt: "2026-07-17T09:00:00.000Z",
       });
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: "888800001111222233@g.us",
+          participant_jid: "15550001234@s.whatsapp.net",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: null,
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
       const trigger = await conversations.insertMessage({
         conversationId: currentGroup.id,
         providerMessageId: "grp-current-2",
@@ -1592,6 +1617,42 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages.some((message) => message.id === groupMessage.row.id)).toBe(true);
       const groupHit = outcome.body.messages.find((message) => message.id === groupMessage.row.id);
       expect((groupHit?.conversation as { name: string }).name).toBe("WhatsApp group");
+    });
+
+    it("denies the current Slack conversation and shared-target write after membership removal", async () => {
+      const seeded = await seedSlackChannel(db, {
+        channelId: "C-REMOVED-CURRENT",
+        text: "removed current channel secret",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const trigger = await createConversationRepository(db).insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "removed-current-trigger",
+        senderJid: USER_SLACK_ID,
+        senderName: "Roopak",
+        text: "search this",
+        receivedAt: "2026-07-17T09:11:00.000Z",
+      });
+      await db
+        .deleteFrom("slack_channel_participants")
+        .where("channel_id", "=", "C-REMOVED-CURRENT")
+        .where("slack_user_id", "=", USER_SLACK_ID)
+        .execute();
+
+      const deps = depsFor(db, {
+        conversationContext: { conversationId: seeded.conversationId, currentMessageId: trigger.row.id },
+      });
+      const outcome = await handleAllChatsSearch({ query: "removed current channel secret" }, deps);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(0);
+      await expect(
+        new ChatHistoryAccessResolver(deps).authorizedProviderTargets([
+          { platform: "slack", targetId: "C-REMOVED-CURRENT" },
+        ]),
+      ).resolves.toEqual(new Set());
     });
 
     it("handles punctuation-only queries safely", async () => {

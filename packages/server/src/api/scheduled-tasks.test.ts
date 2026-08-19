@@ -2136,6 +2136,66 @@ describe("Scheduled Tasks API", () => {
     expect(contentRows[0].apps).toBe(JSON.stringify(["clickup"]));
   });
 
+  it("rejects a builder save that targets an unauthorized shared destination", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-delivery@test.com", slackUserId: "U-ALICE" });
+    await tasks.add({
+      id: "task-unauthorized-delivery",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Old prompt",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const cookie = await getMemberCookie(db, alice.id);
+    await acquireOrRenewLock(db, {
+      taskId: "task-unauthorized-delivery",
+      holder: { userId: alice.id, sessionId: "tab-alice", platform: "web", surface: "builder", conversationId: null },
+    });
+
+    const request = makeBuilderSaveRequest({
+      delivery: {
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C-UNAUTHORIZED",
+        threadTs: null,
+        mode: "deliver",
+      },
+    });
+    const response = await app.request("/api/scheduled-tasks/task-unauthorized-delivery", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(withLease(request, "tab-alice")),
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "DELIVERY_TARGET_UNAUTHORIZED", message: expect.stringContaining("C-UNAUTHORIZED") },
+    });
+    await expect(tasks.getById("task-unauthorized-delivery")).resolves.toMatchObject({ revision: 0 });
+    expect(refreshTaskSchedule).not.toHaveBeenCalled();
+  });
+
   it("rejects stale builder saves without rescheduling", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

@@ -2,8 +2,7 @@ import { Buffer } from "node:buffer";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
-import type { AccessPrincipal } from "../../connectors/types";
-import { accessPrincipalPredicateSql } from "../../db/repositories/connectors";
+import { authorizedTargets } from "../../access/membership";
 import type { StoredConversationMessage } from "../../db/repositories/conversations";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
@@ -237,26 +236,20 @@ function baseSliceAnchorQuery(db: Kysely<DB>) {
     .where("whatsapp_groups.index_enabled", "=", 1);
 }
 
-function authorizedSliceAnchorQuery(db: Kysely<DB>, userPrincipals: AccessPrincipal[]) {
+function authorizedSliceAnchorQuery(db: Kysely<DB>) {
   return baseSliceAnchorQuery(db)
     .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
     .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
-    .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
     .where("indexed_files.source", "=", "whatsapp")
     .where("indexed_files.is_archived", "=", 0)
     .where("indexed_files.share_with_everyone", "=", 0)
     .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "whatsapp_group")
-    .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where(accessPrincipalPredicateSql("access_scope_members", userPrincipals));
+    .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id");
 }
 
-async function loadAuthorizedSliceAnchor(
-  db: Kysely<DB>,
-  sliceId: string,
-  userPrincipals: AccessPrincipal[],
-): Promise<DrillAnchor | null> {
-  const row = await authorizedSliceAnchorQuery(db, userPrincipals)
+async function loadAuthorizedSliceAnchor(db: Kysely<DB>, sliceId: string): Promise<DrillAnchor | null> {
+  const row = await authorizedSliceAnchorQuery(db)
     .where("conversation_slices.id", "=", sliceId)
     .limit(1)
     .executeTakeFirst();
@@ -271,8 +264,8 @@ function parseGroupRef(groupRef: string): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function accessibleGroupAnchorQuery(db: Kysely<DB>, conversationId: number, userPrincipals: AccessPrincipal[]) {
-  return authorizedSliceAnchorQuery(db, userPrincipals)
+function accessibleGroupAnchorQuery(db: Kysely<DB>, conversationId: number) {
+  return authorizedSliceAnchorQuery(db)
     .where("conversation_slices.conversation_id", "=", conversationId)
     .where("conversation_slices.salience_verdict", "=", "kept");
 }
@@ -306,10 +299,9 @@ function mergeMessageWindows(windows: AuthorizedMessageWindow[]): AuthorizedMess
 async function loadGroupWindowAuthorization(
   db: Kysely<DB>,
   conversationId: number,
-  userPrincipals: AccessPrincipal[],
   window: WhatsAppGroupHistoryWindow,
 ): Promise<GroupWindowAuthorization | null> {
-  const overlappingRows = await accessibleGroupAnchorQuery(db, conversationId, userPrincipals)
+  const overlappingRows = await accessibleGroupAnchorQuery(db, conversationId)
     .where("conversation_slices.started_at", "<=", window.end)
     .where("conversation_slices.ended_at", ">=", window.start)
     .orderBy("conversation_slices.started_at", "asc")
@@ -576,17 +568,44 @@ export async function handleWhatsAppGroupHistory(
   let messageWindows: AuthorizedMessageWindow[] = [];
 
   if (args.sliceId) {
-    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userPrincipals);
+    const group = await deps.db
+      .selectFrom("conversation_slices")
+      .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
+      .select("conversations.provider_conversation_id")
+      .where("conversation_slices.id", "=", args.sliceId)
+      .where("conversations.platform", "=", "whatsapp")
+      .where("conversations.kind", "=", "group")
+      .executeTakeFirst();
+    const authorized = group
+      ? await authorizedTargets(deps.db, userPrincipals, [
+          { platform: "whatsapp", targetId: group.provider_conversation_id },
+        ])
+      : new Set<string>();
+    if (!group || !authorized.has(`whatsapp:${group.provider_conversation_id}`)) return deniedResult();
+    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId);
     if (!anchor) return deniedResult();
     window = buildWhatsAppGroupHistoryWindow(anchor.startedAt, anchor.endedAt, args.expandMinutes);
     if (window) messageWindows = [{ start: window.start, end: window.end }];
   } else if (args.groupRef && args.startedAt && args.endedAt) {
     const conversationId = parseGroupRef(args.groupRef) ?? -1;
+    const group = await deps.db
+      .selectFrom("conversations")
+      .select("provider_conversation_id")
+      .where("id", "=", conversationId)
+      .where("platform", "=", "whatsapp")
+      .where("kind", "=", "group")
+      .executeTakeFirst();
+    const authorized = group
+      ? await authorizedTargets(deps.db, userPrincipals, [
+          { platform: "whatsapp", targetId: group.provider_conversation_id },
+        ])
+      : new Set<string>();
+    if (!group || !authorized.has(`whatsapp:${group.provider_conversation_id}`)) return deniedResult();
     window = buildWhatsAppGroupHistoryWindow(args.startedAt, args.endedAt, args.expandMinutes, {
       maxWindowMinutes: MAX_WHATSAPP_GROUP_HISTORY_WINDOW_MINUTES,
     });
     if (!window) return textResult(INVALID_INPUT_TEXT);
-    const authorization = await loadGroupWindowAuthorization(deps.db, conversationId, userPrincipals, window);
+    const authorization = await loadGroupWindowAuthorization(deps.db, conversationId, window);
     if (!authorization) return deniedResult();
     anchor = authorization.anchor;
     window = authorization.window;

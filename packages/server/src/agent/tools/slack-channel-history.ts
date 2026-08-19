@@ -3,6 +3,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod/v4";
+import { authorizedTargets } from "../../access/membership";
 import { fileAccessFilterSql } from "../../connectors/search";
 import type { AccessPrincipal } from "../../connectors/types";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
@@ -235,6 +236,28 @@ function parseChannelRef(channelRef: string): number | null {
   if (!match?.[1]) return null;
   const id = Number(match[1]);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+async function slackChannelIdForSlice(db: Kysely<DB>, sliceId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("conversation_slices")
+    .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
+    .select("conversations.provider_conversation_id")
+    .where("conversation_slices.id", "=", sliceId)
+    .where("conversations.platform", "=", "slack")
+    .where("conversations.kind", "=", "channel")
+    .executeTakeFirst();
+  return row?.provider_conversation_id ?? null;
+}
+
+async function slackChannelIsAuthorized(
+  db: Kysely<DB>,
+  channelId: string | null,
+  principals: AccessPrincipal[],
+): Promise<boolean> {
+  if (!channelId) return false;
+  const authorized = await authorizedTargets(db, principals, [{ platform: "slack", targetId: channelId }]);
+  return authorized.has(`slack:${channelId}`);
 }
 
 function intersectMessageWindow(
@@ -562,6 +585,11 @@ export async function handleSlackChannelHistory(
   let messageWindows: AuthorizedMessageWindow[] = [];
 
   if (args.sliceId) {
+    if (
+      !(await slackChannelIsAuthorized(deps.db, await slackChannelIdForSlice(deps.db, args.sliceId), userPrincipals))
+    ) {
+      return deniedResult();
+    }
     anchor = await loadAuthorizedSliceAnchor(
       deps.db,
       args.sliceId,
@@ -573,6 +601,16 @@ export async function handleSlackChannelHistory(
     if (window) messageWindows = [{ start: window.start, end: window.end }];
   } else if (args.channelRef && args.startedAt && args.endedAt) {
     const conversationId = parseChannelRef(args.channelRef) ?? -1;
+    const channel = await deps.db
+      .selectFrom("conversations")
+      .select("provider_conversation_id")
+      .where("id", "=", conversationId)
+      .where("platform", "=", "slack")
+      .where("kind", "=", "channel")
+      .executeTakeFirst();
+    if (!(await slackChannelIsAuthorized(deps.db, channel?.provider_conversation_id ?? null, userPrincipals))) {
+      return deniedResult();
+    }
     window = buildSlackChannelHistoryWindow(args.startedAt, args.endedAt, args.expandMinutes, {
       maxWindowMinutes: MAX_SLACK_CHANNEL_HISTORY_WINDOW_MINUTES,
     });

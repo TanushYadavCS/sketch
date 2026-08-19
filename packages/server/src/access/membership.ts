@@ -58,13 +58,17 @@ async function resolveSlackTargets(
   granted: Set<string>,
   logger?: MembershipLogger,
 ): Promise<void> {
+  const activeTeamId = (
+    await db.selectFrom("settings").select("slack_team_id").where("id", "=", "default").executeTakeFirst()
+  )?.slack_team_id;
   for (const targetIdChunk of chunk([...targetIds], IN_CLAUSE_CHUNK_SIZE)) {
     const rows = await db
       .selectFrom("slack_channel_participants")
-      .leftJoin(
-        "slack_user_sync_state",
-        "slack_user_sync_state.slack_user_id",
-        "slack_channel_participants.slack_user_id",
+      .leftJoin("slack_user_sync_state", (join) =>
+        join
+          .onRef("slack_user_sync_state.slack_user_id", "=", "slack_channel_participants.slack_user_id")
+          .on("slack_user_sync_state.team_id", "=", activeTeamId ?? "")
+          .on("slack_user_sync_state.inactive_at", "is", null),
       )
       .select([
         "slack_channel_participants.channel_id as channelId",

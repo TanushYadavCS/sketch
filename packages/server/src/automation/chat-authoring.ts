@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { deliveryAuthorizationError } from "../access/delivery";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
@@ -97,6 +99,7 @@ export function createChatAutomationAuthoring(deps: {
   const now = deps.now ?? (() => new Date());
   const tasks = createScheduledTaskRepository(deps.db);
   const stepContent = createAutomationStepContentRepository(deps.db);
+  const userRepo = createUserRepository(deps.db);
 
   async function refreshOrError(
     taskId: string,
@@ -148,6 +151,13 @@ export function createChatAutomationAuthoring(deps: {
     if (result.kind === "clarification") {
       return { kind: "clarification", message: result.question };
     }
+    const deliveryError = await deliveryAuthorizationError({
+      db: deps.db,
+      userRepo,
+      userId: input.taskContext.createdBy,
+      delivery: result.definition.delivery,
+    });
+    if (deliveryError) return { kind: "error", message: deliveryError };
 
     if (deps.validateAgentSkills && input.taskContext.createdBy) {
       const requestedSkills = result.definition.steps.flatMap((step) =>
@@ -241,6 +251,13 @@ export function createChatAutomationAuthoring(deps: {
     if (result.kind === "clarification") {
       return { kind: "clarification", message: result.question };
     }
+    const deliveryError = await deliveryAuthorizationError({
+      db: deps.db,
+      userRepo,
+      userId: input.taskContext.createdBy,
+      delivery: result.definition.delivery,
+    });
+    if (deliveryError) return { kind: "error", message: deliveryError };
 
     if (deps.validateAgentSkills && input.taskContext.createdBy) {
       const requestedSkills = result.definition.steps.flatMap((step) =>

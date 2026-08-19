@@ -10,8 +10,7 @@ import {
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
-import { authorizedTargets } from "../../access/membership";
-import { resolveViewerPrincipals } from "../../access/principals";
+import { deliveryAuthorizationError } from "../../access/delivery";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
@@ -735,32 +734,6 @@ async function buildDeliveryFields(
     outputThreadTs = null;
   }
 
-  const targetType =
-    delivery?.targetType ?? (outputThreadTs ? "thread" : ctx.contextType === "channel" ? "channel" : ctx.contextType);
-  const validationPlatform =
-    outputPlatform ?? (ctx.platform === "slack" || ctx.platform === "whatsapp" ? ctx.platform : undefined);
-  if (
-    outputTarget &&
-    validationPlatform &&
-    (targetType === "channel" || targetType === "group" || targetType === "thread")
-  ) {
-    const principals =
-      deps.db && deps.userRepo && ctx.createdBy
-        ? await resolveViewerPrincipals({ db: deps.db, currentUserId: ctx.createdBy, userRepo: deps.userRepo }).catch(
-            () => [],
-          )
-        : [];
-    const authorized = deps.db
-      ? await authorizedTargets(deps.db, principals, [{ platform: validationPlatform, targetId: outputTarget }])
-      : new Set<string>();
-    if (!authorized.has(`${validationPlatform}:${outputTarget}`)) {
-      const targetLabel = targetType === "thread" ? "channel or group" : targetType;
-      return {
-        error: `Error: delivery target ${outputTarget} is not a member-authorized ${targetLabel}. No changes were saved.`,
-      };
-    }
-  }
-
   return {
     outputTarget,
     outputPlatform,
@@ -1428,6 +1401,19 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
+      const deliveryError = await deliveryAuthorizationError({
+        db: deps.db,
+        userRepo: deps.userRepo,
+        userId: ctx.createdBy,
+        delivery: {
+          platform: outputPlatform,
+          targetType:
+            params.delivery?.targetType ??
+            (outputThreadTs ? "thread" : ctx.contextType === "channel" ? "channel" : ctx.contextType),
+          targetId: outputTarget,
+        },
+      });
+      if (deliveryError) return text(deliveryError);
 
       let saved: Awaited<ReturnType<typeof createAutomationDefinition>>;
       try {
@@ -1543,6 +1529,16 @@ export async function handleManageScheduledTasks(
         (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       const patch = definitionPatchFromParams(params, ctx);
       if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision;
+      if (patch.delivery) {
+        if (!guardedTask) return text("Error: task not found.");
+        const deliveryError = await deliveryAuthorizationError({
+          db,
+          userRepo: deps.userRepo,
+          userId: ctx.createdBy,
+          delivery: { ...guardedTask.delivery, ...patch.delivery },
+        });
+        if (deliveryError) return text(deliveryError);
+      }
 
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
       let agentLease: AgentLease | undefined;

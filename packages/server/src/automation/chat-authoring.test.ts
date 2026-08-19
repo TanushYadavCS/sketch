@@ -211,6 +211,36 @@ describe("chat automation authoring orchestration", () => {
     ).resolves.toEqual([expect.objectContaining({ conversation_id: "conversation-1", kind: "web_chat" })]);
   });
 
+  it("rejects an unauthorized shared target before natural-language authoring persists", async () => {
+    const authoring = {
+      create: vi.fn(async () => ({
+        kind: "definition" as const,
+        definition: definition({
+          delivery: {
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C-UNAUTHORIZED",
+            threadTs: null,
+            mode: "deliver",
+          },
+        }),
+      })),
+      edit: vi.fn(),
+    };
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring,
+      scheduler: { refreshTaskSchedule: vi.fn(), getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+    });
+
+    const result = await service.author({ action: "create", request: "Send it there", taskContext: taskContext() });
+
+    expect(result).toMatchObject({ kind: "error" });
+    expect((result as { message: string }).message).toContain("C-UNAUTHORIZED");
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+  });
+
   it("returns a clarification without persisting or refreshing", async () => {
     const refreshTaskSchedule = vi.fn();
     const service = createChatAutomationAuthoring({

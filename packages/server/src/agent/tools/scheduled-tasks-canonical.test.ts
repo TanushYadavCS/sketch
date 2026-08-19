@@ -586,6 +586,44 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
   });
 
+  it("rejects a partial update when its inherited stored delivery target is unauthorized", async () => {
+    await db
+      .updateTable("users")
+      .set({ email: "owner@example.com", slack_user_id: "U-OWNER" })
+      .where("id", "=", "owner-1")
+      .execute();
+    await createAutomationDefinition({
+      db,
+      request: definition({ title: "Stored target" }),
+      context: {
+        ...context("inherited-target-task"),
+        id: "inherited-target-task",
+      },
+      brokerCapable: true,
+    });
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "inherited-target-task",
+        delivery: { platform: "slack" },
+      },
+      {
+        db,
+        scheduler: schedulerFor("inherited-target-task"),
+        userRepo: createUserRepository(db),
+        taskContext: taskContextFor("inherited-target-task"),
+      },
+    );
+
+    expect(result.content[0].text).toContain("C123");
+    expect(result.content[0].text).toContain("not authorized");
+    await expect(createScheduledTaskRepository(db).getById("inherited-target-task")).resolves.toMatchObject({
+      title: "Stored target",
+      revision: 0,
+    });
+  });
+
   it("creates native webhook definitions with external webhook schedule fields", async () => {
     const scheduler = schedulerFor("native-webhook-task");
     const result = await handleManageScheduledTasks(
@@ -1193,6 +1231,15 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
   });
 
   it("retains delivery update semantics and synchronizes schedule trigger metadata", async () => {
+    await db
+      .updateTable("users")
+      .set({ email: "owner@example.com", slack_user_id: "U-OWNER" })
+      .where("id", "=", "owner-1")
+      .execute();
+    await db
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C456", slack_user_id: "U-OWNER" })
+      .execute();
     const initial = definition({
       scheduleType: "cron",
       scheduleValue: "*/5 * * * *",
@@ -1223,7 +1270,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         delivery: { platform: "slack", targetType: "channel", targetId: "C456" },
         expected_revision: 0,
       },
-      { db, scheduler, taskContext: taskContextFor("metadata-task") },
+      { db, scheduler, userRepo: createUserRepository(db), taskContext: taskContextFor("metadata-task") },
     );
 
     expect(result.content[0].text).toContain("Automation updated:");
