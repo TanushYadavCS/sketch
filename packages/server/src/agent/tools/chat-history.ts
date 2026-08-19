@@ -18,12 +18,13 @@ export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
 export const SEARCH_CHAT_HISTORY_TOOL_NAME = "SearchChatHistory";
 
 /**
- * Row ids are 32-bit `integer`/`serial` columns under Postgres, while the tool
- * schemas only constrain model-supplied ids to positive safe JS integers. An
- * agent that invents a sentinel such as Number.MAX_SAFE_INTEGER to mean "no
- * upper bound" therefore passes validation and overflows the bind parameter,
- * surfacing a raw driver error as tool output. SQLite stores 64-bit integers
- * and never reproduces it.
+ * Row ids are 32-bit `integer`/`serial` columns under Postgres. Every row-id
+ * field advertises this as its schema maximum: zod renders a bare `.int()` as
+ * `maximum: 9007199254740991` in the JSON Schema the model reads, and a model
+ * asked for an upper bound reasonably echoes back the largest value we said we
+ * accept — which then overflows the bind parameter and surfaces a raw driver
+ * error as tool output. Capping the advertised ceiling keeps that echo valid.
+ * SQLite stores 64-bit integers and never reproduces the overflow.
  */
 const INT4_MAX = 2_147_483_647;
 
@@ -332,6 +333,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
         .describe("Center the read around this message row id returned by SearchChatHistory."),
       pageToken: z
@@ -348,12 +350,14 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
         .describe("Return messages with row id greater than this. Omit to read from the start; never pass a sentinel."),
       beforeMessageId: z
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
         .describe("Return messages with row id less than this. Omit for no upper bound; never pass a sentinel."),
       limit: z.number().int().positive().max(100).optional().describe("Max messages to return. Default 50, max 100."),
@@ -548,6 +552,7 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new Ch
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
         .describe(
           "Search messages with row id greater than this. Omit to search from the start; never pass a sentinel.",
@@ -556,6 +561,7 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new Ch
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
         .describe(
           "Search messages with row id less than this. Defaults to the current trigger message id. Omit for no upper bound; never pass a sentinel.",
