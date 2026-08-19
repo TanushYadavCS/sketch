@@ -493,7 +493,7 @@ async function toLockView(
   row: AutomationTaskLockRow,
   viewerUserId: string | null,
   usersRepo: ReturnType<typeof createUserRepository>,
-  viewerSessionId?: string,
+  _viewerSessionId?: string,
 ): Promise<AutomationLockView> {
   const [holder, requester] = await Promise.all([
     usersRepo.findById(row.holder_user_id),
@@ -513,8 +513,8 @@ async function toLockView(
     heldBySurface: row.holder_surface,
     generation: row.generation,
     expiresAt: row.expires_at,
-    isHeldByMe: sameUser && (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
-    isHeldByMyOtherSession: sameUser && viewerSessionId !== undefined && row.holder_session_id !== viewerSessionId,
+    isHeldByMe: sameUser,
+    isHeldByMyOtherSession: false,
     stealPending,
   };
 }
@@ -1027,22 +1027,16 @@ export function scheduledTaskRoutes(
     const leaseRequest = await readLeaseRequest(c);
     if ("response" in leaseRequest) return leaseRequest.response;
     const existing = await createAutomationLocksRepository(db).getByTaskId(id);
-    const exactSessionIsActive =
-      existing &&
-      existing.expires_at > new Date().toISOString() &&
-      existing.holder_user_id === result.userId &&
-      existing.holder_session_id === leaseRequest.clientSessionId;
+    const sameUserIsActive =
+      existing && existing.expires_at > new Date().toISOString() && existing.holder_user_id === result.userId;
+    const exactSessionIsActive = sameUserIsActive && existing.holder_session_id === leaseRequest.clientSessionId;
     if (exactSessionIsActive && leaseRequest.generation === undefined) {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "generation is required to renew an active lease" } },
         400,
       );
     }
-    if (
-      exactSessionIsActive &&
-      leaseRequest.generation !== undefined &&
-      existing.generation !== leaseRequest.generation
-    ) {
+    if (sameUserIsActive && leaseRequest.generation !== undefined && existing.generation !== leaseRequest.generation) {
       const lock = await toLockView(existing, result.userId, users, leaseRequest.clientSessionId);
       logger?.warn(
         {
@@ -1059,6 +1053,7 @@ export function scheduledTaskRoutes(
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
       holder: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
+      requestedGeneration: leaseRequest.generation,
     });
     const lock = await toLockView(acquired.lock, result.userId, users, leaseRequest.clientSessionId);
     if (acquired.kind === "locked") {

@@ -18,7 +18,6 @@ import type {
   WebChatQuestionInteraction,
 } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
-import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -360,8 +359,6 @@ export interface RunAgentParams {
   currentAutomation?: CurrentAutomation;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
-  chatAutomationAuthoring?: ChatAutomationAuthoring;
-  automationAuthoringEnabled?: boolean;
   automationBuilderChat?: boolean;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -847,7 +844,6 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
-    automationAuthoringEnabled: params.automationAuthoringEnabled,
     automationBuilderChat: params.automationBuilderChat,
   });
   const claudeMdContext = await loadAgentRuntimeClaudeMdContext({
@@ -1216,7 +1212,6 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
-    automationAuthoringEnabled: params.automationAuthoringEnabled,
     automationBuilderChat: params.automationBuilderChat,
   })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
 
@@ -1288,7 +1283,6 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     taskContext: params.taskContext,
     currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,
-    chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,

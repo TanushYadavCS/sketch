@@ -341,7 +341,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.executeTaskById).toHaveBeenCalledTimes(1);
   });
 
-  it("fences manual runs by the active authoring session and generation", async () => {
+  it("fences manual runs by the active authoring user and generation", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner-lease-run@test.com" });
@@ -394,13 +394,12 @@ describe("Scheduled Tasks API", () => {
     const lock = (await acquired.json()).lock;
     expect(lock).toMatchObject({ generation: 1, isHeldByMe: true });
 
-    const conflictingRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
+    const secondSessionRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
       method: "POST",
       headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-b", generation: lock.generation }),
     });
-    expect(conflictingRun.status).toBe(409);
-    await expect(conflictingRun.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(secondSessionRun.status).toBe(200);
 
     const exactRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
       method: "POST",
@@ -408,10 +407,10 @@ describe("Scheduled Tasks API", () => {
       body: JSON.stringify({ clientSessionId: "tab-a", generation: lock.generation }),
     });
     expect(exactRun.status).toBe(200);
-    expect(executeTaskById).toHaveBeenCalledTimes(2);
+    expect(executeTaskById).toHaveBeenCalledTimes(3);
   });
 
-  it("requires an exact authoring lease for browser saves", async () => {
+  it("requires a user-scoped authoring lease for browser saves", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-browser-save@test.com" });
     await createScheduledTaskRepository(db).add({
@@ -452,7 +451,7 @@ describe("Scheduled Tasks API", () => {
       taskId: "task-browser-save",
       holder: { userId: owner.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
     });
-    const conflicting = await app.request("/api/scheduled-tasks/task-browser-save", {
+    const secondSessionSave = await app.request("/api/scheduled-tasks/task-browser-save", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -461,14 +460,13 @@ describe("Scheduled Tasks API", () => {
         generation: 1,
       }),
     });
-    expect(conflicting.status).toBe(409);
-    await expect(conflicting.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(secondSessionSave.status).toBe(200);
 
     const exact = await app.request("/api/scheduled-tasks/task-browser-save", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...makeBuilderSaveRequest({ expectedRevision: 0 }),
+        ...makeBuilderSaveRequest({ expectedRevision: 1 }),
         clientSessionId: "tab-a",
         generation: 1,
       }),
@@ -994,7 +992,7 @@ describe("Scheduled Tasks API", () => {
     });
   });
 
-  it("fences pause and resume behind the exact authoring lease", async () => {
+  it("fences pause and resume behind the user-scoped authoring lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1052,7 +1050,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.resumeTask).toHaveBeenCalledWith("task-lease-pause");
   });
 
-  it("authorizes deletion inside the transaction and accepts only the exact lease", async () => {
+  it("authorizes deletion inside the transaction and requires the user-scoped lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1510,7 +1508,7 @@ describe("Scheduled Tasks API", () => {
     await expect(tasks.getById("task-share")).resolves.toMatchObject({ revision: 0 });
   });
 
-  it("fences share grants and revocations behind the exact authoring lease", async () => {
+  it("fences share grants and revocations behind the user-scoped authoring lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1555,10 +1553,17 @@ describe("Scheduled Tasks API", () => {
     const staleLease = await app.request(path, {
       method: "PUT",
       headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ clientSessionId: "tab-b", generation: 1 }),
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: 2 }),
     });
     expect(staleLease.status).toBe(409);
-    await expect(staleLease.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    await expect(staleLease.json()).resolves.toMatchObject({ error: { code: "LEASE_STALE" } });
+
+    const secondSession = await app.request(path, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: 1 }),
+    });
+    expect(secondSession.status).toBe(200);
 
     const exactLease = { clientSessionId: "tab-a", generation: 1 };
     const grant = await app.request(path, {
@@ -2790,7 +2795,7 @@ describe("Scheduled Tasks API", () => {
     expect(afterReleaseBody.automation).not.toHaveProperty("lock");
   });
 
-  it("requires a client session and conflicts when the same user opens another session", async () => {
+  it("requires a client session and shares editing across sessions for the same user", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -2870,26 +2875,32 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-b" }),
     });
-    expect(second.status).toBe(409);
+    expect(second.status).toBe(200);
     await expect(second.json()).resolves.toMatchObject({
-      error: { code: "LOCKED", lock: { generation: 1, isHeldByMe: false } },
-    });
-
-    const sameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal", {
-      method: "POST",
-      headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ clientSessionId: "tab-b" }),
-    });
-    expect(sameUserSteal.status).toBe(200);
-    const sameUserStealBody = await sameUserSteal.json();
-    expect(sameUserStealBody).toMatchObject({
-      status: "pending",
       lock: {
         heldByUserId: alice.id,
-        isHeldByMe: false,
-        isHeldByMyOtherSession: true,
-        stealPending: { requesterName: "Alice" },
+        isHeldByMe: true,
+        isHeldByMyOtherSession: false,
+        generation: 1,
       },
+    });
+
+    const sameUserTakeover = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a" }),
+    });
+    expect(sameUserTakeover.status).toBe(409);
+    await expect(sameUserTakeover.json()).resolves.toMatchObject({ error: { code: "NOT_LOCKED" } });
+
+    const firstSessionRenewal = await app.request("/api/scheduled-tasks/task-session-contract/lock", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: firstBody.lock.generation }),
+    });
+    expect(firstSessionRenewal.status).toBe(200);
+    await expect(firstSessionRenewal.json()).resolves.toMatchObject({
+      lock: { generation: 1, isHeldByMe: true, isHeldByMyOtherSession: false },
     });
 
     const otherSessionDetail = await app.request("/api/scheduled-tasks/task-session-contract?clientSessionId=tab-b", {
@@ -2899,29 +2910,10 @@ describe("Scheduled Tasks API", () => {
       automation: {
         lock: {
           heldByUserId: alice.id,
-          isHeldByMe: false,
-          isHeldByMyOtherSession: true,
+          isHeldByMe: true,
+          isHeldByMyOtherSession: false,
+          generation: 1,
         },
-      },
-    });
-
-    const approveSameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal/response", {
-      method: "POST",
-      headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        approve: true,
-        clientSessionId: "tab-a",
-        generation: sameUserStealBody.lock.generation,
-      }),
-    });
-    expect(approveSameUserSteal.status).toBe(200);
-    await expect(approveSameUserSteal.json()).resolves.toMatchObject({
-      status: "approved",
-      lock: {
-        heldByUserId: alice.id,
-        isHeldByMe: false,
-        isHeldByMyOtherSession: true,
-        generation: sameUserStealBody.lock.generation + 1,
       },
     });
   });

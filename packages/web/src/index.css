@@ -467,7 +467,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--automation-builder-control-background);
-  box-shadow: 0 14px 34px var(--automation-builder-flow-shadow);
+  box-shadow: none;
   backdrop-filter: blur(12px);
 }
 

@@ -136,18 +136,13 @@ function builderConversationBinding(row: AutomationTaskLockRow): string | null {
 function summarizeBuilderLock(
   row: AutomationTaskLockRow | undefined,
   transcriptUserId: string,
-  clientSessionId?: string,
   nowMs = Date.now(),
 ): AutomationTaskConversationLockSummary {
   if (!row || Date.parse(row.expires_at) <= nowMs) return availableBuilderLock();
   return {
     state: "held",
     conversationId: builderConversationBinding(row),
-    owner:
-      row.holder_user_id === transcriptUserId &&
-      (clientSessionId === undefined || row.holder_session_id === clientSessionId)
-        ? "self"
-        : "other",
+    owner: row.holder_user_id === transcriptUserId ? "self" : "other",
     expiresAt: row.expires_at,
     generation: row.generation,
   };
@@ -166,14 +161,13 @@ async function claimAuthoringLease(
     existing &&
     Date.parse(existing.expires_at) > Date.now() &&
     existing.holder_user_id === transcriptUserId &&
-    existing.holder_session_id === clientSessionId &&
     generation !== undefined &&
     generation !== existing.generation
   ) {
     return {
       acquired: false,
       stale: true,
-      lock: summarizeBuilderLock(existing, transcriptUserId, clientSessionId),
+      lock: summarizeBuilderLock(existing, transcriptUserId),
     };
   }
 
@@ -191,7 +185,7 @@ async function claimAuthoringLease(
     return {
       acquired: false,
       stale: false,
-      lock: summarizeBuilderLock(result.lock, transcriptUserId, clientSessionId),
+      lock: summarizeBuilderLock(result.lock, transcriptUserId),
     };
   }
 
@@ -213,7 +207,7 @@ async function claimAuthoringLease(
   return {
     acquired: true,
     stale: false,
-    lock: summarizeBuilderLock(bound, transcriptUserId, clientSessionId),
+    lock: summarizeBuilderLock(bound, transcriptUserId),
   };
 }
 
@@ -291,13 +285,9 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
     async getBuilderLock(
       taskId: string,
       transcriptUserId: string,
-      clientSessionId?: string,
+      _clientSessionId?: string,
     ): Promise<AutomationTaskConversationLockSummary> {
-      return summarizeBuilderLock(
-        await createAutomationLocksRepository(db).getByTaskId(taskId),
-        transcriptUserId,
-        clientSessionId,
-      );
+      return summarizeBuilderLock(await createAutomationLocksRepository(db).getByTaskId(taskId), transcriptUserId);
     },
 
     async hasAnyAssociation(taskId: string, conversationId: string): Promise<boolean> {

@@ -1473,7 +1473,7 @@ describe("web chat API", () => {
     ).resolves.toHaveLength(0);
   });
 
-  it("requires an exact authoring lease for AI SDK builder messages", async () => {
+  it("requires the active user's authoring lease generation for AI SDK builder messages", async () => {
     const admin = await seedAdmin(db);
     await createScheduledTaskConversationRepository(db).upsert({
       taskId: "task-builder-lease",
@@ -1534,9 +1534,13 @@ describe("web chat API", () => {
       headers,
       body: JSON.stringify({ ...message, clientSessionId: "builder-session-b", generation: 1 }),
     });
-    expect(otherSession.status).toBe(409);
-    expect(await otherSession.json()).toMatchObject({ error: { code: "BUILDER_CHAT_LOCKED" } });
-    expect(runAgent).toHaveBeenCalledOnce();
+    expect(otherSession.status).toBe(200);
+    await otherSession.text();
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(runAgent.mock.calls[1]?.[0].taskContext?.authoringLease).toEqual({
+      sessionId: "builder-session-b",
+      generation: 1,
+    });
 
     await db
       .updateTable("automation_task_locks")
@@ -1550,7 +1554,7 @@ describe("web chat API", () => {
     });
     expect(staleGeneration.status).toBe(409);
     expect(await staleGeneration.json()).toMatchObject({ error: { code: "LEASE_STALE" } });
-    expect(runAgent).toHaveBeenCalledOnce();
+    expect(runAgent).toHaveBeenCalledTimes(2);
   });
 
   it("marks explicit automation planning requests as plan-only turns", async () => {
