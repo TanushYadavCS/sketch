@@ -45,11 +45,11 @@ function unchanged<T>(value: T): Capped<T> {
   return { value, changed: false };
 }
 
-function capToolResultContentPart(part: unknown): Capped<unknown> {
+function capToolResultContentPart(part: unknown, maxTextBytes: number): Capped<unknown> {
   if (!isRecord(part)) return unchanged(part);
 
-  if (part.type === "text" && typeof part.text === "string" && byteLength(part.text) > MAX_PERSISTED_TEXT_BYTES) {
-    return { value: { ...part, text: truncateText(part.text, MAX_PERSISTED_TEXT_BYTES) }, changed: true };
+  if (part.type === "text" && typeof part.text === "string" && byteLength(part.text) > maxTextBytes) {
+    return { value: { ...part, text: truncateText(part.text, maxTextBytes) }, changed: true };
   }
 
   if (part.type === "file" && isRecord(part.data) && part.data.type === "data" && typeof part.data.data === "string") {
@@ -82,28 +82,28 @@ function capToolResultContentPart(part: unknown): Capped<unknown> {
   return unchanged(part);
 }
 
-function capToolResultOutput(output: unknown): Capped<unknown> {
+function capToolResultOutput(output: unknown, maxTextBytes: number): Capped<unknown> {
   if (!isRecord(output)) return unchanged(output);
 
   if (
     (output.type === "text" || output.type === "error-text") &&
     typeof output.value === "string" &&
-    byteLength(output.value) > MAX_PERSISTED_TEXT_BYTES
+    byteLength(output.value) > maxTextBytes
   ) {
-    return { value: { ...output, value: truncateText(output.value, MAX_PERSISTED_TEXT_BYTES) }, changed: true };
+    return { value: { ...output, value: truncateText(output.value, maxTextBytes) }, changed: true };
   }
 
   if (output.type === "json" || output.type === "error-json") {
     const serialized = JSON.stringify(output.value) ?? "";
-    if (byteLength(serialized) > MAX_PERSISTED_TEXT_BYTES) {
-      return { value: { type: "text", value: truncateText(serialized, MAX_PERSISTED_TEXT_BYTES) }, changed: true };
+    if (byteLength(serialized) > maxTextBytes) {
+      return { value: { type: "text", value: truncateText(serialized, maxTextBytes) }, changed: true };
     }
   }
 
   if (output.type === "content" && Array.isArray(output.value)) {
     let changed = false;
     const value = output.value.map((part) => {
-      const capped = capToolResultContentPart(part);
+      const capped = capToolResultContentPart(part, maxTextBytes);
       changed ||= capped.changed;
       return capped.value;
     });
@@ -113,11 +113,11 @@ function capToolResultOutput(output: unknown): Capped<unknown> {
   return unchanged(output);
 }
 
-function capMessagePart(part: unknown): Capped<unknown> {
+function capMessagePart(part: unknown, maxTextBytes: number): Capped<unknown> {
   if (!isRecord(part)) return unchanged(part);
 
-  if (part.type === "text" && typeof part.text === "string" && byteLength(part.text) > MAX_PERSISTED_TEXT_BYTES) {
-    return { value: { ...part, text: truncateText(part.text, MAX_PERSISTED_TEXT_BYTES) }, changed: true };
+  if (part.type === "text" && typeof part.text === "string" && byteLength(part.text) > maxTextBytes) {
+    return { value: { ...part, text: truncateText(part.text, maxTextBytes) }, changed: true };
   }
 
   if (
@@ -159,26 +159,26 @@ function capMessagePart(part: unknown): Capped<unknown> {
   }
 
   if (part.type === "tool-result") {
-    const output = capToolResultOutput(part.output);
+    const output = capToolResultOutput(part.output, maxTextBytes);
     if (output.changed) return { value: { ...part, output: output.value }, changed: true };
   }
 
   return unchanged(part);
 }
 
-function capModelMessageContent(content: unknown): Capped<unknown> {
+function capModelMessageContent(content: unknown, maxTextBytes: number): Capped<unknown> {
   if (!isRecord(content)) return unchanged(content);
   const inner = content.content;
 
   if (typeof inner === "string") {
-    if (byteLength(inner) <= MAX_PERSISTED_TEXT_BYTES) return unchanged(content);
-    return { value: { ...content, content: truncateText(inner, MAX_PERSISTED_TEXT_BYTES) }, changed: true };
+    if (byteLength(inner) <= maxTextBytes) return unchanged(content);
+    return { value: { ...content, content: truncateText(inner, maxTextBytes) }, changed: true };
   }
 
   if (Array.isArray(inner)) {
     let changed = false;
     const parts = inner.map((part) => {
-      const capped = capMessagePart(part);
+      const capped = capMessagePart(part, maxTextBytes);
       changed ||= capped.changed;
       return capped.value;
     });
@@ -194,9 +194,10 @@ function capModelMessageContent(content: unknown): Capped<unknown> {
  */
 export function capPersistedRuntimeMessages(
   messages: readonly AgentRuntimeMessageAppend[],
+  maxTextBytes = MAX_PERSISTED_TEXT_BYTES,
 ): AgentRuntimeMessageAppend[] {
   return messages.map((message) => {
-    const capped = capModelMessageContent(message.content);
+    const capped = capModelMessageContent(message.content, maxTextBytes);
     return capped.changed ? { role: message.role, content: capped.value } : message;
   });
 }

@@ -116,6 +116,8 @@ interface ScheduledTaskListItem {
   scheduleLabel: string;
   canPause: boolean;
   canResume: boolean;
+  canMuteResponses: boolean;
+  canUnmuteResponses: boolean;
   canDelete: boolean;
   isOwner: boolean;
   sharedWithMe: boolean;
@@ -421,6 +423,8 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
+      canMuteResponses: (isOwner || isAdmin) && delivery.mode === "deliver",
+      canUnmuteResponses: (isOwner || isAdmin) && delivery.mode === "silent",
       canDelete: isOwner || isAdmin,
       isOwner,
       sharedWithMe,
@@ -679,7 +683,7 @@ export function scheduledTaskRoutes(
     return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
   }
 
-  async function loadDeletableTask(
+  async function loadOwnerOrAdminTask(
     c: Context,
     id: string,
   ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
@@ -1594,9 +1598,36 @@ export function scheduledTaskRoutes(
     });
   });
 
+  routes.put("/:id/response-delivery", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnerOrAdminTask(c, id);
+    if ("response" in result) return result.response;
+
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.muted !== "boolean") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "muted must be a boolean" } }, 400);
+    }
+
+    const outputMode = body.muted ? "silent" : "deliver";
+    const updated =
+      result.row.output_mode === outputMode
+        ? result.row
+        : ((await repo.update(id, { output_mode: outputMode })) ?? result.row);
+    return c.json({
+      task: (
+        await buildTaskListItems(db, [updated], {
+          baseUrl: options.baseUrl,
+          port: options.port,
+          encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
+        })
+      )[0],
+    });
+  });
+
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadDeletableTask(c, id);
+    const access = await loadOwnerOrAdminTask(c, id);
     if ("response" in access) return access.response;
     const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
     if ("response" in request) return request.response;

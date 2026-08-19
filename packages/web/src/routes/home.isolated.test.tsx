@@ -119,6 +119,7 @@ describe("buildWebChatRecents", () => {
           title: "Create a PDF for my skills",
           channel: "web",
           updatedAt: "2026-05-26T06:30:00.000Z",
+          builderTaskId: "task-alpha",
         },
       ]),
     ).toEqual([
@@ -127,6 +128,7 @@ describe("buildWebChatRecents", () => {
         title: "Create a PDF for my skills",
         channel: "web",
         occurredAt: "2026-05-26T06:30:00.000Z",
+        builderTaskId: "task-alpha",
       },
     ]);
   });

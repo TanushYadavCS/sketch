@@ -138,6 +138,8 @@ export interface ScheduledTaskListItem {
   scheduleLabel: string;
   canPause: boolean;
   canResume: boolean;
+  canMuteResponses: boolean;
+  canUnmuteResponses: boolean;
   canDelete: boolean;
   title: string | null;
   description: string | null;
@@ -1786,6 +1788,7 @@ export interface WebChatConversationSummary {
   title: string;
   channel: "web";
   updatedAt: string;
+  builderTaskId?: string;
 }
 
 export interface WebChatUploadedAttachment {
@@ -1893,8 +1896,9 @@ export const api = {
         options,
       );
     },
-    conversations() {
-      return request<{ conversations: WebChatConversationSummary[] }>("/api/web-chat/conversations");
+    conversations(options?: { includeBuilder?: boolean }) {
+      const query = options?.includeBuilder ? "?includeBuilder=true" : "";
+      return request<{ conversations: WebChatConversationSummary[] }>(`/api/web-chat/conversations${query}`);
     },
     removeConversation(conversationId: string) {
       return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
@@ -2657,6 +2661,13 @@ export const api = {
       const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/resume`, {
         method: "POST",
         ...(lease ? { body: JSON.stringify(lease) } : {}),
+      });
+      return res.task;
+    },
+    async setResponseMuted(id: string, muted: boolean) {
+      const res = await request<{ task: ScheduledTaskListItem }>(`/api/scheduled-tasks/${id}/response-delivery`, {
+        method: "PUT",
+        body: JSON.stringify({ muted }),
       });
       return res.task;
     },

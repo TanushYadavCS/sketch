@@ -9,6 +9,8 @@ import {
 } from "@/lib/automation-refresh";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
+  BellIcon,
+  BellSlashIcon,
   CaretRightIcon,
   CheckCircleIcon,
   CheckIcon,
@@ -20,7 +22,6 @@ import {
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
-  PlusIcon,
   RobotIcon,
   ShareNetworkIcon,
   SlackLogoIcon,
@@ -423,6 +424,19 @@ export function ScheduledTasksPage() {
     },
   });
 
+  const responseMutation = useMutation({
+    mutationFn: ({ taskId, muted }: { taskId: string; muted: boolean }) =>
+      api.scheduledTasks.setResponseMuted(taskId, muted),
+    onSuccess: (task) => {
+      queryClient.setQueryData<ScheduledTaskListItem[]>(TASKS_QUERY_KEY, (tasks) => replaceTaskInCache(tasks, task));
+      void invalidateAutomationQueries(queryClient, [task.id]);
+      toast.success(task.outputMode === "silent" ? "Automation responses muted" : "Automation responses unmuted");
+    },
+    onError: (error) => {
+      toast.error(getFallbackTaskError(error));
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (taskId: string) => api.scheduledTasks.remove(taskId),
     onSuccess: (_result, taskId) => {
@@ -512,14 +526,14 @@ export function ScheduledTasksPage() {
         <Button
           type="button"
           size="sm"
-          className="shrink-0 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-[0_8px_24px_-12px_rgba(234,208,0,0.9)] transition-all hover:-translate-y-0.5 hover:bg-brand-accent/90 hover:shadow-[0_12px_28px_-12px_rgba(234,208,0,1)]"
+          className="shrink-0"
           onClick={() => createMutation.mutate()}
           disabled={createMutation.isPending}
         >
           {createMutation.isPending ? (
             <SpinnerGapIcon size={14} className="animate-spin" />
           ) : (
-            <PlusIcon size={14} weight="bold" />
+            <RobotIcon size={14} weight="fill" aria-hidden />
           )}
           {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
         </Button>
@@ -568,12 +582,15 @@ export function ScheduledTasksPage() {
                     isMutating={
                       (pauseMutation.isPending && pauseMutation.variables === task.id) ||
                       (resumeMutation.isPending && resumeMutation.variables === task.id) ||
+                      (responseMutation.isPending && responseMutation.variables?.taskId === task.id) ||
                       (deleteMutation.isPending && deleteMutation.variables === task.id) ||
                       (triggerMutation.isPending && triggerMutation.variables === task.id)
                     }
                     onToggleExpanded={() => setExpandedTaskId((current) => (current === task.id ? null : task.id))}
                     onPause={() => pauseMutation.mutate(task.id)}
                     onResume={() => resumeMutation.mutate(task.id)}
+                    onMuteResponses={() => responseMutation.mutate({ taskId: task.id, muted: true })}
+                    onUnmuteResponses={() => responseMutation.mutate({ taskId: task.id, muted: false })}
                     onDelete={() => setDeletingTask(task)}
                     onTrigger={() => triggerMutation.mutate(task.id)}
                     onShare={() => setSharingTask(task)}
@@ -926,6 +943,8 @@ function TaskRow({
   onToggleExpanded,
   onPause,
   onResume,
+  onMuteResponses,
+  onUnmuteResponses,
   onDelete,
   onTrigger,
   onShare,
@@ -941,6 +960,8 @@ function TaskRow({
   onToggleExpanded: () => void;
   onPause: () => void;
   onResume: () => void;
+  onMuteResponses: () => void;
+  onUnmuteResponses: () => void;
   onDelete: () => void;
   onTrigger: () => void;
   onShare: () => void;
@@ -1042,6 +1063,18 @@ function TaskRow({
               <DropdownMenuItem disabled={isMutating} onClick={onResume}>
                 <PlayIcon size={16} />
                 Resume
+              </DropdownMenuItem>
+            ) : null}
+            {task.canMuteResponses ? (
+              <DropdownMenuItem disabled={isMutating} onClick={onMuteResponses}>
+                <BellSlashIcon size={16} />
+                Mute responses
+              </DropdownMenuItem>
+            ) : null}
+            {task.canUnmuteResponses ? (
+              <DropdownMenuItem disabled={isMutating} onClick={onUnmuteResponses}>
+                <BellIcon size={16} />
+                Unmute responses
               </DropdownMenuItem>
             ) : null}
             {task.canDelete ? (
@@ -1522,16 +1555,13 @@ function EmptyState({
       <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-4 gap-2 rounded-[8px] bg-brand-accent px-4 text-[#161300] shadow-none hover:bg-brand-accent/90"
-        onClick={onCreate}
-        disabled={isCreating}
-      >
-        {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} weight="bold" />}
-        {isCreating ? "Opening builder…" : "Create with Sketch"}{" "}
+      <Button type="button" size="sm" className="mt-4" onClick={onCreate} disabled={isCreating}>
+        {isCreating ? (
+          <SpinnerGapIcon size={14} className="animate-spin" />
+        ) : (
+          <RobotIcon size={14} weight="fill" aria-hidden />
+        )}
+        {isCreating ? "Opening builder…" : "Create with Sketch"}
       </Button>
     </div>
   );

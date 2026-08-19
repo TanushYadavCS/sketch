@@ -989,6 +989,8 @@ describe("handleManageScheduledTasks — ownership", () => {
     "remove",
     "pause",
     "resume",
+    "mute",
+    "unmute",
     "run",
     "getRun",
     "share",
@@ -1017,7 +1019,7 @@ describe("handleManageScheduledTasks — ownership", () => {
       });
 
       expect(result.content[0].text).toBe(
-        `Error: You can't ${action === "remove" ? "delete" : action === "getRun" || action === "get" ? "inspect" : action === "updateStepContent" ? "update" : action} "Do a thing" because it was created by Roopak.`,
+        `Error: You can't ${action === "remove" ? "delete" : action === "getRun" || action === "get" ? "inspect" : action === "updateStepContent" ? "update" : action === "mute" ? "mute responses from" : action === "unmute" ? "unmute responses from" : action} "Do a thing" because it was created by Roopak.`,
       );
       expect(scheduler.updateTask).not.toHaveBeenCalled();
       expect(scheduler.removeTask).not.toHaveBeenCalled();
@@ -1117,5 +1119,37 @@ describe("handleManageScheduledTasks — ownership", () => {
 
     expect(result.content[0].text).not.toContain("Error:");
     expect(scheduler.pauseTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("lets an owner mute and unmute automation responses", async () => {
+    const scheduler = makeMockScheduler();
+
+    const muted = await handleManageScheduledTasks(
+      { action: "mute", task_id: "task-1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+    const unmuted = await handleManageScheduledTasks(
+      { action: "unmute", task_id: "task-1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(muted.content[0].text).toContain("responses muted");
+    expect(unmuted.content[0].text).toContain("responses unmuted");
+    expect(scheduler.updateTask).toHaveBeenNthCalledWith(1, "task-1", { outputMode: "silent" });
+    expect(scheduler.updateTask).toHaveBeenNthCalledWith(2, "task-1", { outputMode: "deliver" });
+  });
+
+  it("lets an admin mute another member's automation", async () => {
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(makeTask({ createdBy: "U_OTHER" })),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "mute", task_id: "task-1" },
+      { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
+    );
+
+    expect(result.content[0].text).toContain("responses muted");
+    expect(scheduler.updateTask).toHaveBeenCalledWith("task-1", { outputMode: "silent" });
   });
 });

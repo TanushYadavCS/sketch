@@ -1838,8 +1838,8 @@ function BuilderChatSidecar({
     refetchOnWindowFocus: true,
   });
   const webChatConversationsQuery = useQuery({
-    queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-    queryFn: () => api.webChat.conversations(),
+    queryKey: [...WEB_CHAT_CONVERSATIONS_QUERY_KEY, "include-builder"],
+    queryFn: () => api.webChat.conversations({ includeBuilder: true }),
     staleTime: 30_000,
   });
   const webChatSummaryById = useMemo(

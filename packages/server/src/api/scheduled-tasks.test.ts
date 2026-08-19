@@ -968,6 +968,30 @@ describe("Scheduled Tasks API", () => {
     });
     expect(resumeRes.status).toBe(200);
     expect((await resumeRes.json()).task.status).toBe("active");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-1/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(200);
+    expect((await muteRes.json()).task).toMatchObject({
+      outputMode: "silent",
+      canMuteResponses: false,
+      canUnmuteResponses: true,
+    });
+
+    const unmuteRes = await app.request("/api/scheduled-tasks/task-1/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: false }),
+    });
+    expect(unmuteRes.status).toBe(200);
+    expect((await unmuteRes.json()).task).toMatchObject({
+      outputMode: "deliver",
+      canMuteResponses: true,
+      canUnmuteResponses: false,
+    });
   });
 
   it("fences pause and resume behind the exact authoring lease", async () => {
@@ -1116,6 +1140,7 @@ describe("Scheduled Tasks API", () => {
     const routes = [
       { method: "POST", path: "/api/scheduled-tasks/task-bob/pause" },
       { method: "POST", path: "/api/scheduled-tasks/task-bob/resume" },
+      { method: "PUT", path: "/api/scheduled-tasks/task-bob/response-delivery" },
       { method: "DELETE", path: "/api/scheduled-tasks/task-bob" },
       { method: "POST", path: "/api/scheduled-tasks/task-bob/run" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob" },
@@ -1191,6 +1216,14 @@ describe("Scheduled Tasks API", () => {
     expect(pauseRes.status).toBe(200);
     expect((await pauseRes.json()).task.status).toBe("paused");
     expect(scheduler.pauseTask).toHaveBeenCalledWith("task-bob");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-bob/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(200);
+    expect((await muteRes.json()).task).toMatchObject({ outputMode: "silent", canUnmuteResponses: true });
 
     // Share grant/revoke stays owner-only, admins included.
     for (const { method, path } of [
@@ -1943,6 +1976,14 @@ describe("Scheduled Tasks API", () => {
     });
     expect(resumeRes.status).toBe(200);
     expect((await resumeRes.json()).task.status).toBe("active");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-grantee/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(404);
+    expect((await tasks.getById("task-grantee"))?.output_mode).toBe("deliver");
 
     const stepContentRes = await app.request("/api/scheduled-tasks/task-grantee/step-content", {
       headers: { Cookie: memberCookie },

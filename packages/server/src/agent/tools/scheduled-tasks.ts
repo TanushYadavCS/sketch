@@ -128,6 +128,8 @@ const manageScheduledTasksSchema = {
       "remove",
       "pause",
       "resume",
+      "mute",
+      "unmute",
       "run",
       "get",
       "getRun",
@@ -147,6 +149,8 @@ const manageScheduledTasksSchema = {
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
 - 'resume': resume a paused automation (requires task_id)
+- 'mute': stop all success and failure responses from an automation without pausing its runs (requires task_id)
+- 'unmute': resume responses from a muted automation (requires task_id)
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
 - 'share': return the canonical URL for an automation (requires task_id)
@@ -194,7 +198,7 @@ For external: use 'webhook' or 'slack_channel_message' as described above.`,
     .string()
     .optional()
     .describe(
-      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/run/getRun/share/updateStepContent.",
+      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/mute/unmute/run/getRun/share/updateStepContent.",
     ),
   title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
   description: z.string().optional().describe("Description of what this automation does."),
@@ -218,7 +222,7 @@ For external: use 'webhook' or 'slack_channel_message' as described above.`,
   output_mode: z
     .enum(["deliver", "silent"])
     .optional()
-    .describe("Use 'silent' to record successful runs without sending final output to Slack or WhatsApp."),
+    .describe("Use 'silent' to keep running without sending success or failure messages to Slack or WhatsApp."),
   delivery: deliverySchema.optional().describe("Canonical final-output delivery destination for the workflow."),
   status: z
     .enum(["active", "paused", "completed"])
@@ -256,6 +260,8 @@ const authoredScheduledTasksSchema = {
       "remove",
       "pause",
       "resume",
+      "mute",
+      "unmute",
       "run",
       "get",
       "getRun",
@@ -274,6 +280,8 @@ const authoredScheduledTasksSchema = {
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
 - 'resume': resume a paused automation (requires task_id)
+- 'mute': stop all success and failure responses from an automation without pausing its runs (requires task_id)
+- 'unmute': resume responses from a muted automation (requires task_id)
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
 - 'share': return the canonical URL for an automation (requires task_id)
@@ -290,7 +298,7 @@ const authoredScheduledTasksSchema = {
     .string()
     .optional()
     .describe(
-      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/run/getRun/share.",
+      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/mute/unmute/run/getRun/share.",
     ),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
 };
@@ -305,6 +313,8 @@ type ManageScheduledTasksParams = {
     | "remove"
     | "pause"
     | "resume"
+    | "mute"
+    | "unmute"
     | "run"
     | "get"
     | "getRun"
@@ -388,6 +398,32 @@ function lockHolderFor(ctx: TaskContext): LockHolderFields {
   };
 }
 
+function effectiveLeaseIdentityFor(ctx: TaskContext): {
+  holder: LockHolderFields;
+  generation?: number;
+  authoringLease: boolean;
+} {
+  const holder = lockHolderFor(ctx);
+  if (!ctx.authoringLease) return { holder, authoringLease: false };
+  return {
+    holder: { ...holder, sessionId: ctx.authoringLease.sessionId },
+    generation: ctx.authoringLease.generation,
+    authoringLease: true,
+  };
+}
+
+function lockMatchesEffectiveIdentity(
+  lock: Awaited<ReturnType<ReturnType<typeof createAutomationLocksRepository>["getByTaskId"]>>,
+  identity: ReturnType<typeof effectiveLeaseIdentityFor>,
+): boolean {
+  return Boolean(
+    lock &&
+      lock.holder_user_id === identity.holder.userId &&
+      lock.holder_session_id === identity.holder.sessionId &&
+      (identity.generation === undefined || lock.generation === identity.generation),
+  );
+}
+
 /**
  * Agent turns do not have a browser tab UUID. Derive one from the authenticated
  * conversation surface instead so consecutive turns on the same chat renew the
@@ -420,21 +456,27 @@ async function acquireAgentLease(
   | { kind: "locked"; lock: Awaited<ReturnType<typeof acquireOrRenewLock>>["lock"] }
   | { kind: "stale" }
 > {
-  if (ctx.authoringLease && ctx.createdBy) {
+  const identity = effectiveLeaseIdentityFor(ctx);
+  if (identity.authoringLease && ctx.createdBy) {
     const renewed = await renewLock(db, {
       taskId,
       userId: ctx.createdBy,
-      sessionId: ctx.authoringLease.sessionId,
-      generation: ctx.authoringLease.generation,
+      sessionId: identity.holder.sessionId,
+      generation: identity.generation,
     });
     if (renewed.kind === "renewed") {
-      return { kind: "held", lease: { ...ctx.authoringLease, releaseAfterMutation: false } };
+      return {
+        kind: "held",
+        lease: {
+          sessionId: identity.holder.sessionId as string,
+          generation: identity.generation as number,
+          releaseAfterMutation: false,
+        },
+      };
     }
-    const lock = await createAutomationLocksRepository(db).getByTaskId(taskId);
-    if (lock) return { kind: "locked", lock };
     return { kind: "stale" };
   }
-  const acquired = await acquireOrRenewLock(db, { taskId, holder: lockHolderFor(ctx) });
+  const acquired = await acquireOrRenewLock(db, { taskId, holder: identity.holder });
   if (acquired.kind === "locked") return acquired;
   return {
     kind: "held",
@@ -659,6 +701,8 @@ function guardedActionLabel(action: ManageScheduledTasksParams["action"]): strin
   if (action === "remove") return "delete";
   if (action === "resume") return "resume";
   if (action === "pause") return "pause";
+  if (action === "mute") return "mute responses from";
+  if (action === "unmute") return "unmute responses from";
   if (action === "run") return "run";
   if (action === "getRun" || action === "get" || action === "lockStatus") return "inspect";
   if (action === "share") return "share";
@@ -1101,6 +1145,25 @@ export async function handleManageScheduledTasks(
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
 
   if (
+    ctx.planOnly &&
+    [
+      "add",
+      "update",
+      "remove",
+      "pause",
+      "resume",
+      "mute",
+      "unmute",
+      "run",
+      "share",
+      "steal",
+      "updateStepContent",
+    ].includes(action)
+  ) {
+    return text("This is a plan-only turn, so no automation changes or lock requests were made.");
+  }
+
+  if (
     ctx.conversationKind === "web_chat" &&
     (action === "add" || action === "update" || action === "updateStepContent")
   ) {
@@ -1154,6 +1217,8 @@ export async function handleManageScheduledTasks(
     "remove",
     "pause",
     "resume",
+    "mute",
+    "unmute",
     "run",
     "getRun",
     "open",
@@ -1162,11 +1227,12 @@ export async function handleManageScheduledTasks(
     "lockStatus",
     "steal",
   ];
-  // Share is owner-only (admins denied). Remove is owner-or-admin. Every other
+  // Share is owner-only (admins denied). Remove and response controls are owner-or-admin. Every other
   // guarded action passes for owner, grantee, or admin. Persistence still
   // enforces owner-or-grantee inside its own transactions, so admin mutations
   // of a foreign task are denied there (L5 admin restore resolves this).
   const OWNER_ONLY_ACTIONS = new Set<ManageScheduledTasksParams["action"]>(["share"]);
+  const OWNER_OR_ADMIN_ACTIONS = new Set<ManageScheduledTasksParams["action"]>(["remove", "mute", "unmute"]);
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
@@ -1175,7 +1241,7 @@ export async function handleManageScheduledTasks(
     }
     const isOwner = task.createdBy === ctx.createdBy;
     const isAdmin = ctx.canManageAnyTask === true;
-    if (action === "remove") {
+    if (OWNER_OR_ADMIN_ACTIONS.has(action)) {
       if (!isOwner && !isAdmin) {
         return text(await taskPermissionError(task, action, deps.userRepo));
       }
@@ -1684,6 +1750,26 @@ export async function handleManageScheduledTasks(
       return text(`Automation ${task_id} resumed.`);
     }
 
+    case "mute": {
+      if (!task_id) {
+        return text("Error: task_id is required for mute action.");
+      }
+      const updated = await deps.scheduler.updateTask(task_id, { outputMode: "silent" });
+      if (!updated) return text(`Error: task ${task_id} not found.`);
+      return text(
+        `Automation ${task_id} responses muted. It will keep running without sending success or failure messages.`,
+      );
+    }
+
+    case "unmute": {
+      if (!task_id) {
+        return text("Error: task_id is required for unmute action.");
+      }
+      const updated = await deps.scheduler.updateTask(task_id, { outputMode: "deliver" });
+      if (!updated) return text(`Error: task ${task_id} not found.`);
+      return text(`Automation ${task_id} responses unmuted.`);
+    }
+
     case "run": {
       if (!task_id) {
         return text("Error: task_id is required for run action.");
@@ -1743,6 +1829,13 @@ export async function handleManageScheduledTasks(
       if (!lock) {
         return text(`Automation "${displayName}" is not locked.`);
       }
+      const identity = effectiveLeaseIdentityFor(ctx);
+      if (lockMatchesEffectiveIdentity(lock, identity)) {
+        return text(`Automation "${displayName}" is held by this builder session until ${lock.expires_at}.`);
+      }
+      if (identity.authoringLease) {
+        return text("Error: the browser editing session is no longer active. Refresh and try again.");
+      }
       const holder = await holderDisplayName(deps, lock.holder_user_id);
       return text(
         `Automation "${displayName}" is locked by ${holder}. The lock expires at ${lock.expires_at}. Reply "take over" to request the edit lock.`,
@@ -1759,8 +1852,20 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: automation lock state is not available in this context.");
       }
-      const stolen = await requestSteal(deps.db, { taskId: task_id, requester: lockHolderFor(ctx) });
       const displayName = guardedTask ? taskDisplayName(guardedTask) : task_id;
+      const identity = effectiveLeaseIdentityFor(ctx);
+      const lock = await createAutomationLocksRepository(deps.db).getByTaskId(task_id);
+      if (lockMatchesEffectiveIdentity(lock, identity)) {
+        return text(
+          identity.authoringLease
+            ? `Automation "${displayName}" is already held by this builder session.`
+            : `Automation "${displayName}" is not locked by another editor right now.`,
+        );
+      }
+      if (identity.authoringLease) {
+        return text("Error: the browser editing session is no longer active. Refresh and try again.");
+      }
+      const stolen = await requestSteal(deps.db, { taskId: task_id, requester: identity.holder });
       if (stolen.kind === "not_locked") {
         return text(`Automation "${displayName}" is not locked by another editor right now.`);
       }

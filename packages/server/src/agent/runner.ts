@@ -353,6 +353,7 @@ export interface RunAgentParams {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   model?: string;
   maxTurns?: number;
+  maxPersistedTextBytes?: number;
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
@@ -1017,6 +1018,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
           systemPrompt: systemAppend,
           tools,
           maxTurns: params.maxTurns ?? 100,
+          maxPersistedTextBytes: params.maxPersistedTextBytes,
           stopAfterToolNames: questionToolNames.filter((name) => customTools[name]),
           stopAfterToolCall: shouldStopAfterCreateAutomationSkill
             ? ({ name, input }) => isCreateAutomationSkillInvocation(name, input)

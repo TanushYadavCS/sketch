@@ -53,6 +53,7 @@ import { createAutomationRunsRepository } from "../db/repositories/automation-ru
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
 import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
@@ -209,6 +210,7 @@ interface WebChatConversationSummary {
   title: string;
   channel: "web";
   updatedAt: string;
+  builderTaskId?: string;
 }
 
 interface LatestUserMessage {
@@ -265,10 +267,14 @@ type WebChatUiChunk =
   | { type: "error"; errorText: string };
 
 type WebChatUiWriter = (chunk: WebChatUiChunk) => void;
+type WebChatUiCancelRegistrar = (handler: () => void) => void;
 
-function webChatUiStreamResponse(execute: (write: WebChatUiWriter) => Promise<void>): Response {
+function webChatUiStreamResponse(
+  execute: (write: WebChatUiWriter, setOnCancel: WebChatUiCancelRegistrar) => Promise<void>,
+): Response {
   const encoder = new TextEncoder();
   let cancelled = false;
+  let onCancel: (() => void) | undefined;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const write = (chunk: WebChatUiChunk) => {
@@ -281,7 +287,9 @@ function webChatUiStreamResponse(execute: (write: WebChatUiWriter) => Promise<vo
       };
 
       try {
-        await execute(write);
+        await execute(write, (handler) => {
+          onCancel = handler;
+        });
       } finally {
         if (!cancelled) {
           try {
@@ -295,6 +303,7 @@ function webChatUiStreamResponse(execute: (write: WebChatUiWriter) => Promise<vo
     },
     cancel() {
       cancelled = true;
+      onCancel?.();
     },
   });
 
@@ -962,6 +971,7 @@ function automationBuilderContextLines(context: Exclude<AutomationBuilderContext
     `schedule: ${task.scheduleType} ${builderContextText(task.scheduleValue, 160)} (${task.timezone})`,
     `delivery: ${builderDeliverySummary(task)}`,
     "The originating chat context is authoritative for the user's requested automation. Reuse it before asking the user to repeat details; placeholder builder fields are not the user's request.",
+    "Treat the builder transcript plus the current automation revision as the workflow checkpoint. Resume from the last completed action instead of repeating discovery or completed tool calls.",
     "For bounded setup choices such as trigger, schedule, delivery, or execution mode, use AskUserQuestion with 2–4 concrete options, or AskUserQuestions when 2–4 independent choices are ready together. Stop after either question tool call and wait for the user's answer; do not repeat details already present in the originating chat.",
   ];
   const description = builderContextText(task.description, 500);
@@ -983,14 +993,46 @@ function automationBuilderContextLines(context: Exclude<AutomationBuilderContext
   return lines;
 }
 
-function webChatCurrentMessage(message: string, automationBuilderContext: AutomationBuilderContext): string {
+function webChatCurrentMessage(
+  message: string,
+  automationBuilderContext: AutomationBuilderContext,
+  planOnly: boolean,
+): string {
   if (!automationBuilderContext) return message;
   const lines = [...automationBuilderContextLines(automationBuilderContext), "</automation_builder>"];
+  if (planOnly) {
+    lines.push(
+      "",
+      "This turn is plan-only. Inspect and explain, but do not change, run, pause, share, delete, or request the lock for the automation.",
+    );
+  }
   return [...lines, "", message].join("\n");
 }
 
 const MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES = 12;
 const MAX_AUTOMATION_BUILDER_HISTORY_MESSAGE_LENGTH = 1200;
+const AUTOMATION_BUILDER_MAX_TURNS = 24;
+const AUTOMATION_BUILDER_MAX_TOOL_CALLS = 20;
+const AUTOMATION_BUILDER_MAX_REPEATED_TOOL_CALLS = 3;
+const AUTOMATION_BUILDER_MAX_ELAPSED_MS = 2 * 60_000;
+const AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES = 24 * 1024;
+const AUTOMATION_BUILDER_ALLOWED_TOOLS = [
+  "mcp__sketch__ManageScheduledTasks",
+  "mcp__sketch__ManageAutomationShares",
+  "mcp__sketch__SearchDeliveryTargets",
+  "mcp__sketch__Search",
+  "mcp__sketch__SearchEntities",
+  "mcp__sketch__GetEntityContext",
+  "mcp__sketch__GetFileContent",
+  "mcp__sketch__AskUserQuestion",
+  "mcp__sketch__AskUserQuestions",
+];
+
+function isAutomationBuilderPlanOnlyMessage(message: string): boolean {
+  return /\b(?:plan only|just plan|planning only|do not (?:make )?(?:any )?changes|don't (?:make )?(?:any )?changes|without (?:making|applying) changes|no changes)\b/i.test(
+    message,
+  );
+}
 
 function builderTranscriptPromptMessages(messages: WebChatTranscriptMessage[], userName: string): BufferedMessage[] {
   const promptMessages = messages.flatMap<BufferedMessage>((message) => {
@@ -1100,7 +1142,9 @@ function deterministicBuilderSetupQuestion(sourceText: string, messageId: string
 
 const AUTOMATION_CARD_INTRO_TEXT = "All set - here's the automation.";
 const AUTOMATION_BUILDER_FOLLOW_UP_TEXT =
-  "Let's continue configuring this automation. What should trigger it, and what should it do when it runs?";
+  "I couldn't finish that step before the turn ended. Your conversation and completed automation changes are saved—tell me to continue and I'll resume from the current automation.";
+const AUTOMATION_BUILDER_INTERRUPTED_TEXT =
+  "I paused this turn before it could continue. Your conversation and completed automation changes are saved—tell me to continue and I'll resume from the current automation.";
 const EMPTY_WEB_CHAT_RESPONSE_TEXT = "I wasn't able to complete that request. Please try again.";
 const AUTOMATION_SETUP_MODE_SELECTION_MARKER = "[automation-setup-mode-selection]";
 
@@ -1914,6 +1958,8 @@ async function readWebChatConversationSummaries(
   workspaceDir: string,
   userId: string,
   logger: Logger,
+  db: Kysely<DB>,
+  includeBuilder: boolean,
 ): Promise<WebChatConversationSummary[]> {
   await migrateLegacyWebChatTranscripts(config, workspaceDir, userId, logger);
   const transcriptDir = webChatTranscriptDir(config, userId);
@@ -1923,12 +1969,28 @@ async function readWebChatConversationSummaries(
     return [];
   });
 
+  const associations = await createScheduledTaskConversationRepository(db).listByTranscriptUser(userId, {
+    includeArchived: true,
+  });
+  const kindsByConversation = new Map<string, Set<string>>();
+  const builderTaskByConversation = new Map<string, string>();
+  for (const association of associations) {
+    const kinds = kindsByConversation.get(association.conversation_id) ?? new Set<string>();
+    kinds.add(association.kind);
+    kindsByConversation.set(association.conversation_id, kinds);
+    if (association.kind === "web_chat" && !builderTaskByConversation.has(association.conversation_id)) {
+      builderTaskByConversation.set(association.conversation_id, association.task_id);
+    }
+  }
+
   const summaries = await Promise.all(
     entries.flatMap(async (entry) => {
       if (!entry.isFile() || !entry.name.endsWith(".json")) return [];
       const id = entry.name.slice(0, -".json".length);
       const conversationId = normalizeWebChatConversationId(id);
       if (!conversationId || conversationId !== id) return [];
+      const kinds = kindsByConversation.get(conversationId);
+      if (!includeBuilder && kinds?.has("builder") && !kinds.has("web_chat")) return [];
 
       const messages = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
       const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
@@ -1938,7 +2000,10 @@ async function readWebChatConversationSummaries(
       const updatedAt = await readWebChatTranscriptUpdatedAt(config, workspaceDir, userId, logger, conversationId);
       if (!title || !updatedAt) return [];
 
-      return [{ id: conversationId, title, channel: "web" as const, updatedAt }];
+      const builderTaskId = builderTaskByConversation.get(conversationId);
+      return [
+        { id: conversationId, title, channel: "web" as const, updatedAt, ...(builderTaskId ? { builderTaskId } : {}) },
+      ];
     }),
   );
 
@@ -1986,6 +2051,7 @@ function automationBuilderTaskContext(params: {
   role: string | undefined;
   conversationId: string;
   lease: BuilderLease;
+  planOnly: boolean;
 }) {
   const task = params.context.task;
   return {
@@ -1999,6 +2065,7 @@ function automationBuilderTaskContext(params: {
     canManageAnyTask: params.role === "admin",
     currentAutomation: params.context.currentAutomation,
     authoringLease: { sessionId: params.lease.clientSessionId, generation: params.lease.generation },
+    planOnly: params.planOnly,
     origin: {
       platform: "web" as const,
       conversationId: params.conversationId,
@@ -2049,6 +2116,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       workspaceDir,
       currentUser.id,
       deps.logger,
+      deps.db,
+      c.req.query("includeBuilder") === "true",
     );
     return c.json({ conversations });
   });
@@ -2531,6 +2600,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
+    const builderPlanOnly = Boolean(automationBuilderContext && isAutomationBuilderPlanOnlyMessage(message));
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
           context: automationBuilderContext,
@@ -2538,6 +2608,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           role: c.get("role"),
           conversationId,
           lease: builderLease as BuilderLease,
+          planOnly: builderPlanOnly,
         })
       : dmContext
         ? {
@@ -2617,7 +2688,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const userMessage = buildSketchContext({
       messages: builderHistory,
       currentUserName: currentUser.name,
-      currentMessage: webChatCurrentMessage(message, automationBuilderContext),
+      currentMessage: webChatCurrentMessage(message, automationBuilderContext, builderPlanOnly),
       currentUserEmail: currentUser.email,
       currentUserPhone: currentUser.whatsapp_number,
       workspaceDir,
@@ -2639,7 +2710,18 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const explicitUpdateTaskId =
       selectedAutomationTask?.id ?? (updateResolution?.kind === "match" ? updateResolution.task.id : undefined);
 
-    return webChatUiStreamResponse(async (write) => {
+    const builderTurnStartedAt = Date.now();
+    let builderAbortSource: string | null = null;
+    const abortBuilderRun = (source: string) => {
+      if (!automationBuilderContext || abortController.signal.aborted) return;
+      builderAbortSource = source;
+      abortController.abort();
+    };
+    const requestAbortListener = () => abortBuilderRun("request_cancelled");
+    if (automationBuilderContext) c.req.raw.signal.addEventListener("abort", requestAbortListener, { once: true });
+
+    return webChatUiStreamResponse(async (write, setOnCancel) => {
+      if (automationBuilderContext) setOnCancel(() => abortBuilderRun("stream_cancelled"));
       write({ type: "start", messageMetadata: { createdAt: new Date().toISOString() } });
       write({ type: "start-step" });
       let textPartId: string | null = null;
@@ -2651,6 +2733,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       let bufferedTextDeltas = "";
       let sawAutomationTool = false;
       let bufferedTextAfterAutomationTool = "";
+      let builderToolCalls = 0;
+      const builderRepeatedToolCalls = new Map<string, number>();
 
       const startTextPart = () => {
         textPartId = `text-${textPartIndex}`;
@@ -2837,6 +2921,20 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             stopAfterCreateAutomationSkill: true,
             automationBuilderChat: Boolean(automationBuilderContext),
             onProgressEvent: async (event) => {
+              if (automationBuilderContext && event.kind === "tool_use") {
+                builderToolCalls += 1;
+                const signature = `${event.toolName}:${JSON.stringify(event.input)}`;
+                const repeatedCalls = (builderRepeatedToolCalls.get(signature) ?? 0) + 1;
+                builderRepeatedToolCalls.set(signature, repeatedCalls);
+                if (builderToolCalls > AUTOMATION_BUILDER_MAX_TOOL_CALLS) {
+                  abortBuilderRun("tool_call_limit");
+                  return;
+                }
+                if (repeatedCalls > AUTOMATION_BUILDER_MAX_REPEATED_TOOL_CALLS) {
+                  abortBuilderRun("repeated_tool_call_limit");
+                  return;
+                }
+              }
               if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
               if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
                 sawAutomationTool = true;
@@ -2874,6 +2972,13 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             abortController,
             sessionMode: "chat",
             persistSession: true,
+            ...(automationBuilderContext
+              ? {
+                  maxTurns: AUTOMATION_BUILDER_MAX_TURNS,
+                  maxPersistedTextBytes: AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES,
+                  agentAllowedTools: AUTOMATION_BUILDER_ALLOWED_TOOLS,
+                }
+              : {}),
             orgName: settingsRow?.org_name,
             botName: settingsRow?.bot_name,
             integrationMcpServers,
@@ -2895,7 +3000,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           });
         };
         let leaseRenewalTimer: ReturnType<typeof setInterval> | undefined;
+        let builderBudgetTimer: ReturnType<typeof setTimeout> | undefined;
         if (activeBuilderTaskId) {
+          builderBudgetTimer = setTimeout(
+            () => abortBuilderRun("elapsed_time_limit"),
+            AUTOMATION_BUILDER_MAX_ELAPSED_MS,
+          );
           leaseRenewalTimer = setInterval(() => {
             void createAutomationTaskConversationService(deps.db)
               .acquireBuilderConversationLock(
@@ -2905,9 +3015,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                 builderLease ?? undefined,
               )
               .then((access) => {
-                if (access.kind !== "active") abortController.abort();
+                if (access.kind !== "active") abortBuilderRun("lease_lost");
               })
-              .catch(() => abortController.abort());
+              .catch(() => abortBuilderRun("lease_renewal_failed"));
           }, BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS);
         }
 
@@ -2920,6 +3030,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           );
         } finally {
           if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
+          if (builderBudgetTimer) clearTimeout(builderBudgetTimer);
         }
 
         const fileParts: Array<{ id: string; data: WebChatFile }> = [];
@@ -3007,6 +3118,22 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           (fileParts.length === 0 && automationArtifacts.length === 0 && integrationCards.length === 0 && !questionPart
             ? EMPTY_WEB_CHAT_RESPONSE_TEXT
             : "");
+        if (automationBuilderContext) {
+          deps.logger.info(
+            {
+              taskId: automationBuilderContext.task.id,
+              conversationId,
+              finishReason: result.rawUsage.stopReason,
+              abortSource: builderAbortSource,
+              toolCalls: result.rawUsage.toolCalls.length,
+              turns: result.rawUsage.numTurns,
+              assistantOutputBytes: Buffer.byteLength(responseText, "utf8"),
+              persistedTextLimitBytes: AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES,
+              elapsedMs: Date.now() - builderTurnStartedAt,
+            },
+            "Automation builder turn finished",
+          );
+        }
         if (integrationCards.length === 0 && automationArtifacts.length === 0) {
           writeBufferedTextDeltas();
         } else {
@@ -3053,8 +3180,30 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       } catch (err) {
         if (abortController.signal.aborted) {
           writeBufferedTextDeltas();
-          const interruptedText = currentTextPart.trim();
+          const partialText = currentTextPart.trim();
+          const interruptedText = automationBuilderContext
+            ? [partialText, AUTOMATION_BUILDER_INTERRUPTED_TEXT].filter(Boolean).join("\n\n")
+            : partialText;
           closeTextPart();
+          if (automationBuilderContext) {
+            deps.logger.info(
+              {
+                taskId: automationBuilderContext.task.id,
+                conversationId,
+                finishReason: "aborted",
+                abortSource: builderAbortSource ?? "interrupted",
+                toolCalls: builderToolCalls,
+                assistantOutputBytes: Buffer.byteLength(interruptedText, "utf8"),
+                persistedTextLimitBytes: AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES,
+                elapsedMs: Date.now() - builderTurnStartedAt,
+              },
+              "Automation builder turn finished",
+            );
+          }
+          if (automationBuilderContext) {
+            writeTextDelta(AUTOMATION_BUILDER_INTERRUPTED_TEXT);
+            closeTextPart();
+          }
           write({ type: "data-interruption", id: "interruption", data: WEB_CHAT_INTERRUPTION_DATA });
           await completeWebChatProgressMessage(
             deps.config,
@@ -3082,6 +3231,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         );
         write({ type: "error", errorText: message });
       } finally {
+        if (automationBuilderContext) c.req.raw.signal.removeEventListener("abort", requestAbortListener);
         write({ type: "finish-step" });
         write({ type: "finish" });
       }
