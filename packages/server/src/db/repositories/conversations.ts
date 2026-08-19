@@ -228,6 +228,8 @@ async function findExistingMessage(db: ConversationDb, data: ConversationMessage
   return legacyMessageUniqueWhere(db, data).executeTakeFirst();
 }
 
+const CROSS_CONVERSATION_QUERY_CONCURRENCY = 16;
+
 function sanitizePostgresWebsearchQuery(input: string): string {
   return input.split("\0").join(" ").replace(/\s+/g, " ").trim();
 }
@@ -697,57 +699,68 @@ export function createConversationRepository(db: ConversationDb) {
       const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
       const order = options.order ?? "asc";
 
-      const perConversation = await Promise.all(
-        conversationIds.map(async (conversationId) => {
-          let query = db
-            .selectFrom("conversation_messages as m")
-            .innerJoin("conversations as c", "c.id", "m.conversation_id")
-            .selectAll("m")
-            .select([
-              "c.platform as conversation_platform",
-              "c.kind as conversation_kind",
-              "c.display_name as conversation_display_name",
-            ])
-            .where("m.conversation_id", "=", conversationId)
-            .where("m.effective_at", "is not", null);
-          if (options.afterEffectiveAt !== undefined) {
-            query = query.where("m.effective_at", ">=", options.afterEffectiveAt);
-          }
-          if (options.beforeEffectiveAt !== undefined) {
-            query = query.where("m.effective_at", "<=", options.beforeEffectiveAt);
-          }
-          if (options.snapshotBeforeMessageId !== undefined) {
-            query = query.where("m.id", "<", options.snapshotBeforeMessageId);
-          }
-          if (!options.includeBotMessages) query = query.where("m.is_bot", "=", 0);
-          if (options.cursor) {
-            const comparison = order === "desc" ? "<" : ">";
-            query = query.where((eb) =>
-              eb.or([
-                eb("m.effective_at", comparison, options.cursor?.effectiveAt ?? ""),
-                eb.and([
-                  eb("m.effective_at", "=", options.cursor?.effectiveAt ?? ""),
-                  eb("m.id", comparison, options.cursor?.messageId ?? 0),
-                ]),
+      const runConversationQuery = async (conversationId: number) => {
+        let query = db
+          .selectFrom("conversation_messages as m")
+          .innerJoin("conversations as c", "c.id", "m.conversation_id")
+          .selectAll("m")
+          .select([
+            "c.platform as conversation_platform",
+            "c.kind as conversation_kind",
+            "c.display_name as conversation_display_name",
+          ])
+          .where("m.conversation_id", "=", conversationId)
+          .where("m.effective_at", "is not", null);
+        if (options.afterEffectiveAt !== undefined) {
+          query = query.where("m.effective_at", ">=", options.afterEffectiveAt);
+        }
+        if (options.beforeEffectiveAt !== undefined) {
+          query = query.where("m.effective_at", "<=", options.beforeEffectiveAt);
+        }
+        if (options.snapshotBeforeMessageId !== undefined) {
+          query = query.where("m.id", "<", options.snapshotBeforeMessageId);
+        }
+        if (!options.includeBotMessages) query = query.where("m.is_bot", "=", 0);
+        if (options.cursor) {
+          const comparison = order === "desc" ? "<" : ">";
+          query = query.where((eb) =>
+            eb.or([
+              eb("m.effective_at", comparison, options.cursor?.effectiveAt ?? ""),
+              eb.and([
+                eb("m.effective_at", "=", options.cursor?.effectiveAt ?? ""),
+                eb("m.id", comparison, options.cursor?.messageId ?? 0),
               ]),
-            );
-          }
-          const rows = await query
-            .orderBy("m.effective_at", order)
-            .orderBy("m.id", order)
-            .limit(limit + 1)
-            .execute();
-          return {
-            messages: rows.slice(0, limit).map((row) => crossConversationRowToStored(row)),
-            hasMore: rows.length > limit,
-          };
-        }),
-      );
+            ]),
+          );
+        }
+        const rows = await query
+          .orderBy("m.effective_at", order)
+          .orderBy("m.id", order)
+          .limit(limit + 1)
+          .execute();
+        return {
+          messages: rows.slice(0, limit).map((row) => crossConversationRowToStored(row)),
+          hasMore: rows.length > limit,
+        };
+      };
+
+      /**
+       * Streams are merged application-side because both time indexes lead with
+       * conversation_id, so a single global ORDER BY cannot use them. The chunk cap keeps a
+       * requester in many groups from opening one connection per conversation at once.
+       */
+      const perConversation: Array<{ messages: CrossConversationSearchMessage[]; hasMore: boolean }> = [];
+      for (let index = 0; index < conversationIds.length; index += CROSS_CONVERSATION_QUERY_CONCURRENCY) {
+        const chunk = conversationIds.slice(index, index + CROSS_CONVERSATION_QUERY_CONCURRENCY);
+        perConversation.push(...(await Promise.all(chunk.map(runConversationQuery))));
+      }
 
       const messages = perConversation.flatMap((stream) => stream.messages);
       messages.sort((left, right) => {
-        const byEffectiveAt = left.effectiveAt.localeCompare(right.effectiveAt);
-        if (byEffectiveAt !== 0) return order === "desc" ? -byEffectiveAt : byEffectiveAt;
+        if (left.effectiveAt !== right.effectiveAt) {
+          const byEffectiveAt = left.effectiveAt < right.effectiveAt ? -1 : 1;
+          return order === "desc" ? -byEffectiveAt : byEffectiveAt;
+        }
         return order === "desc" ? right.id - left.id : left.id - right.id;
       });
       return {
