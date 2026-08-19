@@ -29,6 +29,7 @@ import {
 import { isRuntimeAbortError } from "../agent/runtime/errors";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
+import { encodeChatHistoryBacklogPageToken } from "../agent/tools/chat-history";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
   type FollowupReviewCommandHandler,
@@ -1226,6 +1227,15 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
                     beforeMessageId: capture.captured.id,
                     hasMore: backlog.hasMore,
                     nextCursor: backlog.nextCursor,
+                    ...(backlog.hasMore && backlog.nextCursor
+                      ? {
+                          pageToken: encodeChatHistoryBacklogPageToken({
+                            conversationId: capture.conversation.id,
+                            anchorMessageId: capture.captured.id,
+                            boundaryMessageId: backlog.nextCursor,
+                          }),
+                        }
+                      : {}),
                   }
                 : undefined;
 
@@ -1735,6 +1745,15 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
                     beforeMessageId: capture.captured.id,
                     hasMore: backlog.hasMore,
                     nextCursor: backlog.nextCursor,
+                    ...(backlog.hasMore && backlog.nextCursor
+                      ? {
+                          pageToken: encodeChatHistoryBacklogPageToken({
+                            conversationId: capture.conversation.id,
+                            anchorMessageId: capture.captured.id,
+                            boundaryMessageId: backlog.nextCursor,
+                          }),
+                        }
+                      : {}),
                   }
                 : undefined;
             const bootstrapMessages = !conversationBacklog

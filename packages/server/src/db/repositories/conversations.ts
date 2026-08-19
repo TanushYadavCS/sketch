@@ -66,11 +66,24 @@ export interface StoredConversationMessage {
 export interface ListConversationMessagesOptions {
   afterMessageId?: number;
   beforeMessageId?: number;
+  afterEffectiveAt?: string;
+  beforeEffectiveAt?: string;
   limit?: number;
   order?: "asc" | "desc";
   includeBotMessages?: boolean;
   providerThreadId?: string | null;
   isThreadReply?: boolean;
+}
+
+export interface ListMessagesAcrossConversationsOptions {
+  conversationIds: number[];
+  afterEffectiveAt?: string;
+  beforeEffectiveAt?: string;
+  cursor?: { effectiveAt: string; messageId: number };
+  snapshotBeforeMessageId?: number;
+  limit?: number;
+  order?: "asc" | "desc";
+  includeBotMessages?: boolean;
 }
 
 export interface ListConversationMessagesInWindowOptions {
@@ -134,10 +147,14 @@ export interface CrossConversationSearchMessage extends StoredConversationMessag
   conversationDisplayName: string | null;
 }
 
-interface CrossConversationRankedRow extends RankedConversationMessageRow {
+interface CrossConversationRow extends ConversationMessageRow {
   conversation_platform: string;
   conversation_kind: string;
   conversation_display_name: string | null;
+}
+
+interface CrossConversationRankedRow extends CrossConversationRow {
+  rank: number;
 }
 
 function parseAttachments(value: string | null): Attachment[] {
@@ -224,7 +241,7 @@ function rankedToStored(row: RankedConversationMessageRow): SearchConversationMe
   return { ...toStored(row), rank: Number(row.rank) };
 }
 
-function crossConversationRowToStored(row: CrossConversationRankedRow): CrossConversationSearchMessage {
+function crossConversationRowToStored(row: CrossConversationRow): CrossConversationSearchMessage {
   return {
     ...toStored(row),
     conversationPlatform: row.conversation_platform,
@@ -632,6 +649,12 @@ export function createConversationRepository(db: ConversationDb) {
       let query = db.selectFrom("conversation_messages").selectAll().where("conversation_id", "=", conversationId);
       if (options.afterMessageId !== undefined) query = query.where("id", ">", options.afterMessageId);
       if (options.beforeMessageId !== undefined) query = query.where("id", "<", options.beforeMessageId);
+      if (options.afterEffectiveAt !== undefined) {
+        query = query.where("effective_at", ">=", options.afterEffectiveAt).where("effective_at", "is not", null);
+      }
+      if (options.beforeEffectiveAt !== undefined) {
+        query = query.where("effective_at", "<=", options.beforeEffectiveAt).where("effective_at", "is not", null);
+      }
       if (!options.includeBotMessages) query = query.where("is_bot", "=", 0);
       if (options.providerThreadId !== undefined) {
         if (options.providerThreadId === null) {
@@ -656,6 +679,80 @@ export function createConversationRepository(db: ConversationDb) {
         messages,
         hasMore,
         nextCursor: hasMore ? visibleRows[visibleRows.length - 1]?.id : undefined,
+      };
+    },
+
+    /**
+     * Reads one bounded stream per conversation, then performs the global merge in application code. This preserves
+     * index locality on both dialects instead of asking an IN-list sort to produce global effective-time order.
+     * The cursor predicate is the portable expanded form of (effective_at, id) greater-than or less-than comparison.
+     * effective_at nulls are intentionally excluded because they have no stable position in the merged timeline. A
+     * backfilled row can receive a later id with an earlier effective_at and may be skipped after a page boundary.
+     */
+    async listMessagesAcrossConversations(
+      options: ListMessagesAcrossConversationsOptions,
+    ): Promise<{ messages: CrossConversationSearchMessage[]; hasMore: boolean }> {
+      const conversationIds = [...new Set(options.conversationIds)];
+      if (conversationIds.length === 0) return { messages: [], hasMore: false };
+      const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
+      const order = options.order ?? "asc";
+
+      const perConversation = await Promise.all(
+        conversationIds.map(async (conversationId) => {
+          let query = db
+            .selectFrom("conversation_messages as m")
+            .innerJoin("conversations as c", "c.id", "m.conversation_id")
+            .selectAll("m")
+            .select([
+              "c.platform as conversation_platform",
+              "c.kind as conversation_kind",
+              "c.display_name as conversation_display_name",
+            ])
+            .where("m.conversation_id", "=", conversationId)
+            .where("m.effective_at", "is not", null);
+          if (options.afterEffectiveAt !== undefined) {
+            query = query.where("m.effective_at", ">=", options.afterEffectiveAt);
+          }
+          if (options.beforeEffectiveAt !== undefined) {
+            query = query.where("m.effective_at", "<=", options.beforeEffectiveAt);
+          }
+          if (options.snapshotBeforeMessageId !== undefined) {
+            query = query.where("m.id", "<", options.snapshotBeforeMessageId);
+          }
+          if (!options.includeBotMessages) query = query.where("m.is_bot", "=", 0);
+          if (options.cursor) {
+            const comparison = order === "desc" ? "<" : ">";
+            query = query.where((eb) =>
+              eb.or([
+                eb("m.effective_at", comparison, options.cursor?.effectiveAt ?? ""),
+                eb.and([
+                  eb("m.effective_at", "=", options.cursor?.effectiveAt ?? ""),
+                  eb("m.id", comparison, options.cursor?.messageId ?? 0),
+                ]),
+              ]),
+            );
+          }
+          const rows = await query
+            .orderBy("m.effective_at", order)
+            .orderBy("m.id", order)
+            .limit(limit + 1)
+            .execute();
+          return {
+            messages: rows.slice(0, limit).map((row) => crossConversationRowToStored(row)),
+            hasMore: rows.length > limit,
+          };
+        }),
+      );
+
+      const messages = perConversation.flatMap((stream) => stream.messages);
+      messages.sort((left, right) => {
+        const byEffectiveAt = left.effectiveAt.localeCompare(right.effectiveAt);
+        if (byEffectiveAt !== 0) return order === "desc" ? -byEffectiveAt : byEffectiveAt;
+        return order === "desc" ? right.id - left.id : left.id - right.id;
+      });
+      return {
+        messages: messages.slice(0, limit),
+        hasMore: messages.length > limit || perConversation.some((stream) => stream.hasMore),
       };
     },
 

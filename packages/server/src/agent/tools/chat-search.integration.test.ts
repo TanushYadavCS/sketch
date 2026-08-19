@@ -15,8 +15,23 @@ import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { createReadChatHistoryTool } from "./chat-history";
-import { ChatHistoryAccessResolver, handleAllChatsSearch } from "./chat-search";
+import { ChatHistoryAccessResolver, handleAllChatsRead } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
+
+async function readAllChats(
+  args: Parameters<typeof handleAllChatsRead>[0],
+  deps: SketchMcpDeps,
+  access?: ChatHistoryAccessResolver,
+) {
+  return handleAllChatsRead(
+    {
+      ...args,
+      snapshotBeforeMessageId: deps.conversationContext?.currentMessageId,
+    },
+    deps,
+    access,
+  );
+}
 
 const USER_ID = "user-roopak";
 const USER_EMAIL = "roopak@example.com";
@@ -372,7 +387,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         displayName: "Deal Room",
       });
 
-      const outcome = await handleAllChatsSearch({ query: "atlas pricing" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(2);
@@ -389,7 +404,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       }
     });
 
-    it("authorizes every matching conversation before applying the result limit", async () => {
+    it("derives the complete member conversation set before applying the result limit", async () => {
       const matchingIds: number[] = [];
       for (const channelId of ["C-CANDIDATE-1", "C-CANDIDATE-2", "C-CANDIDATE-3"]) {
         const seeded = await seedSlackChannel(db, {
@@ -408,24 +423,24 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       });
       const deps = depsFor(db);
       const access = new ChatHistoryAccessResolver(deps);
-      const authorize = access.authorizedConversationIds.bind(access);
-      const candidateCalls: number[][] = [];
-      access.authorizedConversationIds = async (conversationIds) => {
-        candidateCalls.push(conversationIds);
-        return authorize(conversationIds);
+      const authorize = access.authorizedConversationIdsForAllChats.bind(access);
+      const authorizationCalls: Array<"slack" | "whatsapp" | undefined> = [];
+      access.authorizedConversationIdsForAllChats = async (platform) => {
+        authorizationCalls.push(platform);
+        return authorize(platform);
       };
 
-      const outcome = await handleAllChatsSearch({ query: "candidate-first marker", limit: 1 }, deps, access);
+      const outcome = await readAllChats({ limit: 1 }, deps, access);
 
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
       expect(outcome.body.hasMore).toBe(true);
-      expect(candidateCalls).toHaveLength(1);
-      expect([...candidateCalls[0]].sort((a, b) => a - b)).toEqual(matchingIds.sort((a, b) => a - b));
+      expect(authorizationCalls).toEqual([undefined]);
+      expect(matchingIds).toHaveLength(3);
     });
 
-    it("uses passive Slack membership without calling Slack during search", async () => {
+    it("uses passive Slack membership without calling Slack during a read", async () => {
       let providerCalls = 0;
       await seedSlackChannel(db, {
         channelId: "C2",
@@ -433,14 +448,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      const outcome = await handleAllChatsSearch(
-        { query: "secret finance" },
+      const outcome = await readAllChats(
+        {},
         depsFor(db, {
           getSlack: () =>
             ({
               isUserInChannel: async () => {
                 providerCalls += 1;
-                throw new Error("Search must not call Slack");
+                throw new Error("Chat history reads must not call Slack");
               },
             }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
         }),
@@ -461,12 +476,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const deps = depsFor(db);
       const access = new ChatHistoryAccessResolver(deps);
 
-      const before = await handleAllChatsSearch({ query: "leave cache marker" }, deps, access);
+      const before = await readAllChats({}, deps, access);
       expect(before.ok && before.body.messages).toHaveLength(1);
 
       await createSlackChannelParticipantsRepository(db).remove("C-LEAVE-CACHE", USER_SLACK_ID);
 
-      const after = await handleAllChatsSearch({ query: "leave cache marker" }, deps, access);
+      const after = await readAllChats({}, deps, access);
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
@@ -482,7 +497,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         .set({ last_seen_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString() })
         .where("channel_id", "=", "C2-ERROR")
         .execute();
-      const outcome = await handleAllChatsSearch({ query: "provider failure secret" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
@@ -495,16 +510,16 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      const before = await handleAllChatsSearch({ query: "disconnect revocation marker" }, depsFor(db));
+      const before = await readAllChats({}, depsFor(db));
       expect(before.ok && before.body.messages).toHaveLength(1);
 
       await createSlackChannelParticipantsRepository(db).clearAll();
 
-      const after = await handleAllChatsSearch({ query: "disconnect revocation marker" }, depsFor(db));
+      const after = await readAllChats({}, depsFor(db));
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("searches raw Slack history even when its indexed file is archived", async () => {
+    it("reads raw Slack history even when its indexed file is archived", async () => {
       await seedSlackChannel(db, {
         channelId: "C3",
         text: "archived channel content",
@@ -512,13 +527,13 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: slackConfigId,
         archived: true,
       });
-      const outcome = await handleAllChatsSearch({ query: "archived channel content" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("searches raw Slack history independently of indexed-file sharing state", async () => {
+    it("reads raw Slack history independently of indexed-file sharing state", async () => {
       await seedSlackChannel(db, {
         channelId: "C4",
         text: "broadcast topic",
@@ -526,20 +541,20 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: slackConfigId,
         shareWithEveryone: true,
       });
-      const outcome = await handleAllChatsSearch({ query: "broadcast topic" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("searches WhatsApp group history when indexing is disabled", async () => {
+    it("reads WhatsApp group history when indexing is disabled", async () => {
       await seedWhatsAppGroup(db, {
         text: "disabled group content",
         members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      const outcome = await handleAllChatsSearch({ query: "disabled group content" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
@@ -552,11 +567,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      const outcome = await handleAllChatsSearch({ query: "other group secret" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
-      expect(outcome.body.noMatchMeaning).toContain("does not prove");
     });
 
     it("revokes retained WhatsApp history when the requester leaves the group", async () => {
@@ -566,7 +580,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      const before = await handleAllChatsSearch({ query: "departed group retained" }, depsFor(db));
+      const before = await readAllChats({}, depsFor(db));
       expect(before.ok && before.body.messages).toHaveLength(1);
 
       await db
@@ -575,7 +589,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         .where("phone_e164", "=", USER_WHATSAPP_NUMBER)
         .execute();
 
-      const after = await handleAllChatsSearch({ query: "departed group retained" }, depsFor(db));
+      const after = await readAllChats({}, depsFor(db));
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
@@ -622,7 +636,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
       ]);
 
-      const outcome = await handleAllChatsSearch({ query: "stable lid mapping" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
@@ -670,7 +684,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
       ]);
 
-      const outcome = await handleAllChatsSearch({ query: "phone jid lid mapping" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
@@ -717,7 +731,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
       ]);
 
-      const outcome = await handleAllChatsSearch({ query: "ambiguous lid mapping" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
@@ -768,7 +782,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
       ]);
 
-      const outcome = await handleAllChatsSearch({ query: "ambiguous reverse lid" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
@@ -807,13 +821,13 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
       ]);
 
-      const outcome = await handleAllChatsSearch({ query: "direct phone survives" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("reads sanitized chronology around an authorized cross-chat search hit", async () => {
+    it("reads sanitized chronology around an authorized cross-chat anchor", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "context before the decision",
         members: [USER_EMAIL],
@@ -855,10 +869,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         conversationRepo: conversations,
         conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
       });
-      const search = await handleAllChatsSearch({ query: "cobalt launch decision" }, deps);
-      expect(search.ok).toBe(true);
-      if (!search.ok) return;
-      const hit = search.body.messages[0];
+      const listing = await readAllChats({}, deps);
+      expect(listing.ok).toBe(true);
+      if (!listing.ok) return;
+      const hit = listing.body.messages[0];
       const conversationRef = (hit?.conversation as { ref: string }).ref;
       const readTool = createReadChatHistoryTool(deps) as unknown as {
         handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
@@ -883,7 +897,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       ).toBe(true);
     });
 
-    it("reauthorizes Search then Read from passive WhatsApp membership without changing knowledge state", async () => {
+    it("reauthorizes a cross-chat read from passive WhatsApp membership without changing knowledge state", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "cached membership target",
         members: [USER_EMAIL],
@@ -895,9 +909,9 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       });
       const access = new ChatHistoryAccessResolver(deps);
       const graphBefore = await snapshotKnowledgeGraphState(db);
-      const search = await handleAllChatsSearch({ query: "cached membership target" }, deps, access);
-      expect(search.ok).toBe(true);
-      if (!search.ok) return;
+      const listing = await readAllChats({}, deps, access);
+      expect(listing.ok).toBe(true);
+      if (!listing.ok) return;
       const readTool = createReadChatHistoryTool(deps, access) as unknown as {
         handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
       };
@@ -972,7 +986,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       );
     });
 
-    it("requires a search-hit anchor when starting a referenced read", async () => {
+    it("requires an anchor when starting a referenced read", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "anchor required marker",
         members: [USER_EMAIL],
@@ -989,9 +1003,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         conversationRef: `conversation:${seeded.conversationId}`,
       });
 
-      expect(result.content[0]?.text).toBe(
-        "conversationRef must be combined with the anchorMessageId returned by SearchChatHistory.",
-      );
+      expect(result.content[0]?.text).toBe("conversationRef must be combined with anchorMessageId.");
     });
 
     it("keeps cross-chat Slack reads inside the anchor thread", async () => {
@@ -1091,7 +1103,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(rootBody.messages.map((message) => message.text)).not.toContain("unrelated thread root");
     });
 
-    it("uses the search-hit thread when conversationRef points to the active Slack channel", async () => {
+    it("uses the anchor thread when conversationRef points to the active Slack channel", async () => {
       const conversations = createConversationRepository(db);
       const channel = await conversations.getOrCreate({
         platform: "slack",
@@ -1393,8 +1405,8 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         receivedAt: "2026-07-17T09:02:00.000Z",
       });
 
-      const outcome = await handleAllChatsSearch(
-        { query: "atlas keyword" },
+      const outcome = await readAllChats(
+        {},
         depsFor(db, {
           conversationContext: { conversationId: currentDm.id, currentMessageId: trigger.row.id },
         }),
@@ -1433,8 +1445,8 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         receivedAt: "2026-07-17T09:01:00.000Z",
       });
 
-      const slackOnly = await handleAllChatsSearch(
-        { query: "crossplatform token", platform: "slack" },
+      const slackOnly = await readAllChats(
+        { platform: "slack" },
         depsFor(db, { conversationContext: { conversationId: currentDm.id } }),
       );
       expect(slackOnly.ok).toBe(true);
@@ -1442,8 +1454,8 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(slackOnly.body.messages).toHaveLength(1);
       expect((slackOnly.body.messages[0]?.conversation as { platform: string }).platform).toBe("slack");
 
-      const whatsappOnly = await handleAllChatsSearch(
-        { query: "crossplatform token", platform: "whatsapp" },
+      const whatsappOnly = await readAllChats(
+        { platform: "whatsapp" },
         depsFor(db, { conversationContext: { conversationId: currentDm.id } }),
       );
       expect(whatsappOnly.ok).toBe(true);
@@ -1458,7 +1470,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      const outcome = await handleAllChatsSearch({ query: "slack-only provider", platform: "slack" }, depsFor(db));
+      const outcome = await readAllChats({ platform: "slack" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
@@ -1481,12 +1493,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         receivedAt: "2026-07-17T09:20:00.000Z",
       });
 
-      const withoutBots = await handleAllChatsSearch({ query: "botfilter" }, depsFor(db));
+      const withoutBots = await readAllChats({}, depsFor(db));
       expect(withoutBots.ok).toBe(true);
       if (!withoutBots.ok) return;
       expect(withoutBots.body.messages).toHaveLength(1);
 
-      const withBots = await handleAllChatsSearch({ query: "botfilter", includeBotMessages: true }, depsFor(db));
+      const withBots = await readAllChats({ includeBotMessages: true }, depsFor(db));
       expect(withBots.ok).toBe(true);
       if (!withBots.ok) return;
       expect(withBots.body.messages).toHaveLength(2);
@@ -1515,13 +1527,173 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       });
       expect(seeded.messageId).toBeGreaterThan(trigger.row.id);
 
-      const outcome = await handleAllChatsSearch(
-        { query: "snapshot marker" },
+      const outcome = await readAllChats(
+        {},
         depsFor(db, { conversationContext: { conversationId: currentDm.id, currentMessageId: trigger.row.id } }),
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
+    });
+
+    it("normalizes time bounds, includes both edges, and omits null effective times", async () => {
+      const seeded = await seedSlackChannel(db, {
+        channelId: "C-TIME-BOUNDS",
+        text: "outside lower bound",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const conversations = createConversationRepository(db);
+      const atLower = await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "time-lower",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "at lower bound",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const atUpper = await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "time-upper",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "at upper bound",
+        providerTimestamp: "2026-07-17T11:30:00.000Z",
+        receivedAt: "2026-07-17T11:30:00.000Z",
+      });
+      const nullEffective = await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "time-null",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "null effective time",
+        providerTimestamp: null,
+        receivedAt: "2026-07-17T10:30:00.000Z",
+      });
+      await db
+        .updateTable("conversation_messages")
+        .set({ effective_at: null })
+        .where("id", "=", nullEffective.row.id)
+        .execute();
+      const current = await conversations.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "15550001234@s.whatsapp.net",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "time-trigger",
+        senderJid: "15550001234@s.whatsapp.net",
+        senderName: "Roopak",
+        text: "read bounded history",
+        receivedAt: "2026-07-17T12:00:00.000Z",
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+        }),
+      ) as unknown as { handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> };
+
+      const bounded = await readTool.handler({
+        scope: "all_chats",
+        platform: "slack",
+        afterTime: "2026-07-17T15:30:00+05:30",
+        beforeTime: "2026-07-17T17:00:00+05:30",
+        limit: 10,
+      });
+      const body = JSON.parse(bounded.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(body.messages.map((message) => message.id)).toEqual([atLower.row.id, atUpper.row.id]);
+      expect(body.messages.map((message) => message.text)).toEqual(["at lower bound", "at upper bound"]);
+
+      const empty = await readTool.handler({
+        scope: "all_chats",
+        platform: "slack",
+        afterTime: "2026-07-17T18:00:00+05:30",
+        beforeTime: "2026-07-17T17:00:00+05:30",
+      });
+      expect(JSON.parse(empty.content[0]?.text ?? "{}").messages).toEqual([]);
+    });
+
+    it("pages a merged all-chat stream with a global effective-time cursor", async () => {
+      const first = await seedSlackChannel(db, {
+        channelId: "C-GLOBAL-CURSOR-A",
+        text: "A twelve",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const second = await seedSlackChannel(db, {
+        channelId: "C-GLOBAL-CURSOR-B",
+        text: "B eleven",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const conversations = createConversationRepository(db);
+      await db
+        .updateTable("conversation_messages")
+        .set({ provider_timestamp: "2026-07-17T12:00:00.000Z", effective_at: "2026-07-17T12:00:00.000Z" })
+        .where("id", "=", first.messageId)
+        .execute();
+      await db
+        .updateTable("conversation_messages")
+        .set({ provider_timestamp: "2026-07-17T11:00:00.000Z", effective_at: "2026-07-17T11:00:00.000Z" })
+        .where("id", "=", second.messageId)
+        .execute();
+      const aEarlier = await conversations.insertMessage({
+        conversationId: first.conversationId,
+        providerMessageId: "cursor-a-earlier",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "A ten",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const bEarlier = await conversations.insertMessage({
+        conversationId: second.conversationId,
+        providerMessageId: "cursor-b-earlier",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "B nine",
+        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        receivedAt: "2026-07-17T09:00:00.000Z",
+      });
+      const current = await conversations.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "15550001234@s.whatsapp.net",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "cursor-trigger",
+        senderJid: "15550001234@s.whatsapp.net",
+        senderName: "Roopak",
+        text: "page all chats",
+        receivedAt: "2026-07-17T13:00:00.000Z",
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+        }),
+      ) as unknown as { handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> };
+
+      const firstPage = await readTool.handler({ scope: "all_chats", platform: "slack", order: "desc", limit: 2 });
+      const firstBody = JSON.parse(firstPage.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+        nextPageToken?: string;
+      };
+      expect(firstBody.messages.map((message) => message.text)).toEqual(["A twelve", "B eleven"]);
+      expect(firstBody.nextPageToken).toBeTypeOf("string");
+
+      const secondPage = await readTool.handler({ pageToken: firstBody.nextPageToken, limit: 2 });
+      const secondBody = JSON.parse(secondPage.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(secondBody.messages.map((message) => message.text)).toEqual(["A ten", "B nine"]);
+      expect(secondBody.messages.map((message) => message.id)).toEqual([aEarlier.row.id, bEarlier.row.id]);
     });
 
     it("denies without an authenticated requester or any usable provider identity", async () => {
@@ -1532,16 +1704,13 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: slackConfigId,
       });
 
-      const anonymous = await handleAllChatsSearch(
-        { query: "gated content" },
-        depsFor(db, { currentUserId: undefined }),
-      );
+      const anonymous = await readAllChats({}, depsFor(db, { currentUserId: undefined }));
       expect(anonymous.ok).toBe(false);
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ slack_user_id: null }).where("id", "=", USER_ID).execute();
-      const unverified = await handleAllChatsSearch({ query: "gated content" }, depsFor(db));
+      const unverified = await readAllChats({}, depsFor(db));
       expect(unverified.ok).toBe(false);
     });
 
@@ -1575,8 +1744,8 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         receivedAt: "2026-07-17T09:01:00.000Z",
       });
 
-      const outcome = await handleAllChatsSearch(
-        { query: "shared context marker" },
+      const outcome = await readAllChats(
+        {},
         depsFor(db, {
           conversationContext: { conversationId: currentGroup.id, currentMessageId: trigger.row.id },
         }),
@@ -1590,13 +1759,6 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages.some((message) => message.id === groupMessage.row.id)).toBe(true);
       const groupHit = outcome.body.messages.find((message) => message.id === groupMessage.row.id);
       expect((groupHit?.conversation as { name: string }).name).toBe("WhatsApp group");
-    });
-
-    it("handles punctuation-only queries safely", async () => {
-      const outcome = await handleAllChatsSearch({ query: "!!! ??? ***" }, depsFor(db));
-      expect(outcome.ok).toBe(true);
-      if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
     });
 
     it("resolves Slack mentions and uses hashed fallbacks for unknown WhatsApp senders", async () => {
@@ -1633,7 +1795,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         rosterSnapshot: whatsappRoster,
       });
 
-      const outcome = await handleAllChatsSearch({ query: "mention check" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(2);
@@ -1658,7 +1820,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         .where("id", "=", seeded.conversationId)
         .execute();
 
-      const outcome = await handleAllChatsSearch({ query: "jid name guard" }, depsFor(db));
+      const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);

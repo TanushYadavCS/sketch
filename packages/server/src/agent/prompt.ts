@@ -54,6 +54,7 @@ export interface ConversationBacklogContext {
   beforeMessageId: number;
   hasMore: boolean;
   nextCursor?: number;
+  pageToken?: string;
 }
 
 export interface QuotedMessageContext {
@@ -126,17 +127,13 @@ function formatConversationBacklogMessages(messages: ConversationBacklogMessage[
 }
 
 function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
-  const lowerBound = params.afterMessageId ?? 0;
-  const olderHistoryBounds =
-    lowerBound > 0
-      ? `afterMessageId ${lowerBound}, beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`
-      : `beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`;
   const lines = [
-    `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+    "Missed chat messages are shown below. Included messages precede the current message in this conversation.",
   ];
   if (params.hasMore) {
+    const pageToken = params.pageToken ? `pageToken ${params.pageToken}` : "the pageToken included in this context";
     lines.push(
-      `Only the newest ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For the omitted older messages, use ReadChatHistory with ${olderHistoryBounds}, and includeBotMessages false.`,
+      `Only the newest ${params.messages.length} missed messages are inlined. For omitted older messages, continue with ReadChatHistory using ${pageToken} and includeBotMessages false. Use Search for targeted keyword or topic lookup.`,
     );
   }
   return lines.join("\n");
@@ -532,17 +529,13 @@ export function buildSystemContext(params: {
     "",
     "## Chat History",
     "",
-    "Use SearchChatHistory to find relevant stored chat messages by keyword, topic, decision, person, project, or older/wider chat reference in the current conversation.",
-    "When a user asks about a named topic, decision, person, project, phrase, or older chat reference that is not already visible, you must call SearchChatHistory first. Do not page through chat history with ReadChatHistory as the first step for targeted lookup.",
-    "Use ReadChatHistory for chronological paging, missed-message continuation, or reading around a known chat message row id.",
-    'For Slack thread-local questions, use SearchChatHistory with scope: "current_thread" when active thread metadata is available.',
-    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
-    "SearchChatHistory scopes conversation and current_thread cover the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
-    'Use SearchChatHistory with scope: "all_chats" when the user asks about something that may live in another Slack channel or WhatsApp group they are a member of — for example "find that message about pricing in my groups". Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
+    "Use ReadChatHistory for chronological paging, missed-message continuation, reading around a known message, or listing all authorized chats.",
+    'For Slack thread-local questions, use ReadChatHistory with scope: "current_thread" when active thread metadata is available.',
+    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use ReadChatHistory with scope: "conversation".',
+    'Use ReadChatHistory with scope: "all_chats" when the user asks about history across Slack channels or WhatsApp groups they belong to. Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
     'scope: "all_chats" works in any context, including shared channels and groups. In a shared context, remember the reply is visible to everyone present, so summarize cross-chat results with judgment rather than quoting private-looking content verbatim.',
-    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory with the returned conversation ref and anchor message id. The same ReadChatHistory tool handles current-chat and cross-chat chronology, with access checks enforced server-side.",
-    "A cross-chat ReadChatHistory result may return olderPageToken and newerPageToken. Continue only by calling ReadChatHistory with one returned token as pageToken (and optionally limit); do not restart with conversationRef or omit the original search hit's anchorMessageId.",
-    "An empty SearchChatHistory result means no match was found in chats authorized for the requester. Never infer from an empty result that matching messages were never persisted or that inaccessible chats contain no matches.",
+    "Use Search for targeted keyword, topic, decision, person, project, phrase, or indexed knowledge lookup. Search is separate from chronological chat-history reading.",
+    "A ReadChatHistory result may return nextPageToken, olderPageToken, or newerPageToken. Continue only by calling ReadChatHistory with one returned token as pageToken (and optionally limit); do not restart with filters that change the original read.",
   );
 
   sections.push(

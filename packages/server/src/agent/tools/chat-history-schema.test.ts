@@ -1,32 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod/v4";
-import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./chat-history";
+import { createReadChatHistoryTool } from "./chat-history";
 import type { SketchMcpDeps } from "./types";
 
-const POSTGRES_INTEGER_MAX = 2_147_483_647;
-
-function advertisedProperties(tool: { inputSchema: unknown }): Record<string, { maximum?: number }> {
+function advertisedProperties(tool: { inputSchema: unknown }): Record<string, Record<string, unknown>> {
   const schema = z.toJSONSchema(z.object(tool.inputSchema as Record<string, z.ZodType>));
-  return (schema as { properties: Record<string, { maximum?: number }> }).properties;
+  return (schema as { properties: Record<string, Record<string, unknown>> }).properties;
 }
 
-describe("chat-history advertised row-id ceilings", () => {
+describe("ReadChatHistory advertised schema", () => {
   const deps = {} as SketchMcpDeps;
 
-  it.each([
-    ["SearchChatHistory", createSearchChatHistoryTool, ["afterMessageId", "beforeMessageId"]],
-    ["ReadChatHistory", createReadChatHistoryTool, ["anchorMessageId", "afterMessageId", "beforeMessageId"]],
-  ] as const)("%s caps row-id fields at the storable maximum", (_name, create, fields) => {
-    const properties = advertisedProperties(create(deps));
-    for (const field of fields) {
-      expect(properties[field].maximum).toBe(POSTGRES_INTEGER_MAX);
-    }
+  it("exposes the unified parameter set without row-id range bounds", () => {
+    const properties = advertisedProperties(createReadChatHistoryTool(deps));
+    expect(Object.keys(properties).sort()).toEqual(
+      [
+        "afterTime",
+        "anchorMessageId",
+        "beforeTime",
+        "conversationRef",
+        "includeBotMessages",
+        "limit",
+        "order",
+        "pageToken",
+        "platform",
+        "scope",
+      ].sort(),
+    );
+    expect(properties.scope.enum).toEqual(["conversation", "current_thread", "all_chats"]);
+    expect(properties.platform.enum).toEqual(["slack", "whatsapp"]);
   });
 
-  it("never advertises Number.MAX_SAFE_INTEGER as an acceptable value", () => {
-    for (const create of [createSearchChatHistoryTool, createReadChatHistoryTool]) {
-      const maxima = Object.values(advertisedProperties(create(deps))).map((property) => property.maximum);
-      expect(maxima).not.toContain(Number.MAX_SAFE_INTEGER);
-    }
+  it("does not advertise obsolete search or row-id range parameters", () => {
+    const properties = advertisedProperties(createReadChatHistoryTool(deps));
+    expect(properties).not.toHaveProperty("query");
+    expect(properties).not.toHaveProperty("afterMessageId");
+    expect(properties).not.toHaveProperty("beforeMessageId");
+    expect(JSON.stringify(properties)).not.toContain("9007199254740991");
   });
 });

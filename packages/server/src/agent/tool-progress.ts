@@ -48,7 +48,6 @@ const TOOL_EMOJI: Record<string, string> = {
   SearchEntities: "🔍",
   GetEntityContext: "📊",
   ReadChatHistory: "💬",
-  SearchChatHistory: "🔎",
   local_run_command: "💻",
   local_claude_session: "💻",
   GetTeamDirectory: "👥",
@@ -80,7 +79,6 @@ const TOOL_KIND: Record<string, WebProgressItemKind> = {
   SearchEntities: "entity",
   GetEntityContext: "entity",
   ReadChatHistory: "chat",
-  SearchChatHistory: "chat",
   local_run_command: "local",
   local_claude_session: "local",
   GetTeamDirectory: "chat",
@@ -109,7 +107,6 @@ const PRIMARY_ARG: Record<string, string> = {
   SearchDeliveryTargets: "query",
   SearchEntities: "queries",
   local_claude_session: "action",
-  SearchChatHistory: "query",
   SearchUsers: "query",
 };
 
@@ -142,11 +139,6 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
     fallback: "Listing delivery targets",
   },
   SearchEntities: { prefix: "Searching entities for", keys: ["queries"], fallback: "Searching entities" },
-  SearchChatHistory: {
-    prefix: "Searching chat history for",
-    keys: ["query"],
-    fallback: "Searching chat history",
-  },
 };
 
 const FRIENDLY_STATIC_LINES: Record<string, string> = {
@@ -172,7 +164,6 @@ const FRIENDLY_WEB_LABELS: Record<string, string> = {
   SearchEntities: "Searching connected knowledge",
   GetEntityContext: "Reading connected knowledge",
   ReadChatHistory: "Reading chat history",
-  SearchChatHistory: "Searching chat history",
   local_run_command: "Using local device",
   local_claude_session: "Using local Claude Code",
   GetTeamDirectory: "Reading team directory",

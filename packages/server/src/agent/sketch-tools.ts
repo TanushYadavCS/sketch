@@ -3,7 +3,7 @@ import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { notifyStealRequested } from "../whatsapp/lock-confirmations";
 import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createManageAutomationSharesTool } from "./tools/automation-shares";
-import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
+import { createReadChatHistoryTool } from "./tools/chat-history";
 import { ChatHistoryAccessResolver } from "./tools/chat-search";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
@@ -50,7 +50,6 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
   return [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps, chatHistoryAccess),
-    createSearchChatHistoryTool(deps, chatHistoryAccess),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),

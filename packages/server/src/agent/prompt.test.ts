@@ -165,20 +165,17 @@ describe("buildSystemContext", () => {
   });
 
   describe("chat history section", () => {
-    it("distinguishes chronological reads from chat-history search", () => {
+    it("describes unified chronological chat-history reads", () => {
       const result = buildSystemContext({ platform: "slack" });
 
       expect(result).toContain("## Chat History");
       expect(result).toContain("Use ReadChatHistory for chronological paging");
-      expect(result).toContain("Use SearchChatHistory to find relevant stored chat messages");
-      expect(result).toContain("must call SearchChatHistory first");
       expect(result).toContain('scope: "current_thread"');
       expect(result).toContain('scope: "conversation"');
       expect(result).toContain('scope: "all_chats"');
       expect(result).toContain('"all_chats" works in any context, including shared channels and groups');
-      expect(result).toContain("does not replace the existing Search tool");
-      expect(result).toContain("call ReadChatHistory with the returned conversation ref and anchor message id");
-      expect(result).toContain("Never infer from an empty result that matching messages were never persisted");
+      expect(result).toContain("Use Search for targeted keyword");
+      expect(result).toContain("nextPageToken");
       expect(result).not.toContain("WhatsAppGroupHistory");
       expect(result).not.toContain("SlackChannelHistory");
     });
@@ -947,7 +944,7 @@ describe("buildSketchContext", () => {
         },
       });
 
-      expect(result).toContain("Missed chat messages are shown below using durable row ids.");
+      expect(result).toContain("Missed chat messages are shown below.");
       expect(result).toContain("Bob [messageId=11]: first missed message");
       expect(result).toContain("Carol [messageId=12]: See attached files.");
       expect(result).toContain('path="/ws/attachments/note.txt"');
@@ -1065,15 +1062,9 @@ describe("buildSketchContext", () => {
       });
 
       expect(result).toContain("<thread>");
-      expect(result).toContain("after messageId 0 and before the current messageId 50");
-      expect(result).toContain(
-        "If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially.",
-      );
+      expect(result).toContain("Missed chat messages are shown below");
       expect(result).toContain("Only the newest 0 missed messages are inlined.");
-      expect(result).toContain(
-        "For the omitted older messages, use ReadChatHistory with beforeMessageId 25, and includeBotMessages false.",
-      );
-      expect(result).not.toContain("ReadChatHistory with afterMessageId 0");
+      expect(result).toContain("continue with ReadChatHistory using the pageToken");
     });
 
     it("preserves an existing lower bound when continuing a truncated backlog", () => {
@@ -1092,9 +1083,7 @@ describe("buildSketchContext", () => {
         },
       });
 
-      expect(result).toContain(
-        "For the omitted older messages, use ReadChatHistory with afterMessageId 10, beforeMessageId 25, and includeBotMessages false.",
-      );
+      expect(result).toContain("continue with ReadChatHistory using the pageToken");
     });
   });
 
