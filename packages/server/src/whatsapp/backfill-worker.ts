@@ -293,7 +293,7 @@ export class WhatsAppBackfillWorker {
       const requestSessionId = await this.options.facade.fetchMessageHistory({
         count: WHATSAPP_BACKFILL_FETCH_COUNT,
         oldestMessageKey: { remoteJid: anchor.remoteJid, id: anchor.id, fromMe: anchor.fromMe },
-        oldestMessageTimestamp: Date.parse(anchor.providerTimestamp) / 1_000,
+        oldestMessageTimestamp: Date.parse(anchor.providerTimestamp),
       });
       const requestedAtMs = this.now();
       this.lastFetchAt = requestedAtMs;

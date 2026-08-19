@@ -1281,6 +1281,7 @@ describe("WhatsAppBackfillWorker", () => {
 
   it("retries deadline expiry, exhausts after the bound, and re-arms on connected", async () => {
     const conversation = await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
     await seedLease(db);
     const conversations = createConversationRepository(db);
     const live = await conversations.insertMessage({
@@ -1384,6 +1385,7 @@ describe("WhatsAppBackfillWorker", () => {
 
   it("reclaims a stale request after gateway respawn without charging the accepted-attempt budget", async () => {
     await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
     await seedLease(db, 2);
     await db
       .insertInto("whatsapp_backfill_ranges")
@@ -1426,6 +1428,7 @@ describe("WhatsAppBackfillWorker", () => {
 
   it("reclaims a stale pre-request claim before issuing the serialized fetch", async () => {
     await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
     await seedLease(db);
     await db
       .insertInto("whatsapp_backfill_ranges")
@@ -1469,6 +1472,7 @@ describe("WhatsAppBackfillWorker", () => {
 
   it("selects least-recently-served and never issues concurrent history fetches", async () => {
     const conversation = await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
     await seedLease(db);
     const conversations = createConversationRepository(db);
     for (const [index, key] of [KEY_2, KEY_3].entries()) {
@@ -1512,7 +1516,10 @@ describe("WhatsAppBackfillWorker", () => {
     topUp.start();
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({ oldestMessageKey: expect.objectContaining({ id: "anchor-1" }) }),
+      expect.objectContaining({
+        oldestMessageKey: expect.objectContaining({ id: "anchor-1" }),
+        oldestMessageTimestamp: Date.parse("2026-07-17T11:00:00.000Z"),
+      }),
     );
     void topUp.wake();
     void topUp.wake();
@@ -1528,5 +1535,53 @@ describe("WhatsAppBackfillWorker", () => {
       expect(inFlight).toHaveLength(1);
     });
     await topUp.stop();
+  });
+
+  it("does not claim backfill ranges for disabled groups", async () => {
+    await seedGroup(db);
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "=", "group@g.us").execute();
+    await db
+      .insertInto("whatsapp_groups")
+      .values({
+        jid: "disabled@g.us",
+        name: "Disabled",
+        description: null,
+        updated_at: "2026-07-17T12:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values([
+        {
+          id: "range-disabled",
+          group_jid: "disabled@g.us",
+          range_key: "initial",
+          kind: "initial",
+          connection_key: KEY_2,
+          status: "pending",
+          lower_bound_at: "2026-06-17T12:00:00.000Z",
+          upper_bound_at: "2026-07-17T12:00:00.000Z",
+          created_at: "2026-07-17T10:00:00.000Z",
+        },
+        {
+          id: "range-enabled",
+          group_jid: "group@g.us",
+          range_key: "initial",
+          kind: "initial",
+          connection_key: KEY_2,
+          status: "pending",
+          lower_bound_at: "2026-06-17T12:00:00.000Z",
+          upper_bound_at: "2026-07-17T12:00:00.000Z",
+          created_at: "2026-07-17T11:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    const ranges = createWhatsAppBackfillRangeRepository(db);
+    await expect(ranges.claimNext("claim-enabled", "2026-07-17T12:00:00.000Z")).resolves.toMatchObject({
+      id: "range-enabled",
+      status: "claimed",
+    });
+    await expect(ranges.getById("range-disabled")).resolves.toMatchObject({ status: "pending" });
   });
 });
