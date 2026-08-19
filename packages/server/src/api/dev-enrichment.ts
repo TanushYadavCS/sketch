@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * Dev-only enrichment trace routes.
  *
@@ -13,6 +14,8 @@ import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
+import { handleSearch } from "../agent/tools/search";
+import type { SketchMcpDeps } from "../agent/tools/types";
 import { runEnrichment } from "../connectors/enrichment";
 import {
   buildEnrichmentProviderConfig,
@@ -23,7 +26,9 @@ import {
 import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { createOpenRouterGenerator } from "../connectors/openrouter-generate";
 import { mintTasksFromFile } from "../connectors/task-minting";
+import { createDevSearchTraceRepository } from "../db/repositories/dev-search-traces";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { DevTraceRun } from "../dev/enrichment-trace";
 import {
@@ -37,6 +42,20 @@ import {
 import { listLlmDumpHeaders, readLlmDumpBody } from "../dev/llm-dump-reader";
 import { getFileViewer } from "./auth-helpers";
 import { resolveTaskAccessContext } from "./task-access";
+
+const searchRunSchema = z.object({
+  query: z.string().optional(),
+  entityIds: z.array(z.string()).optional(),
+  entityIdsMode: z.enum(["and", "or"]).optional(),
+  kind: z.enum(["meeting", "doc", "task", "message"]).optional(),
+  source: z
+    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "whatsapp", "slack", "local"])
+    .optional(),
+  sortBy: z.enum(["relevance", "recency"]).optional(),
+  after: z.string().optional(),
+  before: z.string().optional(),
+  limit: z.number().optional(),
+});
 
 const startRunSchema = z.object({
   fileId: z.string().min(1),
@@ -61,6 +80,7 @@ export function devEnrichmentRoutes(
     DATA_DIR?: string;
     LLM_TASK_CORROBORATION_THRESHOLD?: number;
     TASK_MINTING_MODEL?: string;
+    SLACK_ENTITY_SYNC?: boolean;
   },
   deps: { enrichmentGenerator?: GeminiGenerator; taskMintingGenerator?: GeminiGenerator } = {},
 ) {
@@ -200,6 +220,80 @@ export function devEnrichmentRoutes(
       steps: since > 0 ? steps.filter((step) => step.seq > since) : steps,
       stageReports,
     });
+  });
+
+  /**
+   * Runs one `Search` from the dev-tools tab, through the very same traced core the agent
+   * uses, and returns the finished trace.
+   *
+   * This is not a simulation: `Search` is a pure read, so running it here executes the real
+   * pipeline against the real index and records a real trace. The only difference from an
+   * agent's own search is the `dev_tools` origin, which is what lets the feed tell a test
+   * run apart from live traffic.
+   *
+   * Principals are the calling admin's own, so the trace answers "what would I see". To
+   * ask what another user would see, open that user's own search from the feed.
+   */
+  routes.post("/search-runs", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const parsed = searchRunSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: { code: "INVALID_BODY", message: parsed.error.issues[0]?.message ?? "Invalid" } }, 400);
+    }
+
+    const traceId = randomUUID();
+    const deps = {
+      db,
+      logger,
+      currentUserId: c.get("sub") as string,
+      userRepo: createUserRepository(db, { slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC }),
+      slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC,
+      devToolsEnabled: true,
+      devSearchTraceId: traceId,
+      geminiConfig: { maxRpm: appConfig?.GEMINI_MAX_RPM, maxRetries: appConfig?.GEMINI_MAX_RETRIES },
+      openRouterApiKey: appConfig?.OPENROUTER_API_KEY,
+      settingsEncryptionKey: appConfig?.ENCRYPTION_KEY,
+    } as unknown as SketchMcpDeps;
+
+    await handleSearch(parsed.data, deps, "dev_tools");
+
+    /**
+     * The trace write is fire-and-forget everywhere else, so the id is pre-assigned above
+     * and read back here rather than guessing at the newest row.
+     */
+    const repo = createDevSearchTraceRepository(db);
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const trace = await repo.get(traceId);
+      if (trace) return c.json({ trace }, 201);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return c.json(
+      { error: { code: "TRACE_NOT_WRITTEN", message: "The search ran but its trace was not stored" } },
+      500,
+    );
+  });
+
+  /**
+   * Captured traces of real `Search` calls. There is no POST: nothing is started here,
+   * only observed. Traces exist only for searches made while `DEV_TOOLS_ENABLED` was on,
+   * which the client states plainly rather than rendering an empty list.
+   */
+  routes.get("/search-traces", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    return c.json({ traces: await createDevSearchTraceRepository(db).list() });
+  });
+
+  routes.get("/search-traces/:id", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    const trace = await createDevSearchTraceRepository(db).get(c.req.param("id"));
+    if (!trace) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Trace not found" } }, 404);
+    }
+    return c.json({ trace });
   });
 
   routes.get("/runs/:id/calls", async (c) => {

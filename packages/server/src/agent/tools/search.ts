@@ -3,8 +3,10 @@ import { z } from "zod/v4";
 import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "../../connectors/search";
 import { type AccessPrincipal, normalizeAccessPrincipals } from "../../connectors/types";
 import { viewerPrincipals } from "../../db/repositories/connectors";
+import type { DevSearchTraceOrigin, DevSearchTraceStatus } from "../../db/repositories/dev-search-traces";
 import { createEntityRepository } from "../../db/repositories/entities";
 import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
+import { createSearchTraceCapture } from "./search-trace";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const searchToolDescription = `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
@@ -168,20 +170,54 @@ export async function handleSearch(
     limit: resultLimit,
   }: SearchArgs,
   deps: SketchMcpDeps,
+  origin: DevSearchTraceOrigin = "agent",
 ): Promise<ToolResult> {
   if (!deps.db) {
     return { content: [{ type: "text", text: "Search not available." }] };
   }
 
+  const trace = createSearchTraceCapture({
+    deps,
+    origin,
+    query: (searchQuery ?? "").trim(),
+    toolArgs: {
+      query: searchQuery,
+      entityId,
+      entityIds,
+      entityIdsMode,
+      kind,
+      source,
+      sortBy,
+      after,
+      before,
+      limit: resultLimit,
+    },
+    principals: null,
+  });
+  const stageReport = trace?.report;
+
+  /**
+   * Every exit path records a trace, including the ones that return before any stage ran.
+   * A search that returned nothing is exactly the call someone opens the feed to debug, so
+   * omitting it would hide the interesting half of the traffic.
+   */
+  const done = (
+    status: DevSearchTraceStatus,
+    text: string,
+    resultCount = 0,
+    error: string | null = null,
+  ): ToolResult => {
+    trace?.finish(status, error, resultCount);
+    return { content: [{ type: "text", text }] };
+  };
+
   if (kind && source === "local") {
-    return {
-      content: [
-        {
-          type: "text",
-          text: "kind cannot be combined with source: 'local' (local files have no kind taxonomy).",
-        },
-      ],
-    };
+    return done(
+      "empty",
+      "kind cannot be combined with source: 'local' (local files have no kind taxonomy).",
+      0,
+      "kind combined with source: local",
+    );
   }
 
   const trimmedQuery = (searchQuery ?? "").trim();
@@ -189,14 +225,12 @@ export async function handleSearch(
   const hasFilter = !!kind || !!source || callerProvidedEntityIds || !!after || !!before;
 
   if (!trimmedQuery && !hasFilter) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Need a query or at least one filter (kind, source, entityIds, after, before).",
-        },
-      ],
-    };
+    return done(
+      "empty",
+      "Need a query or at least one filter (kind, source, entityIds, after, before).",
+      0,
+      "no query and no filter",
+    );
   }
 
   const lines: string[] = [];
@@ -240,9 +274,10 @@ export async function handleSearch(
   const userPrincipals = await resolveUserPrincipals(deps);
   if (deps.publicMcp && userPrincipals.length === 0) {
     const label = trimmedQuery ? `"${trimmedQuery}"` : "the given filters";
-    return { content: [{ type: "text", text: `No results found for ${label}.` }] };
+    return done("empty", `No results found for ${label}.`, 0, "public MCP caller resolved to no principals");
   }
   const results = await search(deps.db, trimmedQuery, {
+    stageReport,
     kindRules: kind ? KIND_TO_RULES[kind] : undefined,
     source,
     limit: effectiveLimit,
@@ -263,7 +298,9 @@ export async function handleSearch(
   });
 
   const effectiveSortBy = sortBy ?? "relevance";
-  if (effectiveSortBy === "relevance" && !callerProvidedEntityIds && entityFileIds && entityFileIds.size > 0) {
+  const rerankApplied =
+    effectiveSortBy === "relevance" && !callerProvidedEntityIds && !!entityFileIds && entityFileIds.size > 0;
+  if (rerankApplied) {
     results.sort((a, b) => {
       const aLinked = entityFileIds?.has(a.id) ? 1 : 0;
       const bLinked = entityFileIds?.has(b.id) ? 1 : 0;
@@ -271,10 +308,11 @@ export async function handleSearch(
       return b.score - a.score;
     });
   }
+  trace?.rerank(results, rerankApplied, entityFileIds?.size ?? 0);
 
   if (results.length === 0 && entityMatches.length === 0) {
     const label = trimmedQuery ? `"${trimmedQuery}"` : "the given filters";
-    return { content: [{ type: "text", text: `No results found for ${label}.` }] };
+    return done("empty", `No results found for ${label}.`, 0, null);
   }
 
   for (const r of results) {
@@ -293,7 +331,7 @@ export async function handleSearch(
     lines.push("");
   }
 
-  return { content: [{ type: "text", text: lines.join("\n") }] };
+  return done("done", lines.join("\n"), results.length);
 }
 
 export async function handleSearchEntities(

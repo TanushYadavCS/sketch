@@ -153,6 +153,11 @@ export interface SketchMcpDeps {
   currentUserEmail?: string | null;
   currentUserName?: string | null;
   slackEntitySyncEnabled?: boolean;
+  /** Mirrors DEV_TOOLS_ENABLED. Gates dev-tools search-trace capture; off means no capture at all. */
+  devToolsEnabled?: boolean;
+  /** Pre-assigned trace id, set only by the dev-tools search runner so it can read the
+   * finished trace back without racing the fire-and-forget write. */
+  devSearchTraceId?: string;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   workspaceKey?: string;

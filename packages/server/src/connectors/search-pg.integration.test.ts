@@ -10,7 +10,8 @@ import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import type { DB } from "../db/schema";
-import { getSharedPgDb } from "../test-utils";
+import { createTestPgDb, getSharedPgDb } from "../test-utils";
+import type { StageReport } from "./enrichment-stage-report";
 import { hybridSearch, searchFiles } from "./search";
 
 /**
@@ -241,5 +242,181 @@ describe("hybridSearch on Postgres — vector + FTS", () => {
     const ids = results.map((r) => r.id);
     expect(ids).toContain("f-tf-1");
     expect(ids).not.toContain("f-tf-2");
+  });
+});
+
+/**
+ * Its own database, not the shared one with per-test BEGIN/ROLLBACK.
+ *
+ * `hybridSearch` opens its own transaction for the KNN reads, so under an ambient
+ * manual BEGIN the inner COMMIT ends the outer transaction and the rollback no longer
+ * undoes anything — rows leak into the next test. This is the case CLAUDE.md reserves a
+ * fresh `createTestPgDb()` for.
+ */
+describe("hybridSearch vector hit sources", () => {
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await createTestPgDb();
+  }, 30000);
+
+  /**
+   * Explicit deletes rather than the usual BEGIN/ROLLBACK: `hybridSearch` opens its own
+   * transaction, so an ambient one would be committed out from under the test. Cascades
+   * from `indexed_files` clear the chunk and field embedding rows.
+   */
+  afterEach(async () => {
+    await sql`DELETE FROM indexed_files`.execute(db);
+  });
+
+  it("shows the vector that won a file even when its source's slots are taken by losers", async () => {
+    /**
+     * 60 files whose closest vector is a content chunk, 20 of which also carry a worse
+     * file-name vector, plus one file reachable only by its name. That last name vector
+     * is the worst-ranked of its source but the only thing representing its file — and
+     * filling the source's slots by global rank alone would spend all 15 on the losers
+     * and drop it.
+     */
+    for (let i = 0; i < 60; i++) {
+      await insertFile(db, `f-chunk-${i}`, { fileName: `doc ${i}.txt`, summary: null });
+      const chunkId = randomUUID();
+      await db
+        .insertInto("document_chunks")
+        .values({ id: chunkId, indexed_file_id: `f-chunk-${i}`, chunk_index: 0, content: `body ${i}`, token_count: 5 })
+        .execute();
+      await sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (
+        ${chunkId}, ${makeVector(EMBEDDING_DIMENSIONS, { 0: 1.0, 1: 0.001 * i })}::vector
+      )`.execute(db);
+
+      if (i < 20) {
+        await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+          ${`f-chunk-${i}`}, 'file_name',
+          ${makeVector(EMBEDDING_DIMENSIONS, { 0: 1.0, 1: 0.9 + 0.001 * i })}::vector,
+          ${`doc ${i}.txt`}
+        )`.execute(db);
+      }
+    }
+
+    await insertFile(db, "f-name-only", { fileName: "reachable only by name.txt", summary: null });
+    await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+      'f-name-only', 'file_name',
+      ${makeVector(EMBEDDING_DIMENSIONS, { 0: 1.0, 1: 1.4 })}::vector,
+      'reachable only by name.txt'
+    )`.execute(db);
+
+    const queryEmbedding = new Array(EMBEDDING_DIMENSIONS).fill(0);
+    queryEmbedding[0] = 1.0;
+
+    const reports: StageReport[] = [];
+    await hybridSearch(db, "doc", { queryEmbedding, stageReport: (report) => reports.push(report) });
+
+    const hits = reports.find((report) => report.stage === "vectorCandidates")?.vectorChunks ?? [];
+    const nameHits = hits.filter((hit) => hit.source === "file_name");
+
+    /** Worst of its source, but the only row that carries its file. */
+    expect(nameHits.some((hit) => hit.fileId === "f-name-only" && hit.bestForFile)).toBe(true);
+
+    /** No file may appear only through a row that lost, while the winner is off the page. */
+    const shownByFile = new Map<string, boolean>();
+    for (const hit of hits) shownByFile.set(hit.fileId, (shownByFile.get(hit.fileId) ?? false) || hit.bestForFile);
+    expect([...shownByFile.entries()].filter(([, hasWinner]) => !hasWinner)).toEqual([]);
+  });
+
+  it("keeps a distant summary visible when near-identical file names fill the cap", async () => {
+    /**
+     * The real corpus that produced this: 70 WhatsApp files named
+     * `WhatsApp: Internal OW - <timestamp>`, whose name vectors sit ~0.13 apart. A
+     * name-shaped query pulls all of them into one band that fills the display cap, and
+     * the tool showed zero summary hits while the summary arm was scoring normally.
+     */
+    for (let i = 0; i < 70; i++) {
+      await insertFile(db, `f-name-${i}`, { fileName: `templated name ${i}.txt`, summary: null });
+      await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+        ${`f-name-${i}`}, 'file_name',
+        ${makeVector(EMBEDDING_DIMENSIONS, { 0: 1.0, 1: 0.001 * i })}::vector,
+        ${`templated name ${i}.txt`}
+      )`.execute(db);
+    }
+
+    await insertFile(db, "f-far-summary", { fileName: "outlier.txt", summary: "a distant summary" });
+    await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+      'f-far-summary', 'summary', ${makeVector(EMBEDDING_DIMENSIONS, { 0: 0.5, 1: 0.866 })}::vector, 'a distant summary'
+    )`.execute(db);
+
+    const queryEmbedding = new Array(EMBEDDING_DIMENSIONS).fill(0);
+    queryEmbedding[0] = 1.0;
+
+    const reports: StageReport[] = [];
+    await hybridSearch(db, "templated name", {
+      queryEmbedding,
+      stageReport: (report) => reports.push(report),
+    });
+
+    const hits = reports.find((report) => report.stage === "vectorCandidates")?.vectorChunks ?? [];
+    const summaryHits = hits.filter((hit) => hit.source === "summary");
+
+    /** Every name outranks it, so a flat top-60 would have cut it entirely. */
+    expect(summaryHits).toHaveLength(1);
+    expect(summaryHits[0]?.rank).toBeGreaterThan(60);
+    expect(hits.filter((hit) => hit.source === "file_name").length).toBeGreaterThan(15);
+  });
+
+  it("labels each vector hit with its source, and gives the file to the closest one", async () => {
+    await insertFile(db, "f-src-1", {
+      fileName: "notes.txt",
+      summary: "a summary that is a near-exact match for the query",
+      content: "loosely related body text",
+    });
+
+    const chunkId = randomUUID();
+    await db
+      .insertInto("document_chunks")
+      .values({
+        id: chunkId,
+        indexed_file_id: "f-src-1",
+        chunk_index: 0,
+        content: "loosely related body text",
+        token_count: 10,
+      })
+      .execute();
+
+    /** The chunk sits at ~60 degrees off the query; the summary sits directly on it. */
+    await sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (
+    ${chunkId}, ${makeVector(EMBEDDING_DIMENSIONS, { 0: 0.5, 1: 0.866 })}::vector
+  )`.execute(db);
+    await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+    'f-src-1', 'summary', ${makeVector(EMBEDDING_DIMENSIONS, { 0: 1.0 })}::vector, 'a summary that is a near-exact match for the query'
+  )`.execute(db);
+    await sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text) VALUES (
+    'f-src-1', 'file_name', ${makeVector(EMBEDDING_DIMENSIONS, { 2: 1.0 })}::vector, 'notes.txt'
+  )`.execute(db);
+
+    const queryEmbedding = new Array(EMBEDDING_DIMENSIONS).fill(0);
+    queryEmbedding[0] = 1.0;
+
+    const reports: StageReport[] = [];
+    await hybridSearch(db, "near-exact match", {
+      queryEmbedding,
+      stageReport: (report) => reports.push(report),
+    });
+
+    const hits = reports.find((report) => report.stage === "vectorCandidates")?.vectorChunks ?? [];
+    expect(hits.map((hit) => hit.source).sort()).toEqual(["content", "file_name", "summary"]);
+
+    const summaryHit = hits.find((hit) => hit.source === "summary");
+    const contentHit = hits.find((hit) => hit.source === "content");
+    const nameHit = hits.find((hit) => hit.source === "file_name");
+
+    expect(summaryHit?.chunkPreview).toContain("near-exact match");
+    expect(nameHit?.chunkPreview).toBe("notes.txt");
+
+    /**
+     * The whole point: one file, three vectors, and only the closest one is credited.
+     * Before field vectors existed the content chunk would have been marked green here.
+     */
+    expect(summaryHit?.bestForFile).toBe(true);
+    expect(contentHit?.bestForFile).toBe(false);
+    expect(nameHit?.bestForFile).toBe(false);
+    expect((summaryHit?.distance ?? 1) < (contentHit?.distance ?? 0)).toBe(true);
   });
 });

@@ -38,6 +38,23 @@ export const MINT_STAGES: StageDefinition[] = [
   { stage: "writeCandidates", label: "Write candidates", kind: "code" },
 ];
 
+/**
+ * Search's ten stages. All `code`: the one model call a search makes is the query
+ * embedding, which has no prompt or response worth a tab, so it reports as a summary.
+ */
+export const SEARCH_STAGES: StageDefinition[] = [
+  { stage: "discoverEntities", label: "Discover entities", kind: "code" },
+  { stage: "resolveEntities", label: "Resolve entity scope", kind: "code" },
+  { stage: "embedQuery", label: "Embed query", kind: "code" },
+  { stage: "ftsCandidates", label: "Keyword candidates", kind: "code" },
+  { stage: "vectorCandidates", label: "Vector candidates", kind: "code" },
+  { stage: "fuse", label: "Fuse rankings", kind: "code" },
+  { stage: "filter", label: "Metadata filters", kind: "code" },
+  { stage: "rbac", label: "Access filter", kind: "code" },
+  { stage: "finalize", label: "Collapse and slice", kind: "code" },
+  { stage: "rerank", label: "Entity re-sort", kind: "code" },
+];
+
 export function stagesFor(kind: DevTraceRunKind): StageDefinition[] {
   return kind === "mint" ? MINT_STAGES : STAGES;
 }

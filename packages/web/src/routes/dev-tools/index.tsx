@@ -19,6 +19,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { RunStatusBadge } from "./enrichment-trace";
+import { SearchTraces } from "./search-traces";
 import { TraceDialog } from "./trace-dialog";
 
 export const devToolsRoute = createRoute({
@@ -32,6 +33,7 @@ function DevToolsPage() {
   const [traceFile, setTraceFile] = useState<{ id: string; name: string } | null>(null);
   const [traceKind, setTraceKind] = useState<DevTraceRunKind>("enrichment");
   const [openRun, setOpenRun] = useState<{ id: string; kind: DevTraceRunKind } | null>(null);
+  const [tab, setTab] = useState<"enrichment" | "search">("enrichment");
   const isAdmin = auth.role === "admin";
 
   /**
@@ -72,30 +74,31 @@ function DevToolsPage() {
       <div>
         <h1 className="text-[22px] font-medium">Pipeline debug</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          One file through enrichment or task minting, stage by stage. Every model call, in and out. Internal only — not
-          part of the product.
+          Enrichment and task minting, one file at a time. Search, as it actually ran. Internal only — not part of the
+          product.
         </p>
       </div>
 
       {mounted ? (
         <>
-          <div className="mt-5 flex gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
-            <WarningIcon size={15} className="mt-0.5 shrink-0" />
-            <span>
-              This runs the real pipeline and re-runs stages the file has already been through, so it writes facts and
-              can create entities. Prompts embed the file body, so this page shows raw customer content.
-            </span>
+          <div className="mt-5 flex gap-1 border-b border-border">
+            <TabButton active={tab === "enrichment"} onClick={() => setTab("enrichment")} label="Enrichment" />
+            <TabButton active={tab === "search"} onClick={() => setTab("search")} label="Search" />
           </div>
 
-          <FilePicker onTrace={startTrace} />
-          <PastRuns runs={runsQuery.data?.runs ?? []} onSelect={setOpenRun} />
-          <TraceDialog
-            file={traceFile}
-            existingRunId={openRun?.id ?? null}
-            existingRunKind={openRun?.kind}
-            kind={traceKind}
-            onOpenChange={(next) => !next && closeDialog()}
-          />
+          {tab === "search" ? (
+            <SearchTraces />
+          ) : (
+            <EnrichmentTab
+              runs={runsQuery.data?.runs ?? []}
+              traceFile={traceFile}
+              openRun={openRun}
+              traceKind={traceKind}
+              onTrace={startTrace}
+              onSelectRun={setOpenRun}
+              onCloseDialog={closeDialog}
+            />
+          )}
         </>
       ) : (
         <p className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
@@ -104,6 +107,60 @@ function DevToolsPage() {
         </p>
       )}
     </div>
+  );
+}
+
+function TabButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`-mb-px border-b-2 px-3 py-1.5 text-[13px] ${
+        active ? "border-foreground font-medium" : "border-transparent text-muted-foreground"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EnrichmentTab({
+  runs,
+  traceFile,
+  openRun,
+  traceKind,
+  onTrace,
+  onSelectRun,
+  onCloseDialog,
+}: {
+  runs: DevTraceRunHeader[];
+  traceFile: { id: string; name: string } | null;
+  openRun: { id: string; kind: DevTraceRunKind } | null;
+  traceKind: DevTraceRunKind;
+  onTrace: (file: { id: string; name: string }, kind: DevTraceRunKind) => void;
+  onSelectRun: (run: { id: string; kind: DevTraceRunKind }) => void;
+  onCloseDialog: () => void;
+}) {
+  return (
+    <>
+      <div className="mt-5 flex gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
+        <WarningIcon size={15} className="mt-0.5 shrink-0" />
+        <span>
+          This runs the real pipeline and re-runs stages the file has already been through, so it writes facts and can
+          create entities. Prompts embed the file body, so this page shows raw customer content.
+        </span>
+      </div>
+
+      <FilePicker onTrace={onTrace} />
+      <PastRuns runs={runs} onSelect={onSelectRun} />
+      <TraceDialog
+        file={traceFile}
+        existingRunId={openRun?.id ?? null}
+        existingRunKind={openRun?.kind}
+        kind={traceKind}
+        onOpenChange={(next) => !next && onCloseDialog()}
+      />
+    </>
   );
 }
 

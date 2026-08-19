@@ -1067,6 +1067,70 @@ async function enrichTextDocument(
       logger.warn({ err, fileId: file.id }, "Embedding storage failed, entity linking still saved");
     }
   }
+
+  if (embeddingProvider) {
+    await embedFileFields(db, logger, embeddingProvider, file.id);
+  }
+}
+
+/**
+ * Embeds the file's own name and summary, beside its content chunks.
+ *
+ * Without these, a file is semantically reachable only through its body — so the two things
+ * a person is most likely to describe it by, what it is called and what it is about, reach
+ * only the keyword arm.
+ *
+ * Postgres only: the table is created by migration 197, which is a no-op on SQLite. Runs
+ * after the summary is written, so it sees the current one. Best-effort throughout — a
+ * failure here must not undo the chunk embeddings that already succeeded.
+ */
+async function embedFileFields(
+  db: Kysely<DB>,
+  logger: Logger,
+  embeddingProvider: EmbeddingProvider,
+  fileId: string,
+): Promise<void> {
+  if (!isPg(db)) return;
+  try {
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(["file_name", "summary"])
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    if (!row) return;
+
+    const fields: Array<{ field: string; text: string }> = [];
+    const name = row.file_name?.trim();
+    const summary = row.summary?.trim();
+    if (name) fields.push({ field: "file_name", text: name });
+    if (summary) fields.push({ field: "summary", text: summary });
+    if (fields.length === 0) return;
+
+    /** Skip the provider call when the stored text is already what we would embed. */
+    const existing = await db
+      .selectFrom("file_field_embeddings")
+      .select(["field", "source_text"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    const unchanged = new Map(existing.map((entry) => [entry.field, entry.source_text]));
+    const stale = fields.filter((entry) => unchanged.get(entry.field) !== entry.text);
+    if (stale.length === 0) return;
+
+    const vectors = await embeddingProvider.embedTexts(stale.map((entry) => entry.text));
+    await Promise.all(
+      stale.map((entry, index) =>
+        vectors[index]
+          ? sql`INSERT INTO file_field_embeddings (indexed_file_id, field, embedding, source_text)
+                VALUES (${fileId}, ${entry.field}, ${JSON.stringify(vectors[index])}::vector, ${entry.text})
+                ON CONFLICT (indexed_file_id, field)
+                DO UPDATE SET embedding = EXCLUDED.embedding, source_text = EXCLUDED.source_text`.execute(db)
+          : Promise.resolve(),
+      ),
+    );
+    logger.info({ fileId, fields: stale.map((entry) => entry.field) }, "Field embeddings created");
+  } catch (err) {
+    logger.warn({ err, fileId }, "Field embedding failed, other embeddings still saved");
+  }
 }
 
 /**

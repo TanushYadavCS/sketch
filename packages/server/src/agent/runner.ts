@@ -328,6 +328,7 @@ export interface RunAgentParams {
   userName: string;
   userEmail?: string | null;
   slackEntitySyncEnabled?: boolean;
+  devToolsEnabled?: boolean;
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
@@ -1301,6 +1302,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     currentUserEmail: params.userEmail ?? null,
     currentUserName: params.userName,
     slackEntitySyncEnabled: params.slackEntitySyncEnabled,
+    devToolsEnabled: params.devToolsEnabled,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
     workspaceKey: params.workspaceKey,

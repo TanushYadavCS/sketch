@@ -215,6 +215,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     currentUserEmail: params.userEmail ?? null,
     currentUserName: params.userName,
     slackEntitySyncEnabled: params.slackEntitySyncEnabled,
+    devToolsEnabled: params.devToolsEnabled,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
     workspaceKey: params.workspaceKey,

@@ -360,6 +360,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       slackEntitySyncEnabled: params.slackEntitySyncEnabled ?? config.SLACK_ENTITY_SYNC,
+      devToolsEnabled: params.devToolsEnabled ?? config.DEV_TOOLS_ENABLED,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,

@@ -27,7 +27,14 @@ import type { DB } from "../db/schema";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
 import type { EmailAddr } from "./email/normalized-email";
 import { createEnrichmentQueryEmbedder, resolveOpenRouterEnrichmentConfig } from "./enrichment-providers";
+import type { SearchCandidate, StageKey, StageReporter, VectorChunkHit } from "./enrichment-stage-report";
 import { type AccessPrincipalInput, normalizeAccessPrincipals } from "./types";
+import {
+  type ScoredVector,
+  VECTOR_HIT_DISPLAY_CAP,
+  rankVectorHits,
+  selectVectorHitsForDisplay,
+} from "./vector-trace-hits";
 
 export interface SearchResult {
   id: string;
@@ -138,7 +145,7 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
 			indexed_files.provider_url as "providerUrl",
 			indexed_files.source_path as "sourcePath",
 			indexed_files.source_updated_at as "sourceUpdatedAt",
-			bm25(indexed_files_fts, 10.0, 1.0, 3.0) as relevance
+			bm25(indexed_files_fts, 10.0, 4.0, 2.0) as relevance
 		FROM indexed_files
 		INNER JOIN indexed_files_fts ON indexed_files.rowid = indexed_files_fts.rowid
 		WHERE indexed_files_fts MATCH ${ftsQuery}
@@ -437,6 +444,12 @@ export interface HybridSearchOptions extends SearchOptions {
   sources?: string[];
   /** Compiled kind rules — see KIND_TO_RULES. Caller (Search tool) translates `kind` → rules. */
   kindRules?: KindRule[];
+  /**
+   * Dev-tools trace hook. Undefined in production, which is what keeps the reporting path
+   * free: every call site is optional-chained and the one extra query it needs is guarded
+   * on this being set.
+   */
+  stageReport?: StageReporter;
 }
 
 export interface HybridSearchResult {
@@ -467,6 +480,14 @@ export interface HybridSearchResult {
   participants?: string[];
 }
 
+/**
+ * pgvector caps `hnsw.ef_search` at 1000. Sized to the requested candidate limit, because
+ * a non-iterative scan cannot return more rows than this.
+ */
+function hnswEfSearch(vecLimit: number): number {
+  return Math.min(1000, Math.max(40, vecLimit));
+}
+
 /** RRF constant — standard value from the original paper. */
 const RRF_K = 60;
 
@@ -475,6 +496,11 @@ const ENTITY_BOOST = 0.005;
 
 /**
  * Hybrid search combining FTS5 keyword search and vector similarity.
+ *
+ * Opens its own transaction for the Postgres KNN reads, so it must not be called from
+ * inside a caller's transaction: the inner COMMIT would end the outer one early. No
+ * production caller does this today, and tests that need an ambient transaction get
+ * their own database instead.
  *
  * Strategy:
  * 1. Run FTS5 search → ranked keyword results
@@ -491,6 +517,11 @@ export async function hybridSearch(
   const limit = opts?.limit ?? 10;
   const candidateLimit = Math.max(limit * 40, 200);
   if (opts?.userPrincipals !== undefined && opts.userPrincipals.length === 0) return [];
+  let scoredChunks: VectorChunkHit[] = [];
+  /** Counted over every scored chunk, not the capped display slice. */
+  let totalChunksScored = 0;
+  let totalFieldVectors = 0;
+  let totalImageVectors = 0;
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
 
@@ -537,12 +568,19 @@ export async function hybridSearch(
   } else {
     const ftsQuery = sanitizeFtsQuery(query);
     if (ftsQuery) {
-      // BM25 weights: file_name=10, source=1, source_path=3
+      /**
+       * BM25 weights are positional over the FTS5 columns, which migration 196 changed
+       * to (file_name, summary, source_path). The old 10/1/3 was written when column two
+       * was `source`, and left unchanged it ranks a folder-name match above a summary
+       * match — the opposite of the Postgres side. 10/4/2 mirrors the ts_rank ratio
+       * there (A=1.0, B=0.4, C=0.2), so both dialects agree that name beats summary
+       * beats path.
+       */
       const ftsRows = await sql<{
         id: string;
         rank: number;
       }>`
-        SELECT indexed_files.id, bm25(indexed_files_fts, 10.0, 1.0, 3.0) as rank
+        SELECT indexed_files.id, bm25(indexed_files_fts, 10.0, 4.0, 2.0) as rank
         FROM indexed_files
         INNER JOIN indexed_files_fts ON indexed_files.rowid = indexed_files_fts.rowid
         WHERE indexed_files_fts MATCH ${ftsQuery}
@@ -568,28 +606,78 @@ export async function hybridSearch(
 
     let chunkRows: { rows: Array<{ indexed_file_id: string; chunk_content: string; distance: number }> };
     let fileRows: { rows: Array<{ indexed_file_id: string; distance: number }> };
+    let fieldRows: { rows: Array<{ indexed_file_id: string; field: string; source_text: string; distance: number }> } =
+      {
+        rows: [],
+      };
 
     if (isPg(db)) {
       const dims = EMBEDDING_DIMENSIONS;
-      chunkRows = await sql<{ indexed_file_id: string; chunk_content: string; distance: number }>`
-        SELECT
-          dc.indexed_file_id,
-          dc.content as chunk_content,
-          (ce.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})) as distance
-        FROM chunk_embeddings ce
-        INNER JOIN document_chunks dc ON dc.id = ce.chunk_id
-        ORDER BY ce.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})
-        LIMIT ${vecLimit}
-      `.execute(db);
+      const vectorFilter = vectorPredicateSql(opts);
 
-      fileRows = await sql<{ indexed_file_id: string; distance: number }>`
-        SELECT
-          fe.indexed_file_id,
-          (fe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})) as distance
-        FROM file_embeddings fe
-        ORDER BY fe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})
-        LIMIT ${vecLimit}
-      `.execute(db);
+      /**
+       * Both KNN reads run inside one transaction, because `SET LOCAL` outside a
+       * transaction block is a no-op — Postgres emits a WARNING and the setting never
+       * applies. Without the transaction the two settings below silently do nothing and
+       * the pool stays capped at the 40-row default.
+       *
+       * `ef_search` must be at least the requested LIMIT: a non-iterative HNSW scan
+       * returns at most `ef_search` rows, so asking for 400 with the default 40 silently
+       * truncates the candidate pool. `iterative_scan` then covers the filtered case,
+       * where a plain scan would hand back `ef_search` tuples and let the WHERE discard
+       * most of them. `relaxed_order` is safe here because candidates are re-sorted by
+       * distance in JS before ranks are assigned.
+       */
+      const vectorRows = await db.transaction().execute(async (trx) => {
+        await sql`SET LOCAL hnsw.ef_search = ${sql.lit(hnswEfSearch(vecLimit))}`.execute(trx);
+        await sql`SET LOCAL hnsw.iterative_scan = relaxed_order`.execute(trx);
+
+        const chunks = await sql<{ indexed_file_id: string; chunk_content: string; distance: number }>`
+          SELECT
+            dc.indexed_file_id,
+            dc.content as chunk_content,
+            (ce.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})) as distance
+          FROM chunk_embeddings ce
+          INNER JOIN document_chunks dc ON dc.id = ce.chunk_id
+          INNER JOIN indexed_files ON indexed_files.id = dc.indexed_file_id
+          WHERE indexed_files.is_archived = 0
+          ${vectorFilter}
+          ORDER BY ce.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})
+          LIMIT ${vecLimit}
+        `.execute(trx);
+
+        const files = await sql<{ indexed_file_id: string; distance: number }>`
+          SELECT
+            fe.indexed_file_id,
+            (fe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})) as distance
+          FROM file_embeddings fe
+          INNER JOIN indexed_files ON indexed_files.id = fe.indexed_file_id
+          WHERE indexed_files.is_archived = 0
+          ${vectorFilter}
+          ORDER BY fe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})
+          LIMIT ${vecLimit}
+        `.execute(trx);
+
+        /** The file's own name and summary, as their own vectors. */
+        const fields = await sql<{ indexed_file_id: string; field: string; source_text: string; distance: number }>`
+          SELECT
+            ffe.indexed_file_id,
+            ffe.field,
+            ffe.source_text,
+            (ffe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})) as distance
+          FROM file_field_embeddings ffe
+          INNER JOIN indexed_files ON indexed_files.id = ffe.indexed_file_id
+          WHERE indexed_files.is_archived = 0
+          ${vectorFilter}
+          ORDER BY ffe.embedding::halfvec(${sql.lit(dims)}) <=> ${embeddingJson}::halfvec(${sql.lit(dims)})
+          LIMIT ${vecLimit}
+        `.execute(trx);
+
+        return { chunks, files, fields };
+      });
+      chunkRows = vectorRows.chunks;
+      fileRows = vectorRows.files;
+      fieldRows = vectorRows.fields;
     } else {
       // Search chunk embeddings (text documents)
       chunkRows = await sql<{
@@ -643,13 +731,72 @@ export async function hybridSearch(
       }
     }
 
-    for (const [fileId, data] of bestChunkPerFile) {
+    /**
+     * One entry per file, at its best distance across every source: content chunks, the
+     * image embedding, the file name and the summary. Taking the minimum matters — a
+     * source-priority merge would let a mediocre content chunk mask a near-exact name
+     * match, which is the case this whole change exists to fix.
+     */
+    const bestPerFile = new Map<string, { distance: number; snippet: string | null }>();
+    const offer = (fileId: string, distance: number, snippet: string | null) => {
+      const existing = bestPerFile.get(fileId);
+      if (!existing || distance < existing.distance) bestPerFile.set(fileId, { distance, snippet });
+    };
+    for (const [fileId, data] of bestChunkPerFile) offer(fileId, data.distance, data.snippet);
+    for (const row of fileRows.rows) offer(row.indexed_file_id, row.distance, null);
+    for (const row of fieldRows.rows) offer(row.indexed_file_id, row.distance, row.source_text.slice(0, 200));
+    for (const [fileId, data] of bestPerFile) {
       allVecResults.push({ fileId, distance: data.distance, snippet: data.snippet });
     }
-    for (const row of fileRows.rows) {
-      if (!bestChunkPerFile.has(row.indexed_file_id)) {
-        allVecResults.push({ fileId: row.indexed_file_id, distance: row.distance, snippet: null });
+
+    /**
+     * Vector-grain capture for the trace, ranked across every source rather than per
+     * source. A file is reachable through four independent vectors — its content chunks,
+     * its name, its summary, and (for images) its file embedding — so a hit is only
+     * legible if the trace says which one matched and with what text.
+     *
+     * `bestForFile` is read off `bestPerFile`, not off the chunk map: a content chunk
+     * that lost the file to a closer summary vector has not survived into the fusion,
+     * and marking it green would misreport exactly the case this change exists to show.
+     */
+    if (opts?.stageReport) {
+      /**
+       * Postgres pushes the entity scope into the KNN SQL, but the SQLite arm cannot and
+       * filters in JS further down. Applying the scope here keeps the trace honest on
+       * both dialects: without it a scoped SQLite search shows — and credits — vectors
+       * belonging to files that never reach the result set. On Postgres this is a no-op,
+       * because the rows arrived scoped already.
+       */
+      const scope = opts.fileIds && opts.fileIds.length > 0 ? new Set(opts.fileIds) : null;
+      const inScope = (fileId: string) => !scope || scope.has(fileId);
+
+      const hits: ScoredVector[] = [];
+      for (const row of chunkRows.rows) {
+        if (!inScope(row.indexed_file_id)) continue;
+        totalChunksScored++;
+        hits.push({
+          fileId: row.indexed_file_id,
+          source: "content",
+          preview: row.chunk_content.slice(0, 240),
+          distance: row.distance,
+        });
       }
+      for (const row of fieldRows.rows) {
+        if (!inScope(row.indexed_file_id)) continue;
+        totalFieldVectors++;
+        hits.push({
+          fileId: row.indexed_file_id,
+          source: row.field === "file_name" ? "file_name" : "summary",
+          preview: row.source_text.slice(0, 240),
+          distance: row.distance,
+        });
+      }
+      for (const row of fileRows.rows) {
+        if (!inScope(row.indexed_file_id)) continue;
+        totalImageVectors++;
+        hits.push({ fileId: row.indexed_file_id, source: "image", preview: "", distance: row.distance });
+      }
+      scoredChunks = selectVectorHitsForDisplay(rankVectorHits(hits), VECTOR_HIT_DISPLAY_CAP);
     }
 
     // Filter by file IDs if entity-scoped
@@ -670,6 +817,44 @@ export async function hybridSearch(
       });
     }
   }
+
+  opts?.stageReport?.({
+    stage: "ftsCandidates",
+    label: "Keyword candidates",
+    kind: "code",
+    status: "done",
+    summary: {
+      candidates: ftsResults.size,
+      dialect: isPg(db) ? "ts_rank" : "bm25",
+      sanitisedQuery: isPg(db) ? sanitizeTsQuery(query) : sanitizeFtsQuery(query),
+      candidateLimit,
+    },
+  });
+  opts?.stageReport?.(
+    opts?.queryEmbedding
+      ? {
+          stage: "vectorCandidates",
+          label: "Vector candidates",
+          kind: "code",
+          status: "done",
+          summary: {
+            chunksScored: totalChunksScored,
+            fieldVectorsScored: totalFieldVectors,
+            imageVectorsScored: totalImageVectors,
+            hitsShown: scoredChunks.length,
+            filesAfterDedup: vecResults.size,
+            candidateLimit,
+          },
+          vectorChunks: scoredChunks,
+        }
+      : {
+          stage: "vectorCandidates",
+          label: "Vector candidates",
+          kind: "code",
+          status: "skipped",
+          error: "No query embedding — keyword-only search",
+        },
+  );
 
   // ── 3. Merge via RRF ───────────────────────────────────────
   const allFileIds = new Set([...ftsResults.keys(), ...vecResults.keys()]);
@@ -699,9 +884,42 @@ export async function hybridSearch(
 
   scored.sort((a, b) => b.score - a.score);
 
+  opts?.stageReport?.({
+    stage: "fuse",
+    label: "Fuse rankings",
+    kind: "code",
+    status: "done",
+    summary: {
+      rrfK: RRF_K,
+      entityBoost: ENTITY_BOOST,
+      boostedFiles: opts?.entityFileIds?.size ?? 0,
+      scored: scored.length,
+    },
+  });
+
   // ── 4. Fetch file metadata and apply filters ────────────────
   const topFileIds = scored.slice(0, candidateLimit).map((s) => s.fileId);
-  if (topFileIds.length === 0) return [];
+  if (topFileIds.length === 0) {
+    /**
+     * Nothing scored, so the remaining stages never execute. They still report — a trace
+     * that simply stops is indistinguishable from one that crashed, and "no candidates
+     * survived scoring" is the answer someone opened the trace to find.
+     */
+    for (const [stage, label] of [
+      ["filter", "Metadata filters"],
+      ["rbac", "Access filter"],
+      ["finalize", "Collapse and slice"],
+    ] as const) {
+      opts?.stageReport?.({
+        stage,
+        label,
+        kind: "code",
+        status: "skipped",
+        error: "No candidates were scored — keyword and vector search both returned nothing",
+      });
+    }
+    return [];
+  }
 
   const scoreMap = new Map(scored.map((s) => [s.fileId, s]));
 
@@ -793,6 +1011,28 @@ export async function hybridSearch(
     }
   }
 
+  const dropAttribution = opts?.stageReport
+    ? await attributeFilterDrops(db, topFileIds, files, filteredFiles, opts)
+    : undefined;
+  opts?.stageReport?.({
+    stage: "filter",
+    label: "Metadata filters",
+    kind: "code",
+    status: "done",
+    summary: {
+      scored: topFileIds.length,
+      survivedSqlFilters: files.length,
+      survivedTimeFilter: filteredFiles.length,
+      attributionAvailable: dropAttribution !== undefined,
+    },
+    outcomes: describeFilters(opts).map((entry) => ({
+      subject: entry.label,
+      kind: entry.field,
+      result: entry.applied ? ("kept" as const) : ("suppressed" as const),
+      reason: entry.detail,
+    })),
+  });
+
   // ── 6. Apply RBAC (batch query — same pattern as searchFiles) ─
   const principalList = opts?.userPrincipals ?? [];
   let accessFiltered = filteredFiles;
@@ -814,6 +1054,37 @@ export async function hybridSearch(
     accessFiltered = filteredFiles.filter((f) => allowedIds.has(f.id));
   }
 
+  if (opts?.stageReport && principalList.length > 0) {
+    const allowed = new Set(accessFiltered.map((file) => file.id));
+    opts.stageReport({
+      stage: "rbac",
+      label: "Access filter",
+      kind: "code",
+      status: "done",
+      outcomes: filteredFiles.map((file) => ({
+        subject: file.file_name,
+        kind: file.source,
+        result: allowed.has(file.id) ? ("kept" as const) : ("dropped" as const),
+        reason: allowed.has(file.id) ? "visible to these principals" : "no matching access principal",
+      })),
+    });
+  }
+  opts?.stageReport?.({
+    stage: "rbac",
+    label: "Access filter",
+    kind: "code",
+    status: principalList.length > 0 ? "done" : "skipped",
+    ...(principalList.length > 0
+      ? {
+          summary: {
+            principals: principalList.length,
+            allowed: accessFiltered.length,
+            denied: filteredFiles.length - accessFiltered.length,
+          },
+        }
+      : { error: "No principals supplied — access filter not applied" }),
+  });
+
   // ── 7. Build final results ─────────────────────────────────
   const collapsed = await collapseEmailSearchResults(
     db,
@@ -825,7 +1096,285 @@ export async function hybridSearch(
 
   const results: HybridSearchResult[] = collapsed.sort((a, b) => b.score - a.score).slice(0, limit);
 
+  if (opts?.stageReport) {
+    opts.stageReport({
+      stage: "finalize",
+      label: "Collapse and slice",
+      kind: "code",
+      status: "done",
+      summary: {
+        beforeCollapse: accessFiltered.length,
+        afterCollapse: collapsed.length,
+        limit,
+        returned: results.length,
+        droppedByLimit: Math.max(0, collapsed.length - results.length),
+      },
+      outcomes: collapsed
+        .slice()
+        .sort((a, b) => b.score - a.score)
+        .map((result, index) => ({
+          subject: result.fileName,
+          kind: result.resultKind === "email_thread" ? `thread of ${result.messageCount ?? "?"}` : result.source,
+          result: index < limit ? ("kept" as const) : ("dropped" as const),
+          reason:
+            index < limit
+              ? `returned at position ${index + 1}, score ${result.score.toFixed(5)}`
+              : `cut by limit ${limit} (would have been ${index + 1})`,
+        })),
+      candidates: draftCandidates({
+        scored,
+        ftsResults,
+        vecResults,
+        entityFileIds: opts.entityFileIds,
+        attribution: dropAttribution,
+        accessFiltered,
+        collapsed,
+        filteredFiles,
+      }),
+    });
+  }
+
   return results;
+}
+
+/**
+ * The subset of the metadata predicates that can be pushed into the KNN query.
+ *
+ * Previously the vector arm carried no WHERE at all: it took the globally nearest rows and
+ * filtered afterwards in JS, so a filtered search spent its whole candidate budget on rows
+ * it was about to discard. Entity-scoped searches were the worst case — a scope covering a
+ * small fraction of the corpus expected almost no surviving candidates.
+ *
+ * Time and RBAC stay out for now. Both are more expensive predicates and want a plan
+ * measured against a real corpus before being pushed down.
+ */
+function vectorPredicateSql(opts: HybridSearchOptions) {
+  const parts = [];
+  if (opts.fileIds && opts.fileIds.length > 0) {
+    parts.push(
+      sql`AND indexed_files.id IN (${sql.join(
+        opts.fileIds.map((id) => sql`${id}`),
+        sql`,`,
+      )})`,
+    );
+  }
+  if (opts.source) parts.push(sql`AND indexed_files.source = ${opts.source}`);
+  if (opts.sources && opts.sources.length > 0) {
+    parts.push(
+      sql`AND indexed_files.source IN (${sql.join(
+        opts.sources.map((value) => sql`${value}`),
+        sql`,`,
+      )})`,
+    );
+  }
+  if (opts.category) parts.push(sql`AND indexed_files.content_category = ${opts.category}`);
+  if (opts.kindRules?.length) parts.push(kindFilterSql(opts.kindRules));
+  return parts.length > 0 ? sql`${sql.join(parts, sql` `)}` : sql``;
+}
+
+/**
+ * Which predicates the metadata query actually carried, and which were absent.
+ *
+ * "no filters set" and "filters set but nothing matched" look identical from counts alone,
+ * so the trace states each predicate rather than leaving it to be inferred.
+ */
+function describeFilters(opts: HybridSearchOptions): Array<{
+  field: string;
+  label: string;
+  applied: boolean;
+  detail: string;
+}> {
+  return [
+    { field: "source", label: "Source", value: opts.source ?? null, shown: opts.source ?? "" },
+    {
+      field: "sources",
+      label: "Sources",
+      value: opts.sources?.length ? opts.sources : null,
+      shown: (opts.sources ?? []).join(", "),
+    },
+    {
+      field: "kind",
+      label: "Kind rules",
+      value: opts.kindRules?.length ? opts.kindRules : null,
+      shown: `${opts.kindRules?.length ?? 0} rule(s)`,
+    },
+    { field: "category", label: "Category", value: opts.category ?? null, shown: opts.category ?? "" },
+    {
+      field: "contentTypes",
+      label: "Content types",
+      value: opts.contentTypes?.length ? opts.contentTypes : null,
+      shown: (opts.contentTypes ?? []).join(", "),
+    },
+    {
+      field: "time",
+      label: "Time range",
+      value: opts.timeFilter?.after || opts.timeFilter?.before ? opts.timeFilter : null,
+      shown: `${opts.timeFilter?.after ?? "…"} → ${opts.timeFilter?.before ?? "…"}`,
+    },
+    {
+      field: "fileIds",
+      label: "Entity file scope",
+      value: opts.fileIds?.length ? opts.fileIds : null,
+      shown: `${opts.fileIds?.length ?? 0} file(s)`,
+    },
+    { field: "archived", label: "Archived excluded", value: true, shown: "is_archived = 0" },
+  ].map((entry) => ({
+    field: entry.field,
+    label: entry.label,
+    applied: entry.value !== null,
+    detail: entry.value !== null ? entry.shown : "not set",
+  }));
+}
+
+/**
+ * Why each scored file is missing from the metadata result set.
+ *
+ * Vector candidates are filtered by neither kind, source nor category — only by `fileIds`,
+ * in JS — so a file of the wrong kind reaches the fuse and then vanishes when the metadata
+ * SQL folds every predicate into one WHERE. At that point the row is gone and with it the
+ * file's own name, so reconstructing the reason needs one deliberately unfiltered read.
+ *
+ * Runs only when a stage reporter is attached, and never propagates: a fault in
+ * attribution must degrade the trace, not fail the search that is being traced.
+ */
+async function attributeFilterDrops(
+  db: Kysely<DB>,
+  scoredFileIds: string[],
+  survivedSql: SearchMetadataFile[],
+  survivedTime: SearchMetadataFile[],
+  opts: HybridSearchOptions,
+): Promise<Map<string, { fileName: string; source: string; droppedAt: StageKey; dropReason: string }> | undefined> {
+  try {
+    const attribution = new Map<
+      string,
+      { fileName: string; source: string; droppedAt: StageKey; dropReason: string }
+    >();
+    if (scoredFileIds.length === 0) return attribution;
+
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "file_name", "source", "content_category", "file_type", "is_archived"])
+      .where("id", "in", scoredFileIds)
+      .execute();
+
+    const survivedSqlIds = new Set(survivedSql.map((file) => file.id));
+    const survivedTimeIds = new Set(survivedTime.map((file) => file.id));
+
+    for (const row of rows) {
+      const identity = { fileName: row.file_name, source: row.source };
+      if (!survivedSqlIds.has(row.id)) {
+        attribution.set(row.id, {
+          ...identity,
+          droppedAt: "filter",
+          dropReason: sqlFilterReason(row, opts),
+        });
+        continue;
+      }
+      if (!survivedTimeIds.has(row.id)) {
+        attribution.set(row.id, { ...identity, droppedAt: "filter", dropReason: "outside the requested time range" });
+        continue;
+      }
+      attribution.set(row.id, { ...identity, droppedAt: "filter", dropReason: "" });
+    }
+    return attribution;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Mirrors the predicates the metadata query folds into its WHERE. Pinned by test against
+ * the SQL on both dialects — the day these drift, the trace starts lying.
+ */
+function sqlFilterReason(
+  row: { is_archived: number; source: string; content_category: string; file_type: string | null },
+  opts: HybridSearchOptions,
+): string {
+  if (row.is_archived !== 0) return "archived";
+  if (opts.source && row.source !== opts.source) return `source is ${row.source}, not ${opts.source}`;
+  if (opts.sources?.length && !opts.sources.includes(row.source))
+    return `source ${row.source} not in the requested set`;
+  if (opts.category && row.content_category !== opts.category) {
+    return `category is ${row.content_category}, not ${opts.category}`;
+  }
+  if (opts.contentTypes?.length && !opts.contentTypes.includes(row.content_category)) {
+    return `content type ${row.content_category} not in the requested set`;
+  }
+  if (opts.kindRules?.length) {
+    const matches = opts.kindRules.some((rule) => {
+      const sourceOk = rule.sources?.length ? rule.sources.includes(row.source) : true;
+      const typeOk = rule.fileTypes?.length ? rule.fileTypes.includes(row.file_type ?? "") : true;
+      return rule.sources?.length || rule.fileTypes?.length ? sourceOk && typeOk : true;
+    });
+    if (!matches) return `does not match the requested kind (source ${row.source}, type ${row.file_type ?? "none"})`;
+  }
+  return "excluded by a metadata filter";
+}
+
+/**
+ * One row per scored candidate, with positions left null.
+ *
+ * Final positions cannot be assigned here: `search()` may still re-sort for recency, and
+ * the Search tool applies its own post-sort after that. The caller fills them in once the
+ * order the caller actually received is known.
+ */
+function draftCandidates(input: {
+  scored: Array<{ fileId: string; score: number; similarity: number | null }>;
+  ftsResults: Map<string, { rank: number }>;
+  vecResults: Map<string, { rank: number; similarity: number }>;
+  entityFileIds?: Set<string>;
+  attribution?: Map<string, { fileName: string; source: string; droppedAt: StageKey; dropReason: string }>;
+  accessFiltered: SearchMetadataFile[];
+  collapsed: HybridSearchResult[];
+  filteredFiles: SearchMetadataFile[];
+}): SearchCandidate[] {
+  const allowedIds = new Set(input.accessFiltered.map((file) => file.id));
+  const timeSurvivorIds = new Set(input.filteredFiles.map((file) => file.id));
+  const identity = new Map(input.accessFiltered.map((file) => [file.id, file]));
+  const survivingHits = new Set(input.collapsed.map((result) => result.hitFileId));
+  const threadOf = new Map<string, string>();
+  for (const file of input.accessFiltered) {
+    if (file.file_type === "email_message") {
+      threadOf.set(file.id, `${file.connector_config_id}:${file.thread_id ?? file.id}`);
+    }
+  }
+
+  return input.scored.map((entry) => {
+    const attributed = input.attribution?.get(entry.fileId);
+    const file = identity.get(entry.fileId);
+    const base: SearchCandidate = {
+      fileId: entry.fileId,
+      fileName: file?.file_name ?? attributed?.fileName ?? entry.fileId,
+      source: file?.source ?? attributed?.source ?? "unknown",
+      ftsRank: input.ftsResults.get(entry.fileId)?.rank ?? null,
+      vecRank: input.vecResults.get(entry.fileId)?.rank ?? null,
+      similarity: entry.similarity,
+      boosted: input.entityFileIds?.has(entry.fileId) ?? false,
+      score: entry.score,
+      finalPosition: null,
+      droppedAt: null,
+      dropReason: null,
+      mergedInto: null,
+    };
+
+    if (!timeSurvivorIds.has(entry.fileId)) {
+      return {
+        ...base,
+        droppedAt: "filter",
+        dropReason: attributed?.dropReason || "excluded by a metadata filter",
+      };
+    }
+    if (!allowedIds.has(entry.fileId)) {
+      return { ...base, droppedAt: "rbac", dropReason: "no matching access principal" };
+    }
+    if (!survivingHits.has(entry.fileId)) {
+      const thread = threadOf.get(entry.fileId);
+      return thread
+        ? { ...base, mergedInto: thread }
+        : { ...base, droppedAt: "finalize", dropReason: "below the result limit" };
+    }
+    return base;
+  });
 }
 
 type SearchMetadataFile = {
@@ -1302,6 +1851,8 @@ export async function search(
     openRouterApiKey?: string;
     settingsEncryptionKey?: string;
     logger?: Logger;
+    /** Dev-tools trace hook. Undefined in production. */
+    stageReport?: StageReporter;
   },
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
@@ -1315,8 +1866,27 @@ export async function search(
   let fileIds: string[] | undefined;
   if (allEntityIds.length > 0) {
     fileIds = await resolveEntityFileIds(db, allEntityIds, opts?.entityIdsMode ?? "and");
+    opts?.stageReport?.({
+      stage: "resolveEntities",
+      label: "Resolve entity scope",
+      kind: "code",
+      status: "done",
+      summary: {
+        entityIds: allEntityIds.length,
+        mode: opts?.entityIdsMode ?? "and",
+        files: fileIds.length,
+      },
+    });
     // Empty-set short-circuit: avoid `IN ()` (invalid on SQLite) and skip the work.
     if (fileIds.length === 0) return [];
+  } else {
+    opts?.stageReport?.({
+      stage: "resolveEntities",
+      label: "Resolve entity scope",
+      kind: "code",
+      status: "skipped",
+      error: "No entityIds supplied — search was not entity-scoped",
+    });
   }
 
   // Empty-query path: skip FTS/vector entirely. Require at least one structural filter.
@@ -1342,8 +1912,11 @@ export async function search(
   }
 
   let queryEmbedding: number[] | undefined;
+  let embedSkippedReason: string | null = null;
+  const embedStartedAt = Date.now();
   try {
     const settings = await createSettingsRepository(db, opts?.settingsEncryptionKey).get();
+    if (settings?.enrichment_enabled === 0) embedSkippedReason = "Enrichment is disabled in settings";
     if (settings?.enrichment_enabled !== 0) {
       const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, opts?.openRouterApiKey);
       const embedQuery = createEnrichmentQueryEmbedder({
@@ -1355,10 +1928,49 @@ export async function search(
         ...openRouterConfig,
       });
       if (embedQuery) queryEmbedding = await embedQuery(trimmedQuery);
+      else embedSkippedReason = "No embedding provider is configured";
     }
-  } catch {
+  } catch (err) {
     // Vector search is best-effort — fall back to FTS5 only
+    embedSkippedReason = err instanceof Error ? err.message : String(err);
   }
+
+  /**
+   * Losing the embedding silently turns every search into keyword-only matching, which on a
+   * corpus with generated file names is close to no search at all. The stage reports are
+   * dev-tools-only, so without this the degradation has no production signal whatsoever.
+   */
+  if (!queryEmbedding && trimmedQuery !== "") {
+    opts?.logger?.error(
+      { event: "search_query_embedding_unavailable", reason: embedSkippedReason },
+      "Search fell back to keyword-only — no query embedding",
+    );
+  }
+
+  opts?.stageReport?.(
+    queryEmbedding
+      ? {
+          stage: "embedQuery",
+          label: "Embed query",
+          kind: "code",
+          status: "done",
+          summary: {
+            dimensions: queryEmbedding.length,
+            latencyMs: Date.now() - embedStartedAt,
+            magnitude: Math.sqrt(queryEmbedding.reduce((sum, value) => sum + value * value, 0)),
+            nonZero: queryEmbedding.filter((value) => value !== 0).length,
+            /** First slice of the actual vector — enough to eyeball that it is real and not all zeros. */
+            preview: queryEmbedding.slice(0, 24).map((value) => Number(value.toFixed(5))),
+          },
+        }
+      : {
+          stage: "embedQuery",
+          label: "Embed query",
+          kind: "code",
+          status: "skipped",
+          error: embedSkippedReason ?? "No embedding produced — keyword-only search",
+        },
+  );
 
   // Auto-entity-discovery boost. Suppressed when the caller already pinned
   // entityIds (would double-count) or asked to skip it.
@@ -1378,8 +1990,33 @@ export async function search(
           entityFileIds = new Set(mentions.map((m) => m.indexed_file_id));
         }
       }
-    } catch {
+      opts?.stageReport?.({
+        stage: "discoverEntities",
+        label: "Discover entities",
+        kind: "code",
+        status: "done",
+        summary: {
+          set: "fuse boost",
+          entitiesMatched: matchingEntities.length,
+          filesBoosted: entityFileIds?.size ?? 0,
+          note: "search()'s own discovery, limit 10, not public-filtered. This is the set applied at RRF fuse.",
+        },
+        outcomes: matchingEntities.map((entity) => ({
+          subject: entity.name,
+          kind: entity.source_type,
+          result: "linked" as const,
+          reason: "boosts files mentioning this entity",
+        })),
+      });
+    } catch (err) {
       // Entity boost is best-effort
+      opts?.stageReport?.({
+        stage: "discoverEntities",
+        label: "Discover entities",
+        kind: "code",
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -1388,6 +2025,7 @@ export async function search(
   const fetchLimit = isRecency ? Math.max(limit * 5, 50) : limit;
 
   const results = await hybridSearch(db, trimmedQuery, {
+    stageReport: opts?.stageReport,
     source: opts?.source,
     sources: opts?.sources,
     kindRules: opts?.kindRules,

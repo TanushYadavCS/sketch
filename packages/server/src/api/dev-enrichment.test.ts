@@ -466,3 +466,104 @@ describe("Dev enrichment trace routes", () => {
     expect(list.runs.find((run) => run.id === runId)?.kind).toBe("mint");
   });
 });
+
+describe("POST /api/dev/search-runs", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  async function seedSearchable(id: string, source = "notion", category = "document") {
+    await db
+      .insertInto("connector_configs")
+      .values({ id: "sc-1", connector_type: source, auth_type: "oauth", credentials: "{}", created_by: ADMIN_ID })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "sc-1",
+        provider_file_id: id,
+        file_name: `auth migration ${id}.txt`,
+        file_type: "text",
+        content_category: category,
+        source,
+        source_path: `/${id}`,
+        provider_url: null,
+        content: "notes about the auth migration",
+        summary: null,
+        context_note: null,
+        access_scope_id: null,
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+      })
+      .execute();
+  }
+
+  it("runs a real search and returns its finished trace", async () => {
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
+    const cookie = await login(app, ADMIN_EMAIL);
+    await seedSearchable("sf-1");
+
+    const res = await app.request("/api/dev/search-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ query: "auth" }),
+    });
+    expect(res.status).toBe(201);
+
+    const body = (await res.json()) as { trace: { id: string; origin: string; query: string; stages: unknown[] } };
+    expect(body.trace.origin).toBe("dev_tools");
+    expect(body.trace.query).toBe("auth");
+    expect(body.trace.stages.length).toBeGreaterThan(0);
+
+    const listed = await app.request("/api/dev/search-traces", { headers: { Cookie: cookie } });
+    const listBody = (await listed.json()) as { traces: Array<{ id: string }> };
+    expect(listBody.traces.map((trace) => trace.id)).toContain(body.trace.id);
+  });
+
+  it("records a trace even when the search returns nothing", async () => {
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
+    const cookie = await login(app, ADMIN_EMAIL);
+
+    const res = await app.request("/api/dev/search-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ query: "nothing will match this" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { trace: { status: string } };
+    expect(["done", "empty"]).toContain(body.trace.status);
+  });
+
+  it("is 404 without the flag and 403 for a member", async () => {
+    const hidden = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: false }), { logger });
+    const adminCookie = await login(hidden, ADMIN_EMAIL);
+    const off = await hidden.request("/api/dev/search-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie },
+      body: JSON.stringify({ query: "auth" }),
+    });
+    expect(off.status).toBe(404);
+
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
+    const memberCookie = await login(app, MEMBER_EMAIL);
+    const denied = await app.request("/api/dev/search-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: memberCookie },
+      body: JSON.stringify({ query: "auth" }),
+    });
+    expect(denied.status).toBe(403);
+  });
+});

@@ -1192,8 +1192,21 @@ export type DevTraceRunKind = "enrichment" | "mint";
 
 export type DevMintStageKey = "neighbourhood" | "gatherContext" | "extractCandidates" | "writeCandidates";
 
+export type DevSearchStageKey =
+  | "discoverEntities"
+  | "resolveEntities"
+  | "embedQuery"
+  | "ftsCandidates"
+  | "vectorCandidates"
+  | "fuse"
+  | "filter"
+  | "rbac"
+  | "finalize"
+  | "rerank";
+
 export type DevStageKey =
   | DevMintStageKey
+  | DevSearchStageKey
   | "extractEntities"
   | "dedupAdjudicate"
   | "reconcileFacts"
@@ -1221,6 +1234,60 @@ export interface DevStageReport {
   error?: string;
   parallelGroup?: string;
   summary?: Record<string, unknown>;
+  candidates?: DevSearchCandidate[];
+  vectorChunks?: DevVectorChunkHit[];
+}
+
+/** One scored file's journey through hybrid search, as the ranking pane renders it. */
+export interface DevSearchCandidate {
+  fileId: string;
+  fileName: string;
+  source: string;
+  ftsRank: number | null;
+  vecRank: number | null;
+  similarity: number | null;
+  boosted: boolean;
+  score: number;
+  finalPosition: number | null;
+  droppedAt: DevStageKey | null;
+  dropReason: string | null;
+  mergedInto: string | null;
+}
+
+/** Which of a file's four vectors produced the hit. */
+export type DevVectorHitSource = "content" | "file_name" | "summary" | "image";
+
+/** One vector the search scored, before per-file dedup collapsed it. */
+export interface DevVectorChunkHit {
+  rank: number;
+  fileId: string;
+  source: DevVectorHitSource;
+  chunkPreview: string;
+  distance: number;
+  similarity: number;
+  bestForFile: boolean;
+}
+
+export type DevSearchTraceOrigin = "agent" | "automation" | "public_mcp" | "dev_tools";
+
+export interface DevSearchTraceHeader {
+  id: string;
+  origin: DevSearchTraceOrigin;
+  userId: string | null;
+  conversationId: number | null;
+  query: string;
+  status: "done" | "failed" | "empty";
+  error: string | null;
+  resultCount: number;
+  durationMs: number;
+  startedAt: string;
+  stageCount: number;
+}
+
+export interface DevSearchTraceDetail extends DevSearchTraceHeader {
+  args: Record<string, unknown>;
+  principals: unknown;
+  stages: DevStageReport[];
 }
 
 /** One LLM call's header. Never carries the prompt — those are ~19,000 chars each. */
@@ -3548,6 +3615,26 @@ export const api = {
     /** Fetched per call on expand — the prompt bodies are far too large for the list. */
     enrichmentCall(runId: string, seq: number) {
       return request<{ call: DevLlmCallBody }>(`/api/dev/runs/${runId}/calls/${seq}`);
+    },
+    /** Captured traces of real Search calls. Nothing is started here — only observed. */
+    /** Runs one real Search through the traced core and returns its finished trace. */
+    runSearch(args: {
+      query?: string;
+      kind?: string;
+      source?: string;
+      sortBy?: "relevance" | "recency";
+      limit?: number;
+    }) {
+      return request<{ trace: DevSearchTraceDetail }>("/api/dev/search-runs", {
+        method: "POST",
+        body: JSON.stringify(args),
+      });
+    },
+    searchTraces() {
+      return request<{ traces: DevSearchTraceHeader[] }>("/api/dev/search-traces");
+    },
+    searchTrace(id: string) {
+      return request<{ trace: DevSearchTraceDetail }>(`/api/dev/search-traces/${id}`);
     },
   },
   workspace: {

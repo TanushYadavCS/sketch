@@ -282,7 +282,9 @@ export function createAutomationCapabilityRegistry(): AutomationCapabilityRegist
 
       if (allowed.has("search")) {
         tools.search = (value) =>
-          invoke(context, "search", async () => boundedResultText(await handleSearch(parseSearchArgs(value), deps)));
+          invoke(context, "search", async () =>
+            boundedResultText(await handleSearch(parseSearchArgs(value), deps, "automation")),
+          );
       }
       if (allowed.has("searchEntities")) {
         tools.searchEntities = (value) =>
