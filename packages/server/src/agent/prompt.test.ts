@@ -152,9 +152,10 @@ describe("buildSystemContext", () => {
       expect(result).toContain("## Skills");
     });
 
-    it("mentions complex task threshold", () => {
+    it("does not instruct the agent to author new skills", () => {
       const result = buildSystemContext({ platform: "slack" });
-      expect(result).toContain("complex task (5+ tool calls)");
+      expect(result).not.toContain("SKILL.md");
+      expect(result).not.toContain("save it as a skill");
     });
 
     it("instructs to patch outdated skills immediately", () => {
