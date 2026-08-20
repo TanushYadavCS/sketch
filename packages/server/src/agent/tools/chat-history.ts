@@ -13,6 +13,7 @@ import {
   isChatHistoryConversationAuthorized,
   renderAllChatsSearchResults,
 } from "./chat-search";
+import { blankToUndefined } from "./optional-params";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
@@ -149,14 +150,6 @@ function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Models fill optional string parameters with empty placeholders rather than omitting
- * them, so a blank value means "not supplied" and must never be validated as content.
- */
-function blankToUndefined(value: string | undefined): string | undefined {
-  return value === undefined || value.trim() === "" ? undefined : value;
 }
 
 function normalizeTime(value: string | undefined): string | undefined | null {
@@ -430,6 +423,16 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
 
       const hasPageToken = Boolean(allChatsPageToken || crossReadPageToken);
       const isAllChats = !hasPageToken && scope === "all_chats";
+      if (isAllChats && conversationRef) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "all_chats scope reads every authorized chat, so it cannot be combined with a conversationRef. Send scope all_chats on its own, or send the conversationRef without a scope to read that one conversation.",
+            },
+          ],
+        };
+      }
       const effectiveConversationRef = hasPageToken || isAllChats ? undefined : conversationRef;
       const effectiveAnchorMessageId = hasPageToken || isAllChats ? undefined : anchorMessageId;
       const effectivePlatform = isAllChats ? requestedPlatform : undefined;

@@ -13,6 +13,7 @@ import {
   stableWhatsAppParticipantJidRef,
 } from "../../whatsapp/identity-resolution";
 import { stripPersonalNumberTokens } from "../../whatsapp/privacy";
+import { withoutBlankStrings } from "./optional-params";
 import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
@@ -29,20 +30,13 @@ const INVALID_INPUT_TEXT =
 const LOCAL_PATH_PATTERN = /(?:\/(?:tmp|private\/tmp|var\/folders|Users|data\/workspaces)\/[^\s"'<>()[\]{}]*)/giu;
 
 const whatsappGroupHistorySchema = {
-  sliceId: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .describe("WhatsApp conversation slice id from a Search result providerId."),
+  sliceId: z.string().optional().describe("WhatsApp conversation slice id from a Search result providerId."),
   groupRef: z
     .string()
-    .trim()
-    .min(1)
     .optional()
     .describe('Stable group reference returned by this tool, formatted as "conversation:<id>".'),
-  startedAt: z.string().trim().min(1).optional().describe("ISO timestamp for the start of a direct group window."),
-  endedAt: z.string().trim().min(1).optional().describe("ISO timestamp for the end of a direct group window."),
+  startedAt: z.string().optional().describe("ISO timestamp for the start of a direct group window."),
+  endedAt: z.string().optional().describe("ISO timestamp for the end of a direct group window."),
   expandMinutes: z
     .number()
     .int()
@@ -50,7 +44,7 @@ const whatsappGroupHistorySchema = {
     .optional()
     .describe("Minutes to expand before and after the anchor window. Default 30, capped at 240."),
   limit: z.number().int().positive().optional().describe("Maximum messages to return. Default 100, capped at 200."),
-  pageToken: z.string().trim().min(1).optional().describe("Continuation token returned by a prior call."),
+  pageToken: z.string().optional().describe("Continuation token returned by a prior call."),
 };
 
 interface WhatsAppGroupHistoryArgs {
@@ -623,6 +617,6 @@ export function createWhatsAppGroupHistoryTool(deps: SketchMcpDeps) {
     WHATSAPP_GROUP_HISTORY_TOOL_NAME,
     "Read raw WhatsApp group messages around an indexed WhatsApp slice, including adjacent messages that were dropped from indexing. Use this after Search finds a WhatsApp slice and the user asks what exactly was said before, during, or after it. Requires sliceId, or groupRef with startedAt and endedAt from a prior WhatsAppGroupHistory result. Use pageToken as a continuation token for additional pages. Returns display-name-only senders and type-only attachment placeholders.",
     whatsappGroupHistorySchema,
-    (args) => handleWhatsAppGroupHistory(args, deps),
+    (args) => handleWhatsAppGroupHistory(withoutBlankStrings(args), deps),
   );
 }

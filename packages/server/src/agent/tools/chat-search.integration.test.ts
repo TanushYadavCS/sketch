@@ -1687,11 +1687,17 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
           order: "asc",
           includeBotMessages: false,
         },
-        { scope: "all_chats", platform: "slack", conversationRef: `conversation:${current.id}` },
         { scope: "all_chats", platform: "slack", anchorMessageId: 1 },
         { scope: "all_chats", platform: "slack", conversationRef: "", pageToken: "" },
         { scope: "all_chats", platform: "slack", afterTime: "", beforeTime: "" },
       ];
+
+      const ambiguous = await readTool.handler({
+        scope: "all_chats",
+        platform: "slack",
+        conversationRef: `conversation:${current.id}`,
+      });
+      expect(ambiguous.content[0]?.text).toContain("cannot be combined with a conversationRef");
 
       for (const payload of placeholderPayloads) {
         const result = await readTool.handler(payload);

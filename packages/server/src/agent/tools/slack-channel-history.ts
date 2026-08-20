@@ -8,6 +8,7 @@ import type { AccessPrincipal } from "../../connectors/types";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
+import { withoutBlankStrings } from "./optional-params";
 import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
@@ -25,15 +26,13 @@ const LOCAL_PATH_PATTERN = /(?:\/(?:tmp|private\/tmp|var\/folders|Users|data\/wo
 const MENTION_TOKEN_PATTERN = /<@(U[A-Z0-9]+)(?:\|[^>]*)?>/g;
 
 const slackChannelHistorySchema = {
-  sliceId: z.string().trim().min(1).optional().describe("Slack conversation slice id from a Search result providerId."),
+  sliceId: z.string().optional().describe("Slack conversation slice id from a Search result providerId."),
   channelRef: z
     .string()
-    .trim()
-    .min(1)
     .optional()
     .describe('Stable channel reference returned by this tool, formatted as "conversation:<id>".'),
-  startedAt: z.string().trim().min(1).optional().describe("ISO timestamp for the start of a direct channel window."),
-  endedAt: z.string().trim().min(1).optional().describe("ISO timestamp for the end of a direct channel window."),
+  startedAt: z.string().optional().describe("ISO timestamp for the start of a direct channel window."),
+  endedAt: z.string().optional().describe("ISO timestamp for the end of a direct channel window."),
   expandMinutes: z
     .number()
     .int()
@@ -41,7 +40,7 @@ const slackChannelHistorySchema = {
     .optional()
     .describe("Minutes to expand before and after the anchor window. Default 30, capped at 240."),
   limit: z.number().int().positive().optional().describe("Maximum messages to return. Default 100, capped at 200."),
-  pageToken: z.string().trim().min(1).optional().describe("Continuation token returned by a prior call."),
+  pageToken: z.string().optional().describe("Continuation token returned by a prior call."),
 };
 
 interface SlackChannelHistoryArgs {
@@ -621,6 +620,6 @@ export function createSlackChannelHistoryTool(deps: SketchMcpDeps) {
     SLACK_CHANNEL_HISTORY_TOOL_NAME,
     "Read raw Slack channel messages around an indexed Slack slice, including adjacent messages that were dropped from indexing. Use this after Search finds a Slack slice and the user asks what exactly was said before, during, or after it. Requires sliceId, or channelRef with startedAt and endedAt from a prior SlackChannelHistory result. Thread slices return that thread's messages; channel slices return the top-level flow. Use pageToken as a continuation token for additional pages.",
     slackChannelHistorySchema,
-    (args) => handleSlackChannelHistory(args, deps),
+    (args) => handleSlackChannelHistory(withoutBlankStrings(args), deps),
   );
 }
