@@ -214,8 +214,7 @@ function isInternalIntegrationName(value: string): boolean {
 
 function friendlyIntegrationLabel(serverName?: string): string {
   if (!serverName || isInternalIntegrationName(serverName)) return "Running integration";
-  const integrationName = humanizeIdentifier(serverName);
-  return integrationName ? `Running ${integrationName} integration` : "Running integration";
+  return "Running integration";
 }
 
 function isIntegrationSkillName(value: string): boolean {

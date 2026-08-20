@@ -147,7 +147,7 @@ export function ChatIntegrationConnectionFrame({
       try {
         const app = fallbackApp(connection);
         if (cancelled || requestRef.current !== requestId) return;
-        const callbackUrl = `${window.location.origin}/integrations/callback`;
+        const callbackUrl = `${window.location.origin}/integrations/callback?app=${encodeURIComponent(app.id)}`;
         const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
         if (cancelled || requestRef.current !== requestId) return;
         activeAppRef.current = result.app;
