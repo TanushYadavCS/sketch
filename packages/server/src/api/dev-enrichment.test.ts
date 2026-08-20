@@ -533,6 +533,41 @@ describe("POST /api/dev/search-runs", () => {
     expect(listBody.traces.map((trace) => trace.id)).toContain(body.trace.id);
   });
 
+  it("reads settings with the encryption key, so an encrypted provider key does not 500", async () => {
+    /**
+     * Provider keys set through the settings UI are stored `enc:`-prefixed. Reading them
+     * without the encryption key throws inside the route, before the model call's own
+     * try/catch, so the run is lost rather than recorded as failed. The assertion is not
+     * that synthesis succeeds — there is no provider configured here — but that the
+     * failure is a handled one and never the decrypt throw.
+     */
+    const encryptionKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true, ENCRYPTION_KEY: encryptionKey }), {
+      logger,
+    });
+    const cookie = await login(app, ADMIN_EMAIL);
+    await seedSearchable("enc-1");
+
+    const run = await app.request("/api/dev/search-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ query: "auth" }),
+    });
+    const { trace } = (await run.json()) as { trace: { id: string } };
+
+    /** Written through the repository so the key is stored `enc:`-prefixed, as the UI does. */
+    await createSettingsRepository(db, encryptionKey).update({ llmProvider: "anthropic", anthropicApiKey: "sk-test" });
+
+    const res = await app.request(`/api/dev/search-traces/${trace.id}/syntheses`, {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).not.toBe(500);
+    const body = (await res.json()) as { synthesis?: { status: string }; error?: { message: string } };
+    expect(JSON.stringify(body)).not.toContain("ENCRYPTION_KEY is not set");
+  });
+
   it("records a trace even when the search returns nothing", async () => {
     const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
     const cookie = await login(app, ADMIN_EMAIL);

@@ -1204,7 +1204,8 @@ export type DevSearchStageKey =
   | "filter"
   | "rbac"
   | "finalize"
-  | "rerank";
+  | "rerank"
+  | "finalOutput";
 
 export type DevStageKey =
   | DevMintStageKey
@@ -1290,6 +1291,39 @@ export interface DevSearchTraceDetail extends DevSearchTraceHeader {
   args: Record<string, unknown>;
   principals: unknown;
   stages: DevStageReport[];
+  results: DevSearchTraceResult[];
+}
+
+/** One returned result. `agentText` is the rendered block the agent actually received. */
+export interface DevSearchTraceResult {
+  position: number;
+  hitFileId: string;
+  resultKind: string;
+  fileName: string;
+  source: string;
+  providerUrl: string | null;
+  agentText: string;
+  snippet: string | null;
+  summary: string | null;
+  score: number;
+  similarity: number | null;
+}
+
+/** A synthesis header. The prompt and answer are fetched per run. */
+export interface DevSearchSynthesisHeader {
+  id: string;
+  traceId: string;
+  provider: string;
+  model: string;
+  status: string;
+  error: string | null;
+  durationMs: number;
+  createdAtMs: number;
+}
+
+export interface DevSearchSynthesis extends DevSearchSynthesisHeader {
+  prompt: string;
+  answer: string | null;
 }
 
 /** One LLM call's header. Never carries the prompt — those are ~19,000 chars each. */
@@ -3646,6 +3680,18 @@ export const api = {
     },
     searchTrace(id: string) {
       return request<{ trace: DevSearchTraceDetail }>(`/api/dev/search-traces/${id}`);
+    },
+    searchTraceSyntheses(traceId: string) {
+      return request<{ syntheses: DevSearchSynthesisHeader[] }>(`/api/dev/search-traces/${traceId}/syntheses`);
+    },
+    searchSynthesis(id: string) {
+      return request<{ synthesis: DevSearchSynthesis }>(`/api/dev/syntheses/${id}`);
+    },
+    /** Spends one real model call. Only ever reached from an explicit click. */
+    runSearchSynthesis(traceId: string) {
+      return request<{ synthesis: DevSearchSynthesis }>(`/api/dev/search-traces/${traceId}/syntheses`, {
+        method: "POST",
+      });
     },
   },
   workspace: {

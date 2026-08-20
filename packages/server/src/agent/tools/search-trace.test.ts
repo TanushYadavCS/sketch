@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { HybridSearchResult } from "../../connectors/search";
-import { createDevSearchTraceRepository } from "../../db/repositories/dev-search-traces";
+import { DEV_SEARCH_TRACE_RESULT_CAP, createDevSearchTraceRepository } from "../../db/repositories/dev-search-traces";
 import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
 import { createSearchTraceCapture } from "./search-trace";
@@ -44,6 +44,26 @@ function candidate(fileId: string, score: number) {
   };
 }
 
+function searchHit(position: number) {
+  return {
+    resultKind: "file",
+    id: `f-${position}`,
+    hitFileId: `f-${position}`,
+    fileName: `doc ${position}.txt`,
+    source: "slack",
+    contentCategory: "document",
+    summary: null,
+    providerFileId: `p-${position}`,
+    providerUrl: null,
+    sourcePath: null,
+    sourceUpdatedAt: null,
+    sourceCreatedAt: null,
+    snippet: "a preview",
+    similarity: 0.5,
+    score: 1 / position,
+  } as unknown as HybridSearchResult;
+}
+
 async function onlyTrace() {
   const repo = createDevSearchTraceRepository(db);
   const headers = await vi.waitFor(async () => {
@@ -59,6 +79,29 @@ async function onlyTrace() {
 describe("createSearchTraceCapture", () => {
   it("returns null when dev tools are off, so no reporter ever reaches the search", () => {
     expect(createSearchTraceCapture({ ...capturedArgs(db), deps: { db } as SketchMcpDeps })).toBeNull();
+  });
+
+  it("caps the rows it stores, because the Search tool's limit has no ceiling", async () => {
+    /**
+     * This is the enforcement point. The repository inserts whatever it is handed, so a
+     * test that pre-slices its input to the cap proves nothing — that was the earlier
+     * version of this assertion.
+     */
+    const traced = capture();
+    const hits = Array.from({ length: DEV_SEARCH_TRACE_RESULT_CAP + 12 }, (_, index) => searchHit(index + 1));
+    traced?.finalOutput(
+      hits,
+      hits.map((hit) => `**${hit.fileName}**\n> preview`),
+    );
+    traced?.finish("done", null, hits.length);
+
+    const detail = await onlyTrace();
+    expect(detail.results).toHaveLength(DEV_SEARCH_TRACE_RESULT_CAP);
+    expect(detail.results[0]?.agentText).toContain("> preview");
+    /** The stage still reports the true count, so the cap is visible rather than silent. */
+    const stage = detail.stages.find((entry) => entry.stage === "finalOutput");
+    expect(stage?.summary?.returned).toBe(DEV_SEARCH_TRACE_RESULT_CAP + 12);
+    expect(stage?.summary?.stored).toBe(DEV_SEARCH_TRACE_RESULT_CAP);
   });
 
   it("records a trace for a search that returned results", async () => {

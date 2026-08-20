@@ -11,6 +11,7 @@ import { Button } from "@sketch/ui/components/button";
 import { Input } from "@sketch/ui/components/input";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { FinalOutput, Synthesis } from "./final-output";
 import { RankingTable } from "./ranking-table";
 import { SEARCH_STAGES } from "./stages";
 import { VectorChunks } from "./vector-chunks";
@@ -267,6 +268,13 @@ function TraceDetail({ id, onBack }: { id: string; onBack: () => void }) {
               {active?.candidates && (
                 <div className="mt-4">
                   <RankingTable candidates={active.candidates} />
+                </div>
+              )}
+
+              {selected === "finalOutput" && trace && (
+                <div className="mt-4">
+                  <FinalOutput results={trace.results} />
+                  <Synthesis traceId={trace.id} />
                 </div>
               )}
             </div>

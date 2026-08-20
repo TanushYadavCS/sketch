@@ -12,7 +12,9 @@ import type { Logger } from "pino";
 import type { SearchCandidate, StageReport, StageReporter } from "../../connectors/enrichment-stage-report";
 import type { HybridSearchResult } from "../../connectors/search";
 import {
+  DEV_SEARCH_TRACE_RESULT_CAP,
   type DevSearchTraceOrigin,
+  type DevSearchTraceResultInput,
   type DevSearchTraceStatus,
   createDevSearchTraceRepository,
 } from "../../db/repositories/dev-search-traces";
@@ -22,6 +24,8 @@ export interface SearchTraceCapture {
   report: StageReporter;
   /** Records the tool's own post-sort — the order the caller actually received. */
   rerank: (results: HybridSearchResult[], applied: boolean, rerankSetSize: number) => void;
+  /** Records the rendered blocks the agent received, paired with their result rows. */
+  finalOutput: (results: HybridSearchResult[], agentBlocks: string[]) => void;
   finish: (status: DevSearchTraceStatus, error: string | null, resultCount: number) => void;
 }
 
@@ -42,6 +46,7 @@ export function createSearchTraceCapture(args: {
   const logger = args.deps.logger;
   const startedAt = Date.now();
   const stages: StageReport[] = [];
+  let results: DevSearchTraceResultInput[] = [];
   let recorded = false;
 
   return {
@@ -79,6 +84,39 @@ export function createSearchTraceCapture(args: {
       });
     },
 
+    finalOutput(hits, agentBlocks) {
+      /**
+       * Capped rather than unbounded: the Search tool's `limit` has no ceiling, so one
+       * call could otherwise write thousands of text rows into a debugging table.
+       */
+      results = hits.slice(0, DEV_SEARCH_TRACE_RESULT_CAP).map((hit, index) => ({
+        position: index + 1,
+        hitFileId: hit.hitFileId,
+        resultKind: hit.resultKind,
+        fileName: hit.fileName,
+        source: hit.source,
+        providerUrl: hit.providerUrl,
+        agentText: agentBlocks[index] ?? "",
+        snippet: hit.snippet,
+        summary: hit.summary,
+        score: hit.score,
+        similarity: hit.similarity,
+      }));
+
+      stages.push({
+        stage: "finalOutput",
+        label: "Final output",
+        kind: "code",
+        status: hits.length > 0 ? "done" : "skipped",
+        summary: {
+          returned: hits.length,
+          stored: results.length,
+          agentTextChars: results.reduce((total, row) => total + row.agentText.length, 0),
+          note: "Text as the agent received it — summary preferred over snippet, cut at 200 characters. Reading the full document is a separate GetFileContent call.",
+        },
+      });
+    },
+
     finish(status, error, resultCount) {
       if (recorded) return;
       recorded = true;
@@ -97,6 +135,7 @@ export function createSearchTraceCapture(args: {
         error,
         resultCount,
         durationMs: Date.now() - startedAt,
+        results,
       });
     },
   };
@@ -117,6 +156,7 @@ async function recordTrace(input: {
   error: string | null;
   resultCount: number;
   durationMs: number;
+  results: DevSearchTraceResultInput[];
 }): Promise<void> {
   try {
     await createDevSearchTraceRepository(input.db).record({
@@ -132,6 +172,7 @@ async function recordTrace(input: {
       error: input.error,
       resultCount: input.resultCount,
       durationMs: input.durationMs,
+      results: input.results,
     });
   } catch (err) {
     input.logger?.warn({ err }, "Failed to record dev search trace");
