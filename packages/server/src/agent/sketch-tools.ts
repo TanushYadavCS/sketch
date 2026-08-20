@@ -29,7 +29,12 @@ import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
-export { handleSearchUsers, handleSendMessage, handleSendMessageToUsers } from "./tools/messaging";
+export {
+  handleSearchUsers,
+  handleSendMessage,
+  handleSendMessageToTarget,
+  handleSendMessageToUsers,
+} from "./tools/messaging";
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
 export { handleManageAutomationShares } from "./tools/automation-shares";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";

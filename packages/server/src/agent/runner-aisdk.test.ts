@@ -508,6 +508,7 @@ describe("runAgent AI SDK runtime path", () => {
       "mcp__sketch__SearchUsers",
       "mcp__sketch__SendFileToChat",
       "mcp__sketch__SendMessage",
+      "mcp__sketch__SendMessageToTarget",
       "mcp__sketch__SendMessageToUsers",
       "mcp__sketch__SetUserTimezone",
       "mcp__sketch__UpdateInboxWorkflow",

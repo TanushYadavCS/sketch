@@ -9,6 +9,7 @@ import { SpinnerGapIcon } from "@phosphor-icons/react";
 import {
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_TOOL_CATALOG,
+  CHANNEL_WRITE_AGENT_TOOL_NAME,
   DEFAULT_PHONE_COUNTRY,
   type PhoneCountryCode,
   emailSchema,
@@ -50,6 +51,10 @@ const addAgentSchema = z.object({
   name: z.string().min(1),
 });
 
+export const DEFAULT_AGENT_ALLOWED_TOOLS = AGENT_TOOL_CATALOG.filter(
+  (tool) => tool.name !== CHANNEL_WRITE_AGENT_TOOL_NAME,
+).map((tool) => tool.name);
+
 export function AddMemberDialog({
   open,
   users,
@@ -71,7 +76,7 @@ export function AddMemberDialog({
   const [phoneNationalNumber, setPhoneNationalNumber] = useState("");
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
-  const [allowedTools, setAllowedTools] = useState<string[]>(() => AGENT_TOOL_CATALOG.map((t) => t.name));
+  const [allowedTools, setAllowedTools] = useState<string[]>(() => DEFAULT_AGENT_ALLOWED_TOOLS);
   const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
   const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
   const [isWhatsappFallback, setIsWhatsappFallback] = useState(false);
@@ -133,7 +138,7 @@ export function AddMemberDialog({
     setPhoneNationalNumber("");
     setDescription("");
     setReportsTo("none");
-    setAllowedTools(AGENT_TOOL_CATALOG.map((t) => t.name));
+    setAllowedTools(DEFAULT_AGENT_ALLOWED_TOOLS);
     setSlackChannelIds([]);
     setWhatsappGroupJids([]);
     setIsWhatsappFallback(false);

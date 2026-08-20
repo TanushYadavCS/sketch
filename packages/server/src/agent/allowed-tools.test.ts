@@ -21,6 +21,10 @@ describe("agent tool name canonicalization", () => {
     expect(isKnownAgentToolName("mcp__sketch__SearchDeliveryTargets")).toBe(true);
   });
 
+  it("recognizes the separate shared-destination send tool", () => {
+    expect(isKnownAgentToolName("mcp__sketch__SendMessageToTarget")).toBe(true);
+  });
+
   it("canonicalizes and dedupes stored allowlists on read", () => {
     const stored = JSON.stringify([
       "mcp__sketch__SendMessageToUser",

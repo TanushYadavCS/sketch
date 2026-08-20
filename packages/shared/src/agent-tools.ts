@@ -19,6 +19,7 @@ export interface AgentToolCatalogEntry {
 }
 
 export const VISUAL_ANALYSIS_AGENT_TOOL_NAME = "mcp__sketch__VisualAnalysis";
+export const CHANNEL_WRITE_AGENT_TOOL_NAME = "mcp__sketch__SendMessageToTarget";
 
 export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
   {
@@ -145,7 +146,13 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
   {
     name: "mcp__sketch__SendMessage",
     label: "Send message",
-    description: "Send a DM to a team member, or post in a Slack channel or WhatsApp group.",
+    description: "Send a direct message to a team member.",
+    category: "sketch",
+  },
+  {
+    name: CHANNEL_WRITE_AGENT_TOOL_NAME,
+    label: "Send message to channel or group",
+    description: "Post a message in a Slack channel or WhatsApp group.",
     category: "sketch",
   },
   {

@@ -99,6 +99,18 @@ export interface SendMessageParams {
   threadTs?: string;
 }
 
+const sendMessageTargetSchema = z
+  .object({
+    platform: z.enum(["slack", "whatsapp"]).describe("The platform the target belongs to."),
+    targetType: z
+      .enum(["channel", "group"])
+      .describe("Use 'channel' for Slack and 'group' for WhatsApp. Other combinations are rejected."),
+    targetId: z
+      .string()
+      .describe("The targetId returned by SearchDeliveryTargets. Never guess a channel ID or group JID."),
+  })
+  .describe("The channel or group to post in, exactly as returned by SearchDeliveryTargets.");
+
 export type SendMessageDeps = Pick<
   SketchMcpDeps,
   "inboxMessagesRepo" | "userRepo" | "sendDm" | "sendTargetMessage" | "currentUserId" | "db" | "conversationContext"
@@ -233,6 +245,17 @@ export async function handleSendMessage(
   };
 }
 
+export async function handleSendMessageToTarget(
+  params: SendMessageParams,
+  deps: SendMessageDeps,
+  access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
+): Promise<ToolResult> {
+  if (!params.message.trim()) return toolError("message must not be empty.");
+  if (params.recipientUserId !== undefined) return toolError("set only target for channel or group posting.");
+  if (params.target === undefined) return toolError("target is required for channel or group posting.");
+  return sendToTarget({ ...params, target: params.target }, deps, access);
+}
+
 export const searchUsersToolSchema = {
   queries: z.array(z.string()).describe("Names, emails, Slack mentions, or Slack user IDs to resolve."),
 };
@@ -355,28 +378,32 @@ export function createMessagingTools(deps: SketchMcpDeps) {
 
     tool(
       "SendMessage",
-      "Send one message, either as a DM to a team member or into a Slack channel or WhatsApp group. Set exactly one of recipientUserId or target. A DM goes out on the person's connected channel and the same text is also stored as a one-way inbox item, so their agent can see it on their next private chat. For a channel or group, first resolve it with SearchDeliveryTargets and pass the platform, targetType, and targetId it returns; the person you are working for must be a member of it.",
+      "Send one direct message to a team member. A DM goes out on the person's connected channel and the same text is also stored as a one-way inbox item, so their agent can see it on their next private chat.",
       {
         message: z.string().describe("The exact message text to send."),
         recipientUserId: z.string().optional().describe("The user ID from GetTeamDirectory. Use this to send a DM."),
-        target: z
-          .object({
-            platform: z.enum(["slack", "whatsapp"]).describe("The platform the target belongs to."),
-            targetType: z
-              .enum(["channel", "group"])
-              .describe("Use 'channel' for Slack and 'group' for WhatsApp. Other combinations are rejected."),
-            targetId: z
-              .string()
-              .describe("The targetId returned by SearchDeliveryTargets. Never guess a channel ID or group JID."),
-          })
-          .optional()
-          .describe("The channel or group to post in, exactly as returned by SearchDeliveryTargets."),
+      },
+      async (params) => {
+        const rawParams = params as SendMessageParams;
+        if (rawParams.target !== undefined || rawParams.threadTs !== undefined) {
+          return toolError("channel and group posting requires SendMessageToTarget.");
+        }
+        return handleSendMessage(rawParams, deps);
+      },
+    ),
+
+    tool(
+      "SendMessageToTarget",
+      "Post one message in a Slack channel or WhatsApp group. First resolve the destination with SearchDeliveryTargets and pass its platform, targetType, and targetId. The person you are working for must be a member of the destination.",
+      {
+        message: z.string().describe("The exact message text to send."),
+        target: sendMessageTargetSchema,
         threadTs: z
           .string()
           .optional()
           .describe("Slack thread timestamp to reply in. Only valid with a Slack channel target."),
       },
-      async (params) => handleSendMessage(params, deps),
+      async (params) => handleSendMessageToTarget(params, deps),
     ),
 
     tool(

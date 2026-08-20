@@ -14,6 +14,7 @@ import {
   handleResolveInboxWorkflow,
   handleSearchUsers,
   handleSendMessage,
+  handleSendMessageToTarget,
   handleSendMessageToUsers,
   handleSetUserTimezone,
   handleUpdateInboxWorkflow,
@@ -1161,6 +1162,45 @@ describe("handleSendMessage to a channel or group", () => {
 
     expect(result.content[0].text).toContain("requires an authenticated requesting user");
     expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("registered messaging tools", () => {
+  it("keeps the DM tool from posting to a shared destination at runtime", async () => {
+    const { createMessagingTools } = await import("./tools/messaging");
+    const tools = createMessagingTools({
+      currentUserId: "user-alice",
+      workspaceDir: "/tmp/workspace",
+      uploadCollector: new UploadCollector(),
+      sendTargetMessage: vi.fn(),
+    });
+    const dmTool = tools.find((entry) => entry.name === "SendMessage");
+
+    const result = await dmTool?.handler(
+      {
+        message: "post this",
+        target: { platform: "slack", targetType: "channel", targetId: "C123" },
+      } as never,
+      {} as never,
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Error: channel and group posting requires SendMessageToTarget." }],
+    });
+  });
+
+  it("keeps channel and group posting available through the separate tool", async () => {
+    const slackTarget = { platform: "slack" as const, targetType: "channel" as const, targetId: "C123" };
+    const deps = {
+      db: {} as unknown as NonNullable<Parameters<typeof handleSendMessageToTarget>[1]["db"]>,
+      currentUserId: "user-alice",
+      sendTargetMessage: vi.fn().mockResolvedValue({ messageRef: "1700000000.0001" }),
+    };
+    const result = await handleSendMessageToTarget({ target: slackTarget, message: "post this" }, deps, {
+      authorizedProviderTargets: async () => new Set(["slack:C123"]),
+    });
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "sent", targetId: "C123" });
   });
 });
 
