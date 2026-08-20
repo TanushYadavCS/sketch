@@ -212,6 +212,16 @@ describe("entity review seed rows", () => {
       source: "llm_extraction",
     });
     await repo.markRetired([first.row.id], "weekly_junk", "weekly-mint", new Date().toISOString());
+    await db
+      .insertInto("weekly_mint_candidates")
+      .values({
+        review_id: first.row.id,
+        company_key: "company-1",
+        dry_streak: 3,
+        retired_at: new Date().toISOString(),
+        retired_reason: "weekly_junk",
+      })
+      .execute();
 
     const replayed = await repo.upsertQueueRow({
       proposedName: "Budget Dashboard",
@@ -227,6 +237,12 @@ describe("entity review seed rows", () => {
     });
     expect(replayed.skipEvidence).toBe(true);
     expect(replayed.row.status).toBe("retired");
+    const stillRetired = await db
+      .selectFrom("weekly_mint_candidates")
+      .select("retired_at")
+      .where("review_id", "=", first.row.id)
+      .executeTakeFirstOrThrow();
+    expect(stillRetired.retired_at).not.toBeNull();
 
     const revived = await repo.upsertQueueRow({
       proposedName: "Budget Dashboard",
@@ -243,5 +259,12 @@ describe("entity review seed rows", () => {
     expect(revived.skipEvidence).toBe(false);
     expect(revived.row.status).toBe("pending");
     expect(revived.row.retired_reason).toBeNull();
+
+    const candidate = await db
+      .selectFrom("weekly_mint_candidates")
+      .select(["dry_streak", "retired_at", "retired_reason"])
+      .where("review_id", "=", first.row.id)
+      .executeTakeFirstOrThrow();
+    expect(candidate).toEqual({ dry_streak: 0, retired_at: null, retired_reason: null });
   });
 });

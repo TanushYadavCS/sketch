@@ -834,7 +834,7 @@ async function incrementDryStreak(
           resolved_at: now,
         })
         .where("id", "=", reviewId)
-        .where("status", "=", "pending")
+        .where("status", "in", ["pending", "deferred"])
         .executeTakeFirst();
       if (Number(result.numUpdatedRows ?? 0) > 0) {
         retired.push({ reviewId, groupNames: group.names });

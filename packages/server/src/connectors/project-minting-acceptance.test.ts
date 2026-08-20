@@ -115,11 +115,13 @@ describe("project minting junk retirement", () => {
     };
   }
 
+  /** The junked row sits `deferred` (a pass set it aside) — junk must retire deferred rows too, or the queue row stays visible while its candidate is excluded from weekly runs forever. */
   it("junking a project via accept retires covered rows while a sibling stays pooled", async () => {
     const corpus = await seedCorpus();
     const keepReviewId = await seedProjectReview("Keep Work", corpus.fileIds);
     const junkReviewId = await seedProjectReview("Junk Work", corpus.fileIds);
     const siblingReviewId = await seedProjectReview("Sibling Work", corpus.fileIds);
+    await db.updateTable("entity_review_queue").set({ status: "deferred" }).where("id", "=", junkReviewId).execute();
     await db
       .insertInto("weekly_mint_candidates")
       .values([

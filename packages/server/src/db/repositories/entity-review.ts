@@ -295,6 +295,14 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (existing.status === "retired" && !reviving) {
         return { row: existing, skipEvidence: true };
       }
+      if (reviving) {
+        await db
+          .updateTable("weekly_mint_candidates")
+          .set({ retired_at: null, retired_reason: null, dry_streak: 0, updated_at: now })
+          .where("review_id", "=", existing.id)
+          .where("retired_at", "is not", null)
+          .execute();
+      }
 
       const reviewStartedAt = existing.review_started_at;
       const midReview = reviewStartedAt !== null && Date.now() - new Date(reviewStartedAt).getTime() < freezeMs;
@@ -971,6 +979,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return Number(result[0]?.numUpdatedRows ?? 0) > 0;
     },
 
+    /**
+     * Covers `deferred` as well as `pending`: both are non-terminal and can
+     * return to the pool, and the caller retires the weekly candidate rows
+     * unconditionally — flipping only pending would leave a deferred row
+     * visible in the queue while its candidate is excluded from weekly runs.
+     */
     async markRetired(reviewIds: string[], reason: ReviewRetiredReason, by: string, now = new Date().toISOString()) {
       const ids = [...new Set(reviewIds.filter((reviewId) => reviewId.length > 0))];
       if (ids.length === 0) return 0;
@@ -983,7 +997,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           resolved_at: now,
         })
         .where("id", "in", ids)
-        .where("status", "=", "pending")
+        .where("status", "in", ["pending", "deferred"])
         .executeTakeFirst();
       return Number(result.numUpdatedRows ?? 0);
     },
