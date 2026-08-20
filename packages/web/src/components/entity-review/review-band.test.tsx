@@ -136,6 +136,25 @@ describe("ReviewBand birth rows", () => {
     expect(screen.queryByTestId("reconcile-proposed")).not.toBeInTheDocument();
   });
 
+  it("closes a person inspect sheet without removing the person from review", async () => {
+    const person = birthRow({ entity_type: "person", proposed_name: "Priya Shah" });
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [person], total: 1 })),
+      http.get("/api/entity-review/:id", () => HttpResponse.json({ row: person, evidence: [] })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewBand types={["person"]} />);
+
+    await user.click(await screen.findByTestId("birth-inspect"));
+    expect(await screen.findByTestId("birth-inspect-dismiss")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("birth-inspect-dismiss"));
+
+    await waitFor(() => expect(screen.queryByTestId("birth-inspect-dismiss")).not.toBeInTheDocument());
+    expect(screen.getByText("Priya Shah")).toBeInTheDocument();
+  });
+
   it("lists the tasks under a tracker seed in the inspect sheet", async () => {
     server.use(
       http.get("/api/entity-review", () => HttpResponse.json({ rows: [birthRow()], total: 1 })),

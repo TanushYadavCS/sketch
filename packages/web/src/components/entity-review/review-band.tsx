@@ -321,6 +321,7 @@ export function BirthInspectSheet({
             evidence={evidence}
             childTasks={childTasks}
             childTaskCount={childTaskCount}
+            onClose={onClose}
             onResolved={() => {
               onResolved();
               onClose();
@@ -337,12 +338,14 @@ function BirthInspectBody({
   evidence,
   childTasks,
   childTaskCount,
+  onClose,
   onResolved,
 }: {
   row: EntityReviewQueueRow;
   evidence: EntityReviewEvidenceRow[];
   childTasks: ChildTask[];
   childTaskCount: number;
+  onClose: () => void;
   onResolved: () => void;
 }) {
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -505,7 +508,7 @@ function BirthInspectBody({
         <Button
           size="sm"
           variant="outline"
-          onClick={() => mutations.dismiss()}
+          onClick={onClose}
           disabled={mutations.isPending}
           className="ml-auto h-7 gap-1 text-[11px] text-muted-foreground hover:text-foreground"
           data-testid="birth-inspect-dismiss"
