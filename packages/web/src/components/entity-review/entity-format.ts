@@ -71,6 +71,21 @@ export function isWeeklyPassProjectRow(row: EntityReviewQueueRow): boolean {
   );
 }
 
+/**
+ * The weekly pass dismisses pooled rows whose last_seen_at is older than
+ * AGE_OUT_WEEKS = 8 weeks (ageOutStaleCandidates in server
+ * connectors/weekly-mint.ts — the source of truth for the cliff). A row in
+ * its final two weeks is flagged "expiring" so the silent age-out stops
+ * being silent. A drifted constant only shifts the chip by a week; cosmetic.
+ */
+const EXPIRY_WARNING_MS = 6 * 7 * 24 * 60 * 60 * 1000;
+
+export function isExpiringSoon(row: EntityReviewQueueRow): boolean {
+  if (!isWeeklyPassProjectRow(row) || !row.last_seen_at) return false;
+  const lastSeen = Date.parse(row.last_seen_at);
+  return Number.isFinite(lastSeen) && Date.now() - lastSeen > EXPIRY_WARNING_MS;
+}
+
 /** Read an entity's email out of its metadata blob, if present. */
 export function entityEmail(entity: EntityListItem | null): string | null {
   const value = entity?.metadata?.email;

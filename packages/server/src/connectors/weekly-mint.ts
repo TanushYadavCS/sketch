@@ -8,7 +8,7 @@ import {
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
-import { WEEKLY_PASS_PROJECT_SOURCES } from "../entities/resolve";
+import { WEEKLY_PASS_PROJECT_SOURCES, confirmReview } from "../entities/resolve";
 import type { GeminiGenerator, GenerateMeta } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
@@ -109,6 +109,8 @@ type ClaimedCandidate = {
   proposedName: string;
   normalizedName: string;
   candidateEntityId: string | null;
+  /** CAS snapshot confirmReview requires; null on old rows → the auto-link falls back to stamping. */
+  candidateGeneratedAt: string | null;
   dryStreak: number;
   evidenceFileIds: string[];
 };
@@ -381,6 +383,7 @@ async function readClaimedCandidates(
       "entity_review_queue.proposed_name as proposedName",
       "entity_review_queue.normalized_name as normalizedName",
       "entity_review_queue.candidate_entity_id as candidateEntityId",
+      "entity_review_queue.candidate_generated_at as candidateGeneratedAt",
       "weekly_mint_candidates.dry_streak as dryStreak",
     ])
     .where("weekly_mint_candidates.company_key", "=", companyKey)
@@ -414,6 +417,7 @@ async function readClaimedCandidates(
       proposedName: row.proposedName,
       normalizedName: row.normalizedName,
       candidateEntityId: row.candidateEntityId,
+      candidateGeneratedAt: row.candidateGeneratedAt,
       dryStreak: row.dryStreak,
       evidenceFileIds: [...new Set(evidenceByReview.get(row.reviewId) ?? [])].sort(),
     }))
@@ -878,7 +882,7 @@ async function groupHasInternalStructuralCoSignal(db: Kysely<DB>, group: Candida
 function splitAliasCandidates(
   candidates: ClaimedCandidate[],
   projects: ExistingProject[],
-): { aliases: Array<{ reviewIds: string[]; targetEntityId: string }>; rest: ClaimedCandidate[] } {
+): { aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }>; rest: ClaimedCandidate[] } {
   const projectByKey = new Map<string, string>();
   for (const project of projects) {
     for (const name of [project.name, ...project.aliases]) {
@@ -886,11 +890,11 @@ function splitAliasCandidates(
       if (!projectByKey.has(key)) projectByKey.set(key, project.entityId);
     }
   }
-  const aliases: Array<{ reviewIds: string[]; targetEntityId: string }> = [];
+  const aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }> = [];
   const rest: ClaimedCandidate[] = [];
   for (const candidate of candidates) {
     const targetEntityId = projectByKey.get(normalizeName(candidate.proposedName));
-    if (targetEntityId) aliases.push({ reviewIds: [candidate.reviewId], targetEntityId });
+    if (targetEntityId) aliases.push({ candidate, targetEntityId });
     else rest.push(candidate);
   }
   return { aliases, rest };
@@ -916,6 +920,58 @@ async function markAliasCandidates(
         .execute();
     }
   }
+}
+
+/**
+ * Deterministic exact-name matches are auto-linked through the same
+ * confirmReview merge path a human Link click uses (user decision,
+ * 2026-08-20). A row the full path cannot take — null CAS snapshot, drift, a
+ * guard, an FK — falls back to the candidate stamp, degrading to the old
+ * human Link chore rather than ever losing the row. Model-asserted alias
+ * groups from the verdict deliberately stay on the stamp path.
+ */
+async function autoLinkAliasCandidates(
+  db: Kysely<DB>,
+  logger: Logger,
+  aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }>,
+  now: string,
+): Promise<{ linked: number; stamped: number }> {
+  let linked = 0;
+  let stamped = 0;
+  for (const { candidate, targetEntityId } of aliases) {
+    const stamp = () =>
+      markAliasCandidates(db, [{ reviewIds: [candidate.reviewId], targetEntityId }], now).then(() => {
+        stamped += 1;
+      });
+    if (!candidate.candidateGeneratedAt) {
+      await stamp();
+      continue;
+    }
+    try {
+      const outcome = await confirmReview(
+        { db, userId: "weekly-mint-alias", machineActor: true, logger },
+        candidate.reviewId,
+        {
+          candidateGeneratedAt: candidate.candidateGeneratedAt,
+          mergeIntoEntityId: targetEntityId,
+        },
+      );
+      if (outcome.targetEntityId === targetEntityId) linked += 1;
+      else {
+        logger.warn(
+          { reviewId: candidate.reviewId, targetEntityId, resolvedInto: outcome.targetEntityId },
+          "Weekly mint alias auto-link replayed into a different target",
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, reviewId: candidate.reviewId, targetEntityId },
+        "Weekly mint alias auto-link failed; stamping for manual Link",
+      );
+      await stamp().catch(() => {});
+    }
+  }
+  return { linked, stamped };
 }
 
 async function ageOutStaleCandidates(db: Kysely<DB>, companyKey: string, clock: Date, now: string): Promise<number> {
@@ -1946,8 +2002,8 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const existingProjects = await loadExistingProjects(deps.db, container.fileIds, container.companyEntityId);
         const { aliases: exactAliases, rest } = splitAliasCandidates(candidates, existingProjects);
         if (deps.mode === "live" && exactAliases.length > 0) {
-          await markAliasCandidates(deps.db, exactAliases, batchNow);
-          await writeRunEvent(container, "alias_marked", { count: exactAliases.length, phase: "exact" });
+          const { linked, stamped } = await autoLinkAliasCandidates(deps.db, deps.logger, exactAliases, batchNow);
+          await writeRunEvent(container, "alias_linked", { linked, stamped });
         }
         const groups = groupClaimedCandidates(rest, container.companyName).filter((group) => group.tokens.length > 0);
         const scanResults = await scanTokenRecurrence(deps.db, {

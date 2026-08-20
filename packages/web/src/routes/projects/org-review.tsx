@@ -10,7 +10,7 @@
  * inspect sheet ({@link BirthInspectSheet}) for rows without one — evidence,
  * match reason, and pick-a-different-existing all live there.
  */
-import { isWeeklyPassProjectRow } from "@/components/entity-review/entity-format";
+import { isExpiringSoon, isWeeklyPassProjectRow } from "@/components/entity-review/entity-format";
 import { BirthInspectSheet, ReviewDetailSheet } from "@/components/entity-review/review-band";
 import {
   WhatsAppIdentityDrawer,
@@ -230,12 +230,15 @@ function PoolingSummary({
 
   if (rows.length === 0) return null;
 
+  const expiringCount = rows.filter(isExpiringSoon).length;
+
   return (
     <div className="border-t border-amber-300/40 dark:border-amber-700/30" data-testid="review-band-pooling">
       <div className="flex items-center justify-between gap-2 px-3 py-2">
         <span className="min-w-0 truncate text-[11.5px] text-muted-foreground">
           {rows.length} new {rows.length === 1 ? "name" : "names"} pooling for the weekly pass · next pass{" "}
           {nextPassLabel()}
+          {expiringCount > 0 ? ` · ${expiringCount} expiring` : ""}
         </span>
         {isAdmin ? (
           started ? (
@@ -269,6 +272,14 @@ function PoolingSummary({
             >
               <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="sm" />
               <span className="min-w-0 flex-1 truncate text-[12px]">{row.proposed_name}</span>
+              {isExpiringSoon(row) ? (
+                <span
+                  className="shrink-0 rounded-sm bg-muted px-1 py-px text-[9.5px] uppercase tracking-wide text-muted-foreground"
+                  data-testid="review-band-expiring-chip"
+                >
+                  expiring
+                </span>
+              ) : null}
               <span className="shrink-0 text-[10.5px] text-muted-foreground/70">seen {row.occurrence_count}×</span>
             </div>
           ))}

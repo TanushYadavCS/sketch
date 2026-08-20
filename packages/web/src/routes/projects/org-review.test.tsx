@@ -10,6 +10,7 @@ import type { EntityReviewQueueRow } from "@/lib/api";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { ReviewBandCapped } from "./org-review";
@@ -101,5 +102,39 @@ describe("projects review band action policy", () => {
     const personRow = await screen.findByTestId("org-review-row-row-person");
     expect(within(personRow).getByRole("button", { name: "Add" })).toBeInTheDocument();
     expect(within(personRow).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+  });
+
+  /**
+   * The 8-week age-out used to be silent — a pooled row's last fortnight is
+   * now visible: a count on the summary line and a chip on the row, so a name
+   * about to fall off can be rescued (or let go) deliberately.
+   */
+  it("flags pooled rows nearing the age-out cliff as expiring", async () => {
+    const stale = queueRow({
+      id: "row-stale",
+      proposed_name: "Old Falcon",
+      entity_type: "project",
+      last_seen_at: new Date(Date.now() - 7 * 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const fresh = queueRow({ id: "row-fresh", proposed_name: "New Falcon", entity_type: "project" });
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [stale, fresh], total: 2 })),
+      http.get("/api/project-minting/verdicts", () => HttpResponse.json({ verdicts: [] })),
+      http.get("/api/entities/whatsapp/identities", () =>
+        HttpResponse.json({ items: [], viewerHasWhatsAppIdentity: false }),
+      ),
+    );
+
+    renderWithProviders(<ReviewBandCapped types={["project"]} isAdmin />);
+
+    const pooling = await screen.findByTestId("review-band-pooling");
+    expect(pooling).toHaveTextContent("2 new names pooling for the weekly pass");
+    expect(pooling).toHaveTextContent("1 expiring");
+
+    await userEvent.click(screen.getByTestId("review-band-toggle"));
+    const chips = await screen.findAllByTestId("review-band-expiring-chip");
+    expect(chips).toHaveLength(1);
+    expect(screen.getByTestId("review-band-pooling-row-row-stale")).toHaveTextContent("expiring");
+    expect(screen.getByTestId("review-band-pooling-row-row-fresh")).not.toHaveTextContent("expiring");
   });
 });

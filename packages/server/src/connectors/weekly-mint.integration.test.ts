@@ -944,13 +944,13 @@ describe("weekly mint pass", () => {
 
     const aliasRow = await db
       .selectFrom("entity_review_queue")
-      .select(["candidate_entity_id", "candidate_reason", "status"])
+      .select(["resolved_entity_id", "resolved_by", "status"])
       .where("id", "=", aliasReviewId)
       .executeTakeFirstOrThrow();
     expect(aliasRow).toMatchObject({
-      candidate_entity_id: atlasId,
-      candidate_reason: "weekly-mint-alias",
-      status: "pending",
+      resolved_entity_id: atlasId,
+      resolved_by: "weekly-mint-alias",
+      status: "confirmed",
     });
     const phaseRow = await db
       .selectFrom("entity_review_queue")
@@ -966,6 +966,73 @@ describe("weekly mint pass", () => {
     expect(verdicts).toHaveLength(1);
     const verdict = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true });
     expect(verdict.projects.map((project) => project.name)).toEqual(["Atlas Phase Two"]);
+  });
+
+  /**
+   * Loop closing: a deterministic exact-name alias is auto-linked through the
+   * full confirmReview merge path (terminal row, machine resolved_by), while a
+   * model-asserted alias only gets the candidate stamp and waits for a human —
+   * the model's alias judgment is what the Phase 3 eval measures before it is
+   * trusted to resolve rows.
+   */
+  it("auto-links exact alias candidates but only stamps model-asserted aliases", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-05-04", content: "Beacon phase two planning." },
+        { date: "2026-05-05", content: "Beacon phase two iteration." },
+        { date: "2026-05-06", content: "Beacon phase two wrap." },
+        { date: "2026-05-04", content: "Atlas rollout sync." },
+      ],
+    });
+    const atlasId = await seedProjectEntity(db, "Atlas", ["Atlas Rollout"], corpus.companyId);
+    const exactReviewId = await queueProjectReview(db, { name: "Atlas Rollout", fileIds: [corpus.fileIds[3]] });
+    const beaconReviewId = await queueProjectReview(db, {
+      name: "Beacon Phase Two",
+      fileIds: corpus.fileIds.slice(0, 3),
+    });
+    const generator: GeminiGenerator = {
+      async generate() {
+        return "";
+      },
+      async generateJSON<T>() {
+        return { groups: [{ groupKey: beaconReviewId, action: "alias_of", targetEntityId: atlasId }] } as T;
+      },
+    };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator,
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-05-11T00:00:00.000Z"));
+
+    const exactRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["status", "resolved_by", "resolved_entity_id"])
+      .where("id", "=", exactReviewId)
+      .executeTakeFirstOrThrow();
+    expect(exactRow).toMatchObject({
+      status: "confirmed",
+      resolved_by: "weekly-mint-alias",
+      resolved_entity_id: atlasId,
+    });
+    const beaconRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["status", "candidate_entity_id", "candidate_reason"])
+      .where("id", "=", beaconReviewId)
+      .executeTakeFirstOrThrow();
+    expect(beaconRow).toMatchObject({
+      status: "pending",
+      candidate_entity_id: atlasId,
+      candidate_reason: "weekly-mint-alias",
+    });
+    const events = await db.selectFrom("weekly_mint_run_events").selectAll().execute();
+    const linkedEvent = events.find((event) => event.kind === "alias_linked");
+    expect(JSON.parse(linkedEvent?.detail ?? "{}")).toEqual({ linked: 1, stamped: 0 });
+    const markedEvent = events.find((event) => event.kind === "alias_marked");
+    expect(JSON.parse(markedEvent?.detail ?? "{}")).toMatchObject({ phase: "verdict" });
   });
 
   /**

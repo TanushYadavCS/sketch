@@ -1071,6 +1071,98 @@ describe("project minting verdict acceptance", () => {
   });
 
   /**
+   * Loop closing: rows a minted project covered must leave the pool at
+   * accept — resolved into the minted entity with the proposed name kept as
+   * an alias — while a struck project's rows stay pooled because nothing was
+   * minted for them.
+   */
+  it("resolves covered queue rows into the minted entity and leaves struck projects' rows pooled", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Loopclose", "loopclose.example");
+    const fileIds: string[] = [];
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Loop Standup",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Loop shell and strike shell updates.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@loopclose.example");
+      fileIds.push(fileId);
+    }
+    const keptReviewA = await seedProjectReview(db, "Keep Shell Legacy", fileIds.slice(0, 2));
+    const keptReviewB = await seedProjectReview(db, "Keep Shell", fileIds.slice(2, 4));
+    const struckReview = await seedProjectReview(db, "Strike Shell", fileIds.slice(0, 2));
+    const verdictId = await storeWeeklyVerdict(db, {
+      companyEntityId: companyId,
+      companyName: "Loopclose",
+      fileCount: fileIds.length,
+      verdict: readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: null,
+        projects: [
+          {
+            name: "Keep Shell",
+            status: "active",
+            confidence: "medium",
+            parentName: null,
+            evidenceTitleFamilies: ["Loop Standup"],
+            evidenceRepos: [],
+            evidenceFragments: [],
+            coveredReviewIds: [keptReviewA, keptReviewB],
+            evidencePeople: [],
+          },
+          {
+            name: "Strike Shell",
+            status: "active",
+            confidence: "low",
+            parentName: null,
+            evidenceTitleFamilies: ["Loop Standup"],
+            evidenceRepos: [],
+            evidenceFragments: [],
+            coveredReviewIds: [struckReview],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    });
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...acceptanceBody("client", "active"), struckProjectNames: ["Strike Shell"] }),
+    });
+    const body = (await res.json()) as {
+      acceptance: { entities: { id: string; name: string }[]; coveredReviewsResolved?: number };
+    };
+    expect(res.status).toBe(200);
+    expect(body.acceptance.coveredReviewsResolved).toBe(2);
+    const keepEntityId = body.acceptance.entities.find((entity) => entity.name === "Keep Shell")?.id;
+    if (!keepEntityId) throw new Error("Keep Shell entity missing from accept result");
+
+    const rows = await db
+      .selectFrom("entity_review_queue")
+      .select(["id", "status", "resolved_entity_id"])
+      .where("id", "in", [keptReviewA, keptReviewB, struckReview])
+      .execute();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(keptReviewA)).toMatchObject({ status: "confirmed", resolved_entity_id: keepEntityId });
+    expect(byId.get(keptReviewB)).toMatchObject({ status: "confirmed", resolved_entity_id: keepEntityId });
+    expect(byId.get(struckReview)).toMatchObject({ status: "pending", resolved_entity_id: null });
+
+    const keepEntity = await db
+      .selectFrom("entities")
+      .select(["aliases"])
+      .where("id", "=", keepEntityId)
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(keepEntity.aliases ?? "[]")).toContain("Keep Shell Legacy");
+  });
+
+  /**
    * The one case still worth refusing. Nothing ties the project to the corpus,
    * so minting it would create an entity on no evidence at all.
    */

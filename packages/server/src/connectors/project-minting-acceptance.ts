@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
+import type { Logger } from "pino";
 import {
   type ClientStage,
   type CounterpartyKind,
@@ -18,6 +19,7 @@ import type { DB } from "../db/schema";
 import { withMaterializeReplayQueue } from "../entities/materialize-replay";
 import { EntityMergeError, mergeEntities } from "../entities/merge";
 import { ProjectBindingError, assertNoPartOfCycle } from "../entities/project-bindings";
+import { confirmReview } from "../entities/resolve";
 import { normalizeName } from "./name-normalize";
 import {
   type ClientCluster,
@@ -50,6 +52,8 @@ export interface AcceptProjectMintingVerdictInput {
   overrideTripwireFlags?: boolean;
   /** Plan without writing: full validation and gate math, zero graph writes, no CAS, no declaration. */
   dryRun?: boolean;
+  /** For per-row covered-review resolution failures; absent → failures are counted but not logged. */
+  logger?: Logger;
 }
 
 export interface AcceptedEntitySummary {
@@ -104,6 +108,15 @@ export interface ProjectMintingAcceptResult {
    * Absent on results stored before this was recorded.
    */
   unresolvedAnchors: string[];
+  /**
+   * Loop closing: queue rows this verdict's accepted projects covered,
+   * resolved into the minted entities at accept time via the confirmReview
+   * merge path. Absent on results stored before this existed; `Failed` is
+   * present only when nonzero — a failed row simply stays pooled and the
+   * next weekly pass exact-alias-links it against the now-existing project.
+   */
+  coveredReviewsResolved?: number;
+  coveredReviewsFailed?: number;
   /**
    * Where files matching no accepted project will attach (post-rename name),
    * or null when nothing catches them. Populated on dry runs so the sheet can
@@ -1195,6 +1208,63 @@ async function resolveStandingProductParent(db: Kysely<DB>, entityId: string): P
   return row?.id ?? null;
 }
 
+/**
+ * Close the weekly loop: the queue rows an accepted project covered are
+ * resolved into its minted entity through the same confirmReview merge path a
+ * human Link click uses — alias, evidence transfer, terminal status. Runs
+ * while `projectIdsByOriginalName` is alive (the public result carries
+ * renamed, display-sorted names that cannot be mapped back) and before
+ * `markAccepted` persists the result, so the counts land in the stored result
+ * and covered rows leave the pool before the verdict stops shielding them.
+ * Per-row failures never fail the accept: an unresolved row re-pools and the
+ * next weekly pass exact-alias-links it against the now-existing project.
+ * A row that is missing or already terminal is skipped without counting —
+ * only rows that should have resolved and did not count as failed.
+ */
+async function resolveCoveredReviews(
+  db: Kysely<DB>,
+  plan: AcceptancePlan,
+  projectIdsByOriginalName: Map<string, string>,
+): Promise<{ resolved: number; failed: number }> {
+  let resolved = 0;
+  let failed = 0;
+  const seen = new Set<string>();
+  for (const project of plan.acceptedProjects) {
+    const entityId = projectIdsByOriginalName.get(project.name);
+    if (!entityId) continue;
+    for (const reviewId of project.coveredReviewIds ?? []) {
+      if (seen.has(reviewId)) continue;
+      seen.add(reviewId);
+      try {
+        const row = await db
+          .selectFrom("entity_review_queue")
+          .select(["status", "candidate_generated_at"])
+          .where("id", "=", reviewId)
+          .executeTakeFirst();
+        if (!row || row.status !== "pending") continue;
+        if (!row.candidate_generated_at) {
+          failed += 1;
+          continue;
+        }
+        const outcome = await confirmReview(
+          { db, userId: plan.input.actorUserId, logger: plan.input.logger },
+          reviewId,
+          { candidateGeneratedAt: row.candidate_generated_at, mergeIntoEntityId: entityId },
+        );
+        if (outcome.targetEntityId === entityId) resolved += 1;
+        else failed += 1;
+      } catch (error) {
+        failed += 1;
+        plan.input.logger?.warn(
+          { err: error, reviewId, entityId, verdictId: plan.row.id },
+          "Covered review resolution failed; row stays pooled",
+        );
+      }
+    }
+  }
+  return { resolved, failed };
+}
+
 async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promise<ProjectMintingAcceptResult> {
   const { verdict, container, renameMap, canonicalByName } = plan;
   const projectIdsByOriginalName = new Map<string, string>();
@@ -1360,12 +1430,16 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
     });
   }
 
+  const covered = await resolveCoveredReviews(db, plan, projectIdsByOriginalName);
+
   return {
     ...planResult(plan),
     entityIds: { engagementId, projectIds },
     entities: entities.sort((a, b) => a.name.localeCompare(b.name)),
     mergeIds: mergeIds.sort(),
     taskParentUpdates,
+    coveredReviewsResolved: covered.resolved,
+    ...(covered.failed > 0 ? { coveredReviewsFailed: covered.failed } : {}),
   };
 }
 

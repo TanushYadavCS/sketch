@@ -520,6 +520,7 @@ export function projectMintingRoutes(
       const result = await acceptProjectMintingVerdict(db, {
         verdictId: c.req.param("id"),
         actorUserId: c.get("sub"),
+        logger,
         ...confirmedAxes,
         struckProjectNames: readStringArray(body.struckProjectNames),
         renameMap: readRenameMap(body.renameMap),

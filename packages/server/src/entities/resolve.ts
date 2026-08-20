@@ -103,6 +103,13 @@ export class ResolveError extends Error {
 export interface ResolveCtx {
   db: Kysely<DB>;
   userId: string;
+  /**
+   * Machine resolutions (e.g. the weekly pass auto-linking exact aliases):
+   * `resolved_by` still records the userId string, but FK'd actor columns
+   * (entity_merges.merged_by_user_id references users.id) are written null
+   * because the id is a machine label, not a users row.
+   */
+  machineActor?: boolean;
   /** Override `Date.now()` ISO for tests. Defaults to current time. */
   now?: string;
   logger?: Logger;
@@ -113,6 +120,7 @@ interface ResolveTxnCtx {
   repo: ReturnType<typeof createEntityReviewRepo>;
   entityRepo: ReturnType<typeof createEntityRepository>;
   userId: string;
+  machineActor?: boolean;
   now: string;
   logger?: Logger;
 }
@@ -706,6 +714,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       repo: createEntityReviewRepo(trx),
       entityRepo: createEntityRepository(trx),
       userId: ctx.userId,
+      machineActor: ctx.machineActor,
       now: ctx.now ?? new Date().toISOString(),
       logger: ctx.logger,
     };
@@ -869,7 +878,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         await mergeEntitiesInTransaction(trxCtx.db, {
           survivorId: target.id,
           loserId: stales[0].id,
-          userId: trxCtx.userId,
+          ...(trxCtx.machineActor ? {} : { userId: trxCtx.userId }),
         });
         mergedStaleEntityId = stales[0].id;
       }
