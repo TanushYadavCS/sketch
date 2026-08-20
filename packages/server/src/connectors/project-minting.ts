@@ -13,10 +13,12 @@
  * cluster in the earlier validation inherited files that merely named the
  * brand and minted two projects belonging to other clients; entity_mentions
  * are therefore never a membership signal. A file joins a company's cluster
- * on participants with that company's corporate email domain, on living in a
- * chat channel dedicated to that company by name, or — third signal — on
- * carrying a title family that already belongs to exactly one cluster
- * (family accretion, one iteration, no fixpoint).
+ * on participants with that company's corporate email domain, on a
+ * participant being a person with a high-trust works_at edge to the company
+ * (participant_affiliation — the domainless-company analogue), on living in a
+ * chat channel dedicated to that company by name, or on carrying a title
+ * family that already belongs to exactly one cluster (family accretion, one
+ * iteration, no fixpoint).
  *
  * Clusters are keyed by company duplicate GROUP, not by company row: the
  * validation found the same real-world client split across shards ("Oliver
@@ -31,10 +33,11 @@ import {
   createCompanyRelationshipDeclarationRepository,
   resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
-import { whereLiveEntity } from "../db/repositories/entities";
+import { normalizeContactPointValue, whereLiveEntity } from "../db/repositories/entities";
 import { normalizeEmailDomain } from "../db/repositories/entity-domains";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
+import { resolvePersonEntitiesForEmails } from "../db/repositories/user-entity-resolver";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import {
@@ -46,6 +49,7 @@ import { isPersonalOrSharedDomain } from "../entities/personal-domains";
 import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { GeminiGenerator } from "./gemini-generate";
+import { loadAffiliationIndex, loadWhatsAppSenderPersonsByFile } from "./participant-affiliation";
 import { type TokenRecurrence, scanTokenRecurrence } from "./token-recurrence-scan";
 
 export const PROJECT_MINTING_PROMPT_VERSION = "project-minting-verdict-v3";
@@ -74,7 +78,11 @@ const LINK_CAP = 15;
 const EVENT_CAP = 220;
 const VERDICT_MAX_TOKENS = 40_000;
 
-export type MembershipSignal = "participant_domain" | "dedicated_channel" | "family_accretion";
+export type MembershipSignal =
+  | "participant_domain"
+  | "participant_affiliation"
+  | "dedicated_channel"
+  | "family_accretion";
 
 export interface ClusterFile {
   fileId: string;
@@ -680,6 +688,74 @@ export async function clusterClientFiles(
     const canonicalId = holder ? canonicalByMember.get(holder) : undefined;
     if (!canonicalId) continue;
     addMember(canonicalId, row.fileId, "participant_domain");
+  }
+
+  /**
+   * Fourth signal: a participant who is a person with a high-trust works_at
+   * edge to an outside company attaches the file — the domainless-company
+   * analogue of participant_domain. Own-org-affiliated people never generate
+   * it, targets resolve through canonicalByMember (own-org groups are absent
+   * there, so non-outside targets drop before addMember), and everything is
+   * batched — no per-file resolver calls. See participant-affiliation.ts for
+   * the trust gates.
+   */
+  const ownOrgCompanyIds = new Set(
+    groups.filter((group) => group.ownOrg).flatMap((group) => group.members.map((member) => member.entityId)),
+  );
+  const affiliation = await loadAffiliationIndex(db, ownOrgCompanyIds);
+  if (affiliation.companiesByPerson.size > 0) {
+    const emailsByFile = new Map<string, Set<string>>();
+    const emailsToResolve = new Set<string>();
+    for (const row of participantRows) {
+      if (!row.fileId) continue;
+      const email = row.email?.trim();
+      if (!email || isRoleAccountEmail(email)) continue;
+      const domain = normalizeEmailDomain(email);
+      if (domain && orgDomains.has(domain)) continue;
+      const normalized = normalizeContactPointValue("email", email);
+      let set = emailsByFile.get(row.fileId);
+      if (!set) {
+        set = new Set();
+        emailsByFile.set(row.fileId, set);
+      }
+      set.add(normalized);
+      emailsToResolve.add(normalized);
+    }
+    const personsByEmail = await resolvePersonEntitiesForEmails(db, [...emailsToResolve]);
+    const personByEmail = new Map<string, string>();
+    for (const [email, matches] of personsByEmail) {
+      if (matches.length === 1) personByEmail.set(email, matches[0].id);
+    }
+
+    const personsByFile = await loadWhatsAppSenderPersonsByFile(db);
+    for (const [fileId, emails] of emailsByFile) {
+      for (const email of emails) {
+        const personId = personByEmail.get(email);
+        if (!personId) continue;
+        let set = personsByFile.get(fileId);
+        if (!set) {
+          set = new Set();
+          personsByFile.set(fileId, set);
+        }
+        set.add(personId);
+      }
+    }
+
+    let affiliationProcessed = 0;
+    for (const [fileId, personIds] of personsByFile) {
+      affiliationProcessed += 1;
+      if (affiliationProcessed % YIELD_EVERY === 0) await yieldToEventLoop();
+      for (const personId of personIds) {
+        if (affiliation.ownOrgAffiliatedPersonIds.has(personId)) continue;
+        const companies = affiliation.companiesByPerson.get(personId);
+        if (!companies) continue;
+        for (const companyId of companies) {
+          const canonicalId = canonicalByMember.get(companyId);
+          if (!canonicalId) continue;
+          addMember(canonicalId, fileId, "participant_affiliation");
+        }
+      }
+    }
   }
 
   const conversationRows = await db

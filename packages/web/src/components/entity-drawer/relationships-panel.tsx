@@ -1,20 +1,23 @@
 /**
  * Relationships tab of the entity drawer. Read-only provenance list, plus the
- * one manual write this surface allows: an admin can declare a person→company
- * link (works_at or engaged_with) and unlink declared rows. Inferred rows stay
+ * manual writes this surface allows: an admin can declare a person→company
+ * link from either end — person-side "Link to company", company-side "Add
+ * people" (which issues person-first declare calls, keeping the API
+ * person-first by design) — and unlink declared rows. Inferred rows stay
  * pipeline-owned — no edit or delete on them.
  */
+import { EntityPicker } from "@/components/entity-picker";
 import type { EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
 import { api } from "@/lib/api";
 import { entityAccent, useEntityUi } from "@/lib/entity-ui";
-import { CaretDownIcon, CaretRightIcon, PlusIcon, TrashIcon, WarningIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, CaretRightIcon, PlusIcon, TrashIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { formatRelative } from "./drawer-kit";
@@ -41,6 +44,7 @@ export interface RelationshipsPanelProps {
 export function RelationshipsPanel({ relations, isLoading, entityId, sourceType, isAdmin }: RelationshipsPanelProps) {
   const [linkOpen, setLinkOpen] = useState(false);
   const canDeclare = isAdmin && sourceType === "person";
+  const canAddPeople = isAdmin && sourceType === "company";
 
   if (isLoading) {
     return <Skeleton className="h-20 w-full" />;
@@ -63,6 +67,15 @@ export function RelationshipsPanel({ relations, isLoading, entityId, sourceType,
             Link to company
           </Button>
           <LinkCompanyDialog open={linkOpen} onOpenChange={setLinkOpen} entityId={entityId} />
+        </div>
+      ) : null}
+      {canAddPeople ? (
+        <div className="mb-3">
+          <Button variant="outline" size="sm" onClick={() => setLinkOpen(true)}>
+            <PlusIcon className="mr-1 h-3 w-3" />
+            Add people
+          </Button>
+          <AddPeopleDialog open={linkOpen} onOpenChange={setLinkOpen} companyId={entityId} />
         </div>
       ) : null}
       {all.length === 0 ? (
@@ -179,6 +192,123 @@ function LinkCompanyDialog({
           </Select>
           <Button size="sm" disabled={!selected || declareMutation.isPending} onClick={() => declareMutation.mutate()}>
             {selected ? `Link ${selected.name}` : "Link company"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Company-side declaration: pick people, declare each one's link to this
+ * company via the person-first route. "Works at" replaces a person's previous
+ * declared employer, so rows surface which employer is being replaced before
+ * the admin commits.
+ */
+function AddPeopleDialog({
+  open,
+  onOpenChange,
+  companyId,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  companyId: string;
+}) {
+  const [selected, setSelected] = useState<{ id: string; name: string }[]>([]);
+  const [relationshipType, setRelationshipType] = useState<"works_at" | "engaged_with">("works_at");
+  const queryClient = useQueryClient();
+
+  const relationQueries = useQueries({
+    queries: selected.map((person) => ({
+      queryKey: ["entity-drawer", "relations", person.id],
+      queryFn: () => api.entities.relations(person.id),
+    })),
+  });
+  const declaredEmployerByPerson = new Map<string, string>();
+  selected.forEach((person, index) => {
+    const employer = relationQueries[index]?.data?.outgoing.find(
+      (r) => r.relationshipType === "works_at" && r.source === "declared" && r.other.id !== companyId,
+    );
+    if (employer) declaredEmployerByPerson.set(person.id, employer.other.name);
+  });
+
+  const declareMutation = useMutation({
+    mutationFn: async () => {
+      for (const person of selected) {
+        await api.entities.declareRelationship(person.id, { targetEntityId: companyId, relationshipType });
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "relations"] });
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile"] });
+      toast.success(selected.length === 1 ? "Person linked" : `${selected.length} people linked`);
+      setSelected([]);
+      onOpenChange(false);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to link people"),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Add people</DialogTitle>
+          <DialogDescription>
+            Declare who belongs to this company. "Works at" replaces a person's previously declared employer.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <EntityPicker
+            entityType="person"
+            onPick={(personId, person) => {
+              setSelected((current) =>
+                current.some((p) => p.id === personId) ? current : [...current, { id: personId, name: person.name }],
+              );
+            }}
+            placeholder="Search people"
+          />
+          {selected.length > 0 ? (
+            <div className="flex flex-col rounded-md border">
+              {selected.map((person) => (
+                <div key={person.id} className="flex items-center gap-2 border-b px-2 py-1.5 last:border-b-0">
+                  <span className="truncate text-xs font-medium">{person.name}</span>
+                  {relationshipType === "works_at" && declaredEmployerByPerson.has(person.id) ? (
+                    <span className="truncate text-[10px] text-amber-700 dark:text-amber-500">
+                      replaces {declaredEmployerByPerson.get(person.id)}
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${person.name}`}
+                    onClick={() => setSelected((current) => current.filter((p) => p.id !== person.id))}
+                    className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted"
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <Select
+            value={relationshipType}
+            onValueChange={(value) => setRelationshipType(value as "works_at" | "engaged_with")}
+          >
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="works_at">Works at</SelectItem>
+              <SelectItem value="engaged_with">Engaged with</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            disabled={selected.length === 0 || declareMutation.isPending}
+            onClick={() => declareMutation.mutate()}
+          >
+            {selected.length > 0
+              ? `Link ${selected.length} ${selected.length === 1 ? "person" : "people"}`
+              : "Link people"}
           </Button>
         </div>
       </DialogContent>

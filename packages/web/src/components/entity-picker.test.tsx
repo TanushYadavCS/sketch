@@ -77,6 +77,6 @@ describe("EntityPicker", () => {
     await user.type(screen.getByRole("textbox", { name: /entity search/i }), "simr");
     const option = await screen.findByRole("button", { name: /Simran Suri/i });
     await user.click(option);
-    expect(onPick).toHaveBeenCalledWith("e1");
+    expect(onPick).toHaveBeenCalledWith("e1", expect.objectContaining({ id: "e1", name: "Simran Suri" }));
   });
 });

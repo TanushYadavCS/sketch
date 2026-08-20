@@ -17,7 +17,7 @@ interface EntityPickerProps {
   entityType: string;
   /** Suppress this entity id from results (e.g. the suggested candidate). */
   excludeEntityId?: string;
-  onPick: (entityId: string) => void;
+  onPick: (entityId: string, entity: EntityListItem) => void;
   placeholder?: string;
 }
 
@@ -61,7 +61,9 @@ export function EntityPicker({ entityType, excludeEntityId, onPick, placeholder 
           ) : results.length === 0 ? (
             <div className="px-3 py-2 text-muted-foreground">No matches</div>
           ) : (
-            results.map((entity) => <EntityRow key={entity.id} entity={entity} onPick={() => onPick(entity.id)} />)
+            results.map((entity) => (
+              <EntityRow key={entity.id} entity={entity} onPick={() => onPick(entity.id, entity)} />
+            ))
           )}
         </div>
       ) : null}
