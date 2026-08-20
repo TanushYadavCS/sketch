@@ -9,8 +9,11 @@ import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
 import { WEEKLY_PASS_PROJECT_SOURCES, confirmReview } from "../entities/resolve";
+import { retrieveNameDedupCandidates } from "./embeddings/trunk-name-embeddings";
+import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator, GenerateMeta } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
+import type { AgenticOptions, AgenticOutcome, AgenticToolStep } from "./openrouter-generate";
 import {
   CADENCE_TOKENS,
   type ClientCluster,
@@ -60,6 +63,17 @@ export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST: readonly string[] = [...WEEKLY
 
 type WeeklyMintMode = "shadow" | "live";
 
+export type WeeklyMintJudgeMode = "single" | "agentic";
+
+/**
+ * The one method the agentic judge needs, kept off the shared GeminiGenerator
+ * interface so the Gemini path never grows dummy plumbing. Bootstrap wires the
+ * concrete OpenRouter generator here only when the judge mode is agentic.
+ */
+export interface AgenticJudgeGenerator {
+  generateAgenticJSON<T>(prompt: string, opts: AgenticOptions): Promise<AgenticOutcome<T>>;
+}
+
 export interface WeeklyMintResult {
   status: string;
   stage: string;
@@ -95,6 +109,10 @@ type WeeklyMintDeps = {
   mode: WeeklyMintMode;
   logger: Logger;
   generator?: GeminiGenerator | null;
+  agenticGenerator?: AgenticJudgeGenerator | null;
+  judgeMode?: WeeklyMintJudgeMode;
+  /** Optional fuzzy arm for the judge's lookup_name tool; null degrades the tool to exact-name matching. */
+  embeddingProvider?: EmbeddingProvider | null;
   model?: string | null;
   intervalMs?: number;
   batchSize?: number;
@@ -158,6 +176,7 @@ type ModelDisposition = {
   projectName: string | null;
   targetEntityId: string | null;
   parentGroupKey: string | null;
+  reason: string | null;
 };
 
 type WeeklyPromptGroupContext = {
@@ -1281,6 +1300,7 @@ async function buildWeeklyPrompt(
   groups: CandidateGroup[],
   projects: ExistingProject[],
   products: StandingProduct[],
+  judgeMode: WeeklyMintJudgeMode = "single",
 ): Promise<string> {
   const promptContext = await buildWeeklyPromptContext(db, groups, projects);
   const contexts = promptContext.groups;
@@ -1352,10 +1372,16 @@ When one group's name is a qualified extension of another group's name in this r
 
 Groups that repeatedly share evidence files and stakeholders (see sharedEvidenceWith, which names the other group and its groupKey) are ONE engagement even when each thread names its own deliverable (a portal here, a support thread there) — return the SAME projectName for all of them rather than one project per thread subject. Pick the most specific engagement-level name among them.
 
-Return only JSON:
+${
+  judgeMode === "agentic"
+    ? `You have a lookup_name tool. When a group might duplicate work outside the lists below — a name that sounds like an existing project you cannot see, or a candidate that may belong to another client — call lookup_name with the name BEFORE deciding. It returns matching accepted projects (with entity ids) and pool rows still pending under other containers. Alias or nest into a found project by its entityId. When the same candidate pools under another container that should own it, return skip with reason "pooled_elsewhere".
+
+`
+    : ""
+}Return only JSON:
 {
   "groups": [
-    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of | skip", "projectName": "project name or null", "targetEntityId": "existing project entity id or null", "parentGroupKey": "same-verdict parent groupKey or null" }
+    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of | skip", "projectName": "project name or null", "targetEntityId": "existing project entity id or null", "parentGroupKey": "same-verdict parent groupKey or null", "reason": "short reason or null" }
   ]
 }
 
@@ -1409,6 +1435,7 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
           : null,
       targetEntityId,
       parentGroupKey: action !== "skip" && parentGroupKey && byKey.has(parentGroupKey) ? parentGroupKey : null,
+      reason: typeof rawItem.reason === "string" && rawItem.reason.trim() ? rawItem.reason.trim() : null,
     });
   }
   for (const group of groups) {
@@ -1419,6 +1446,7 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
       projectName: null,
       targetEntityId: group.deterministic.action === "new" ? null : group.deterministic.entityId,
       parentGroupKey: null,
+      reason: null,
     });
   }
   return dispositions;
@@ -1586,7 +1614,12 @@ function buildStoredVerdict(
     }
     if (disposition.action === "skip") {
       skippedGroups += 1;
-      groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "model_skip" });
+      groupDispositions.push({
+        groupKey: group.key,
+        names: group.names,
+        action: "skip",
+        reason: disposition.reason ?? "model_skip",
+      });
       continue;
     }
     if (disposition.action === "alias_of") {
@@ -1738,6 +1771,136 @@ function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGr
   return lines.join("\n");
 }
 
+const LOOKUP_RESULT_CAP = 10;
+
+type JudgeLookupResult = {
+  projects: Array<{ entityId: string; name: string; aliases: string[]; accepted: true }>;
+  poolRows: Array<{
+    reviewId: string;
+    proposedName: string;
+    containerKey: string | null;
+    companyName: string | null;
+    evidenceCount: number;
+    lastSeenAt: string | null;
+  }>;
+};
+
+/**
+ * The judge's one tool: exact normalized-name matching over accepted project
+ * entities and the whole pending pool, with an optional embedding fuzzy arm.
+ * Pool rows carry the container that claimed them so the judge can see "this
+ * name is also pooling under container X" — the cross-container signal the
+ * per-company prompt cannot contain. Read-only by construction.
+ */
+async function lookupNameForJudge(
+  db: Kysely<DB>,
+  embeddingProvider: EmbeddingProvider | null | undefined,
+  name: string,
+): Promise<JudgeLookupResult> {
+  const normalized = normalizeName(name);
+  const fuzzy = await retrieveNameDedupCandidates(db, embeddingProvider, [{ name, type: "project" }]);
+  const fuzzyEntityIds = fuzzy.map((hit) => hit.entityId).filter((id): id is string => id != null);
+  const fuzzyReviewIds = fuzzy.map((hit) => hit.reviewId).filter((id): id is string => id != null);
+
+  const entityRows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("source_type", "=", "project")
+    .where(whereLiveEntity())
+    .execute();
+  const projects = entityRows
+    .filter((row) => {
+      if (fuzzyEntityIds.includes(row.id)) return true;
+      if (normalizeName(row.name) === normalized) return true;
+      return parseAliases(row.aliases).some((alias) => normalizeName(alias) === normalized);
+    })
+    .slice(0, LOOKUP_RESULT_CAP)
+    .map((row) => ({ entityId: row.id, name: row.name, aliases: parseAliases(row.aliases), accepted: true as const }));
+
+  let poolQuery = db
+    .selectFrom("entity_review_queue")
+    .leftJoin("weekly_mint_candidates", "weekly_mint_candidates.review_id", "entity_review_queue.id")
+    .select([
+      "entity_review_queue.id as reviewId",
+      "entity_review_queue.proposed_name as proposedName",
+      "entity_review_queue.last_seen_at as lastSeenAt",
+      "weekly_mint_candidates.company_key as containerKey",
+    ])
+    .where("entity_review_queue.status", "=", "pending")
+    .where("entity_review_queue.entity_type", "=", "project");
+  poolQuery =
+    fuzzyReviewIds.length > 0
+      ? poolQuery.where((eb) =>
+          eb.or([
+            eb("entity_review_queue.normalized_name", "=", normalized),
+            eb("entity_review_queue.id", "in", fuzzyReviewIds),
+          ]),
+        )
+      : poolQuery.where("entity_review_queue.normalized_name", "=", normalized);
+  const poolHits = (await poolQuery.orderBy("entity_review_queue.id", "asc").execute()).slice(0, LOOKUP_RESULT_CAP);
+
+  const evidenceCounts = new Map<string, number>();
+  if (poolHits.length > 0) {
+    const counts = await db
+      .selectFrom("entity_review_evidence")
+      .select(({ fn }) => ["review_id", fn.countAll<number>().as("evidence")])
+      .where(
+        "review_id",
+        "in",
+        poolHits.map((row) => row.reviewId),
+      )
+      .groupBy("review_id")
+      .execute();
+    for (const row of counts) evidenceCounts.set(row.review_id, Number(row.evidence));
+  }
+  const companyNames = new Map<string, string>();
+  const companyIds = [...new Set(poolHits.map((row) => row.containerKey))].filter(
+    (key): key is string => key != null && key !== INTERNAL_CONTAINER_KEY,
+  );
+  if (companyIds.length > 0) {
+    const companies = await db.selectFrom("entities").select(["id", "name"]).where("id", "in", companyIds).execute();
+    for (const row of companies) companyNames.set(row.id, row.name);
+  }
+
+  return {
+    projects,
+    poolRows: poolHits.map((row) => ({
+      reviewId: row.reviewId,
+      proposedName: row.proposedName,
+      containerKey: row.containerKey,
+      companyName:
+        row.containerKey === INTERNAL_CONTAINER_KEY
+          ? INTERNAL_COMPANY_NAME
+          : (companyNames.get(row.containerKey ?? "") ?? null),
+      evidenceCount: evidenceCounts.get(row.reviewId) ?? 0,
+      lastSeenAt: row.lastSeenAt,
+    })),
+  };
+}
+
+/**
+ * Entity ids the model saw through lookup_name during one container's rounds.
+ * Verdict validation re-checks them against the DB (accepted live projects
+ * only) before they may join the valid target set — the transcript itself is
+ * never trusted.
+ */
+async function verifyToolSurfacedProjects(db: Kysely<DB>, entityIds: Set<string>): Promise<ExistingProject[]> {
+  if (entityIds.size === 0) return [];
+  const rows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("id", "in", [...entityIds])
+    .where("source_type", "=", "project")
+    .where(whereLiveEntity())
+    .execute();
+  return rows.map((row) => ({
+    entityId: row.id,
+    name: row.name,
+    aliases: parseAliases(row.aliases),
+    fileIds: new Set<string>(),
+  }));
+}
+
 export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService {
   const intervalMs = deps.intervalMs ?? WEEKLY_MINT_INTERVAL_MS;
   const batchSize = deps.batchSize ?? 100;
@@ -1882,6 +2045,25 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
           .execute();
       } catch (error) {
         deps.logger.warn({ err: error, kind, containerKey: container.key }, "Weekly mint event write failed");
+      }
+    }
+
+    /**
+     * A container being judged supersedes any earlier attempt's transcript for
+     * this run (a crashed attempt leaves partial rows that would collide with
+     * the fresh attempt on the unique (run, container, seq) index and be
+     * silently swallowed). Partial traces therefore survive exactly until the
+     * container is retried — long enough to debug the crash.
+     */
+    async function clearContainerTraces(containerKey: string): Promise<void> {
+      try {
+        await deps.db
+          .deleteFrom("weekly_mint_traces")
+          .where("run_id", "=", ownedRun.id)
+          .where("container_key", "=", containerKey)
+          .execute();
+      } catch (error) {
+        deps.logger.warn({ err: error, containerKey }, "Weekly mint trace clear failed");
       }
     }
 
@@ -2061,19 +2243,28 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             );
           } else {
             if (!deps.generator || !deps.model) throw new Error("weekly mint live mode requires a generator and model");
+            const judgeMode: WeeklyMintJudgeMode = deps.judgeMode ?? "single";
+            if (judgeMode === "agentic" && !deps.agenticGenerator) {
+              throw new Error("weekly mint agentic judge mode requires an agentic generator");
+            }
             const prompt = await buildWeeklyPrompt(
               deps.db,
               container,
               pendingCrossing,
               existingProjects,
               standingProducts,
+              judgeMode,
             );
-            await writeTrace(container.key, 1, "prompt", {
+            await clearContainerTraces(container.key);
+            let seq = 1;
+            await writeTrace(container.key, seq, "prompt", {
               prompt,
               model: deps.model,
               maxTokens: 12_000,
               reasoningEffort: "medium",
               promptVersion: WEEKLY_MINT_PROMPT_VERSION,
+              judgeMode,
+              ...(judgeMode === "agentic" ? { tools: ["lookup_name"] } : {}),
             });
             let generateMeta: GenerateMeta | null = null;
             let responseTraceWritten = false;
@@ -2083,31 +2274,93 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
              * every other company still stores its verdict this week.
              */
             try {
-              const raw = await deps.generator.generateJSON<unknown>(prompt, {
+              const toolSurfacedIds = new Set<string>();
+              let raw: unknown;
+              let judgeStats: { toolCalls: number; rounds: number } | null = null;
+              const generateOptions = {
                 maxTokens: 12_000,
                 label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
                 model: deps.model,
-                reasoningEffort: "medium",
+                reasoningEffort: "medium" as const,
                 thinkingBudget: null,
-                onMeta: (meta) => {
+                onMeta: (meta: GenerateMeta) => {
                   generateMeta = meta;
                 },
-              });
-              await writeTrace(container.key, 2, "response", generateMeta ?? { outcome: "ok", rawText: "" });
+              };
+              if (judgeMode === "agentic" && deps.agenticGenerator) {
+                const outcome = await deps.agenticGenerator.generateAgenticJSON<unknown>(prompt, {
+                  ...generateOptions,
+                  tools: [
+                    {
+                      name: "lookup_name",
+                      description:
+                        "Look up a project name across all accepted projects and the whole pending candidate pool. Returns matching projects (entity ids usable as targetEntityId) and pending pool rows with the container that claimed them.",
+                      parameters: {
+                        type: "object",
+                        properties: { name: { type: "string", description: "the project name to look up" } },
+                        required: ["name"],
+                      },
+                      run: async (args) => {
+                        const lookupName =
+                          args && typeof args === "object" && typeof (args as { name?: unknown }).name === "string"
+                            ? (args as { name: string }).name
+                            : null;
+                        if (!lookupName) throw new Error("lookup_name requires a name argument");
+                        const result = await lookupNameForJudge(deps.db, deps.embeddingProvider, lookupName);
+                        for (const project of result.projects) toolSurfacedIds.add(project.entityId);
+                        return JSON.stringify(result);
+                      },
+                    },
+                  ],
+                  maxToolRounds: 4,
+                  onToolStep: async (step: AgenticToolStep) => {
+                    seq += 1;
+                    await writeTrace(container.key, seq, "tool_call", { name: step.name, args: step.args });
+                    seq += 1;
+                    await writeTrace(container.key, seq, "tool_result", {
+                      result: step.result,
+                      durationMs: step.durationMs,
+                      cached: step.cached,
+                    });
+                  },
+                });
+                raw = outcome.value;
+                judgeStats = { toolCalls: outcome.toolSteps.length, rounds: outcome.rounds };
+              } else {
+                raw = await deps.generator.generateJSON<unknown>(prompt, generateOptions);
+              }
+              seq += 1;
+              await writeTrace(container.key, seq, "response", generateMeta ?? { outcome: "ok", rawText: "" });
               responseTraceWritten = true;
               const dispositions = readModelDispositions(raw, pendingCrossing);
+              const surfacedProjects = await verifyToolSurfacedProjects(deps.db, toolSurfacedIds);
+              const scopedIds = new Set(existingProjects.map((project) => project.entityId));
+              const validationProjects = [
+                ...existingProjects,
+                ...surfacedProjects.filter((project) => !scopedIds.has(project.entityId)),
+              ];
               const { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions } = buildStoredVerdict(
                 container,
                 pendingCrossing,
                 dispositions,
-                existingProjects,
+                validationProjects,
                 standingProducts,
               );
+              for (const groupDisposition of groupDispositions) {
+                if (groupDisposition.targetEntityId && !scopedIds.has(groupDisposition.targetEntityId)) {
+                  groupDisposition.reason = groupDisposition.reason
+                    ? `${groupDisposition.reason},via_lookup`
+                    : "via_lookup";
+                }
+              }
               await writeRunEvent(container, "judged", {
                 groups: pendingCrossing.length,
                 stored: storedGroups.length,
                 aliases: aliasGroups.length,
                 skipped: skippedGroups,
+                ...(judgeStats
+                  ? { judgeMode: "agentic", toolCalls: judgeStats.toolCalls, rounds: judgeStats.rounds }
+                  : {}),
               });
               counters.skippedGroups += skippedGroups;
               if (skippedGroups > 0) {
@@ -2158,13 +2411,15 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 await writeRunEvent(container, "verdict_stored", { verdictId, projects: verdict.projects.length });
                 await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
               }
-              await writeTrace(container.key, 3, "disposition", { groups: groupDispositions, verdictId });
+              seq += 1;
+              await writeTrace(container.key, seq, "disposition", { groups: groupDispositions, verdictId });
             } catch (error) {
               if (error instanceof WeeklyMintProcessCrash) throw error;
               if (!responseTraceWritten) {
+                seq += 1;
                 await writeTrace(
                   container.key,
-                  2,
+                  seq,
                   "response",
                   generateMeta ?? { outcome: "error", error: error instanceof Error ? error.message : String(error) },
                 );

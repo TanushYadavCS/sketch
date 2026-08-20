@@ -53,6 +53,7 @@ export const configSchema = z.object({
     .default("true")
     .transform((v) => v === "true" || v === "1"),
   WEEKLY_MINT_MODE: z.enum(["off", "shadow", "live", "manual"]).default("off"),
+  WEEKLY_MINT_JUDGE_MODE: z.enum(["single", "agentic"]).default("single"),
   WEEKLY_MINT_INTERVAL_MS: z.coerce
     .number()
     .int()

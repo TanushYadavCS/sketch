@@ -7,6 +7,7 @@ import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeTitleFamily, readClusterVerdict } from "./project-minting";
 import { seedAttendee, seedCompany, seedConnector, seedFile } from "./project-minting-fixtures";
 import {
+  type AgenticJudgeGenerator,
   WEEKLY_MINT_PROMPT_VERSION,
   WeeklyMintProcessCrash,
   createWeeklyMintService,
@@ -1116,5 +1117,211 @@ describe("weekly mint pass", () => {
     expect(kindsFor(rerunEvents, "Acme")).toEqual(["pending_dossier_skip"]);
     expect(kindsFor(rerunEvents, "Vendorco")).toEqual(["claimed", "vendor_skip"]);
     expect(await db.selectFrom("weekly_mint_traces").selectAll().execute()).toHaveLength(0);
+  });
+
+  it("agentic judge aliases into a tool-surfaced out-of-scope project with a full tool trace", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-03-02", content: "Falcon Portal build session." },
+        { date: "2026-03-03", content: "Falcon Portal deployment work." },
+        { date: "2026-03-04", content: "Falcon Portal release review." },
+      ],
+    });
+    const otherCompanyId = await seedCompany(db, "Bravo", "bravo.test");
+    const falconId = await seedProjectEntity(db, "Falcon Portal", [], otherCompanyId);
+    const falconReviewId = await queueProjectReview(db, { name: "Falcon Portal", fileIds: corpus.fileIds });
+    const agenticGenerator: AgenticJudgeGenerator = {
+      async generateAgenticJSON(_prompt, opts) {
+        const tool = opts.tools[0];
+        const result = await tool.run({ name: "Falcon Portal" });
+        const step = { name: tool.name, args: { name: "Falcon Portal" }, result, durationMs: 1, cached: false };
+        await opts.onToolStep?.(step);
+        opts.onMeta?.({
+          outcome: "ok",
+          rawText: "{}",
+          durationMs: 5,
+          model: "test/agentic-model",
+          usage: { promptTokens: 10, completionTokens: 5 },
+        });
+        const lookup = JSON.parse(result) as { projects: Array<{ entityId: string }> };
+        const target = lookup.projects[0]?.entityId;
+        return {
+          value: {
+            groups: [
+              {
+                groupKey: falconReviewId,
+                action: "alias_of",
+                targetEntityId: target,
+                reason: "matches existing project",
+              },
+            ],
+          } as never,
+          toolSteps: [step],
+          rounds: 2,
+          meta: { outcome: "ok", rawText: "{}", durationMs: 5, model: "test/agentic-model" },
+        };
+      },
+    };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator({ calls: 0 }),
+      agenticGenerator,
+      judgeMode: "agentic",
+      model: "test/agentic-model",
+    });
+
+    await service.runOnce(new Date("2026-03-09T00:00:00.000Z"));
+
+    const falconRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["status", "candidate_entity_id", "candidate_reason"])
+      .where("id", "=", falconReviewId)
+      .executeTakeFirstOrThrow();
+    expect(falconRow).toMatchObject({
+      status: "pending",
+      candidate_entity_id: falconId,
+      candidate_reason: "weekly-mint-alias",
+    });
+    const traces = await db
+      .selectFrom("weekly_mint_traces")
+      .selectAll()
+      .where("container_key", "=", corpus.companyId)
+      .orderBy("seq", "asc")
+      .execute();
+    expect(traces.map((trace) => [trace.seq, trace.kind])).toEqual([
+      [1, "prompt"],
+      [2, "tool_call"],
+      [3, "tool_result"],
+      [4, "response"],
+      [5, "disposition"],
+    ]);
+    expect(JSON.parse(traces[0]?.payload ?? "{}")).toMatchObject({ judgeMode: "agentic", tools: ["lookup_name"] });
+    expect(JSON.parse(traces[1]?.payload ?? "{}")).toEqual({ name: "lookup_name", args: { name: "Falcon Portal" } });
+    const toolResult = JSON.parse(JSON.parse(traces[2]?.payload ?? "{}").result);
+    expect(toolResult.projects[0]).toMatchObject({ entityId: falconId, name: "Falcon Portal" });
+    const dispositionPayload = JSON.parse(traces[4]?.payload ?? "{}");
+    expect(dispositionPayload.groups[0]).toMatchObject({
+      action: "alias",
+      targetEntityId: falconId,
+      reason: "via_lookup",
+    });
+    const events = await db.selectFrom("weekly_mint_run_events").selectAll().execute();
+    const judged = events.find((event) => event.kind === "judged");
+    expect(JSON.parse(judged?.detail ?? "{}")).toMatchObject({ judgeMode: "agentic", toolCalls: 1, rounds: 2 });
+  });
+
+  it("still drops invented and non-project target ids under the agentic judge", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-03-02", content: "Gadget Tracker sprint one." },
+        { date: "2026-03-03", content: "Gadget Tracker sprint two." },
+        { date: "2026-03-04", content: "Gadget Tracker sprint three." },
+      ],
+    });
+    const productId = await seedStandingProduct(db, "Gizmo Suite");
+    const gadgetReviewId = await queueProjectReview(db, { name: "Gadget Tracker", fileIds: corpus.fileIds });
+    const inventedId = randomUUID();
+    const agenticGenerator: AgenticJudgeGenerator = {
+      async generateAgenticJSON() {
+        return {
+          value: {
+            groups: [{ groupKey: gadgetReviewId, action: "alias_of", targetEntityId: inventedId, reason: null }],
+          } as never,
+          toolSteps: [],
+          rounds: 1,
+          meta: { outcome: "ok", rawText: "{}", durationMs: 3, model: "test/agentic-model" },
+        };
+      },
+    };
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator({ calls: 0 }),
+      agenticGenerator,
+      judgeMode: "agentic",
+      model: "test/agentic-model",
+    });
+
+    await service.runOnce(new Date("2026-03-09T00:00:00.000Z"));
+
+    const gadgetRow = await db
+      .selectFrom("entity_review_queue")
+      .select(["status", "candidate_entity_id"])
+      .where("id", "=", gadgetReviewId)
+      .executeTakeFirstOrThrow();
+    expect(gadgetRow).toMatchObject({ status: "pending", candidate_entity_id: null });
+    const traces = await db.selectFrom("weekly_mint_traces").selectAll().orderBy("seq", "asc").execute();
+    const dispositionPayload = JSON.parse(traces.at(-1)?.payload ?? "{}");
+    expect(dispositionPayload.groups[0]).toMatchObject({ action: "skip", reason: "alias_without_target" });
+    expect(dispositionPayload.groups[0].targetEntityId).toBeUndefined();
+    expect(dispositionPayload.groups[0].targetEntityId).not.toBe(productId);
+  });
+
+  it("a fresh judge attempt supersedes a crashed attempt's partial trace rows", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-01-05", content: "Atlas Migration kickoff and plan." },
+        { date: "2026-01-06", content: "Atlas Migration implementation update." },
+        { date: "2026-01-07", content: "Atlas Migration delivery review." },
+      ],
+    });
+    await queueProjectReview(db, { name: "Atlas Migration", fileIds: corpus.fileIds });
+    const runId = randomUUID();
+    await db
+      .insertInto("weekly_mint_runs")
+      .values({
+        id: runId,
+        run_key: "weekly-mint:2026-01-12",
+        status: "queued",
+        stage: "companies",
+        clock_week: "2026-01-12",
+      })
+      .execute();
+    const staleTraceId = randomUUID();
+    await db
+      .insertInto("weekly_mint_traces")
+      .values([
+        {
+          id: staleTraceId,
+          run_id: runId,
+          container_key: corpus.companyId,
+          seq: 1,
+          kind: "prompt",
+          payload: JSON.stringify({ prompt: "crashed attempt" }),
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: randomUUID(),
+          run_id: runId,
+          container_key: corpus.companyId,
+          seq: 2,
+          kind: "tool_call",
+          payload: JSON.stringify({ name: "lookup_name", args: { name: "Atlas" } }),
+          created_at: new Date().toISOString(),
+        },
+      ])
+      .execute();
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator({ calls: 0 }),
+      model: "test/reasoning-model",
+    });
+
+    await service.runOnce(new Date("2026-01-12T00:00:00.000Z"));
+
+    const traces = await db
+      .selectFrom("weekly_mint_traces")
+      .selectAll()
+      .where("container_key", "=", corpus.companyId)
+      .orderBy("seq", "asc")
+      .execute();
+    expect(traces.map((trace) => trace.kind)).toEqual(["prompt", "response", "disposition"]);
+    expect(traces.some((trace) => trace.id === staleTraceId)).toBe(false);
+    expect(JSON.parse(traces[0]?.payload ?? "{}").prompt).not.toBe("crashed attempt");
   });
 });
