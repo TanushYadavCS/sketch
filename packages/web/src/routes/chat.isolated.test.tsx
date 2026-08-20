@@ -1565,7 +1565,7 @@ describe("chat route", () => {
       expect(mocks.createConnectionIntent).toHaveBeenCalledWith(
         "provider-1",
         "github",
-        expect.any(String),
+        expect.stringContaining("/integrations/callback?app=github"),
         expect.objectContaining({ id: "github", name: "GitHub" }),
       ),
     );

@@ -57,7 +57,7 @@ import {
   managedCliIntegrationAppId,
 } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
-import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, isCancelledError, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type CreateUIMessage, DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -91,10 +91,12 @@ type WebChatDataParts = {
     requestId: string;
     appId: string;
     appName: string;
+    providerId?: string;
     executionMode?: "canvas" | "cli" | "api";
     state?: "connect" | "connected";
     icon?: string;
     reason?: string;
+    connectUrl?: string;
     accountName?: string;
     connectionId?: string | null;
   };
@@ -1115,15 +1117,24 @@ export function ChatPage() {
     queryFn: () => api.mcpServers.list(),
     enabled: hasCanvasIntegrationConnectionCards,
   });
-  const provider = useMemo(
-    () => (serversQuery.data ?? []).find((server) => server.type != null) ?? null,
-    [serversQuery.data],
-  );
-  const providerLoading = hasCanvasIntegrationConnectionCards && serversQuery.isLoading;
-  const connectionsQuery = useQuery({
-    queryKey: ["connections", provider?.id],
-    queryFn: () => api.mcpServers.listConnections(provider?.id ?? ""),
-    enabled: hasCanvasIntegrationConnectionCards && !!provider,
+  const configuredProviders = useMemo(() => {
+    const providers = (serversQuery.data ?? []).filter((server) => server.type != null);
+    const requestedProviderIds = new Set(
+      integrationConnectionCards
+        .map((connection) => connection.providerId)
+        .filter((providerId): providerId is string => Boolean(providerId)),
+    );
+    return requestedProviderIds.size > 0
+      ? providers.filter((server) => requestedProviderIds.has(server.id))
+      : providers;
+  }, [integrationConnectionCards, serversQuery.data]);
+  const provider = configuredProviders[0] ?? null;
+  const connectionQueries = useQueries({
+    queries: configuredProviders.map((configuredProvider) => ({
+      queryKey: ["connections", configuredProvider.id],
+      queryFn: () => api.mcpServers.listConnections(configuredProvider.id),
+      enabled: hasCanvasIntegrationConnectionCards,
+    })),
   });
   const cliUsersQuery = useQuery({
     queryKey: ["users", "chat-github"],
@@ -1141,20 +1152,20 @@ export function ChatPage() {
     queryFn: () => api.channels.listWhatsAppGroups(),
     enabled: githubSetupOpen || linearSetupOpen || hasCliIntegrationConnectionCards,
   });
+  const providerLoading = hasCanvasIntegrationConnectionCards && serversQuery.isLoading;
   const connectedAppIds = useMemo(
     () =>
       new Set(
-        (connectionsQuery.data ?? [])
-          .filter((connection) => isOwnedOrPersonalAppConnection(connection))
-          .map((connection) => connection.appId),
+        connectionQueries.flatMap((query, index) =>
+          (query.data ?? [])
+            .filter((connection) => isOwnedOrPersonalAppConnection(connection))
+            .map((connection) => `${connection.providerId ?? configuredProviders[index]?.id}:${connection.appId}`),
+        ),
       ),
-    [connectionsQuery.data],
+    [configuredProviders, connectionQueries],
   );
   const integrationConnectionStatuses = useMemo(() => {
     const statuses: Record<string, ChatThreadIntegrationConnectionStatus> = {};
-    const providerUnavailable =
-      hasCanvasIntegrationConnectionCards &&
-      (serversQuery.isError || (!serversQuery.isLoading && serversQuery.isFetched && !provider));
     for (const connection of integrationConnectionCards) {
       if (connection.executionMode === "cli" || connection.executionMode === "api") {
         statuses[connection.requestId] =
@@ -1163,10 +1174,24 @@ export function ChatPage() {
             : (localIntegrationConnectionStatuses[connection.requestId] ?? "idle");
         continue;
       }
+      const connectionProvider = connection.providerId
+        ? (configuredProviders.find((configuredProvider) => configuredProvider.id === connection.providerId) ?? null)
+        : provider;
+      const connectionQueryIndex = connectionProvider
+        ? configuredProviders.findIndex((configuredProvider) => configuredProvider.id === connectionProvider.id)
+        : -1;
+      const connectionQuery = connectionQueryIndex >= 0 ? connectionQueries[connectionQueryIndex] : undefined;
+      const providerUnavailable =
+        hasCanvasIntegrationConnectionCards &&
+        (serversQuery.isError ||
+          Boolean(connectionQuery?.isError) ||
+          (!serversQuery.isLoading && serversQuery.isFetched && !connectionProvider));
+      const connectionLoading = providerLoading || Boolean(connectionQuery?.isLoading);
+      const connectedKey = `${connection.providerId ?? provider?.id}:${connection.appId}`;
       statuses[connection.requestId] =
-        connection.state === "connected" || connectedAppIds.has(connection.appId)
+        connection.state === "connected" || connectedAppIds.has(connectedKey)
           ? "connected"
-          : providerLoading
+          : connectionLoading
             ? "loading"
             : providerUnavailable
               ? "unavailable"
@@ -1175,6 +1200,8 @@ export function ChatPage() {
     return statuses;
   }, [
     connectedAppIds,
+    configuredProviders,
+    connectionQueries,
     hasCanvasIntegrationConnectionCards,
     integrationConnectionCards,
     localIntegrationConnectionStatuses,
@@ -1325,7 +1352,10 @@ export function ChatPage() {
         return;
       }
       if (providerLoading) return;
-      if (!provider) {
+      const connectionProvider = connection.providerId
+        ? configuredProviders.find((server) => server.id === connection.providerId)
+        : provider;
+      if (!connectionProvider) {
         setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "unavailable" }));
         toast.error("No integration provider is configured");
         return;
@@ -1339,7 +1369,7 @@ export function ChatPage() {
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
       setActiveIntegrationConnection({ connection, popupWindow });
     },
-    [chat.messages, provider, providerLoading],
+    [chat.messages, configuredProviders, provider, providerLoading],
   );
 
   const handleGithubIntegrationSuccess = useCallback(
@@ -1597,7 +1627,7 @@ export function ChatPage() {
 
       <ChatIntegrationConnectionFrame
         open={activeIntegrationConnection !== null}
-        providerId={provider?.id ?? null}
+        providerId={activeIntegrationConnection?.connection.providerId ?? provider?.id ?? null}
         connection={activeIntegrationConnection?.connection ?? null}
         popupWindow={activeIntegrationConnection?.popupWindow ?? null}
         onOpenChange={handleIntegrationConnectionOpenChange}

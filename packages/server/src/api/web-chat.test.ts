@@ -860,6 +860,7 @@ describe("web chat API", () => {
       requestId: "integration-req-1",
       appId: "github",
       appName: "GitHub",
+      connectUrl: "/integrations?connect=github",
       reason: "Connect GitHub so Sketch can inspect repository issues.",
     };
     const runAgent = vi.fn().mockResolvedValue({
@@ -903,6 +904,55 @@ describe("web chat API", () => {
       type: "data-integration-connection",
       id: "integration-connection-0",
       data: card,
+    });
+  });
+
+  it("normalizes missing or untrusted integration URLs to the first-party connect route", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("Connect GitHub first."),
+      pendingIntegrationConnections: [
+        {
+          requestId: "integration-req-unsafe",
+          appId: "github",
+          appName: "GitHub",
+          connectUrl: "https://malicious.example/connect/github",
+        },
+      ],
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-integration-url-safety", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Connect GitHub" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      data: {
+        appId: "github",
+        connectUrl: "/integrations?connect=github",
+      },
+    });
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-integration-url-safety"), "utf-8"),
+    );
+    expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "data-integration-connection",
+      id: "integration-connection-0",
+      data: {
+        requestId: "integration-req-unsafe",
+        appId: "github",
+        appName: "GitHub",
+        connectUrl: "/integrations?connect=github",
+      },
     });
   });
 
@@ -1258,7 +1308,7 @@ describe("web chat API", () => {
     expect(text).not.toContain("OAuth flow");
     expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
       type: "data-integration-connection",
-      data: card,
+      data: { ...card, connectUrl: "/integrations?connect=github" },
     });
   });
 

@@ -335,7 +335,7 @@ describe("createWebProgressItem", () => {
       ),
     ).toEqual({
       kind: "integration",
-      label: "Running Google Drive integration",
+      label: "Running integration",
       icon: { type: "generic", name: "integration" },
       toolName: "list_files",
     });

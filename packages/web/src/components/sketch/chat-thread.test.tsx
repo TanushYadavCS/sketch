@@ -308,6 +308,7 @@ describe("ChatThread", () => {
       requestId: "integration-req-1",
       appId: "github",
       appName: "GitHub",
+      connectUrl: "/integrations?connect=github",
       reason: "Connect GitHub so Sketch can inspect repository issues.",
     };
     const { rerender } = render(
@@ -328,6 +329,10 @@ describe("ChatThread", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     expect(onConnect).toHaveBeenCalledWith(connection);
+    expect(screen.getByRole("link", { name: "Open integration settings" })).toHaveAttribute(
+      "href",
+      "/integrations?connect=github",
+    );
 
     rerender(
       <ChatThread

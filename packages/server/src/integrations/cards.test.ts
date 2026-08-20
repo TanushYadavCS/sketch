@@ -170,6 +170,22 @@ describe("integration cards", () => {
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_result",
+        toolName: "Skill",
+        input: { skill: "canvas-add-integration" },
+        output: { code: "CONNECTION_NOT_CONNECTED", message: "The skill is not connected" },
+      }),
+    ).toEqual({ queries: [], componentKeys: [], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
+        toolName: "mcp__my_canvas__create_event",
+        input: { app: "google-calendar-oauth" },
+        output: { code: "CONNECTION_NOT_CONNECTED", message: "Calendar is not connected" },
+      }),
+    ).toEqual({ queries: [], componentKeys: [], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
         toolName: "mcp__plugin_pipedream__slack_send_message",
         input: { app: "slack" },
         output: "Rate limit exceeded",
@@ -215,6 +231,35 @@ describe("integration cards", () => {
     expect(connected.cards).toMatchObject([
       { appId: "github", appName: "GitHub", state: "connected", accountName: "Alice GitHub" },
     ]);
+  });
+
+  it("emits a provider-aware first-party connect target for Canvas cards", async () => {
+    const provider = {
+      type: "canvas",
+      providerId: "provider-1",
+      listApps: async () => ({
+        apps: [
+          {
+            id: "google-calendar-oauth",
+            name: "Google Calendar",
+            description: "Calendar",
+            executionMode: "canvas" as const,
+          },
+        ],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "type" | "providerId" | "listApps"> as IntegrationProvider;
+
+    await expect(resolveIntegrationLookup(provider, [], { query: "google-calendar-oauth" })).resolves.toMatchObject({
+      cards: [
+        {
+          appId: "google-calendar-oauth",
+          providerId: "provider-1",
+          executionMode: "canvas",
+          connectUrl: "/integrations?connect=google-calendar-oauth",
+        },
+      ],
+    });
   });
 
   it("collects missing app cards from observed Canvas CLI progress", async () => {

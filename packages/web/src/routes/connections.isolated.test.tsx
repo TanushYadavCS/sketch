@@ -504,6 +504,76 @@ describe("ConnectionsPage direct connect", () => {
     expect(screen.getByText("3 selected")).toBeInTheDocument();
   });
 
+  it("closes Linear access management after saving a share", async () => {
+    const user = userEvent.setup();
+    const shareBodies: unknown[] = [];
+    const linearConnection = {
+      id: "linear-1",
+      appId: "linear",
+      appName: "Linear",
+      executionMode: "api",
+      ownerUserId: "u1",
+      accountLogin: "Ada Lovelace",
+      accountExternalId: "usr_1",
+      accountAvatarUrl: null,
+      accountType: "User",
+      status: "active",
+      verifiedAt: "2026-01-01T00:00:00Z",
+      lastVerificationError: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isOwnedByViewer: true,
+      canUse: true,
+      canManage: true,
+      shares: [],
+    };
+    setupCommonHandlers();
+    server.use(
+      http.get("/api/integration-apps", () =>
+        HttpResponse.json({
+          apps: [
+            {
+              id: "linear",
+              name: "Linear",
+              description: "Use Linear through Sketch.",
+              icon: "https://linear.app/favicon.svg",
+              executionMode: "api",
+              connected: true,
+              connectionId: "linear-1",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/integration-apps/connections", () => HttpResponse.json({ connections: [linearConnection] })),
+      http.get("/api/users", () =>
+        HttpResponse.json({
+          users: [
+            { id: "u1", name: "Owner", email: "owner@example.com", type: "human" },
+            { id: "u2", name: "Recipient", email: "recipient@example.com", type: "human" },
+          ],
+        }),
+      ),
+      http.get("/api/channels/slack", () => HttpResponse.json({ channels: [] })),
+      http.get("/api/channels/whatsapp/groups", () => HttpResponse.json({ groups: [] })),
+      http.put("/api/integration-apps/linear/connections/linear-1/shares", async ({ request }) => {
+        shareBodies.push(await request.json());
+        return HttpResponse.json({
+          connection: { ...linearConnection, shares: [{ type: "user", id: "u2" }] },
+        });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Open settings for Linear" }));
+    expect(await screen.findByRole("dialog", { name: "Manage Linear" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Recipient/ }));
+    await user.click(screen.getByRole("button", { name: "Save access" }));
+
+    await waitFor(() => expect(shareBodies).toEqual([{ targets: [{ type: "user", id: "u2" }] }]));
+    expect(screen.queryByRole("dialog", { name: "Manage Linear" })).not.toBeInTheDocument();
+  });
+
   it("shows callback errors without starting a new intent", async () => {
     const intent = vi.fn();
     setupCommonHandlers();

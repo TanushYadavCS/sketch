@@ -395,6 +395,7 @@ function LinearConnectionManageDialog({
                   await api.cliIntegrations.replaceShares("linear", connection.id, targets);
                   setSavedTargets(targets);
                   toast.success("Linear access updated");
+                  onOpenChange(false);
                 })
               }
             >
