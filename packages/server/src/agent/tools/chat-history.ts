@@ -424,29 +424,17 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
     }) => {
       const conversationRef = blankToUndefined(requestedConversationRef);
       const pageToken = blankToUndefined(requestedPageToken);
-      if (
-        pageToken &&
-        (conversationRef ||
-          anchorMessageId ||
-          scope ||
-          requestedAfterTime ||
-          requestedBeforeTime ||
-          requestedPlatform ||
-          order ||
-          includeBotMessages !== undefined)
-      ) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "pageToken can only be combined with limit.",
-            },
-          ],
-        };
-      }
       const allChatsPageToken = pageToken ? parseAllChatsPageToken(pageToken) : null;
       const crossReadPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
       if (pageToken && !allChatsPageToken && !crossReadPageToken) return unavailableCrossConversationResult();
+
+      const hasPageToken = Boolean(allChatsPageToken || crossReadPageToken);
+      const isAllChats = !hasPageToken && scope === "all_chats";
+      const effectiveConversationRef = hasPageToken || isAllChats ? undefined : conversationRef;
+      const effectiveAnchorMessageId = hasPageToken || isAllChats ? undefined : anchorMessageId;
+      const effectivePlatform = isAllChats ? requestedPlatform : undefined;
+      const effectiveOrder = effectiveAnchorMessageId ? undefined : order;
+      const effectiveScope = effectiveConversationRef || hasPageToken ? "conversation" : scope;
 
       const normalizedAfterTime = allChatsPageToken
         ? (allChatsPageToken.afterTime ?? undefined)
@@ -462,6 +450,8 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
           content: [{ type: "text" as const, text: "afterTime and beforeTime must be valid ISO-8601 timestamps." }],
         };
       }
+      const effectiveAfterTime = effectiveAnchorMessageId ? undefined : normalizedAfterTime;
+      const effectiveBeforeTime = effectiveAnchorMessageId ? undefined : normalizedBeforeTime;
       if (allChatsPageToken) {
         const outcome = await handleAllChatsRead(
           {
@@ -510,26 +500,13 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
           ],
         };
       }
-      if (requestedPlatform && scope !== "all_chats") {
-        return { content: [{ type: "text" as const, text: "platform can only be used with all_chats scope." }] };
-      }
-      if (scope === "all_chats") {
-        if (conversationRef) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: "all_chats scope cannot be combined with a conversationRef.",
-              },
-            ],
-          };
-        }
+      if (isAllChats) {
         const snapshotBeforeMessageId = deps.conversationContext?.currentMessageId;
         const outcome = await handleAllChatsRead(
           {
-            platform: requestedPlatform,
-            afterTime: normalizedAfterTime ?? undefined,
-            beforeTime: normalizedBeforeTime ?? undefined,
+            platform: effectivePlatform,
+            afterTime: effectiveAfterTime ?? undefined,
+            beforeTime: effectiveBeforeTime ?? undefined,
             snapshotBeforeMessageId,
             order,
             limit,
@@ -547,11 +524,11 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
                 lastEffectiveAt: outcome.body.nextCursor.effectiveAt,
                 lastMessageId: outcome.body.nextCursor.messageId,
                 snapshotBeforeMessageId: snapshotBeforeMessageId ?? null,
-                afterTime: normalizedAfterTime ?? null,
-                beforeTime: normalizedBeforeTime ?? null,
-                platform: requestedPlatform ?? null,
+                afterTime: effectiveAfterTime ?? null,
+                beforeTime: effectiveBeforeTime ?? null,
+                platform: effectivePlatform ?? null,
                 includeBotMessages: includeBotMessages === true,
-                order: order ?? "asc",
+                order: effectiveOrder ?? "asc",
               })
             : undefined;
         return {
@@ -571,45 +548,21 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
           ],
         };
       }
-      if (conversationRef && scope === "current_thread") {
-        return {
-          content: [{ type: "text" as const, text: "Current-thread scope cannot be used with conversationRef." }],
-        };
-      }
-      if (conversationRef && !anchorMessageId) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "conversationRef must be combined with anchorMessageId.",
-            },
-          ],
-        };
-      }
-      if (anchorMessageId && (normalizedAfterTime || normalizedBeforeTime || order)) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "anchorMessageId cannot be combined with time bounds or order.",
-            },
-          ],
-        };
-      }
-      if (anchorMessageId !== undefined && !isStorableRowId(anchorMessageId)) {
+      if (effectiveAnchorMessageId !== undefined && !isStorableRowId(effectiveAnchorMessageId)) {
         return unavailableCrossConversationResult();
       }
 
       const parsedPageToken = crossReadPageToken;
       const referencedConversationId =
-        parsedPageToken?.conversationId ?? (conversationRef ? parseConversationRef(conversationRef) : null);
-      if (conversationRef && !referencedConversationId) return unavailableCrossConversationResult();
+        parsedPageToken?.conversationId ??
+        (effectiveConversationRef ? parseConversationRef(effectiveConversationRef) : null);
+      if (effectiveConversationRef && !referencedConversationId) return unavailableCrossConversationResult();
       const conversationId = referencedConversationId ?? deps.conversationContext?.conversationId;
       const repo = deps.conversationRepo ?? (deps.db ? createConversationRepository(deps.db) : undefined);
       if (!conversationId || !repo) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
-      const isReferencedConversation = Boolean(conversationRef || parsedPageToken);
+      const isReferencedConversation = Boolean(effectiveConversationRef || parsedPageToken);
       if (
         isReferencedConversation &&
         !(await isChatHistoryConversationAuthorized(deps, conversationId, access, true))
@@ -620,23 +573,23 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       const providerThreadId = deps.conversationContext?.providerThreadId;
       const isThreadReply = deps.conversationContext?.isThreadReply;
       const currentMessageId = deps.conversationContext?.currentMessageId;
-      const effectiveScope = scope ?? (providerThreadId ? "current_thread" : "conversation");
-      if (effectiveScope === "current_thread" && !providerThreadId) {
+      const resolvedScope = effectiveScope ?? (providerThreadId ? "current_thread" : "conversation");
+      if (resolvedScope === "current_thread" && !providerThreadId) {
         return {
           content: [{ type: "text" as const, text: "Current-thread chat history is not available in this run." }],
         };
       }
 
-      if (anchorMessageId && currentMessageId && anchorMessageId >= currentMessageId) {
+      if (effectiveAnchorMessageId && currentMessageId && effectiveAnchorMessageId >= currentMessageId) {
         return unavailableCrossConversationResult();
       }
       let stream: CrossReadStream =
-        !isReferencedConversation && effectiveScope === "current_thread"
+        !isReferencedConversation && resolvedScope === "current_thread"
           ? { providerThreadId }
-          : !isReferencedConversation && effectiveScope === "conversation" && isThreadReply !== undefined
+          : !isReferencedConversation && resolvedScope === "conversation" && isThreadReply !== undefined
             ? { isThreadReply }
             : {};
-      const referencedAnchorMessageId = parsedPageToken?.anchorMessageId ?? anchorMessageId;
+      const referencedAnchorMessageId = parsedPageToken?.anchorMessageId ?? effectiveAnchorMessageId;
       if (isReferencedConversation && referencedAnchorMessageId) {
         const anchor = await loadCrossConversationAnchorStream(deps, conversationId, referencedAnchorMessageId);
         if (!anchor.ok) return unavailableCrossConversationResult();
@@ -647,8 +600,8 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       }
       const result = parsedPageToken
         ? await readCrossConversationPage(repo, parsedPageToken, stream, limit)
-        : anchorMessageId
-          ? await readAroundMessage(repo, conversationId, anchorMessageId, {
+        : effectiveAnchorMessageId
+          ? await readAroundMessage(repo, conversationId, effectiveAnchorMessageId, {
               limit,
               includeBotMessages,
               beforeMessageId: currentMessageId,
@@ -656,14 +609,14 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             })
           : await repo.listMessages(conversationId, {
               beforeMessageId: currentMessageId,
-              afterEffectiveAt: normalizedAfterTime ?? undefined,
-              beforeEffectiveAt: normalizedBeforeTime ?? undefined,
+              afterEffectiveAt: effectiveAfterTime ?? undefined,
+              beforeEffectiveAt: effectiveBeforeTime ?? undefined,
               limit,
-              order,
+              order: effectiveOrder,
               includeBotMessages,
               ...stream,
             });
-      if ((anchorMessageId || parsedPageToken) && result.messages.length === 0) {
+      if ((effectiveAnchorMessageId || parsedPageToken) && result.messages.length === 0) {
         return unavailableCrossConversationResult();
       }
 
@@ -680,7 +633,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
               {
                 messages,
                 hasMore: result.hasMore,
-                ...(isReferencedConversation && (anchorMessageId || parsedPageToken)
+                ...(isReferencedConversation && (effectiveAnchorMessageId || parsedPageToken)
                   ? {
                       ...("olderPageToken" in result && result.olderPageToken
                         ? { olderPageToken: result.olderPageToken }

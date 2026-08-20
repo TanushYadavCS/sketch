@@ -986,7 +986,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       );
     });
 
-    it("requires an anchor when starting a referenced read", async () => {
+    it("reads a referenced conversation chronologically when no anchor is given", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "anchor required marker",
         members: [USER_EMAIL],
@@ -1003,7 +1003,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         conversationRef: `conversation:${seeded.conversationId}`,
       });
 
-      expect(result.content[0]?.text).toBe("conversationRef must be combined with anchorMessageId.");
+      const body = JSON.parse(result.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(body.messages.map((message) => message.text)).toContain("anchor required marker");
     });
 
     it("keeps cross-chat Slack reads inside the anchor thread", async () => {
@@ -1635,6 +1638,116 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         beforeTime: "2026-07-17T17:00:00+05:30",
       });
       expect(JSON.parse(empty.content[0]?.text ?? "{}").messages).toEqual([]);
+    });
+
+    it("ignores conversation-scoped placeholder params that models fill on an all_chats read", async () => {
+      const conversations = createConversationRepository(db);
+      const channel = await seedSlackChannel(db, {
+        channelId: "C-PLACEHOLDER-COMBOS",
+        text: "placeholder combo message",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const current = await conversations.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "15550009999@s.whatsapp.net",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "placeholder-trigger",
+        senderJid: "15550009999@s.whatsapp.net",
+        senderName: "Roopak",
+        text: "read all chats",
+        receivedAt: "2026-07-18T12:00:00.000Z",
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+        }),
+      ) as unknown as { handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> };
+
+      const baseline = await readTool.handler({ scope: "all_chats", platform: "slack" });
+      const baselineIds = (
+        JSON.parse(baseline.content[0]?.text ?? "{}") as { messages: Array<{ id: number }> }
+      ).messages.map((message) => message.id);
+      expect(baselineIds).toContain(channel.messageId);
+
+      const placeholderPayloads: Array<Record<string, unknown>> = [
+        {
+          conversationRef: "",
+          anchorMessageId: 1,
+          pageToken: "",
+          scope: "all_chats",
+          afterTime: "",
+          beforeTime: "",
+          platform: "slack",
+          limit: 20,
+          order: "asc",
+          includeBotMessages: false,
+        },
+        { scope: "all_chats", platform: "slack", conversationRef: `conversation:${current.id}` },
+        { scope: "all_chats", platform: "slack", anchorMessageId: 1 },
+        { scope: "all_chats", platform: "slack", conversationRef: "", pageToken: "" },
+        { scope: "all_chats", platform: "slack", afterTime: "", beforeTime: "" },
+      ];
+
+      for (const payload of placeholderPayloads) {
+        const result = await readTool.handler(payload);
+        const text = result.content[0]?.text ?? "";
+        expect(text, `payload ${JSON.stringify(payload)}`).not.toContain("cannot be combined");
+        expect(text, `payload ${JSON.stringify(payload)}`).not.toContain("must be combined");
+        expect(text, `payload ${JSON.stringify(payload)}`).not.toContain("can only be");
+        expect(text, `payload ${JSON.stringify(payload)}`).not.toContain("ISO-8601");
+        const ids = (JSON.parse(text) as { messages: Array<{ id: number }> }).messages.map((message) => message.id);
+        expect(ids, `payload ${JSON.stringify(payload)}`).toEqual(baselineIds);
+      }
+    });
+
+    it("reads a referenced conversation without an anchor and still enforces authorization", async () => {
+      const conversations = createConversationRepository(db);
+      const authorized = await seedSlackChannel(db, {
+        channelId: "C-REF-NO-ANCHOR",
+        text: "referenced without anchor",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const forbidden = await seedSlackChannel(db, {
+        channelId: "C-REF-NO-ANCHOR-FORBIDDEN",
+        text: "not allowed",
+        members: ["someone-else@example.com"],
+        connectorConfigId: slackConfigId,
+      });
+      const current = await conversations.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "15550008888@s.whatsapp.net",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "ref-no-anchor-trigger",
+        senderJid: "15550008888@s.whatsapp.net",
+        senderName: "Roopak",
+        text: "read referenced",
+        receivedAt: "2026-07-18T12:00:00.000Z",
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+        }),
+      ) as unknown as { handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> };
+
+      const allowed = await readTool.handler({ conversationRef: `conversation:${authorized.conversationId}` });
+      const allowedText = allowed.content[0]?.text ?? "";
+      expect(allowedText).not.toContain("must be combined with anchorMessageId");
+      expect(
+        (JSON.parse(allowedText) as { messages: Array<{ id: number }> }).messages.map((message) => message.id),
+      ).toContain(authorized.messageId);
+
+      const denied = await readTool.handler({ conversationRef: `conversation:${forbidden.conversationId}` });
+      expect(denied.content[0]?.text ?? "").not.toContain("not allowed");
     });
 
     it("pages a merged all-chat stream with a global effective-time cursor", async () => {
