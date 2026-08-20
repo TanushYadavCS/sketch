@@ -1937,6 +1937,45 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.conversationMessages).not.toHaveBeenCalled();
   });
 
+  it("opens the originating web chat from recents when a builder chat also exists", async () => {
+    mocks.search = { conversationId: "chat-alpha" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "builder-alpha",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+        {
+          conversationId: "chat-alpha",
+          kinds: ["web_chat"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-02T00:00:00.000Z",
+          lastActiveAt: "2026-06-02T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "owner",
+    });
+
+    renderBuilder();
+
+    await waitFor(() => expect(mocks.conversationMessages).toHaveBeenCalledWith("task-123", "chat-alpha"));
+    expect(screen.queryByTestId("automation-builder-chat-unavailable")).not.toBeInTheDocument();
+    expect(mocks.selectConversation).toHaveBeenCalledWith(
+      "task-123",
+      "chat-alpha",
+      "web_chat",
+      expect.objectContaining({ clientSessionId: expect.any(String), generation: 1 }),
+    );
+  });
+
   it("archives the current chat from the sidechat and returns to history", async () => {
     const user = userEvent.setup();
     renderBuilder();
