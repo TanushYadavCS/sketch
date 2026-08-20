@@ -108,7 +108,7 @@ export function AddEntityDialog({
           <DialogTitle>Add entity</DialogTitle>
           <DialogDescription>Declare an entity that Sketch should already know about.</DialogDescription>
         </DialogHeader>
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <div>
             <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Name</p>
             <Input

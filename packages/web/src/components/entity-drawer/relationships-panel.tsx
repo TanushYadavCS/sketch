@@ -151,7 +151,7 @@ function LinkCompanyDialog({
             Declare where this person belongs. Declared links outrank inferred ones.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-3">
+        <div className="flex min-w-0 flex-col gap-3">
           <Input
             placeholder="Search companies"
             value={search}
@@ -257,7 +257,7 @@ function AddPeopleDialog({
             Declare who belongs to this company. "Works at" replaces a person's previously declared employer.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-3">
+        <div className="flex min-w-0 flex-col gap-3">
           <EntityPicker
             entityType="person"
             onPick={(personId, person) => {
