@@ -491,25 +491,39 @@ export interface ProjectMintingVerdict {
   updatedAt: string;
 }
 
-export interface ProjectMintingCluster {
-  companyEntityId: string;
-  companyName: string;
-  fileCount: number;
-  triggered: boolean;
-  shardNames: string[];
-  channels: string[];
-  signals: string[];
-  /** Set when this cluster already has a verdict waiting, so the UI does not invite a second paid run. */
-  pendingVerdictId: string | null;
+export interface WeeklyMintRun {
+  id: string;
+  runKey: string;
+  status: string;
+  stage: string;
+  clockWeek: string;
+  candidatesGrouped: number;
+  verdictsRequested: number;
+  verdictsStored: number;
+  agedOut: number;
+  heartbeatAt: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  eventCount: number;
 }
 
-export interface ProjectMintingPassRun {
+/** `companyEntityId` is null for the internal pot — the weekly pass judges it like any client container. */
+export interface WeeklyMintRunEvent {
   id: string;
-  status: "running" | "complete" | "failed";
-  startedAt: string;
-  finishedAt: string | null;
-  errorMessage: string | null;
-  snapshot: { kind: string; companyName?: string; verdictsStored?: number } | null;
+  containerKey: string;
+  companyEntityId: string | null;
+  companyName: string;
+  kind: string;
+  detail: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface WeeklyMintTraceStep {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface ProjectMintingAcceptBody {
@@ -3747,20 +3761,19 @@ export const api = {
         method: "POST",
       });
     },
-    listClusters() {
-      return request<{ clusters: ProjectMintingCluster[]; passesEnabled: boolean }>("/api/project-minting/clusters");
-    },
-    startPass(companyEntityId: string) {
-      return request<{ run: { id: string; status: string; companyName: string; model: string } }>(
-        "/api/project-minting/passes",
-        { method: "POST", body: JSON.stringify({ companyEntityId }) },
-      );
-    },
-    getPass(id: string) {
-      return request<{ run: ProjectMintingPassRun }>(`/api/project-minting/passes/${id}`);
-    },
     runNow() {
       return request<{ run: { status: string } }>("/api/project-minting/runs", { method: "POST" });
+    },
+    listRuns() {
+      return request<{ runs: WeeklyMintRun[] }>("/api/project-minting/runs");
+    },
+    listRunEvents(runId: string) {
+      return request<{ events: WeeklyMintRunEvent[] }>(`/api/project-minting/runs/${runId}/events`);
+    },
+    getRunTrace(runId: string, containerKey: string) {
+      return request<{ steps: WeeklyMintTraceStep[] }>(
+        `/api/project-minting/runs/${runId}/traces/${encodeURIComponent(containerKey)}`,
+      );
     },
   },
   entityReview: {

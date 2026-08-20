@@ -926,25 +926,38 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ? (config.PROJECT_MINTING_MODEL ?? weeklyMintOpenRouter?.openRouterModel ?? null)
       : null;
   const weeklyMintGenerator =
-    config.WEEKLY_MINT_MODE === "live" && weeklyMintOpenRouter?.openRouterApiKey && weeklyMintModel
+    (config.WEEKLY_MINT_MODE === "live" || config.WEEKLY_MINT_MODE === "manual") &&
+    weeklyMintOpenRouter?.openRouterApiKey &&
+    weeklyMintModel
       ? createOpenRouterGenerator(weeklyMintOpenRouter.openRouterApiKey, {
           model: weeklyMintModel,
           reasoningEffort: "medium",
           timeoutMs: 300_000,
         })
       : null;
+  /**
+   * `manual` runs the service in live mode (real verdicts) but never starts the
+   * scheduler — the only trigger is tryRunManual() via POST /runs. A dev/testing
+   * posture: the whole mint path stays observable from the first click.
+   */
   const weeklyMint =
     config.WEEKLY_MINT_MODE !== "off"
       ? createWeeklyMintService({
           db,
-          mode: config.WEEKLY_MINT_MODE,
+          mode: config.WEEKLY_MINT_MODE === "shadow" ? "shadow" : "live",
           logger,
           generator: weeklyMintGenerator,
           model: weeklyMintModel,
           intervalMs: config.WEEKLY_MINT_INTERVAL_MS,
         })
       : null;
-  if (backgroundWork && externalStartup && config.WEEKLY_MINT_MODE !== "off") weeklyMint?.start();
+  if (
+    backgroundWork &&
+    externalStartup &&
+    (config.WEEKLY_MINT_MODE === "shadow" || config.WEEKLY_MINT_MODE === "live")
+  ) {
+    weeklyMint?.start();
+  }
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;

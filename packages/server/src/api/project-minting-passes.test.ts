@@ -342,4 +342,95 @@ describe("project minting pass route", () => {
     const projectEntities = await db.selectFrom("entities").select("id").where("source_type", "=", "project").execute();
     expect(projectEntities).toHaveLength(0);
   });
+
+  /**
+   * The trace payloads hold raw prompts over org content, so the reads answer
+   * 403 to members and 404 (not 403) when dev tools are off — a production
+   * deployment should not advertise that the surface exists.
+   */
+  it("serves weekly run observability to admins with dev tools on and hides it otherwise", async () => {
+    await db
+      .insertInto("weekly_mint_runs")
+      .values({
+        id: "wr-1",
+        run_key: "weekly-mint:2026-08-17",
+        status: "completed",
+        stage: "completed",
+        clock_week: "2026-08-17",
+        completed_at: "2026-08-17T00:05:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("weekly_mint_run_events")
+      .values([
+        {
+          id: "ev-1",
+          run_id: "wr-1",
+          container_key: "company-1",
+          company_entity_id: "company-1",
+          company_name: "Acme",
+          kind: "claimed",
+          detail: JSON.stringify({ claimed: 3 }),
+          created_at: "2026-08-17T00:01:00.000Z",
+        },
+        {
+          id: "ev-2",
+          run_id: "wr-1",
+          container_key: "company-1",
+          company_entity_id: "company-1",
+          company_name: "Acme",
+          kind: "verdict_stored",
+          detail: JSON.stringify({ verdictId: "v-1", projects: 2 }),
+          created_at: "2026-08-17T00:02:00.000Z",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("weekly_mint_traces")
+      .values({
+        id: "tr-1",
+        run_id: "wr-1",
+        container_key: "company-1",
+        seq: 1,
+        kind: "prompt",
+        payload: JSON.stringify({ prompt: "judge these groups" }),
+      })
+      .execute();
+
+    const app = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: true }), { logger });
+    const memberRes = await app.request("/api/project-minting/runs", {
+      headers: { Cookie: await login(app, MEMBER_EMAIL) },
+    });
+    expect(memberRes.status).toBe(403);
+
+    const cookie = await login(app, ADMIN_EMAIL);
+    const runsRes = await app.request("/api/project-minting/runs", { headers: { Cookie: cookie } });
+    expect(runsRes.status).toBe(200);
+    expect(await runsRes.json()).toMatchObject({
+      runs: [{ id: "wr-1", runKey: "weekly-mint:2026-08-17", status: "completed", eventCount: 2 }],
+    });
+
+    const eventsRes = await app.request("/api/project-minting/runs/wr-1/events", { headers: { Cookie: cookie } });
+    expect(eventsRes.status).toBe(200);
+    expect(await eventsRes.json()).toMatchObject({
+      events: [
+        { id: "ev-1", kind: "claimed", detail: { claimed: 3 } },
+        { id: "ev-2", kind: "verdict_stored", detail: { verdictId: "v-1", projects: 2 } },
+      ],
+    });
+    const missingRes = await app.request("/api/project-minting/runs/nope/events", { headers: { Cookie: cookie } });
+    expect(missingRes.status).toBe(404);
+
+    const traceRes = await app.request("/api/project-minting/runs/wr-1/traces/company-1", {
+      headers: { Cookie: cookie },
+    });
+    expect(await traceRes.json()).toMatchObject({ steps: [{ seq: 1, kind: "prompt" }] });
+
+    const offApp = createApp(db, createTestConfig({ DEV_TOOLS_ENABLED: false }), { logger });
+    const offRes = await offApp.request("/api/project-minting/runs", {
+      headers: { Cookie: await login(offApp, ADMIN_EMAIL) },
+    });
+    expect(offRes.status).toBe(404);
+    expect(await offRes.json()).toMatchObject({ error: { message: "Weekly run observability is not enabled" } });
+  });
 });

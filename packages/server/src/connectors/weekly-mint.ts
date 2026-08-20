@@ -9,7 +9,7 @@ import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
 import { WEEKLY_PASS_PROJECT_SOURCES } from "../entities/resolve";
-import type { GeminiGenerator } from "./gemini-generate";
+import type { GeminiGenerator, GenerateMeta } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
   CADENCE_TOKENS,
@@ -1464,6 +1464,22 @@ function sameVerdictProjectNameForParent(
   return parentDisposition.projectName ?? defaultProjectName(parentGroup);
 }
 
+/**
+ * The final per-group action the code took, after every fallback and merge —
+ * distinct from the model's raw disposition, which loses `new` vs `child_of`
+ * conversions and alias fallbacks. Written to the `disposition` trace step so
+ * the eval reads actions instead of reconstructing them from verdict JSON.
+ */
+export type GroupDisposition = {
+  groupKey: string;
+  names: string[];
+  action: "new" | "child_of" | "alias" | "skip";
+  projectName?: string;
+  parentName?: string;
+  targetEntityId?: string;
+  reason?: string;
+};
+
 function buildStoredVerdict(
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
@@ -1475,6 +1491,7 @@ function buildStoredVerdict(
   storedGroups: CandidateGroup[];
   aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }>;
   skippedGroups: number;
+  groupDispositions: GroupDisposition[];
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
   const groupsByKey = new Map(groups.map((group) => [group.key, group]));
@@ -1502,19 +1519,34 @@ function buildStoredVerdict(
   const existingEntities: ClusterVerdict["existingEntities"] = [];
   const storedGroups: CandidateGroup[] = [];
   const aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }> = [];
+  const groupDispositions: GroupDisposition[] = [];
   let skippedGroups = 0;
 
   for (const group of groups) {
     const disposition = dispositions.get(group.key);
-    if (!disposition) continue;
+    if (!disposition) {
+      groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "no_disposition" });
+      continue;
+    }
     if (disposition.action === "skip") {
       skippedGroups += 1;
+      groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "model_skip" });
       continue;
     }
     if (disposition.action === "alias_of") {
       const targetEntityId =
         disposition.targetEntityId ?? (group.deterministic.action === "alias_of" ? group.deterministic.entityId : null);
-      if (targetEntityId) aliasGroups.push({ group, targetEntityId });
+      if (targetEntityId) {
+        aliasGroups.push({ group, targetEntityId });
+        groupDispositions.push({ groupKey: group.key, names: group.names, action: "alias", targetEntityId });
+      } else {
+        groupDispositions.push({
+          groupKey: group.key,
+          names: group.names,
+          action: "skip",
+          reason: "alias_without_target",
+        });
+      }
       continue;
     }
     if (disposition.action === "child_of") {
@@ -1538,17 +1570,39 @@ function buildStoredVerdict(
           projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
         );
         storedGroups.push(group);
+        groupDispositions.push({
+          groupKey: group.key,
+          names: group.names,
+          action: "new",
+          projectName: name,
+          reason: "child_without_parent",
+        });
         continue;
       }
       const childName = disposition.projectName ?? defaultProjectName(group);
       if (childName.toLowerCase() === resolvedParentName.toLowerCase()) {
-        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
-        else {
+        if (parentEntityId) {
+          aliasGroups.push({ group, targetEntityId: parentEntityId });
+          groupDispositions.push({
+            groupKey: group.key,
+            names: group.names,
+            action: "alias",
+            targetEntityId: parentEntityId,
+            reason: "child_named_as_parent",
+          });
+        } else {
           setOrMergeVerdictProject(
             verdictProjects,
             projectForGroup(group, childName, null, evidenceTitleFamiliesForGroup(container, group)),
           );
           storedGroups.push(group);
+          groupDispositions.push({
+            groupKey: group.key,
+            names: group.names,
+            action: "new",
+            projectName: childName,
+            reason: "child_named_as_parent",
+          });
         }
         continue;
       }
@@ -1578,6 +1632,14 @@ function buildStoredVerdict(
         projectForGroup(group, childName, resolvedParentName, evidenceTitleFamiliesForGroup(container, group)),
       );
       storedGroups.push(group);
+      groupDispositions.push({
+        groupKey: group.key,
+        names: group.names,
+        action: "child_of",
+        projectName: childName,
+        parentName: resolvedParentName,
+        ...(parentEntityId ? { targetEntityId: parentEntityId } : {}),
+      });
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
@@ -1587,6 +1649,7 @@ function buildStoredVerdict(
       projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
     );
     storedGroups.push(group);
+    groupDispositions.push({ groupKey: group.key, names: group.names, action: "new", projectName: name });
   }
 
   const verdict: ClusterVerdict = {
@@ -1599,7 +1662,7 @@ function buildStoredVerdict(
     notes: [`Weekly mint pass for ${container.companyName}.`],
   };
   readClusterVerdict(verdict, { strict: true });
-  return { verdict, storedGroups, aliasGroups, skippedGroups };
+  return { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions };
 }
 
 function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGroup[]): string {
@@ -1648,6 +1711,13 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       const week = clockWeek(clock);
       const current = await ensureRun(deps.db, week);
       if (current.status === COMPLETED) {
+        /**
+         * A rerun reuses the same run id, so the previous attempt's events and
+         * traces must go — otherwise the feed mixes stale rows and the trace
+         * seq unique index rejects the new steps.
+         */
+        await deps.db.deleteFrom("weekly_mint_traces").where("run_id", "=", current.id).execute();
+        await deps.db.deleteFrom("weekly_mint_run_events").where("run_id", "=", current.id).execute();
         await deps.db
           .updateTable("weekly_mint_runs")
           .set({
@@ -1730,6 +1800,54 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       return updated;
     }
 
+    /**
+     * Observability writes must never fail the pass — a broken insert loses
+     * one feed row, not a week of minting (same posture as the per-company
+     * verdict try/catch).
+     */
+    async function writeRunEvent(
+      container: { key: string; companyEntityId: string | null; companyName: string },
+      kind: string,
+      detail?: Record<string, unknown>,
+    ): Promise<void> {
+      try {
+        await deps.db
+          .insertInto("weekly_mint_run_events")
+          .values({
+            id: randomUUID(),
+            run_id: ownedRun.id,
+            container_key: container.key,
+            company_entity_id: container.companyEntityId,
+            company_name: container.companyName,
+            kind,
+            detail: detail ? JSON.stringify(detail) : null,
+            created_at: timestamp(deps.now),
+          })
+          .execute();
+      } catch (error) {
+        deps.logger.warn({ err: error, kind, containerKey: container.key }, "Weekly mint event write failed");
+      }
+    }
+
+    async function writeTrace(containerKey: string, seq: number, kind: string, payload: unknown): Promise<void> {
+      try {
+        await deps.db
+          .insertInto("weekly_mint_traces")
+          .values({
+            id: randomUUID(),
+            run_id: ownedRun.id,
+            container_key: containerKey,
+            seq,
+            kind,
+            payload: JSON.stringify(payload),
+            created_at: timestamp(deps.now),
+          })
+          .execute();
+      } catch (error) {
+        deps.logger.warn({ err: error, kind, containerKey }, "Weekly mint trace write failed");
+      }
+    }
+
     const counters = {
       candidatesGrouped: ownedRun.candidates_grouped,
       verdictsRequested: ownedRun.verdicts_requested,
@@ -1773,6 +1891,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             },
             "Weekly mint manual run skipped company with unresolved pending verdict",
           );
+          await writeRunEvent(container, "pending_dossier_skip");
           companyCursor = container.key;
           await updateOwnedRun({
             stage: COMPANIES_STAGE,
@@ -1793,8 +1912,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const batchNow = timestamp(deps.now);
         const claimed = await claimCandidatesForCompany(deps.db, container, container.key, clock, batchNow);
         counters.candidatesGrouped += claimed;
+        await writeRunEvent(container, "claimed", { claimed });
         if (deps.mode === "live") {
-          counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
+          const agedOutNow = await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
+          counters.agedOut += agedOutNow;
+          if (agedOutNow > 0) await writeRunEvent(container, "aged_out", { agedOut: agedOutNow });
         }
         if (declaration?.counterparty_kind === "vendor") {
           counters.vendorsSkipped += 1;
@@ -1807,6 +1929,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             },
             "Weekly mint skipped vendor-declared container",
           );
+          await writeRunEvent(container, "vendor_skip");
           companyCursor = container.key;
           await updateOwnedRun({
             stage: COMPANIES_STAGE,
@@ -1824,6 +1947,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const { aliases: exactAliases, rest } = splitAliasCandidates(candidates, existingProjects);
         if (deps.mode === "live" && exactAliases.length > 0) {
           await markAliasCandidates(deps.db, exactAliases, batchNow);
+          await writeRunEvent(container, "alias_marked", { count: exactAliases.length, phase: "exact" });
         }
         const groups = groupClaimedCandidates(rest, container.companyName).filter((group) => group.tokens.length > 0);
         const scanResults = await scanTokenRecurrence(deps.db, {
@@ -1834,6 +1958,9 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         await updateScanState(deps.db, container.key, groups, batchNow);
         const nonCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) < RECURRENCE_FLOOR_DAYS);
         await incrementDryStreak(deps.db, container.key, nonCrossing, batchNow);
+        if (nonCrossing.length > 0) {
+          await writeRunEvent(container, "floor_skip", { groups: nonCrossing.length });
+        }
         const recurrenceCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) >= RECURRENCE_FLOOR_DAYS);
         const crossing = container.companyEntityId === null ? [] : recurrenceCrossing;
         if (container.companyEntityId === null) {
@@ -1851,6 +1978,10 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 },
                 "Weekly mint skipped internal group matching a company entity",
               );
+              await writeRunEvent(container, "company_guard_skip", {
+                groupKey: group.key,
+                companyName: guardCompany.name,
+              });
               await incrementDryStreak(deps.db, container.key, [group], batchNow);
               continue;
             }
@@ -1874,30 +2005,54 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             );
           } else {
             if (!deps.generator || !deps.model) throw new Error("weekly mint live mode requires a generator and model");
+            const prompt = await buildWeeklyPrompt(
+              deps.db,
+              container,
+              pendingCrossing,
+              existingProjects,
+              standingProducts,
+            );
+            await writeTrace(container.key, 1, "prompt", {
+              prompt,
+              model: deps.model,
+              maxTokens: 12_000,
+              reasoningEffort: "medium",
+              promptVersion: WEEKLY_MINT_PROMPT_VERSION,
+            });
+            let generateMeta: GenerateMeta | null = null;
+            let responseTraceWritten = false;
             /**
              * One company's bad model response must not fail the whole pass:
              * the candidates stay pooled and get another shot next week, while
              * every other company still stores its verdict this week.
              */
             try {
-              const raw = await deps.generator.generateJSON<unknown>(
-                await buildWeeklyPrompt(deps.db, container, pendingCrossing, existingProjects, standingProducts),
-                {
-                  maxTokens: 12_000,
-                  label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
-                  model: deps.model,
-                  reasoningEffort: "medium",
-                  thinkingBudget: null,
+              const raw = await deps.generator.generateJSON<unknown>(prompt, {
+                maxTokens: 12_000,
+                label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
+                model: deps.model,
+                reasoningEffort: "medium",
+                thinkingBudget: null,
+                onMeta: (meta) => {
+                  generateMeta = meta;
                 },
-              );
+              });
+              await writeTrace(container.key, 2, "response", generateMeta ?? { outcome: "ok", rawText: "" });
+              responseTraceWritten = true;
               const dispositions = readModelDispositions(raw, pendingCrossing);
-              const { verdict, storedGroups, aliasGroups, skippedGroups } = buildStoredVerdict(
+              const { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions } = buildStoredVerdict(
                 container,
                 pendingCrossing,
                 dispositions,
                 existingProjects,
                 standingProducts,
               );
+              await writeRunEvent(container, "judged", {
+                groups: pendingCrossing.length,
+                stored: storedGroups.length,
+                aliases: aliasGroups.length,
+                skipped: skippedGroups,
+              });
               counters.skippedGroups += skippedGroups;
               if (skippedGroups > 0) {
                 deps.logger.info(
@@ -1916,9 +2071,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   aliasGroups.map(({ group, targetEntityId }) => ({ reviewIds: group.reviewIds, targetEntityId })),
                   batchNow,
                 );
+                await writeRunEvent(container, "alias_marked", { count: aliasGroups.length, phase: "verdict" });
               }
+              let verdictId: string | null = null;
               if (verdict.projects.length > 0) {
-                await createProjectMintingVerdictRepository(deps.db).storePending({
+                const stored = await createProjectMintingVerdictRepository(deps.db).storePending({
                   companyEntityId: container.companyEntityId,
                   companyName: container.companyName,
                   fileCount: container.fileIds.length,
@@ -1931,6 +2088,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
                   declaredClientStage: declaration?.client_stage ?? null,
                 });
+                verdictId = stored.id;
                 counters.verdictsStored += 1;
                 deps.logger.info(
                   {
@@ -1941,10 +2099,23 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   },
                   "Weekly mint stored verdict",
                 );
+                await writeRunEvent(container, "verdict_stored", { verdictId, projects: verdict.projects.length });
                 await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
               }
+              await writeTrace(container.key, 3, "disposition", { groups: groupDispositions, verdictId });
             } catch (error) {
               if (error instanceof WeeklyMintProcessCrash) throw error;
+              if (!responseTraceWritten) {
+                await writeTrace(
+                  container.key,
+                  2,
+                  "response",
+                  generateMeta ?? { outcome: "error", error: error instanceof Error ? error.message : String(error) },
+                );
+              }
+              await writeRunEvent(container, "model_error", {
+                error: error instanceof Error ? error.message : String(error),
+              });
               deps.logger.warn(
                 { err: error, containerKey: container.key, companyName: container.companyName },
                 "Weekly mint verdict failed for container; candidates stay pooled",

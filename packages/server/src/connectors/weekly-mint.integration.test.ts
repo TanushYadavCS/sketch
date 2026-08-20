@@ -967,4 +967,87 @@ describe("weekly mint pass", () => {
     const verdict = readClusterVerdict(JSON.parse(verdicts[0]?.verdict ?? "{}"), { strict: true });
     expect(verdict.projects.map((project) => project.name)).toEqual(["Atlas Phase Two"]);
   });
+
+  /**
+   * The observability contract in one pass: a judged container leaves an event
+   * sequence plus a 3-step trace tied to the stored verdict, a vendor container
+   * leaves only claimed → vendor_skip, and a same-week rerun starts from a
+   * clean feed instead of mixing two attempts under one run id.
+   */
+  it("records run events and judgment traces, and a manual rerun clears the previous attempt's rows", async () => {
+    const corpus = await seedClientCorpus(db, {
+      files: [
+        { date: "2026-01-05", content: "Atlas Migration kickoff and plan." },
+        { date: "2026-01-06", content: "Atlas Migration implementation update." },
+        { date: "2026-01-07", content: "Atlas Migration delivery review." },
+      ],
+    });
+    await queueProjectReview(db, { name: "Atlas Migration", fileIds: corpus.fileIds });
+    const vendorCompanyId = await seedCompany(db, "Vendorco", "vendorco.test");
+    const vendorFileIds: string[] = [];
+    for (const [index, date] of ["2026-01-05", "2026-01-06"].entries()) {
+      const fileId = await seedFile(db, corpus.connectorId, {
+        fileName: `vendor-sync-${index}.txt`,
+        source: "fireflies",
+        date: `${date}T10:00:00.000Z`,
+        content: "Vendor Portal rollout notes.",
+      });
+      await seedAttendee(db, corpus.connectorId, fileId, `Vendor ${index}`, `person${index}@vendorco.test`);
+      vendorFileIds.push(fileId);
+    }
+    await db
+      .insertInto("company_relationship_declarations")
+      .values({ subject_entity_id: vendorCompanyId, counterparty_kind: "vendor", client_stage: null, note: null })
+      .execute();
+    await queueProjectReview(db, { name: "Vendor Portal", fileIds: vendorFileIds });
+    let tick = 0;
+    const service = createWeeklyMintService({
+      db,
+      mode: "live",
+      logger: createTestLogger(),
+      generator: fakeGenerator({ calls: 0 }),
+      model: "test/reasoning-model",
+      now: () => new Date(Date.parse("2026-01-12T01:00:00.000Z") + tick++ * 1000),
+    });
+
+    await service.runOnce(new Date("2026-01-12T00:00:00.000Z"));
+
+    const run = await db.selectFrom("weekly_mint_runs").selectAll().executeTakeFirstOrThrow();
+    const firstEvents = await db
+      .selectFrom("weekly_mint_run_events")
+      .selectAll()
+      .orderBy("created_at", "asc")
+      .execute();
+    const kindsFor = (events: typeof firstEvents, name: string) =>
+      events.filter((event) => event.company_name === name).map((event) => event.kind);
+    expect(firstEvents.every((event) => event.run_id === run.id)).toBe(true);
+    expect(kindsFor(firstEvents, "Acme")).toEqual(["claimed", "judged", "verdict_stored"]);
+    expect(kindsFor(firstEvents, "Vendorco")).toEqual(["claimed", "vendor_skip"]);
+    const verdictRow = await db.selectFrom("project_minting_verdicts").selectAll().executeTakeFirstOrThrow();
+    const storedEvent = firstEvents.find((event) => event.kind === "verdict_stored");
+    expect(JSON.parse(storedEvent?.detail ?? "{}")).toMatchObject({ verdictId: verdictRow.id, projects: 1 });
+    const firstTraces = await db.selectFrom("weekly_mint_traces").selectAll().orderBy("seq", "asc").execute();
+    expect(firstTraces.map((trace) => [trace.container_key, trace.seq, trace.kind])).toEqual([
+      [corpus.companyId, 1, "prompt"],
+      [corpus.companyId, 2, "response"],
+      [corpus.companyId, 3, "disposition"],
+    ]);
+    expect(JSON.parse(firstTraces[0]?.payload ?? "{}").prompt).toContain("Atlas Migration");
+    expect(JSON.parse(firstTraces[2]?.payload ?? "{}")).toMatchObject({ verdictId: verdictRow.id });
+
+    const outcome = service.tryRunManual(new Date("2026-01-12T02:00:00.000Z"));
+    if (!outcome.started) throw new Error("manual rerun did not start");
+    await outcome.completion;
+
+    const rerunEvents = await db
+      .selectFrom("weekly_mint_run_events")
+      .selectAll()
+      .orderBy("created_at", "asc")
+      .execute();
+    const firstEventIds = new Set(firstEvents.map((event) => event.id));
+    expect(rerunEvents.some((event) => firstEventIds.has(event.id))).toBe(false);
+    expect(kindsFor(rerunEvents, "Acme")).toEqual(["pending_dossier_skip"]);
+    expect(kindsFor(rerunEvents, "Vendorco")).toEqual(["claimed", "vendor_skip"]);
+    expect(await db.selectFrom("weekly_mint_traces").selectAll().execute()).toHaveLength(0);
+  });
 });

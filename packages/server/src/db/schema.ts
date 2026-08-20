@@ -1280,6 +1280,27 @@ export interface WeeklyMintRunsTable {
   updated_at: Generated<string>;
 }
 
+export interface WeeklyMintRunEventsTable {
+  id: string;
+  run_id: string;
+  container_key: string;
+  company_entity_id: string | null;
+  company_name: string;
+  kind: string;
+  detail: string | null;
+  created_at: Generated<string>;
+}
+
+export interface WeeklyMintTracesTable {
+  id: string;
+  run_id: string;
+  container_key: string;
+  seq: number;
+  kind: string;
+  payload: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityMentionsTable {
   id: string;
   entity_id: string;
@@ -1980,7 +2001,9 @@ export interface DB {
   user_entity_links: UserEntityLinksTable;
   user_entity_link_sweep_runs: UserEntityLinkSweepRunsTable;
   weekly_mint_candidates: WeeklyMintCandidatesTable;
+  weekly_mint_run_events: WeeklyMintRunEventsTable;
   weekly_mint_runs: WeeklyMintRunsTable;
+  weekly_mint_traces: WeeklyMintTracesTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

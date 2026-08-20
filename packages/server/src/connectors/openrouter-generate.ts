@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { GeminiGenerator, GenerateOptions } from "./gemini-generate";
+import { type GeminiGenerator, type GenerateOptions, reportMeta } from "./gemini-generate";
 
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "google/gemini-2.5-flash";
@@ -100,6 +100,7 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
   let temperatureRejected = false;
 
   async function generate(prompt: string, opts?: GenerateOptions): Promise<string> {
+    const startedAt = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60_000);
     const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
@@ -166,11 +167,29 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
       }
 
       if (!response.ok) {
+        reportMeta(opts, {
+          outcome: "http_error",
+          rawText: JSON.stringify(body),
+          durationMs: Date.now() - startedAt,
+          model: modelForCall,
+        });
         throw new Error(body.error?.message ?? `OpenRouter generation failed with HTTP ${response.status}`);
       }
 
       const choice = body.choices?.[0];
       const text = extractTextContent(choice?.message?.content)?.trim();
+
+      /** Fires before the no-text/truncation checks so the observer still sees
+       *  the raw response those errors would otherwise hide. */
+      reportMeta(opts, {
+        outcome: "ok",
+        rawText: text ?? JSON.stringify(body),
+        durationMs: Date.now() - startedAt,
+        model: modelForCall,
+        ...(body.usage?.prompt_tokens !== undefined && body.usage?.completion_tokens !== undefined
+          ? { usage: { promptTokens: body.usage.prompt_tokens, completionTokens: body.usage.completion_tokens } }
+          : {}),
+      });
 
       if (opts?.dumpDir) {
         await dumpCall(opts.dumpDir, {

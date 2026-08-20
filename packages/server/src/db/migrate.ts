@@ -207,6 +207,7 @@ import * as m204 from "./migrations/204-indexed-file-source-meta";
 import * as m205 from "./migrations/205-container-classifications";
 import * as m206 from "./migrations/206-weekly-mint";
 import * as m207 from "./migrations/207-nullable-verdict-company";
+import * as m208 from "./migrations/208-weekly-mint-observability";
 import type { DB } from "./schema";
 
 /**
@@ -423,6 +424,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "205-container-classifications": m205,
           "206-weekly-mint": m206,
           "207-nullable-verdict-company": m207,
+          "208-weekly-mint-observability": m208,
         };
       },
     },

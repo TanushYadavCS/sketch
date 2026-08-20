@@ -571,8 +571,8 @@ export const handlers = [
     return HttpResponse.json({ verdicts: [] });
   }),
 
-  http.get("/api/project-minting/clusters", () => {
-    return HttpResponse.json({ clusters: [], passesEnabled: true });
+  http.get("/api/project-minting/runs", () => {
+    return HttpResponse.json({ runs: [] });
   }),
 
   http.get("/api/entity-review", () => {
