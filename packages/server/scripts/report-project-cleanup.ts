@@ -15,7 +15,7 @@ import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { isGenericEngagementName } from "../src/connectors/engagement-name-filter";
 import { normalizeName } from "../src/connectors/name-normalize";
@@ -81,7 +81,10 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 /**
  * Family hints come from name-token overlap and shared SPECIFIC aliases only.
  * Generic aliases ("dashboard") are exactly the poison this cleanup exists
- * for, so they never contribute to clustering.
+ * for, so they never contribute to clustering. Projects attributed to two
+ * different companies never union either — on the goosebumps tenant, shared
+ * email-subject aliases chained six unrelated clients into one family. A
+ * missed real family still reaches the judge; a wrong hint poisons it.
  */
 function assignFamilies(projects: ProjectEvidence[]): void {
   const parent = new Map<string, string>();
@@ -108,10 +111,18 @@ function assignFamilies(projects: ProjectEvidence[]): void {
     ]),
   );
 
+  const companyKey = (project: ProjectEvidence): string | null => {
+    const company = project.engagedCompany ?? project.companyShares[0]?.company ?? null;
+    return company ? normalizeName(company) : null;
+  };
+
   for (let i = 0; i < projects.length; i++) {
     for (let j = i + 1; j < projects.length; j++) {
       const a = projects[i];
       const b = projects[j];
+      const aCompany = companyKey(a);
+      const bCompany = companyKey(b);
+      if (aCompany !== null && bCompany !== null && aCompany !== bCompany) continue;
       const nameOverlap = jaccard(nameTokens.get(a.entityId) ?? new Set(), nameTokens.get(b.entityId) ?? new Set());
       const aTerms = aliasTerms.get(a.entityId) ?? new Set<string>();
       const bTerms = aliasTerms.get(b.entityId) ?? new Set<string>();
@@ -148,9 +159,24 @@ async function main(): Promise<void> {
     dialect: new PostgresDialect({ pool: new pg.Pool({ connectionString: databaseUrl, max: 2 }) }),
   });
   try {
-    const rows = await db
+    const lifecycleCheck = await sql<{ n: string }>`
+      SELECT count(*) AS n FROM information_schema.columns
+      WHERE table_name = 'entities' AND column_name = 'project_lifecycle_status'
+    `.execute(db);
+    const hasLifecycle = Number(lifecycleCheck.rows[0]?.n ?? 0) > 0;
+
+    const rows: Array<{
+      id: string;
+      name: string;
+      aliases: string | null;
+      metadata: string | null;
+      created_at: string;
+      provenance_tier: string;
+      project_lifecycle_status?: string | null;
+    }> = await db
       .selectFrom("entities")
-      .select(["id", "name", "aliases", "metadata", "created_at", "provenance_tier", "project_lifecycle_status"])
+      .select(["id", "name", "aliases", "metadata", "created_at", "provenance_tier"])
+      .$if(hasLifecycle, (qb) => qb.select("project_lifecycle_status"))
       .where("source_type", "=", "project")
       .where(whereLiveEntity())
       .execute();
@@ -238,7 +264,7 @@ async function main(): Promise<void> {
         aliases: parseAliases(row.aliases),
         createdAt: row.created_at,
         provenanceTier: row.provenance_tier,
-        lifecycleStatus: row.project_lifecycle_status,
+        lifecycleStatus: row.project_lifecycle_status ?? null,
         origin: typeof metadata.origin === "string" ? metadata.origin : null,
         learnedFacts,
         verdictBorn: engagedBy.has(row.id),
