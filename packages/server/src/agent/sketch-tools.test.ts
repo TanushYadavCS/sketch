@@ -373,6 +373,42 @@ describe("createSketchMcpServer", () => {
     expect(JSON.parse(result.content[0].text)).not.toHaveProperty("newerPageToken");
   });
 
+  it("ReadChatHistory treats blank optional strings as omitted", async () => {
+    const collector = new UploadCollector();
+    const listMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      conversationRepo: { listMessages } as never,
+      conversationContext: { conversationId: 1, currentMessageId: 12 },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (input: Record<string, unknown>) => Promise<{ content: { text: string }[] }> }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.ReadChatHistory.handler({
+      conversationRef: "",
+      anchorMessageId: 1,
+      pageToken: "",
+      scope: "all_chats",
+      afterTime: "",
+      beforeTime: "",
+      platform: "slack",
+      limit: 20,
+      order: "asc",
+      includeBotMessages: false,
+    });
+
+    expect(result.content[0].text).not.toContain("ISO-8601");
+    expect(result.content[0].text).not.toContain("cannot be combined");
+    expect(result.content[0].text).not.toContain("pageToken can only be combined");
+  });
+
   it("ReadChatHistory keeps top-level Slack history separate from thread replies", async () => {
     const collector = new UploadCollector();
     const listMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });

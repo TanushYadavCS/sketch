@@ -1,5 +1,6 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
+import { INT4_MAX } from "../../db/limits";
 import {
   type CrossConversationSearchMessage,
   type StoredConversationMessage,
@@ -15,17 +16,6 @@ import {
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
-
-/**
- * Row ids are 32-bit `integer`/`serial` columns under Postgres. Every row-id
- * field advertises this as its schema maximum: zod renders a bare `.int()` as
- * `maximum: 9007199254740991` in the JSON Schema the model reads, and a model
- * asked for an upper bound reasonably echoes back the largest value we said we
- * accept — which then overflows the bind parameter and surfaces a raw driver
- * error as tool output. Capping the advertised ceiling keeps that echo valid.
- * SQLite stores 64-bit integers and never reproduces the overflow.
- */
-const INT4_MAX = 2_147_483_647;
 
 /**
  * Clamps a range bound rather than rejecting it: no stored row id can exceed
@@ -161,9 +151,18 @@ function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
   }
 }
 
+/**
+ * Models fill optional string parameters with empty placeholders rather than omitting
+ * them, so a blank value means "not supplied" and must never be validated as content.
+ */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === "" ? undefined : value;
+}
+
 function normalizeTime(value: string | undefined): string | undefined | null {
-  if (value === undefined) return undefined;
-  const timestamp = Date.parse(value);
+  const supplied = blankToUndefined(value);
+  if (supplied === undefined) return undefined;
+  const timestamp = Date.parse(supplied);
   return Number.isNaN(timestamp) ? null : new Date(timestamp).toISOString();
 }
 
@@ -412,9 +411,9 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
     },
     async ({
-      conversationRef,
+      conversationRef: requestedConversationRef,
       anchorMessageId,
-      pageToken,
+      pageToken: requestedPageToken,
       scope,
       afterTime: requestedAfterTime,
       beforeTime: requestedBeforeTime,
@@ -423,11 +422,8 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       order,
       includeBotMessages,
     }) => {
-      conversationRef = conversationRef?.trim() || undefined;
-      pageToken = pageToken?.trim() || undefined;
-      requestedAfterTime = requestedAfterTime?.trim() || undefined;
-      requestedBeforeTime = requestedBeforeTime?.trim() || undefined;
-
+      const conversationRef = blankToUndefined(requestedConversationRef);
+      const pageToken = blankToUndefined(requestedPageToken);
       if (
         pageToken &&
         (conversationRef ||
@@ -518,12 +514,12 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         return { content: [{ type: "text" as const, text: "platform can only be used with all_chats scope." }] };
       }
       if (scope === "all_chats") {
-        if (conversationRef || anchorMessageId) {
+        if (conversationRef) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: "all_chats scope cannot be combined with a conversationRef or anchorMessageId.",
+                text: "all_chats scope cannot be combined with a conversationRef.",
               },
             ],
           };
