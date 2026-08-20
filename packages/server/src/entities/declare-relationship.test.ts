@@ -93,6 +93,21 @@ describe("declared relationships", () => {
     });
     expect(badTarget.status).toBe(400);
     expect((await badTarget.json()).error.code).toBe("NOT_A_COMPANY");
+
+    const project = await seedEntity("One Stop", "project");
+    const company = await seedEntity("One Stop AI", "company");
+    const projectEdge = await seedEdge(project, company, "engagement_for", "declared");
+    const badDelete = await app.request(`/api/entities/${project.toString()}/relationships/${projectEdge}`, {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(badDelete.status).toBe(404);
+    const stillThere = await db
+      .selectFrom("entity_relationships")
+      .select("id")
+      .where("id", "=", projectEdge)
+      .executeTakeFirst();
+    expect(stillThere).toBeTruthy();
   });
 
   it("a second declared employer replaces the first but leaves inferred and engaged_with rows", async () => {

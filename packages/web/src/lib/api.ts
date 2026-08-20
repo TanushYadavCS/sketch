@@ -859,7 +859,7 @@ export interface EntitySourceRef {
   lastSeenAt: string;
 }
 
-export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type RelationConfidence = "CONFIRMED" | "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 
 export interface EntityRelationView {
   id: string;

@@ -120,6 +120,7 @@ function LinkCompanyDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["entity-drawer", "relations", entityId] });
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile", entityId] });
       toast.success("Company linked");
       setSearch("");
       setSelected(null);
@@ -205,6 +206,7 @@ function RelationshipRow({ relation, entityId, isAdmin }: RelationshipRowProps) 
     mutationFn: () => api.entities.removeDeclaredRelationship(entityId, relation.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["entity-drawer", "relations", entityId] });
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile", entityId] });
       toast.success("Link removed");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to remove link"),

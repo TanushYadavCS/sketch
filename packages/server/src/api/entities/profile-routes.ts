@@ -1071,7 +1071,12 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   routes.post("/:id/relationships", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
-    const body = (await c.req.json()) as { targetEntityId?: string; relationshipType?: string };
+    let body: { targetEntityId?: string; relationshipType?: string };
+    try {
+      body = (await c.req.json()) as { targetEntityId?: string; relationshipType?: string };
+    } catch {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
     if (typeof body.targetEntityId !== "string" || body.targetEntityId.length === 0) {
       return c.json({ error: { code: "BAD_REQUEST", message: "targetEntityId is required" } }, 400);
     }

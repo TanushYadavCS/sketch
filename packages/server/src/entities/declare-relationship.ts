@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { isPg } from "../db/dialect";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 import { strongestProvenanceTier } from "./provenance";
@@ -54,6 +55,12 @@ async function promoteEndpoint(db: Kysely<DB>, id: string): Promise<void> {
     .execute();
 }
 
+/**
+ * Runs in one transaction so a failure between the replacement delete, the
+ * declared upsert, and the endpoint promotions cannot strand partial state.
+ * On Postgres the person row is locked first, serializing concurrent
+ * declarations for the same person (SQLite serializes writers on its own).
+ */
 export async function declareRelationship(
   db: Kysely<DB>,
   input: { personEntityId: string; companyEntityId: string; relationshipType: DeclarableRelationshipType },
@@ -61,48 +68,63 @@ export async function declareRelationship(
   if (input.relationshipType !== "works_at" && input.relationshipType !== "engaged_with") {
     throw new DeclareRelationshipError("UNSUPPORTED_TYPE", `cannot declare ${input.relationshipType}`);
   }
-  const person = await loadLiveEntity(db, input.personEntityId);
-  const company = await loadLiveEntity(db, input.companyEntityId);
-  if (person.source_type !== "person") {
-    throw new DeclareRelationshipError("NOT_A_PERSON", `entity ${person.id} is not a person`);
-  }
-  if (company.source_type !== "company") {
-    throw new DeclareRelationshipError("NOT_A_COMPANY", `entity ${company.id} is not a company`);
-  }
-
-  const replacedRelationshipIds: string[] = [];
-  if (input.relationshipType === "works_at") {
-    const priorDeclared = await db
-      .selectFrom("entity_relationships")
-      .select("id")
-      .where("source_entity_id", "=", person.id)
-      .where("relationship_type", "=", "works_at")
-      .where("source", "=", DECLARED_RELATIONSHIP_SOURCE)
-      .where("target_entity_id", "!=", company.id)
-      .execute();
-    if (priorDeclared.length > 0) {
-      const ids = priorDeclared.map((row) => row.id);
-      await db.deleteFrom("entity_relationships").where("id", "in", ids).execute();
-      replacedRelationshipIds.push(...ids);
+  return db.transaction().execute(async (trx) => {
+    if (isPg(trx)) {
+      await trx
+        .selectFrom("entities")
+        .select("id")
+        .where("id", "=", input.personEntityId)
+        .forUpdate()
+        .executeTakeFirst();
     }
-  }
+    const person = await loadLiveEntity(trx, input.personEntityId);
+    const company = await loadLiveEntity(trx, input.companyEntityId);
+    if (person.source_type !== "person") {
+      throw new DeclareRelationshipError("NOT_A_PERSON", `entity ${person.id} is not a person`);
+    }
+    if (company.source_type !== "company") {
+      throw new DeclareRelationshipError("NOT_A_COMPANY", `entity ${company.id} is not a company`);
+    }
 
-  const repo = createEntityDomainsRepository(db);
-  const relationshipId = await repo.upsertRelationship({
-    sourceEntityId: person.id,
-    targetEntityId: company.id,
-    relationshipType: input.relationshipType,
-    confidence: "CONFIRMED",
-    confidenceScore: 1,
-    source: DECLARED_RELATIONSHIP_SOURCE,
+    const replacedRelationshipIds: string[] = [];
+    if (input.relationshipType === "works_at") {
+      const priorDeclared = await trx
+        .selectFrom("entity_relationships")
+        .select("id")
+        .where("source_entity_id", "=", person.id)
+        .where("relationship_type", "=", "works_at")
+        .where("source", "=", DECLARED_RELATIONSHIP_SOURCE)
+        .where("target_entity_id", "!=", company.id)
+        .execute();
+      if (priorDeclared.length > 0) {
+        const ids = priorDeclared.map((row) => row.id);
+        await trx.deleteFrom("entity_relationships").where("id", "in", ids).execute();
+        replacedRelationshipIds.push(...ids);
+      }
+    }
+
+    const repo = createEntityDomainsRepository(trx);
+    const relationshipId = await repo.upsertRelationship({
+      sourceEntityId: person.id,
+      targetEntityId: company.id,
+      relationshipType: input.relationshipType,
+      confidence: "CONFIRMED",
+      confidenceScore: 1,
+      source: DECLARED_RELATIONSHIP_SOURCE,
+    });
+    if (!relationshipId) throw new Error("declared relationship upsert returned no row");
+
+    await promoteEndpoint(trx, person.id);
+    await promoteEndpoint(trx, company.id);
+    return { relationshipId, replacedRelationshipIds };
   });
-  if (!relationshipId) throw new Error("declared relationship upsert returned no row");
-
-  await promoteEndpoint(db, person.id);
-  await promoteEndpoint(db, company.id);
-  return { relationshipId, replacedRelationshipIds };
 }
 
+/**
+ * Scoped to the pairs this API declares: person-owned works_at/engaged_with
+ * rows only. Declared project engagement_for edges stay behind
+ * restructureProject and cannot be deleted here.
+ */
 export async function removeDeclaredRelationship(
   db: Kysely<DB>,
   input: { entityId: string; relationshipId: string },
@@ -112,6 +134,7 @@ export async function removeDeclaredRelationship(
     .where("id", "=", input.relationshipId)
     .where("source_entity_id", "=", input.entityId)
     .where("source", "=", DECLARED_RELATIONSHIP_SOURCE)
+    .where("relationship_type", "in", ["works_at", "engaged_with"])
     .executeTakeFirst();
   return Number(result.numDeletedRows ?? 0) > 0;
 }
