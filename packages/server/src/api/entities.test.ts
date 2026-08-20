@@ -283,6 +283,29 @@ describe("person subtype API", () => {
     await db.destroy();
   });
 
+  it("stores declared aliases on a manually created company", async () => {
+    const response = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "One Stop AI", sourceType: "company", aliases: ["One Stop", "OSAI"] }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { entity: { id: string; aliases: string[] } };
+    expect(body.entity.aliases).toEqual(["One Stop", "OSAI"]);
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["aliases", "provenance_tier", "status"])
+        .where("id", "=", body.entity.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      aliases: JSON.stringify(["One Stop", "OSAI"]),
+      provenance_tier: "declared",
+      status: "confirmed",
+    });
+  });
+
   it("defaults a manually created person to external", async () => {
     const response = await app.request("/api/entities", {
       method: "POST",

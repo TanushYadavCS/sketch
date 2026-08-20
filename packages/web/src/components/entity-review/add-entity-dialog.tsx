@@ -30,6 +30,7 @@ export function AddEntityDialog({
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [type, setType] = useState(defaultType);
+  const [aliasesInput, setAliasesInput] = useState("");
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -37,13 +38,22 @@ export function AddEntityDialog({
       if (type === "product") {
         await api.products.create({ name: trimmed });
       } else {
-        await api.entities.create({ name: trimmed, sourceType: type });
+        const aliases = aliasesInput
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean);
+        await api.entities.create({
+          name: trimmed,
+          sourceType: type,
+          ...(aliases.length > 0 ? { aliases } : {}),
+        });
       }
     },
     onSuccess: () => {
       toast.success(`Entity "${name.trim()}" created.`);
       onOpenChange(false);
       setName("");
+      setAliasesInput("");
       setType(defaultType);
       queryClient.invalidateQueries({ queryKey: ["entities"] });
       queryClient.invalidateQueries({ queryKey: ["products"] });
@@ -84,6 +94,19 @@ export function AddEntityDialog({
               ))}
             </div>
           </div>
+          {type !== "product" ? (
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Aliases <span className="normal-case tracking-normal">(optional, comma-separated)</span>
+              </p>
+              <Input
+                value={aliasesInput}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAliasesInput(e.target.value)}
+                className="mt-1 text-sm"
+                placeholder="e.g. One Stop, OSAI"
+              />
+            </div>
+          ) : null}
           <Button
             className="w-full text-xs"
             onClick={() => createMutation.mutate()}
