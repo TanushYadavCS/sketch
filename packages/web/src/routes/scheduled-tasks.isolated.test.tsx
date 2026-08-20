@@ -56,6 +56,8 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
     canPause: true,
     canResume: false,
+    canMuteResponses: true,
+    canUnmuteResponses: false,
     canDelete: true,
     title: null,
     description: null,
@@ -109,6 +111,21 @@ function installTaskHandlers(initialTasks: ScheduledTaskListItem[]) {
       );
       const task = tasks.find((item) => item.id === params.id);
       return HttpResponse.json({ task });
+    }),
+    http.put("/api/scheduled-tasks/:id/response-delivery", async ({ params, request }) => {
+      const body = (await request.json()) as { muted: boolean };
+      tasks = tasks.map((task) =>
+        task.id === params.id
+          ? {
+              ...task,
+              outputMode: body.muted ? "silent" : "deliver",
+              delivery: { ...task.delivery, mode: body.muted ? "silent" : "deliver" },
+              canMuteResponses: !body.muted,
+              canUnmuteResponses: body.muted,
+            }
+          : task,
+      );
+      return HttpResponse.json({ task: tasks.find((item) => item.id === params.id) });
     }),
     http.delete("/api/scheduled-tasks/:id", ({ params }) => {
       tasks = tasks.filter((task) => task.id !== params.id);
@@ -175,7 +192,12 @@ describe("ScheduledTasksPage", () => {
         "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
+    const createButtons = screen.getAllByRole("button", { name: "Create with Sketch" });
+    expect(createButtons).toHaveLength(2);
+    for (const button of createButtons) {
+      expect(button).toHaveAttribute("data-variant", "default");
+      expect(button.querySelector("svg")).toBeInTheDocument();
+    }
   });
 
   it("creates a draft and navigates to its fresh builder conversation", async () => {
@@ -427,6 +449,8 @@ describe("ScheduledTasksPage", () => {
         status: "paused",
         canPause: false,
         canResume: true,
+        canMuteResponses: false,
+        canUnmuteResponses: false,
         lastRunStatus: "failed",
       }),
       buildTask({
@@ -621,6 +645,8 @@ describe("ScheduledTasksPage", () => {
         canDelete: false,
         canPause: false,
         canResume: true,
+        canMuteResponses: false,
+        canUnmuteResponses: false,
         status: "paused",
         shareCount: 1,
       }),
@@ -642,6 +668,7 @@ describe("ScheduledTasksPage", () => {
     await user.click(screen.getByRole("button", { name: /Actions for Shared workflow/i }));
     expect(screen.queryByRole("menuitem", { name: /share/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /mute responses/i })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /resume/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /open builder/i })).toBeInTheDocument();
 
@@ -774,6 +801,23 @@ describe("ScheduledTasksPage", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Task status: paused")).toBeInTheDocument();
     });
+  });
+
+  it("mutes and unmutes responses without pausing the automation", async () => {
+    installTaskHandlers([buildTask()]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => expect(screen.getByLabelText("Task status: active")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("menuitem", { name: /mute responses/i }));
+
+    await waitFor(() => expect(screen.getByText("Automation responses muted")).toBeInTheDocument());
+    expect(screen.getByLabelText("Task status: active")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("menuitem", { name: /unmute responses/i }));
+    await waitFor(() => expect(screen.getByText("Automation responses unmuted")).toBeInTheDocument());
   });
 
   it("opens the builder from the actions menu", async () => {

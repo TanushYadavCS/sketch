@@ -761,6 +761,8 @@ export const handlers = [
           scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
           canPause: true,
           canResume: false,
+          canMuteResponses: true,
+          canUnmuteResponses: false,
           canDelete: true,
           title: null,
           description: null,

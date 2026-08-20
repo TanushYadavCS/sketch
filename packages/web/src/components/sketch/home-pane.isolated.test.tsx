@@ -16,20 +16,28 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     to,
     params,
+    search,
     children,
     className,
     onMouseEnter,
     onFocus,
   }: {
     to: string;
-    params?: { conversationId?: string };
+    params?: { conversationId?: string; taskId?: string };
+    search?: { conversationId?: string };
     children: React.ReactNode;
     className?: string;
     onMouseEnter?: React.MouseEventHandler<HTMLAnchorElement>;
     onFocus?: React.FocusEventHandler<HTMLAnchorElement>;
   }) => (
     <a
-      href={params?.conversationId ? `/chat/${params.conversationId}` : to}
+      href={
+        params?.taskId
+          ? `/scheduled-tasks/${params.taskId}/edit?conversationId=${search?.conversationId}`
+          : params?.conversationId
+            ? `/chat/${params.conversationId}`
+            : to
+      }
       className={className}
       onMouseEnter={onMouseEnter}
       onFocus={onFocus}
@@ -147,6 +155,29 @@ describe("HomePane", () => {
     expect(screen.getByRole("link", { name: /Create a PDF for my skills/i })).toHaveAttribute("href", "/chat/web-chat");
     expect(screen.getByText("18m")).toBeInTheDocument();
     expect(screen.queryByText("Your conversations will appear here")).not.toBeInTheDocument();
+  });
+
+  it("opens automation source chats in their builder", () => {
+    render(
+      <HomePane
+        firstName="Karan"
+        onSubmit={() => undefined}
+        recents={[
+          {
+            id: "source-chat",
+            title: "Create a weekly brief",
+            channel: "web",
+            occurredAt: "2026-05-26T06:30:00.000Z",
+            builderTaskId: "task-weekly-brief",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: /Create a weekly brief/i })).toHaveAttribute(
+      "href",
+      "/scheduled-tasks/task-weekly-brief/edit?conversationId=source-chat",
+    );
   });
 
   it("forwards conversation intent to recent rows", async () => {

@@ -9,5 +9,6 @@ export function buildWebChatRecents(conversations: WebChatConversationSummary[])
     title: conversation.title,
     channel: conversation.channel,
     occurredAt: conversation.updatedAt,
+    builderTaskId: conversation.builderTaskId,
   }));
 }

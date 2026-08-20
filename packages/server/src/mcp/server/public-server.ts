@@ -79,7 +79,9 @@ export async function createPublicSketchMcpServer(params: {
     });
   }
 
-  register("sketch_search", searchToolDescription, searchToolSchema, handleSearch);
+  register("sketch_search", searchToolDescription, searchToolSchema, (args, deps) =>
+    handleSearch(args, deps, "public_mcp"),
+  );
   register("sketch_search_entities", searchEntitiesToolDescription, searchEntitiesToolSchema, handleSearchEntities);
   register(
     "sketch_get_entity_context",

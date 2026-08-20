@@ -216,7 +216,6 @@ describe("AI SDK custom Sketch tool provider", () => {
     const smokeInputs = {
       mcp__sketch__SendFileToChat: { file_path: filePath },
       mcp__sketch__ReadChatHistory: {},
-      mcp__sketch__SearchChatHistory: { query: "alpha" },
       mcp__sketch__SearchDeliveryTargets: { query: "alpha", limit: 1 },
       mcp__sketch__local_run_command: { command: "pwd" },
       mcp__sketch__local_claude_session: { action: "list" },

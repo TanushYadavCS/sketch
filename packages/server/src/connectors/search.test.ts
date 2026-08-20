@@ -215,6 +215,69 @@ describe("searchFiles — FTS5 query sanitization", () => {
   });
 });
 
+/**
+ * BM25 weights are positional over the FTS5 columns, so migration 196 swapping column
+ * two from `source` to `summary` silently changed what the old 10/1/3 weighted. Left
+ * alone it ranked a folder name above a summary — the opposite of the Postgres side.
+ */
+describe("searchFiles — FTS5 column weights", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-w",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const file = (id: string, fileName: string, sourcePath: string, summary: string) => ({
+      id,
+      connector_config_id: "connector-w",
+      provider_file_id: id,
+      file_name: fileName,
+      file_type: "text",
+      content_category: "document",
+      source: "google_drive",
+      source_path: sourcePath,
+      provider_url: null,
+      content: null,
+      summary,
+      context_note: null,
+      access_scope_id: null,
+      source_updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+    });
+
+    await db
+      .insertInto("indexed_files")
+      .values([
+        file("w-summary", "alpha.txt", "My Drive / Docs", "the document is about telemetry"),
+        file("w-path", "beta.txt", "My Drive / telemetry", "an unrelated accounting note"),
+        file("w-name", "telemetry.txt", "My Drive / Docs", "an unrelated accounting note"),
+      ])
+      .execute();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("ranks a name match over a summary match over a path match", async () => {
+    const results = await searchFiles(db, "telemetry");
+    expect(results.map((result) => result.id)).toEqual(["w-name", "w-summary", "w-path"]);
+  });
+});
+
 describe("KIND_TO_RULES", () => {
   it("maps message kind to local conversation, WhatsApp, and Slack slice sources", () => {
     expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp", "slack"] }]);

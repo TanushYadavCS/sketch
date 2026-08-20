@@ -194,6 +194,9 @@ import * as m191 from "./migrations/191-task-review-fields";
 import * as m192 from "./migrations/192-scheduled-task-builder-lock-expires-at";
 import * as m193 from "./migrations/193-automation-lock-sessions";
 import * as m194 from "./migrations/194-remove-scheduled-task-builder-locks";
+import * as m195 from "./migrations/195-dev-search-traces";
+import * as m196 from "./migrations/196-search-vector-summary-weights";
+import * as m197 from "./migrations/197-file-field-embeddings";
 import type { DB } from "./schema";
 
 /**
@@ -397,6 +400,9 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "192-scheduled-task-builder-lock-expires-at": m192,
           "193-automation-lock-sessions": m193,
           "194-remove-scheduled-task-builder-locks": m194,
+          "195-dev-search-traces": m195,
+          "196-search-vector-summary-weights": m196,
+          "197-file-field-embeddings": m197,
         };
       },
     },

@@ -256,7 +256,7 @@ describe("scheduled task conversation API", () => {
     expect(admin.id).not.toBe(owner.id);
   });
 
-  it("lets an exact lease holder create chats without overwriting its Slack notification route", async () => {
+  it("lets an exact browser lease holder create chats while keeping its builder notification route", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({
       name: "Slack owner",
@@ -304,9 +304,9 @@ describe("scheduled task conversation API", () => {
     await expect(createAutomationLocksRepository(db).getByTaskId("slack-chat-task")).resolves.toMatchObject({
       holder_user_id: owner.id,
       holder_session_id: clientSessionId,
-      holder_platform: "slack",
-      holder_surface: "dm",
-      holder_conversation_id: "UOWNERCHAT",
+      holder_platform: "web",
+      holder_surface: "builder",
+      holder_conversation_id: secondBody.conversation.conversationId,
       generation: lock.generation,
     });
   });
@@ -583,7 +583,7 @@ describe("scheduled task conversation API", () => {
     ).resolves.toHaveLength(2);
   });
 
-  it("selects a builder with one session and conflicts for another session of the same user", async () => {
+  it("shares a builder lease across sessions for the same user", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({
       name: "Owner",
@@ -615,6 +615,15 @@ describe("scheduled task conversation API", () => {
     const firstBody = await first.json();
     expect(firstBody.builderLock).toMatchObject({ state: "held", owner: "self", generation: 1 });
 
+    const otherSessionList = await app.request(
+      "/api/scheduled-tasks/session-select-task/conversations?clientSessionId=tab-b",
+      { headers: { Cookie: cookie } },
+    );
+    expect(otherSessionList.status).toBe(200);
+    await expect(otherSessionList.json()).resolves.toMatchObject({
+      builderLock: { state: "held", owner: "self", generation: 1 },
+    });
+
     const sameSession = await app.request("/api/scheduled-tasks/session-select-task/conversations/session-builder", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
@@ -627,9 +636,9 @@ describe("scheduled task conversation API", () => {
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-b" }),
     });
-    expect(second.status).toBe(409);
+    expect(second.status).toBe(200);
     await expect(second.json()).resolves.toMatchObject({
-      error: { code: "BUILDER_CHAT_LOCKED", builderLock: { owner: "other", generation: 1 } },
+      builderLock: { state: "held", owner: "self", generation: 1 },
     });
     await expect(
       db
@@ -637,7 +646,7 @@ describe("scheduled task conversation API", () => {
         .select(["holder_user_id", "holder_session_id", "generation"])
         .where("task_id", "=", "session-select-task")
         .executeTakeFirst(),
-    ).resolves.toEqual({ holder_user_id: owner.id, holder_session_id: "tab-a", generation: 1 });
+    ).resolves.toEqual({ holder_user_id: owner.id, holder_session_id: "tab-b", generation: 1 });
   });
 
   it("rejects unrelated or malformed selections without creating associations", async () => {

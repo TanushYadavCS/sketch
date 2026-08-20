@@ -341,7 +341,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.executeTaskById).toHaveBeenCalledTimes(1);
   });
 
-  it("fences manual runs by the active authoring session and generation", async () => {
+  it("fences manual runs by the active authoring user and generation", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner-lease-run@test.com" });
@@ -394,13 +394,12 @@ describe("Scheduled Tasks API", () => {
     const lock = (await acquired.json()).lock;
     expect(lock).toMatchObject({ generation: 1, isHeldByMe: true });
 
-    const conflictingRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
+    const secondSessionRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
       method: "POST",
       headers: { Cookie: granteeCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-b", generation: lock.generation }),
     });
-    expect(conflictingRun.status).toBe(409);
-    await expect(conflictingRun.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(secondSessionRun.status).toBe(200);
 
     const exactRun = await app.request("/api/scheduled-tasks/task-lease-run/runs", {
       method: "POST",
@@ -408,10 +407,10 @@ describe("Scheduled Tasks API", () => {
       body: JSON.stringify({ clientSessionId: "tab-a", generation: lock.generation }),
     });
     expect(exactRun.status).toBe(200);
-    expect(executeTaskById).toHaveBeenCalledTimes(2);
+    expect(executeTaskById).toHaveBeenCalledTimes(3);
   });
 
-  it("requires an exact authoring lease for browser saves", async () => {
+  it("requires a user-scoped authoring lease for browser saves", async () => {
     await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-browser-save@test.com" });
     await createScheduledTaskRepository(db).add({
@@ -452,7 +451,7 @@ describe("Scheduled Tasks API", () => {
       taskId: "task-browser-save",
       holder: { userId: owner.id, sessionId: "tab-a", platform: "web", surface: "builder", conversationId: null },
     });
-    const conflicting = await app.request("/api/scheduled-tasks/task-browser-save", {
+    const secondSessionSave = await app.request("/api/scheduled-tasks/task-browser-save", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -461,14 +460,13 @@ describe("Scheduled Tasks API", () => {
         generation: 1,
       }),
     });
-    expect(conflicting.status).toBe(409);
-    await expect(conflicting.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    expect(secondSessionSave.status).toBe(200);
 
     const exact = await app.request("/api/scheduled-tasks/task-browser-save", {
       method: "PUT",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...makeBuilderSaveRequest({ expectedRevision: 0 }),
+        ...makeBuilderSaveRequest({ expectedRevision: 1 }),
         clientSessionId: "tab-a",
         generation: 1,
       }),
@@ -968,9 +966,33 @@ describe("Scheduled Tasks API", () => {
     });
     expect(resumeRes.status).toBe(200);
     expect((await resumeRes.json()).task.status).toBe("active");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-1/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(200);
+    expect((await muteRes.json()).task).toMatchObject({
+      outputMode: "silent",
+      canMuteResponses: false,
+      canUnmuteResponses: true,
+    });
+
+    const unmuteRes = await app.request("/api/scheduled-tasks/task-1/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: false }),
+    });
+    expect(unmuteRes.status).toBe(200);
+    expect((await unmuteRes.json()).task).toMatchObject({
+      outputMode: "deliver",
+      canMuteResponses: true,
+      canUnmuteResponses: false,
+    });
   });
 
-  it("fences pause and resume behind the exact authoring lease", async () => {
+  it("fences pause and resume behind the user-scoped authoring lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1028,7 +1050,7 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.resumeTask).toHaveBeenCalledWith("task-lease-pause");
   });
 
-  it("authorizes deletion inside the transaction and accepts only the exact lease", async () => {
+  it("authorizes deletion inside the transaction and requires the user-scoped lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1116,6 +1138,7 @@ describe("Scheduled Tasks API", () => {
     const routes = [
       { method: "POST", path: "/api/scheduled-tasks/task-bob/pause" },
       { method: "POST", path: "/api/scheduled-tasks/task-bob/resume" },
+      { method: "PUT", path: "/api/scheduled-tasks/task-bob/response-delivery" },
       { method: "DELETE", path: "/api/scheduled-tasks/task-bob" },
       { method: "POST", path: "/api/scheduled-tasks/task-bob/run" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob" },
@@ -1191,6 +1214,14 @@ describe("Scheduled Tasks API", () => {
     expect(pauseRes.status).toBe(200);
     expect((await pauseRes.json()).task.status).toBe("paused");
     expect(scheduler.pauseTask).toHaveBeenCalledWith("task-bob");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-bob/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(200);
+    expect((await muteRes.json()).task).toMatchObject({ outputMode: "silent", canUnmuteResponses: true });
 
     // Share grant/revoke stays owner-only, admins included.
     for (const { method, path } of [
@@ -1477,7 +1508,7 @@ describe("Scheduled Tasks API", () => {
     await expect(tasks.getById("task-share")).resolves.toMatchObject({ revision: 0 });
   });
 
-  it("fences share grants and revocations behind the exact authoring lease", async () => {
+  it("fences share grants and revocations behind the user-scoped authoring lease", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -1522,10 +1553,17 @@ describe("Scheduled Tasks API", () => {
     const staleLease = await app.request(path, {
       method: "PUT",
       headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ clientSessionId: "tab-b", generation: 1 }),
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: 2 }),
     });
     expect(staleLease.status).toBe(409);
-    await expect(staleLease.json()).resolves.toMatchObject({ error: { code: "LOCKED" } });
+    await expect(staleLease.json()).resolves.toMatchObject({ error: { code: "LEASE_STALE" } });
+
+    const secondSession = await app.request(path, {
+      method: "PUT",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-b", generation: 1 }),
+    });
+    expect(secondSession.status).toBe(200);
 
     const exactLease = { clientSessionId: "tab-a", generation: 1 };
     const grant = await app.request(path, {
@@ -1943,6 +1981,14 @@ describe("Scheduled Tasks API", () => {
     });
     expect(resumeRes.status).toBe(200);
     expect((await resumeRes.json()).task.status).toBe("active");
+
+    const muteRes = await app.request("/api/scheduled-tasks/task-grantee/response-delivery", {
+      method: "PUT",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(muteRes.status).toBe(404);
+    expect((await tasks.getById("task-grantee"))?.output_mode).toBe("deliver");
 
     const stepContentRes = await app.request("/api/scheduled-tasks/task-grantee/step-content", {
       headers: { Cookie: memberCookie },
@@ -2809,7 +2855,7 @@ describe("Scheduled Tasks API", () => {
     expect(afterReleaseBody.automation).not.toHaveProperty("lock");
   });
 
-  it("requires a client session and conflicts when the same user opens another session", async () => {
+  it("requires a client session and shares editing across sessions for the same user", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -2889,26 +2935,32 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-b" }),
     });
-    expect(second.status).toBe(409);
+    expect(second.status).toBe(200);
     await expect(second.json()).resolves.toMatchObject({
-      error: { code: "LOCKED", lock: { generation: 1, isHeldByMe: false } },
-    });
-
-    const sameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal", {
-      method: "POST",
-      headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ clientSessionId: "tab-b" }),
-    });
-    expect(sameUserSteal.status).toBe(200);
-    const sameUserStealBody = await sameUserSteal.json();
-    expect(sameUserStealBody).toMatchObject({
-      status: "pending",
       lock: {
         heldByUserId: alice.id,
-        isHeldByMe: false,
-        isHeldByMyOtherSession: true,
-        stealPending: { requesterName: "Alice" },
+        isHeldByMe: true,
+        isHeldByMyOtherSession: false,
+        generation: 1,
       },
+    });
+
+    const sameUserTakeover = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a" }),
+    });
+    expect(sameUserTakeover.status).toBe(409);
+    await expect(sameUserTakeover.json()).resolves.toMatchObject({ error: { code: "NOT_LOCKED" } });
+
+    const firstSessionRenewal = await app.request("/api/scheduled-tasks/task-session-contract/lock", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientSessionId: "tab-a", generation: firstBody.lock.generation }),
+    });
+    expect(firstSessionRenewal.status).toBe(200);
+    await expect(firstSessionRenewal.json()).resolves.toMatchObject({
+      lock: { generation: 1, isHeldByMe: true, isHeldByMyOtherSession: false },
     });
 
     const otherSessionDetail = await app.request("/api/scheduled-tasks/task-session-contract?clientSessionId=tab-b", {
@@ -2918,29 +2970,10 @@ describe("Scheduled Tasks API", () => {
       automation: {
         lock: {
           heldByUserId: alice.id,
-          isHeldByMe: false,
-          isHeldByMyOtherSession: true,
+          isHeldByMe: true,
+          isHeldByMyOtherSession: false,
+          generation: 1,
         },
-      },
-    });
-
-    const approveSameUserSteal = await app.request("/api/scheduled-tasks/task-session-contract/lock/steal/response", {
-      method: "POST",
-      headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        approve: true,
-        clientSessionId: "tab-a",
-        generation: sameUserStealBody.lock.generation,
-      }),
-    });
-    expect(approveSameUserSteal.status).toBe(200);
-    await expect(approveSameUserSteal.json()).resolves.toMatchObject({
-      status: "approved",
-      lock: {
-        heldByUserId: alice.id,
-        isHeldByMe: false,
-        isHeldByMyOtherSession: true,
-        generation: sameUserStealBody.lock.generation + 1,
       },
     });
   });
@@ -3004,7 +3037,7 @@ describe("Scheduled Tasks API", () => {
     );
   });
 
-  it("delivers a steal request to a Slack-identified holder acquired through the production lock route", async () => {
+  it("keeps a Slack-identified web holder on the builder surface", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -3049,18 +3082,18 @@ describe("Scheduled Tasks API", () => {
     const aliceCookie = await getMemberCookie(db, alice.id);
     const bobCookie = await getMemberCookie(db, bob.id);
 
-    // Production acquire: the holder row records the Slack DM surface.
     const acquired = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock", {
       method: "POST",
       headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ clientSessionId: "tab-alice" }),
     });
     expect(acquired.status).toBe(200);
+    const acquiredBody = await acquired.json();
     await expect(createAutomationLocksRepository(db).getByTaskId("task-route-slack-lock")).resolves.toMatchObject({
       holder_user_id: alice.id,
-      holder_platform: "slack",
-      holder_surface: "dm",
-      holder_conversation_id: "USLACKROUTE",
+      holder_platform: "web",
+      holder_surface: "builder",
+      holder_conversation_id: null,
     });
 
     const res = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock/steal", {
@@ -3069,16 +3102,33 @@ describe("Scheduled Tasks API", () => {
       body: JSON.stringify({ clientSessionId: "tab-bob" }),
     });
     expect(res.status).toBe(200);
-    await vi.waitFor(() => {
-      expect(postLockStealRequestMessage).toHaveBeenCalled();
+    await expect(res.json()).resolves.toMatchObject({
+      status: "pending",
+      lock: { stealPending: { requesterName: "Bob" } },
     });
-    expect(postLockStealRequestMessage).toHaveBeenCalledWith(
-      "USLACKROUTE",
-      expect.objectContaining({ taskId: "task-route-slack-lock", requesterName: "Bob" }),
-    );
+
+    const holderDetail = await app.request("/api/scheduled-tasks/task-route-slack-lock?clientSessionId=tab-alice", {
+      headers: { Cookie: aliceCookie },
+    });
+    await expect(holderDetail.json()).resolves.toMatchObject({
+      automation: { lock: { isHeldByMe: true, stealPending: { requesterName: "Bob" } } },
+    });
+
+    const approved = await app.request("/api/scheduled-tasks/task-route-slack-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approve: true,
+        clientSessionId: "tab-alice",
+        generation: acquiredBody.lock.generation,
+      }),
+    });
+    expect(approved.status).toBe(200);
+    await expect(approved.json()).resolves.toMatchObject({ status: "approved", lock: { heldByUserId: bob.id } });
+    expect(postLockStealRequestMessage).not.toHaveBeenCalled();
   });
 
-  it("delivers a steal request to a WhatsApp-identified holder acquired through the production lock route", async () => {
+  it("keeps a WhatsApp-identified web holder on the builder surface", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -3130,11 +3180,12 @@ describe("Scheduled Tasks API", () => {
       body: JSON.stringify({ clientSessionId: "tab-alice" }),
     });
     expect(acquired.status).toBe(200);
+    const acquiredBody = await acquired.json();
     await expect(createAutomationLocksRepository(db).getByTaskId("task-route-wa-lock")).resolves.toMatchObject({
       holder_user_id: alice.id,
-      holder_platform: "whatsapp",
-      holder_surface: "dm",
-      holder_conversation_id: "15550001111@s.whatsapp.net",
+      holder_platform: "web",
+      holder_surface: "builder",
+      holder_conversation_id: null,
     });
 
     const res = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock/steal", {
@@ -3143,13 +3194,23 @@ describe("Scheduled Tasks API", () => {
       body: JSON.stringify({ clientSessionId: "tab-bob" }),
     });
     expect(res.status).toBe(200);
-    await vi.waitFor(() => {
-      expect(sendText).toHaveBeenCalled();
+    await expect(res.json()).resolves.toMatchObject({
+      status: "pending",
+      lock: { stealPending: { requesterName: "Bob" } },
     });
-    expect(sendText).toHaveBeenCalledWith(
-      { kind: "dm", phoneE164: "+15550001111", providerConversationId: "15550001111@s.whatsapp.net" },
-      expect.stringContaining("CONFIRM-STEAL task-route-wa-lock"),
-    );
+
+    const denied = await app.request("/api/scheduled-tasks/task-route-wa-lock/lock/steal/response", {
+      method: "POST",
+      headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approve: false,
+        clientSessionId: "tab-alice",
+        generation: acquiredBody.lock.generation,
+      }),
+    });
+    expect(denied.status).toBe(200);
+    await expect(denied.json()).resolves.toMatchObject({ status: "denied", lock: { heldByUserId: alice.id } });
+    expect(sendText).not.toHaveBeenCalled();
   });
 
   it("returns 409 LOCKED on PUT and steal edge cases without a valid holder", async () => {

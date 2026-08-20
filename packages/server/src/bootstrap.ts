@@ -19,12 +19,7 @@ import type { SendTargetMessage } from "./agent/tools/types";
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
-import { createAiSdkAutomationAuthoringGenerator } from "./automation/authoring/generator";
-import { createAutomationAuthoringProviderLoader } from "./automation/authoring/provider";
-import { createAutomationAuthoringService } from "./automation/authoring/service";
-import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
 import { createAutomationCapabilityRegistry } from "./automation/capabilities";
-import { createChatAutomationAuthoring } from "./automation/chat-authoring";
 import { AutomationLockSweeper } from "./automation/lock-service";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
@@ -318,7 +313,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   });
   const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
   const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
-  let chatAutomationAuthoring: ReturnType<typeof createChatAutomationAuthoring> | undefined;
   const whatsappRuntimeRef: { current: ReturnType<typeof createWhatsAppRuntime> | null } = { current: null };
 
   /**
@@ -365,15 +359,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
       maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       slackEntitySyncEnabled: params.slackEntitySyncEnabled ?? config.SLACK_ENTITY_SYNC,
+      devToolsEnabled: params.devToolsEnabled ?? config.DEV_TOOLS_ENABLED,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,
       loadAgentRuntimeProviderConfig:
         params.loadAgentRuntimeProviderConfig ??
         (async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get())),
-      automationAuthoringEnabled:
-        params.contextType !== "scheduled_task" && config.AUTOMATION_AUTHORING_MODEL !== undefined,
-      chatAutomationAuthoring: params.contextType !== "scheduled_task" ? chatAutomationAuthoring : undefined,
       validateAgentSkills: cliIntegrations.validateAgentSkills,
       cliIntegrations,
       agentEnv: resolvedAgentEnv,
@@ -857,33 +849,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
     limitScheduledAgentExecution,
     automationCapabilityRegistry,
   });
-  if (config.AUTOMATION_AUTHORING_MODEL) {
-    const loadAuthoringProvider = createAutomationAuthoringProviderLoader({
-      modelId: config.AUTOMATION_AUTHORING_MODEL,
-      loadProviderConfig: async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get()),
-    });
-    const authoring = createAutomationAuthoringService({
-      loadProvider: async () => {
-        const provider = await loadAuthoringProvider();
-        return {
-          provider: "openrouter",
-          modelId: provider.modelId,
-          model: provider.model,
-        };
-      },
-      generator: createAiSdkAutomationAuthoringGenerator(),
-      telemetry: createAutomationAuthoringTelemetry({ logger, pricing }),
-      configuredModelId: config.AUTOMATION_AUTHORING_MODEL,
-    });
-    chatAutomationAuthoring = createChatAutomationAuthoring({
-      db,
-      authoring,
-      scheduler,
-      loadIntegrationProvider,
-      encryptionKey: config.ENCRYPTION_KEY,
-      validateAgentSkills: cliIntegrations.validateAgentSkills,
-    });
-  }
   if (backgroundWork) await scheduler.start();
 
   // Automation edit-lock hygiene: 60s stale-row sweeper. Correctness relies on

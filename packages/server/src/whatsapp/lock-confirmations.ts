@@ -193,8 +193,18 @@ export async function handleStealResponse(params: {
   const requesterConversationId = row.steal_requester_conversation_id;
 
   const responded = approve
-    ? await approveSteal(db, { taskId, approverUserId: responderUserId })
-    : await denySteal(db, { taskId, holderUserId: responderUserId });
+    ? await approveSteal(db, {
+        taskId,
+        approverUserId: responderUserId,
+        approverSessionId: row.holder_session_id,
+        approverGeneration: row.generation,
+      })
+    : await denySteal(db, {
+        taskId,
+        holderUserId: responderUserId,
+        holderSessionId: row.holder_session_id,
+        holderGeneration: row.generation,
+      });
   if (responded.kind !== "approved" && responded.kind !== "denied") return { kind: responded.kind };
 
   const task = await createScheduledTaskRepository(db).getById(taskId);

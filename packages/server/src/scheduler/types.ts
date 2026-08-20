@@ -95,4 +95,5 @@ export interface TaskContext {
   canManageAnyTask?: boolean;
   currentAutomation?: CurrentAutomation;
   authoringLease?: { sessionId: string; generation: number };
+  planOnly?: boolean;
 }

@@ -1756,7 +1756,38 @@ export interface WebhookDeliveriesTable {
   error_message: string | null;
 }
 
+/**
+ * A captured trace of one real `Search` tool call. Written only while dev tools are on.
+ */
+export interface DevSearchTracesTable {
+  id: string;
+  /** Which caller reached `handleSearch`: agent | automation | public_mcp. */
+  origin: string;
+  user_id: string | null;
+  conversation_id: number | null;
+  query: string;
+  args_json: string;
+  principals_json: string;
+  stages_json: string;
+  status: string;
+  error: string | null;
+  result_count: Generated<number>;
+  duration_ms: Generated<number>;
+  started_at: Generated<string>;
+}
+
+/** Embeddings of a file's own fields (name, summary), beside its content chunks. */
+export interface FileFieldEmbeddingsTable {
+  indexed_file_id: string;
+  field: string;
+  embedding: string;
+  source_text: string;
+  updated_at: Generated<string>;
+}
+
 export interface DB {
+  file_field_embeddings: FileFieldEmbeddingsTable;
+  dev_search_traces: DevSearchTracesTable;
   question_interactions: QuestionInteractionsTable;
   question_interaction_items: QuestionInteractionItemsTable;
   question_interaction_events: QuestionInteractionEventsTable;

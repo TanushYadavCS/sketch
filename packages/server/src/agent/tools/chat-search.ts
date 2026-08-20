@@ -12,22 +12,24 @@ import { parseWhatsAppGroupRosterSnapshot, renderWhatsAppGroupHistoryMessages } 
 
 export type ChatSearchPlatform = "slack" | "whatsapp";
 
-export interface AllChatsSearchArgs {
-  query: string;
+export interface AllChatsReadArgs {
   platform?: ChatSearchPlatform;
-  afterMessageId?: number;
-  beforeMessageId?: number;
+  afterTime?: string;
+  beforeTime?: string;
+  cursor?: { effectiveAt: string; messageId: number };
+  snapshotBeforeMessageId?: number;
+  order?: "asc" | "desc";
   limit?: number;
   includeBotMessages?: boolean;
 }
 
-export type AllChatsSearchOutcome =
+export type AllChatsReadOutcome =
   | {
       ok: true;
       body: {
         messages: Array<Record<string, unknown>>;
         hasMore: boolean;
-        noMatchMeaning?: string;
+        nextCursor?: { effectiveAt: string; messageId: number };
       };
     }
   | { ok: false; message: string };
@@ -138,6 +140,37 @@ export class ChatHistoryAccessResolver {
       if (authorized.has(providerTargetKey(target))) granted.add(providerTargetKey(target));
     }
     return granted;
+  }
+
+  /**
+   * Every conversation the requester may read, without a candidate id list.
+   * Answers membership through the same roster gate as every other door, so a
+   * broad read cannot grant more than a targeted one.
+   */
+  async authorizedConversationIdsForAllChats(platform?: ChatSearchPlatform): Promise<number[]> {
+    if (!this.deps.db || !this.deps.currentUserId) return [];
+    let query = this.deps.db
+      .selectFrom("conversations")
+      .select(["id", "platform", "provider_conversation_id"])
+      .where("kind", "in", ["channel", "group"]);
+    if (platform) query = query.where("platform", "=", platform);
+    const rows = await query.execute();
+    if (rows.length === 0) return [];
+
+    const candidates = rows.filter((row) => row.platform === "slack" || row.platform === "whatsapp");
+    const granted = await this.authorizedProviderTargets(
+      candidates.map((row) => ({
+        platform: row.platform as ChatSearchPlatform,
+        targetId: row.provider_conversation_id,
+      })),
+    );
+    return candidates
+      .filter((row) =>
+        granted.has(
+          providerTargetKey({ platform: row.platform as ChatSearchPlatform, targetId: row.provider_conversation_id }),
+        ),
+      )
+      .map((row) => row.id);
   }
 
   private async resolveRows(rows: ConversationAccessRow[]): Promise<Set<number>> {
@@ -327,52 +360,44 @@ export async function renderAllChatsSearchResults(
  * groups must also pass the provider membership gate before they are included.
  * The platform filter still applies to the current conversation.
  */
-export async function handleAllChatsSearch(
-  args: AllChatsSearchArgs,
+export async function handleAllChatsRead(
+  args: AllChatsReadArgs,
   deps: SketchMcpDeps,
   access = new ChatHistoryAccessResolver(deps),
-): Promise<AllChatsSearchOutcome> {
+): Promise<AllChatsReadOutcome> {
   if (!deps.db) {
-    return { ok: false, message: "Cross-chat search is not available in this run." };
+    return { ok: false, message: "Cross-chat chat history is not available in this run." };
   }
   if (!deps.currentUserId) {
-    return { ok: false, message: "Cross-chat search requires an authenticated requesting user." };
+    return { ok: false, message: "Cross-chat chat history requires an authenticated requesting user." };
   }
-  const currentMessageId = deps.conversationContext?.currentMessageId;
-  const effectiveBeforeMessageId =
-    args.beforeMessageId && currentMessageId
-      ? Math.min(args.beforeMessageId, currentMessageId)
-      : (args.beforeMessageId ?? currentMessageId);
-
-  const conversationRepo = deps.conversationRepo ?? createConversationRepository(deps.db);
-  const [candidateConversationIds, currentConversationId] = await Promise.all([
-    conversationRepo.findMatchingConversationIds({
-      query: args.query,
-      platform: args.platform,
-      afterMessageId: args.afterMessageId,
-      beforeMessageId: effectiveBeforeMessageId,
-      includeBotMessages: args.includeBotMessages,
-    }),
+  const [authorizedConversationIds, candidateCurrentConversationId] = await Promise.all([
+    access.authorizedConversationIdsForAllChats(args.platform),
     hasCurrentConversation(deps.db, deps.conversationContext?.conversationId, args.platform),
   ]);
-  if (!currentConversationId && !(await access.hasUsableIdentity())) {
+  /**
+   * Being inside a conversation is not a grant. The current conversation goes
+   * through the same membership gate as every other one, or a user removed
+   * from a channel could still read it by asking from inside it.
+   */
+  const currentConversationId =
+    candidateCurrentConversationId && (await access.isConversationAuthorized(candidateCurrentConversationId))
+      ? candidateCurrentConversationId
+      : undefined;
+  if (!currentConversationId && authorizedConversationIds.length === 0 && !(await access.hasUsableIdentity())) {
     return {
       ok: false,
-      message: "Cross-chat search requires a linked Slack or WhatsApp account.",
+      message: "Cross-chat chat history requires a linked Slack or WhatsApp account.",
     };
   }
-  const authorizedConversationIds = await access.authorizedConversationIds(
-    candidateConversationIds.filter((id) => id !== currentConversationId),
-  );
-  const currentConversationAuthorized = currentConversationId
-    ? await access.isConversationAuthorized(currentConversationId)
-    : false;
-  const result = await conversationRepo.searchMessagesAcrossConversations({
-    query: args.query,
-    authorizedConversationIds: authorizedSearchableConversationIds(deps.db, authorizedConversationIds),
-    currentConversationId: currentConversationAuthorized ? currentConversationId : undefined,
-    afterMessageId: args.afterMessageId,
-    beforeMessageId: effectiveBeforeMessageId,
+  const conversationRepo = deps.conversationRepo ?? createConversationRepository(deps.db);
+  const result = await conversationRepo.listMessagesAcrossConversations({
+    conversationIds: [...authorizedConversationIds, ...(currentConversationId ? [currentConversationId] : [])],
+    afterEffectiveAt: args.afterTime,
+    beforeEffectiveAt: args.beforeTime,
+    cursor: args.cursor,
+    snapshotBeforeMessageId: args.snapshotBeforeMessageId,
+    order: args.order,
     limit: args.limit,
     includeBotMessages: args.includeBotMessages,
   });
@@ -382,10 +407,12 @@ export async function handleAllChatsSearch(
     body: {
       messages: await renderAllChatsSearchResults(deps.db, result.messages),
       hasMore: result.hasMore,
-      ...(result.messages.length === 0
+      ...(result.messages.length > 0
         ? {
-            noMatchMeaning:
-              "No matching messages were found in chats authorized for this requester. This does not prove that matching messages were never persisted or that inaccessible chats contain no matches.",
+            nextCursor: {
+              effectiveAt: result.messages[result.messages.length - 1].effectiveAt,
+              messageId: result.messages[result.messages.length - 1].id,
+            },
           }
         : {}),
     },

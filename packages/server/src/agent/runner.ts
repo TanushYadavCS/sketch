@@ -18,7 +18,6 @@ import type {
   WebChatQuestionInteraction,
 } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
-import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -329,6 +328,7 @@ export interface RunAgentParams {
   userName: string;
   userEmail?: string | null;
   slackEntitySyncEnabled?: boolean;
+  devToolsEnabled?: boolean;
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
@@ -354,14 +354,13 @@ export interface RunAgentParams {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   model?: string;
   maxTurns?: number;
+  maxPersistedTextBytes?: number;
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
   currentAutomation?: CurrentAutomation;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
-  chatAutomationAuthoring?: ChatAutomationAuthoring;
-  automationAuthoringEnabled?: boolean;
   automationBuilderChat?: boolean;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -849,7 +848,6 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
-    automationAuthoringEnabled: params.automationAuthoringEnabled,
     automationBuilderChat: params.automationBuilderChat,
   });
   const claudeMdContext = await loadAgentRuntimeClaudeMdContext({
@@ -1020,6 +1018,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
           systemPrompt: systemAppend,
           tools,
           maxTurns: params.maxTurns ?? 100,
+          maxPersistedTextBytes: params.maxPersistedTextBytes,
           stopAfterToolNames: questionToolNames.filter((name) => customTools[name]),
           stopAfterToolCall: shouldStopAfterCreateAutomationSkill
             ? ({ name, input }) => isCreateAutomationSkillInvocation(name, input)
@@ -1217,7 +1216,6 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
-    automationAuthoringEnabled: params.automationAuthoringEnabled,
     automationBuilderChat: params.automationBuilderChat,
   })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
 
@@ -1289,7 +1287,6 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     taskContext: params.taskContext,
     currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,
-    chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,
@@ -1304,6 +1301,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     currentUserEmail: params.userEmail ?? null,
     currentUserName: params.userName,
     slackEntitySyncEnabled: params.slackEntitySyncEnabled,
+    devToolsEnabled: params.devToolsEnabled,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
     workspaceKey: params.workspaceKey,

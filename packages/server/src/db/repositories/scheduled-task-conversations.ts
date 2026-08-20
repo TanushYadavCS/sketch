@@ -71,6 +71,21 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
       return query.orderBy("last_active_at", "desc").orderBy("created_at", "desc").orderBy("kind", "asc").execute();
     },
 
+    async listByTranscriptUser(
+      transcriptUserId: string,
+      options: ListScheduledTaskConversationOptions = {},
+    ): Promise<ScheduledTaskConversationRow[]> {
+      let query = db
+        .selectFrom("scheduled_task_conversations")
+        .selectAll()
+        .where("transcript_user_id", "=", transcriptUserId);
+
+      if (!options.includeArchived) query = query.where("archived_at", "is", null);
+      if (options.kind) query = query.where("kind", "=", options.kind);
+
+      return query.orderBy("last_active_at", "desc").orderBy("created_at", "desc").orderBy("kind", "asc").execute();
+    },
+
     async listByTaskConversation(taskId: string, conversationId: string): Promise<ScheduledTaskConversationRow[]> {
       return db
         .selectFrom("scheduled_task_conversations")

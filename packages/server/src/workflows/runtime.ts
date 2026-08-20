@@ -186,7 +186,7 @@ async function failAutomationRun(params: {
     runtime.logger.error({ err, taskId: runtime.task.id, runId }, "Automation: failed to persist run failure");
   }
 
-  if (aborted || runtime.runMode === "test" || !runtime.sendMessage) return;
+  if (aborted || runtime.runMode === "test" || runtime.task.output_mode === "silent" || !runtime.sendMessage) return;
 
   const notification =
     runtime.runMode === "manual"

@@ -60,6 +60,7 @@ import {
   BracketsCurlyIcon,
   CalendarDotsIcon,
   CaretDownIcon,
+  ChatCircleIcon,
   CheckCircleIcon,
   CircleIcon,
   CodeIcon,
@@ -71,6 +72,7 @@ import {
   GoogleLogoIcon,
   type IconProps,
   LightningIcon,
+  PauseIcon,
   PlayIcon,
   PlusIcon,
   RobotIcon,
@@ -609,7 +611,9 @@ export function AutomationBuilderPage() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [stealDialogOpen, setStealDialogOpen] = useState(false);
   const [holderResponseDialogOpen, setHolderResponseDialogOpen] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(Boolean(requestedConversationId));
   const [authoringLease, setAuthoringLease] = useState<AutomationAuthoringLease | null>(null);
+  const surfacedStealRequestRef = useRef<string | null>(null);
   const executionModeSelectionIdRef = useRef(0);
   const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
@@ -692,6 +696,21 @@ export function AutomationBuilderPage() {
   useEffect(() => {
     lockHolderRef.current = authoringLease;
   }, [authoringLease]);
+
+  useEffect(() => {
+    const requestId = lockView?.isHeldByMe ? lockView.stealPending?.expiresAt : null;
+    if (!requestId) {
+      setHolderResponseDialogOpen(false);
+      return;
+    }
+    if (surfacedStealRequestRef.current === requestId) return;
+    surfacedStealRequestRef.current = requestId;
+    setHolderResponseDialogOpen(true);
+  }, [lockView?.isHeldByMe, lockView?.stealPending?.expiresAt]);
+
+  useEffect(() => {
+    if (lockView?.isHeldByMe) setStealDialogOpen(false);
+  }, [lockView?.isHeldByMe]);
 
   const leaseIsCurrent = useCallback((lease: AutomationLeaseRequest) => {
     const current = lockHolderRef.current;
@@ -831,6 +850,22 @@ export function AutomationBuilderPage() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Could not delete automation"),
   });
 
+  const statusMutation = useMutation({
+    mutationFn: (action: "pause" | "resume") => {
+      if (!authoringLease) throw new Error("Acquire the automation editing session before changing its status");
+      const lease = leaseRequest(authoringLease);
+      return action === "pause" ? api.scheduledTasks.pause(taskId, lease) : api.scheduledTasks.resume(taskId, lease);
+    },
+    onSuccess: async (_task, action) => {
+      await invalidateAutomationQueries(queryClient, [taskId]);
+      toast.success(action === "pause" ? "Automation paused" : "Automation resumed");
+    },
+    onError: (error) => {
+      if (isLeaseStaleError(error)) setAuthoringLease(null);
+      toast.error(error instanceof Error ? error.message : "Could not change the automation status");
+    },
+  });
+
   const saveDraftPatch = useCallback(
     (
       patch: (current: DraftAutomation) => DraftAutomation,
@@ -922,7 +957,9 @@ export function AutomationBuilderPage() {
     if (!autoAcquireEnabled || authoringLease) return;
     const expiresAt = lockView?.expiresAt ? new Date(lockView.expiresAt).getTime() : null;
     const heldByActiveOtherSession =
-      Boolean(lockView?.heldByUserId && !lockView.isHeldByMe) && expiresAt !== null && expiresAt > Date.now();
+      Boolean(lockView?.heldByUserId && !lockView.isHeldByMe && !lockView.isHeldByMyOtherSession) &&
+      expiresAt !== null &&
+      expiresAt > Date.now();
     if (heldByActiveOtherSession) {
       const expiryTimer = window.setTimeout(() => void acquireLock(), expiresAt - Date.now() + 50);
       return () => window.clearTimeout(expiryTimer);
@@ -1057,6 +1094,10 @@ export function AutomationBuilderPage() {
   const canShareAutomation =
     automation?.canShare === true ||
     (automation != null && automation.canShare == null && Boolean(auth.userId) && automation.createdBy === auth.userId);
+  const canControlAutomationStatus =
+    auth.role === "admin" ||
+    automation.isOwner === true ||
+    (automation.isOwner == null && Boolean(auth.userId) && automation.createdBy === auth.userId);
   const placeholderSetup = isPlaceholderDraft(automation);
   const builderDraft = displayDraft ?? draft;
   const exactRunCandidate = exactRunQuery.data?.run;
@@ -1141,7 +1182,11 @@ export function AutomationBuilderPage() {
         clientSessionId={clientSessionId}
         authoringLease={authoringLeaseRequest}
         onLeaseStale={handleLeaseStale}
-        className="automation-builder-sidecar-enter hidden lg:flex"
+        onMobileClose={() => setMobileChatOpen(false)}
+        className={cn(
+          "automation-builder-sidecar-enter",
+          mobileChatOpen ? "absolute inset-0 z-30 flex lg:static lg:z-auto" : "hidden lg:flex",
+        )}
       />
 
       <div
@@ -1149,7 +1194,7 @@ export function AutomationBuilderPage() {
         className="automation-builder-canvas-enter relative min-h-0 min-w-0 flex-1 bg-background text-foreground"
         aria-busy={runMutation.isPending || selectedRun?.status === "running"}
       >
-        <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="automation-builder-topbar pointer-events-none absolute top-4 right-4 left-4 z-10 flex flex-col gap-2 2xl:flex-row 2xl:items-start 2xl:justify-between 2xl:gap-3">
           <div className="pointer-events-auto flex min-w-0 flex-col items-start gap-2">
             <div
               data-testid="automation-builder-toolbar"
@@ -1165,6 +1210,16 @@ export function AutomationBuilderPage() {
                   navigateRun(runId);
                 }}
               />
+              <Button
+                size="sm"
+                variant="outline"
+                className={cn(canvasToolbarButtonClass, "gap-1.5 lg:hidden")}
+                aria-label="Open automation chat"
+                onClick={() => setMobileChatOpen(true)}
+              >
+                <ChatCircleIcon size={14} weight="fill" />
+                Chat
+              </Button>
               {selectedRunId ? (
                 <Button
                   size="sm"
@@ -1188,8 +1243,10 @@ export function AutomationBuilderPage() {
             />
           </div>
 
-          <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
-            <BuilderOwnership automation={automation} />
+          <div className="automation-builder-topbar-actions pointer-events-auto flex w-full flex-wrap justify-start gap-2 2xl:ml-auto 2xl:w-auto 2xl:justify-end">
+            <div className="hidden sm:block">
+              <BuilderOwnership automation={automation} />
+            </div>
             {canShareAutomation ? (
               <Button
                 size="sm"
@@ -1241,6 +1298,31 @@ export function AutomationBuilderPage() {
             >
               {discardingSetup ? "Discarding…" : placeholderSetup ? "Discard setup" : "Close"}
             </Button>
+            {!placeholderSetup && canControlAutomationStatus && automation.status !== "completed" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className={canvasToolbarButtonClass}
+                aria-label={automation.status === "active" ? "Pause automation" : "Resume automation"}
+                onClick={() => statusMutation.mutate(automation.status === "active" ? "pause" : "resume")}
+                disabled={statusMutation.isPending || runIsBusy || builderReadOnly}
+              >
+                {statusMutation.isPending ? (
+                  <SpinnerGapIcon size={14} className="animate-spin" />
+                ) : automation.status === "active" ? (
+                  <PauseIcon size={14} weight="fill" />
+                ) : (
+                  <PlayIcon size={14} weight="fill" />
+                )}
+                {statusMutation.isPending
+                  ? automation.status === "active"
+                    ? "Pausing…"
+                    : "Resuming…"
+                  : automation.status === "active"
+                    ? "Pause"
+                    : "Resume"}
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -1788,6 +1870,7 @@ function BuilderChatSidecar({
   clientSessionId,
   authoringLease,
   onLeaseStale,
+  onMobileClose,
   className,
 }: {
   requestedConversationId: string | null;
@@ -1806,6 +1889,7 @@ function BuilderChatSidecar({
   clientSessionId: string;
   authoringLease: AutomationLeaseRequest | null;
   onLeaseStale: () => void;
+  onMobileClose: () => void;
   className?: string;
 }) {
   const navigate = useNavigate();
@@ -1826,8 +1910,8 @@ function BuilderChatSidecar({
     refetchOnWindowFocus: true,
   });
   const webChatConversationsQuery = useQuery({
-    queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-    queryFn: () => api.webChat.conversations(),
+    queryKey: [...WEB_CHAT_CONVERSATIONS_QUERY_KEY, "include-builder"],
+    queryFn: () => api.webChat.conversations({ includeBuilder: true }),
     staleTime: 30_000,
   });
   const webChatSummaryById = useMemo(
@@ -1950,7 +2034,7 @@ function BuilderChatSidecar({
       data-testid="automation-builder-chat-sidecar"
       aria-label="Automation chats"
       className={cn(
-        "box-border w-[460px] min-w-[400px] max-w-[560px] shrink-0 resize-x flex-col overflow-hidden border-r border-border/80 bg-background text-foreground",
+        "box-border w-full min-w-0 max-w-none shrink-0 flex-col overflow-hidden border-r-0 border-border/80 bg-background text-foreground lg:w-[460px] lg:min-w-[400px] lg:max-w-[560px] lg:resize-x lg:border-r",
         className,
       )}
     >
@@ -1969,6 +2053,7 @@ function BuilderChatSidecar({
             : undefined
         }
         archivePending={archiveMutation.isPending}
+        onMobileClose={onMobileClose}
       />
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {conversationsQuery.isError ? (
@@ -2035,6 +2120,7 @@ function BuilderChatHeader({
   newDisabled,
   onArchive,
   archivePending,
+  onMobileClose,
 }: {
   conversation?: ScheduledTaskConversationSummary;
   summary?: WebChatConversationSummary;
@@ -2046,6 +2132,7 @@ function BuilderChatHeader({
   newDisabled?: boolean;
   onArchive?: () => void;
   archivePending: boolean;
+  onMobileClose: () => void;
 }) {
   const conversationTitle = conversation ? conversationDisplayTitle(conversation, summary) : null;
   return (
@@ -2108,6 +2195,15 @@ function BuilderChatHeader({
             </>
           )}
         </div>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-8 shrink-0 rounded-[8px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50 lg:hidden"
+          aria-label="Close automation chat"
+          onClick={onMobileClose}
+        >
+          <XIcon size={16} />
+        </Button>
         {conversation ? (
           <Button
             size="icon"

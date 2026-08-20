@@ -181,13 +181,6 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(["💬 Reading Chat History"]);
   });
 
-  it("renders chat history searches with the query", () => {
-    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
-      { kind: "tool_use", toolName: "mcp__sketch__SearchChatHistory", input: { query: "launch budget" } },
-    ]);
-    expect(lines).toEqual(['🔎 Searching chat history for "launch budget"']);
-  });
-
   it("renders visual analysis with the image path", () => {
     expect(
       renderEvents({ toolProgress: "friendly", reasoningText: false }, [

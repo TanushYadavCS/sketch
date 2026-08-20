@@ -323,14 +323,16 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     if (inFlight) return undefined;
 
     const candidate = await db
-      .selectFrom("whatsapp_backfill_ranges")
-      .select("id")
-      .where("status", "=", "pending")
-      .where((eb) => eb.or([eb("next_retry_at", "is", null), eb("next_retry_at", "<=", now)]))
-      .orderBy(sql`CASE WHEN last_served_at IS NULL THEN 0 ELSE 1 END`)
-      .orderBy("last_served_at", "asc")
-      .orderBy("created_at", "asc")
-      .orderBy("id", "asc")
+      .selectFrom("whatsapp_backfill_ranges as range")
+      .innerJoin("whatsapp_groups as group", "group.jid", "range.group_jid")
+      .select("range.id")
+      .where("range.status", "=", "pending")
+      .where("group.index_enabled", "=", 1)
+      .where((eb) => eb.or([eb("range.next_retry_at", "is", null), eb("range.next_retry_at", "<=", now)]))
+      .orderBy(sql`CASE WHEN ${sql.ref("range.last_served_at")} IS NULL THEN 0 ELSE 1 END`)
+      .orderBy("range.last_served_at", "asc")
+      .orderBy("range.created_at", "asc")
+      .orderBy("range.id", "asc")
       .executeTakeFirst();
     if (!candidate) return undefined;
     const result = await db

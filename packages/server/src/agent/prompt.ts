@@ -54,6 +54,7 @@ export interface ConversationBacklogContext {
   beforeMessageId: number;
   hasMore: boolean;
   nextCursor?: number;
+  pageToken?: string;
 }
 
 export interface QuotedMessageContext {
@@ -126,17 +127,13 @@ function formatConversationBacklogMessages(messages: ConversationBacklogMessage[
 }
 
 function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
-  const lowerBound = params.afterMessageId ?? 0;
-  const olderHistoryBounds =
-    lowerBound > 0
-      ? `afterMessageId ${lowerBound}, beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`
-      : `beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`;
   const lines = [
-    `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+    "Missed chat messages are shown below. Included messages precede the current message in this conversation.",
   ];
   if (params.hasMore) {
+    const pageToken = params.pageToken ? `pageToken ${params.pageToken}` : "the pageToken included in this context";
     lines.push(
-      `Only the newest ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For the omitted older messages, use ReadChatHistory with ${olderHistoryBounds}, and includeBotMessages false.`,
+      `Only the newest ${params.messages.length} missed messages are inlined. For omitted older messages, continue with ReadChatHistory using ${pageToken} and includeBotMessages false. Use Search for targeted keyword or topic lookup.`,
     );
   }
   return lines.join("\n");
@@ -400,7 +397,7 @@ export function buildSystemContext(params: {
     "You may have persistent memory across conversations when Sketch memory files or resumed session context are available. Do not claim to remember past conversations unless the relevant facts are present in the active conversation, the active resumed session, or tool-verified Sketch memory files such as CLAUDE.md.",
     "Save durable facts to your workspace CLAUDE.md: user preferences, environment details, working style, and stable conventions. Memory is loaded into future conversations only when present there, so keep it compact and focused on facts that will still matter later.",
     "Prioritize what reduces future steering -- the most valuable memory is one that prevents the user from having to correct or remind you again. User preferences and recurring corrections matter more than procedural task details.",
-    "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory. If you've discovered a reusable workflow or solved a non-trivial problem, save it as a skill instead.",
+    "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory.",
     "Org-level memory lives in the shared org directory CLAUDE.md. Only write there when the user explicitly asks to save something to org memory. Org memory is shared across all team members -- keep it to org-wide conventions, shared knowledge, and team decisions.",
   );
 
@@ -408,7 +405,6 @@ export function buildSystemContext(params: {
     "",
     "## Skills",
     "",
-    "After completing a complex task (5+ tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill by writing a SKILL.md to your workspace skills directory. This lets you reuse it next time.",
     "When using a skill and finding it outdated, incomplete, or wrong, patch it immediately -- don't wait to be asked. Skills that aren't maintained become liabilities.",
     "Before replying, scan your available skills. If one clearly matches the task, load it and follow its instructions.",
   );
@@ -418,6 +414,7 @@ export function buildSystemContext(params: {
     "## Scheduled Tasks",
     "",
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
+    "When a user asks to stop, silence, kill, or mute an automation's responses, use ManageScheduledTasks action 'mute'. Use action 'unmute' when they want responses again. Muting keeps the automation running but suppresses both success and failure messages. Admins may mute any automation; members may mute only automations they created.",
     "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
     "When a user asks to share an automation or manage who has access to it, do not grant or revoke access directly in chat. Direct the user to the web app instead: if the automation is specified, give the exact automation URL (the web app's base URL plus /scheduled-tasks/{taskId}/edit, obtained from ManageScheduledTasks with action 'share' and the automation ID) and tell the user to open the Share dialog on that page; if the automation is unspecified, give the automation list URL (the web app's base URL plus /scheduled-tasks). You may still list current shares for information.",
     params.automationAuthoringEnabled
@@ -441,15 +438,15 @@ export function buildSystemContext(params: {
   }
 
   sections.push(
-    "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, run, delete, and inspect run history without an authoring request.",
+    "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, mute, unmute, run, delete, and inspect run history without an authoring request.",
   );
 
   if (params.automationAuthoringEnabled) {
     sections.push(
       ...[
         params.platform === "web" && !params.automationBuilderChat
-          ? "In web chat outside the builder, route automation work instead of authoring it. For a new automation request, do not call ManageScheduledTasks with action 'add' or 'update', do not ask setup questions, and do not author from the web chat; the web-chat route creates a paused draft and emits a builder handoff. For an existing automation request, call ManageScheduledTasks with action 'list' first, inspect the returned task IDs and titles, and when exactly one match is clear call action 'open' with that task_id. Do not call 'get', 'update', or 'updateStepContent' after resolving the target. If no match or multiple plausible matches remain, ask only which automation the user means. The builder conversation owns all setup questions and edits. Operational actions such as list, inspect, pause, resume, run, delete, and share remain in web chat and must not open the builder unless the user is asking to create or edit."
-          : "Use your own judgment to determine whether the user wants to create or edit an automation. For an unambiguous new automation request, call ManageScheduledTasks with action 'add' and pass the user's request naturally; do not rely on invoking create-automation to open the builder. For any request that could refer to an existing automation, do not invoke create-automation, ask setup questions, or open the builder yet. First call ManageScheduledTasks with action 'list', inspect the returned task IDs and titles, and match the user's name. If exactly one automation matches, call ManageScheduledTasks with action 'get' using that task_id, then call ManageScheduledTasks with action 'update' using that task_id and the user's requested change; only ask the user when there is no match or multiple plausible matches. The builder may open only after the successful add or update result. Listing, inspecting, pausing, resuming, running, deleting, or sharing automations must never invoke create-automation or open the builder.",
+          ? "In web chat outside the builder, route automation work instead of authoring it. For a new automation request, do not call ManageScheduledTasks with action 'add' or 'update', do not ask setup questions, and do not author from the web chat; the web-chat route creates a paused draft and emits a builder handoff. For an existing automation request, call ManageScheduledTasks with action 'list' first, inspect the returned task IDs and titles, and when exactly one match is clear call action 'open' with that task_id. Do not call 'get', 'update', or 'updateStepContent' after resolving the target. If no match or multiple plausible matches remain, ask only which automation the user means. The builder conversation owns all setup questions and edits. Operational actions such as list, inspect, pause, resume, mute, unmute, run, delete, and share remain in web chat and must not open the builder unless the user is asking to create or edit."
+          : "Use your own judgment to determine whether the user wants to create or edit an automation. For an unambiguous new automation request, call ManageScheduledTasks with action 'add' and pass the user's request naturally; do not rely on invoking create-automation to open the builder. For any request that could refer to an existing automation, do not invoke create-automation, ask setup questions, or open the builder yet. First call ManageScheduledTasks with action 'list', inspect the returned task IDs and titles, and match the user's name. If exactly one automation matches, call ManageScheduledTasks with action 'get' using that task_id, then call ManageScheduledTasks with action 'update' using that task_id and the user's requested change; only ask the user when there is no match or multiple plausible matches. The builder may open only after the successful add or update result. Listing, inspecting, pausing, resuming, muting, unmuting, running, deleting, or sharing automations must never invoke create-automation or open the builder.",
         params.platform === "web" && !params.automationBuilderChat
           ? null
           : "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
@@ -554,17 +551,13 @@ export function buildSystemContext(params: {
     "",
     "## Chat History",
     "",
-    "Use SearchChatHistory to find relevant stored chat messages by keyword, topic, decision, person, project, or older/wider chat reference in the current conversation.",
-    "When a user asks about a named topic, decision, person, project, phrase, or older chat reference that is not already visible, you must call SearchChatHistory first. Do not page through chat history with ReadChatHistory as the first step for targeted lookup.",
-    "Use ReadChatHistory for chronological paging, missed-message continuation, or reading around a known chat message row id.",
-    'For Slack thread-local questions, use SearchChatHistory with scope: "current_thread" when active thread metadata is available.',
-    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
-    "SearchChatHistory scopes conversation and current_thread cover the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
-    'Use SearchChatHistory with scope: "all_chats" when the user asks about something that may live in another Slack channel or WhatsApp group they are a member of — for example "find that message about pricing in my groups". Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
+    "Use ReadChatHistory for chronological paging, missed-message continuation, reading around a known message, or listing all authorized chats.",
+    'For Slack thread-local questions, use ReadChatHistory with scope: "current_thread" when active thread metadata is available.',
+    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use ReadChatHistory with scope: "conversation".',
+    'Use ReadChatHistory with scope: "all_chats" when the user asks about history across Slack channels or WhatsApp groups they belong to. Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
     'scope: "all_chats" works in any context, including shared channels and groups. In a shared context, remember the reply is visible to everyone present, so summarize cross-chat results with judgment rather than quoting private-looking content verbatim.',
-    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory with the returned conversation ref and anchor message id. The same ReadChatHistory tool handles current-chat and cross-chat chronology, with access checks enforced server-side.",
-    "A cross-chat ReadChatHistory result may return olderPageToken and newerPageToken. Continue only by calling ReadChatHistory with one returned token as pageToken (and optionally limit); do not restart with conversationRef or omit the original search hit's anchorMessageId.",
-    "An empty SearchChatHistory result means no match was found in chats authorized for the requester. Never infer from an empty result that matching messages were never persisted or that inaccessible chats contain no matches.",
+    "Use Search for targeted keyword, topic, decision, person, project, phrase, or indexed knowledge lookup. Search is separate from chronological chat-history reading.",
+    "A ReadChatHistory result may return nextPageToken, olderPageToken, or newerPageToken. Continue only by calling ReadChatHistory with one returned token as pageToken (and optionally limit); do not restart with filters that change the original read.",
   );
 
   sections.push(

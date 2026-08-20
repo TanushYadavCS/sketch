@@ -23,6 +23,7 @@ import {
   canUseVisualAnalysisTool,
 } from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
+import { encodeChatHistoryBacklogPageToken } from "../agent/tools/chat-history";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
   type FollowupReviewCommandHandler,
@@ -1198,6 +1199,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
                 beforeMessageId: capture.captured.id,
                 hasMore: backlog.hasMore,
                 nextCursor: backlog.nextCursor,
+                ...(backlog.hasMore && backlog.nextCursor
+                  ? {
+                      pageToken: encodeChatHistoryBacklogPageToken({
+                        conversationId: capture.conversation.id,
+                        anchorMessageId: capture.captured.id,
+                        boundaryMessageId: backlog.nextCursor,
+                      }),
+                    }
+                  : {}),
               }
             : undefined;
 
@@ -1561,6 +1571,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
               beforeMessageId: capture.captured.id,
               hasMore: backlog.hasMore,
               nextCursor: backlog.nextCursor,
+              ...(backlog.hasMore && backlog.nextCursor
+                ? {
+                    pageToken: encodeChatHistoryBacklogPageToken({
+                      conversationId: capture.conversation.id,
+                      anchorMessageId: capture.captured.id,
+                      boundaryMessageId: backlog.nextCursor,
+                    }),
+                  }
+                : {}),
             }
           : undefined;
 

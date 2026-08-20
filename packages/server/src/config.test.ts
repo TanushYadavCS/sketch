@@ -99,23 +99,14 @@ describe("configSchema", () => {
       }
     });
 
-    it("parses a complete OpenRouter automation authoring model id", () => {
+    it("ignores the retired secondary automation authoring model", () => {
       const result = configSchema.safeParse({
         AUTOMATION_AUTHORING_MODEL: "  anthropic/claude-sonnet-4.6  ",
       });
 
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.AUTOMATION_AUTHORING_MODEL).toBe("anthropic/claude-sonnet-4.6");
-      }
-    });
-
-    it("treats a blank automation authoring model as disabled", () => {
-      const result = configSchema.safeParse({ AUTOMATION_AUTHORING_MODEL: "   " });
-
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.AUTOMATION_AUTHORING_MODEL).toBeUndefined();
+        expect(result.data).not.toHaveProperty("AUTOMATION_AUTHORING_MODEL");
       }
     });
 
@@ -423,11 +414,6 @@ describe("configSchema", () => {
 
     it("rejects invalid agent runtime values", () => {
       const result = configSchema.safeParse({ AGENT_RUNTIME: "other" });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects an incomplete automation authoring model id", () => {
-      const result = configSchema.safeParse({ AUTOMATION_AUTHORING_MODEL: "claude-sonnet-4.6" });
       expect(result.success).toBe(false);
     });
 

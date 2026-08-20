@@ -157,12 +157,12 @@ describe("createSketchMcpServer", () => {
     expect(unavailableWhatsAppTools.AskUserQuestions).toBeUndefined();
   });
 
-  it("exposes chat history read and search tools", () => {
+  it("exposes the unified chat history tool", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.ReadChatHistory).toBeDefined();
-    expect(tools.SearchChatHistory).toBeDefined();
+    expect(Object.keys(tools)).not.toContain(["Search", "Chat", "History"].join(""));
     expect(tools.WhatsAppGroupHistory).toBeUndefined();
     expect(tools.SlackChannelHistory).toBeUndefined();
   });
@@ -314,68 +314,6 @@ describe("createSketchMcpServer", () => {
     });
   });
 
-  it("SearchChatHistory searches the scoped conversation", async () => {
-    const collector = new UploadCollector();
-    const searchMessages = vi.fn().mockResolvedValue({
-      messages: [
-        {
-          id: 7,
-          conversationId: 1,
-          providerMessageId: "m1",
-          senderJid: "U1",
-          senderName: "Alice",
-          senderUserId: "user-1",
-          isBot: false,
-          addressedToSketch: false,
-          text: "launch budget approved",
-          attachments: [],
-          providerThreadId: "thread-1",
-          providerParentMessageId: null,
-          isThreadReply: false,
-          providerTimestamp: "2026-01-01T00:00:00.000Z",
-          receivedAt: "2026-01-01T00:00:01.000Z",
-          createdAt: "2026-01-01T00:00:01.000Z",
-          rank: 0.5,
-        },
-      ],
-      hasMore: false,
-    });
-    const server = createSketchMcpServer({
-      uploadCollector: collector,
-      workspaceDir: tmpDir,
-      conversationRepo: { searchMessages } as never,
-      conversationContext: { conversationId: 1, currentMessageId: 12, providerThreadId: "thread-1" },
-    });
-    const tools = (
-      server.instance as unknown as {
-        _registeredTools: Record<
-          string,
-          {
-            handler: (input: {
-              query: string;
-              scope?: "conversation" | "current_thread";
-            }) => Promise<{ content: { text: string }[] }>;
-          }
-        >;
-      }
-    )._registeredTools;
-
-    const result = await tools.SearchChatHistory.handler({ query: "launch", scope: "current_thread" });
-
-    expect(searchMessages).toHaveBeenCalledWith(1, {
-      query: "launch",
-      afterMessageId: undefined,
-      beforeMessageId: 12,
-      limit: undefined,
-      includeBotMessages: undefined,
-      providerThreadId: "thread-1",
-    });
-    expect(JSON.parse(result.content[0].text)).toMatchObject({
-      messages: [{ id: 7, rank: 0.5, text: "launch budget approved", providerThreadId: "thread-1" }],
-      hasMore: false,
-    });
-  });
-
   it("ReadChatHistory caps reads at the current conversation message cursor", async () => {
     const collector = new UploadCollector();
     const listMessages = vi.fn().mockResolvedValue({
@@ -412,16 +350,13 @@ describe("createSketchMcpServer", () => {
         _registeredTools: Record<
           string,
           {
-            handler: (input: {
-              beforeMessageId?: number;
-              scope?: "conversation" | "current_thread";
-            }) => Promise<{ content: { text: string }[] }>;
+            handler: (input: { scope?: "conversation" | "current_thread" }) => Promise<{ content: { text: string }[] }>;
           }
         >;
       }
     )._registeredTools;
 
-    const result = await tools.ReadChatHistory.handler({ beforeMessageId: 99, scope: "current_thread" });
+    const result = await tools.ReadChatHistory.handler({ scope: "current_thread" });
 
     expect(listMessages).toHaveBeenCalledWith(1, {
       afterMessageId: undefined,
@@ -453,10 +388,7 @@ describe("createSketchMcpServer", () => {
         _registeredTools: Record<
           string,
           {
-            handler: (input: {
-              beforeMessageId?: number;
-              scope?: "conversation" | "current_thread";
-            }) => Promise<{ content: { text: string }[] }>;
+            handler: (input: { scope?: "conversation" | "current_thread" }) => Promise<{ content: { text: string }[] }>;
           }
         >;
       }
@@ -473,44 +405,6 @@ describe("createSketchMcpServer", () => {
       providerThreadId: undefined,
       isThreadReply: false,
     });
-  });
-
-  it("clamps sentinel row-id bounds to the storable range without a trigger message", async () => {
-    const collector = new UploadCollector();
-    const searchMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
-    const listMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
-    const server = createSketchMcpServer({
-      uploadCollector: collector,
-      workspaceDir: tmpDir,
-      conversationRepo: { searchMessages, listMessages } as never,
-      conversationContext: { conversationId: 1, currentMessageId: undefined },
-    });
-    const tools = (
-      server.instance as unknown as {
-        _registeredTools: Record<
-          string,
-          {
-            handler: (input: {
-              query?: string;
-              afterMessageId?: number;
-              beforeMessageId?: number;
-            }) => Promise<{ content: { text: string }[] }>;
-          }
-        >;
-      }
-    )._registeredTools;
-
-    await tools.SearchChatHistory.handler({ query: "test", beforeMessageId: Number.MAX_SAFE_INTEGER });
-    await tools.ReadChatHistory.handler({
-      afterMessageId: Number.MAX_SAFE_INTEGER,
-      beforeMessageId: Number.MAX_SAFE_INTEGER,
-    });
-
-    expect(searchMessages).toHaveBeenCalledWith(1, expect.objectContaining({ beforeMessageId: 2_147_483_647 }));
-    expect(listMessages).toHaveBeenCalledWith(
-      1,
-      expect.objectContaining({ afterMessageId: 2_147_483_647, beforeMessageId: 2_147_483_647 }),
-    );
   });
 
   it("does not expose TranscribeAudio when transcription is disabled", () => {

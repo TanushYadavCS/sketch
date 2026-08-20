@@ -2367,6 +2367,100 @@ describe("ManageScheduledTasks lock discipline, run ACK, and guard matrix", () =
     );
   });
 
+  it("reports and preserves the exact builder lease for status and takeover", async () => {
+    const taskId = "builder-self-lock-task";
+    const sessionId = "browser-tab-self-lock";
+    await createTask(taskId);
+    await acquireOrRenewLock(db, {
+      taskId,
+      holder: {
+        userId: "owner-1",
+        sessionId,
+        platform: "web",
+        surface: "builder",
+        conversationId: "builder-self-lock",
+      },
+    });
+    const lock = await createAutomationLocksRepository(db).getByTaskId(taskId);
+    const taskContext = {
+      ...taskContextFor(taskId),
+      authoringLease: { sessionId, generation: lock?.generation ?? 0 },
+    };
+    const notifyStealRequest = vi.fn();
+
+    const status = await handleManageScheduledTasks(
+      { action: "lockStatus", task_id: taskId },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+    const steal = await handleManageScheduledTasks(
+      { action: "steal", task_id: taskId },
+      { db, scheduler: schedulerFor(taskId), taskContext, notifyStealRequest },
+    );
+
+    expect(status.content[0].text).toContain("is held by this builder session");
+    expect(steal.content[0].text).toBe('Automation "Daily account brief" is already held by this builder session.');
+    expect(notifyStealRequest).not.toHaveBeenCalled();
+    await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toMatchObject({
+      holder_session_id: sessionId,
+      steal_requester_user_id: null,
+    });
+  });
+
+  it("rejects stale builder lease status and takeover without falling back to an agent identity", async () => {
+    const taskId = "builder-stale-lock-task";
+    await createTask(taskId);
+    await acquireOrRenewLock(db, {
+      taskId,
+      holder: {
+        userId: "owner-1",
+        sessionId: "current-browser-tab",
+        platform: "web",
+        surface: "builder",
+        conversationId: "builder-stale-lock",
+      },
+    });
+    const taskContext = {
+      ...taskContextFor(taskId),
+      authoringLease: { sessionId: "stale-browser-tab", generation: 1 },
+    };
+
+    const status = await handleManageScheduledTasks(
+      { action: "lockStatus", task_id: taskId },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+    const steal = await handleManageScheduledTasks(
+      { action: "steal", task_id: taskId },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+
+    expect(status.content[0].text).toContain("browser editing session is no longer active");
+    expect(steal.content[0].text).toContain("browser editing session is no longer active");
+    await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toMatchObject({
+      holder_session_id: "current-browser-tab",
+      steal_requester_user_id: null,
+    });
+  });
+
+  it("blocks automation mutations and takeover requests during a plan-only builder turn", async () => {
+    const taskId = "builder-plan-only-task";
+    await createTask(taskId);
+    const taskContext = { ...taskContextFor(taskId), planOnly: true };
+
+    const update = await handleManageScheduledTasks(
+      { action: "update", task_id: taskId, prompt: "Do not save this" },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+    const steal = await handleManageScheduledTasks(
+      { action: "steal", task_id: taskId },
+      { db, scheduler: schedulerFor(taskId), taskContext },
+    );
+
+    expect(update.content[0].text).toContain("plan-only turn");
+    expect(steal.content[0].text).toContain("plan-only turn");
+    await expect(createScheduledTaskRepository(db).getById(taskId)).resolves.toMatchObject({ revision: 0 });
+    await expect(createAutomationLocksRepository(db).getByTaskId(taskId)).resolves.toBeUndefined();
+  });
+
   it("acquires and releases the edit lock around a successful step-content update", async () => {
     await createTask("lock-release-content-task");
     const scheduler = schedulerFor("lock-release-content-task");

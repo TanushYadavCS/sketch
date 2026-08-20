@@ -2,8 +2,9 @@
  * Pessimistic whole-automation edit lock state machine.
  *
  * One lock row per automation (task_id primary key). A lock is held by one
- * user session at a time; another user can request a steal, which the holder
- * can approve (handing over the lock) or deny. Every transition is a guarded
+ * authenticated user at a time, and all of that user's browser sessions share
+ * the lease. Another user can request a steal, which the holder can approve
+ * (handing over the lock) or deny. Every transition is a guarded
  * SQL statement (the WHERE clause is the compare-and-swap condition) followed
  * by a read-back verification — affected-row counts are never trusted because
  * their semantics differ between SQLite and Postgres. The generation fences
@@ -79,8 +80,9 @@ function iso(nowMs: number): string {
 /**
  * Checks an authoring lease. An exact live lease is touched with a guarded
  * update so a caller transaction can hold the row lock while it persists a
- * mutation. A live lease is authoritative only when the authenticated user,
- * client session, and generation all match. The caller may use `no_lease` or
+ * mutation. A live lease is authoritative when the authenticated user and
+ * generation match. The client session records lifecycle attribution but does
+ * not split one user into competing editors. The caller may use `no_lease` or
  * `expired` to apply an operation's policy; neither result grants authority to
  * a browser save by itself.
  */
@@ -98,10 +100,9 @@ export async function authorizeAuthoringLease(
   const nowMs = params.nowMs ?? Date.now();
   const now = iso(nowMs);
   if (params.userId && params.sessionId && params.generation !== undefined) {
-    const held = await repo.touchIfExactHolder({
+    const held = await repo.touchIfUserGeneration({
       taskId: params.taskId,
       userId: params.userId,
-      sessionId: params.sessionId,
       generation: params.generation,
       now,
     });
@@ -113,13 +114,12 @@ export async function authorizeAuthoringLease(
 
   if (row.expires_at <= now) return { kind: "expired", lock: row };
 
-  if (params.generation !== undefined && row.generation !== params.generation) {
+  if (!params.sessionId || params.generation === undefined) return { kind: "conflict", lock: row };
+
+  if (row.generation !== params.generation) {
     return { kind: "stale", lock: row };
   }
-  if (row.holder_user_id !== params.userId || row.holder_session_id !== params.sessionId) {
-    return { kind: "conflict", lock: row };
-  }
-  if (params.generation === undefined) return { kind: "stale", lock: row };
+  if (row.holder_user_id !== params.userId) return { kind: "conflict", lock: row };
   return { kind: "held", lock: row };
 }
 
@@ -136,7 +136,7 @@ async function requireRow(db: Kysely<DB>, taskId: string): Promise<AutomationTas
  */
 export async function acquireOrRenewLock(
   db: Kysely<DB>,
-  params: { taskId: string; holder: LockHolderFields; nowMs?: number },
+  params: { taskId: string; holder: LockHolderFields; requestedGeneration?: number; nowMs?: number },
 ): Promise<AcquireResult> {
   const nowMs = params.nowMs ?? Date.now();
   const repo = createAutomationLocksRepository(db);
@@ -156,13 +156,18 @@ export async function acquireOrRenewLock(
   if (row.expires_at <= now) {
     await repo.takeoverExpired(params.holder, { taskId: params.taskId, expiresAt, now });
     const taken = await requireRow(db, params.taskId);
-    if (
-      taken.holder_user_id !== params.holder.userId ||
-      taken.holder_session_id !== (params.holder.sessionId ?? LEGACY_LOCK_SESSION_ID)
-    ) {
+    if (taken.holder_user_id !== params.holder.userId) {
       return { kind: "locked", lock: taken };
     }
     return { kind: "held", lock: taken };
+  }
+
+  if (
+    row.holder_user_id === params.holder.userId &&
+    params.requestedGeneration !== undefined &&
+    params.requestedGeneration !== row.generation
+  ) {
+    return { kind: "locked", lock: row };
   }
 
   if (
@@ -180,13 +185,27 @@ export async function acquireOrRenewLock(
     const renewed = await requireRow(db, params.taskId);
     if (
       renewed.holder_user_id !== params.holder.userId ||
-      renewed.holder_session_id !== (params.holder.sessionId ?? LEGACY_LOCK_SESSION_ID) ||
       renewed.generation !== row.generation ||
       renewed.expires_at <= now
     ) {
       return { kind: "locked", lock: renewed };
     }
     return { kind: "held", lock: renewed };
+  }
+
+  if (row.holder_user_id === params.holder.userId) {
+    await repo.adoptSameUserSession(params.holder, {
+      taskId: params.taskId,
+      previousSessionId: row.holder_session_id,
+      previousGeneration: row.generation,
+      expiresAt,
+      now,
+    });
+    const taken = await requireRow(db, params.taskId);
+    if (taken.holder_user_id === params.holder.userId && taken.generation === row.generation) {
+      return { kind: "held", lock: taken };
+    }
+    return { kind: "locked", lock: taken };
   }
 
   return { kind: "locked", lock: row };
@@ -248,12 +267,7 @@ export async function requestSteal(
   const row = await repo.getByTaskId(params.taskId);
   if (!row) return { kind: "not_locked" };
   if (row.expires_at <= now) return { kind: "not_locked" };
-  if (
-    row.holder_user_id === params.requester.userId &&
-    row.holder_session_id === (params.requester.sessionId ?? LEGACY_LOCK_SESSION_ID)
-  ) {
-    return { kind: "not_locked" };
-  }
+  if (row.holder_user_id === params.requester.userId) return { kind: "not_locked" };
 
   if (row.steal_requester_user_id !== null) {
     const pendingUnexpired =

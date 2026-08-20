@@ -316,7 +316,11 @@ function RecentsNavigation({ pathname, onSelect }: { pathname: string; onSelect:
               <ConversationRow
                 key={conversation.id}
                 {...conversation}
-                isActive={pathname === `/chat/${conversation.id}`}
+                isActive={
+                  conversation.builderTaskId
+                    ? pathname === `/scheduled-tasks/${conversation.builderTaskId}/edit`
+                    : pathname === `/chat/${conversation.id}`
+                }
                 onSelect={onSelect}
               />
             ))}

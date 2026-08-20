@@ -731,6 +731,24 @@ describe("executeTask() delivery routing", () => {
     });
   });
 
+  it("suppresses delivery when responses are muted after a run starts", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D_DM_CHANNEL",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
+    await repo.update(row.id, { output_mode: "silent" });
+    await lastExecuteAutomationParams?.sendMessage?.("Should stay private");
+
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).not.toHaveBeenCalled();
+  });
+
   it("Slack DM user id: sendMessage opens the DM channel before posting", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);

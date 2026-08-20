@@ -8,22 +8,22 @@ import {
 import type { Attachment } from "../../files";
 import {
   ChatHistoryAccessResolver,
-  handleAllChatsSearch,
+  handleAllChatsRead,
   isChatHistoryConversationAuthorized,
   renderAllChatsSearchResults,
 } from "./chat-search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
-export const SEARCH_CHAT_HISTORY_TOOL_NAME = "SearchChatHistory";
 
 /**
- * Row ids are 32-bit `integer`/`serial` columns under Postgres, while the tool
- * schemas only constrain model-supplied ids to positive safe JS integers. An
- * agent that invents a sentinel such as Number.MAX_SAFE_INTEGER to mean "no
- * upper bound" therefore passes validation and overflows the bind parameter,
- * surfacing a raw driver error as tool output. SQLite stores 64-bit integers
- * and never reproduces it.
+ * Row ids are 32-bit `integer`/`serial` columns under Postgres. Every row-id
+ * field advertises this as its schema maximum: zod renders a bare `.int()` as
+ * `maximum: 9007199254740991` in the JSON Schema the model reads, and a model
+ * asked for an upper bound reasonably echoes back the largest value we said we
+ * accept — which then overflows the bind parameter and surfaces a raw driver
+ * error as tool output. Capping the advertised ceiling keeps that echo valid.
+ * SQLite stores 64-bit integers and never reproduces the overflow.
  */
 const INT4_MAX = 2_147_483_647;
 
@@ -32,10 +32,6 @@ const INT4_MAX = 2_147_483_647;
  * the ceiling, so a clamped upper bound is unbounded and a clamped lower bound
  * matches nothing — the same rows the oversized value asked for.
  */
-function clampRowIdBound(value: number | undefined): number | undefined {
-  return value === undefined ? undefined : Math.min(value, INT4_MAX);
-}
-
 /** Guards ids that address one specific row, where clamping would retarget the lookup. */
 function isStorableRowId(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= INT4_MAX;
@@ -100,6 +96,19 @@ interface CrossReadPageToken {
   includeBotMessages: boolean;
 }
 
+interface AllChatsPageToken {
+  version: 2;
+  scope: "all_chats";
+  lastEffectiveAt: string;
+  lastMessageId: number;
+  snapshotBeforeMessageId: number | null;
+  afterTime: string | null;
+  beforeTime: string | null;
+  platform: "slack" | "whatsapp" | null;
+  includeBotMessages: boolean;
+  order: "asc" | "desc";
+}
+
 interface CrossReadStream {
   providerThreadId?: string | null;
   isThreadReply?: boolean;
@@ -114,6 +123,22 @@ interface CrossReadPage {
 
 function encodeCrossReadPageToken(token: CrossReadPageToken): string {
   return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
+}
+
+export function encodeChatHistoryBacklogPageToken(params: {
+  conversationId: number;
+  anchorMessageId: number;
+  boundaryMessageId: number;
+}): string {
+  return encodeCrossReadPageToken({
+    version: 1,
+    conversationId: params.conversationId,
+    anchorMessageId: params.anchorMessageId,
+    direction: "older",
+    boundaryMessageId: params.boundaryMessageId,
+    snapshotBeforeMessageId: params.anchorMessageId,
+    includeBotMessages: false,
+  });
 }
 
 function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
@@ -134,6 +159,42 @@ function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
   } catch {
     return null;
   }
+}
+
+function normalizeTime(value: string | undefined): string | undefined | null {
+  if (value === undefined) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? null : new Date(timestamp).toISOString();
+}
+
+function parseAllChatsPageToken(value: string): AllChatsPageToken | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<AllChatsPageToken>;
+    const validTime = (time: unknown): time is string | null =>
+      time === null || (typeof time === "string" && normalizeTime(time) === time);
+    if (
+      parsed.version !== 2 ||
+      parsed.scope !== "all_chats" ||
+      typeof parsed.lastEffectiveAt !== "string" ||
+      normalizeTime(parsed.lastEffectiveAt) !== parsed.lastEffectiveAt ||
+      !isStorableRowId(parsed.lastMessageId) ||
+      (parsed.snapshotBeforeMessageId !== null && !isStorableRowId(parsed.snapshotBeforeMessageId)) ||
+      !validTime(parsed.afterTime) ||
+      !validTime(parsed.beforeTime) ||
+      (parsed.platform !== null && parsed.platform !== "slack" && parsed.platform !== "whatsapp") ||
+      typeof parsed.includeBotMessages !== "boolean" ||
+      (parsed.order !== "asc" && parsed.order !== "desc")
+    ) {
+      return null;
+    }
+    return parsed as AllChatsPageToken;
+  } catch {
+    return null;
+  }
+}
+
+function encodeAllChatsPageToken(token: AllChatsPageToken): string {
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
 }
 
 async function readAroundMessage(
@@ -320,44 +381,34 @@ async function boundaryBelongsToCrossReadStream(
 export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
-    "Read persisted messages chronologically from the current chat or from an authorized conversation returned by SearchChatHistory. A cross-chat read must start with both conversationRef and anchorMessageId from the search hit. Continue it only with an olderPageToken or newerPageToken returned by that read, passed as pageToken. Do not restart a cross-chat read without its anchor or use this as the first tool for targeted lookup.",
+    "Read persisted messages chronologically from the current chat, an authorized conversation, or every Slack channel and WhatsApp group the requester belongs to. Use all_chats for broad chronological history and continue it with nextPageToken as pageToken. Use conversationRef with anchorMessageId for a specific authorized chat.",
     {
       conversationRef: z
         .string()
         .optional()
-        .describe(
-          "Opaque conversation ref returned by SearchChatHistory, such as conversation:42. Omit to read the current chat.",
-        ),
+        .describe("Opaque conversation ref such as conversation:42. Omit to read the current chat."),
       anchorMessageId: z
         .number()
         .int()
         .positive()
+        .max(INT4_MAX)
         .optional()
-        .describe("Center the read around this message row id returned by SearchChatHistory."),
-      pageToken: z
-        .string()
-        .optional()
-        .describe("Opaque olderPageToken or newerPageToken returned by a prior cross-chat read."),
+        .describe("Center a specific-chat read around this message row id."),
+      pageToken: z.string().optional().describe("Opaque continuation token returned by a prior read."),
       scope: z
-        .enum(["conversation", "current_thread"])
+        .enum(["conversation", "current_thread", "all_chats"])
         .optional()
         .describe(
-          "Read the whole current conversation or only the active Slack thread. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
+          "Read the current conversation, only the active Slack thread, or all authorized chats. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
         ),
-      afterMessageId: z
-        .number()
-        .int()
-        .positive()
+      afterTime: z.string().optional().describe("Inclusive ISO-8601 lower bound on the message effective time."),
+      beforeTime: z.string().optional().describe("Inclusive ISO-8601 upper bound on the message effective time."),
+      platform: z
+        .enum(["slack", "whatsapp"])
         .optional()
-        .describe("Return messages with row id greater than this. Omit to read from the start; never pass a sentinel."),
-      beforeMessageId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Return messages with row id less than this. Omit for no upper bound; never pass a sentinel."),
+        .describe("With scope all_chats only, restrict results to one platform."),
       limit: z.number().int().positive().max(100).optional().describe("Max messages to return. Default 50, max 100."),
-      order: z.enum(["asc", "desc"]).optional().describe("Message row-id order. Default asc."),
+      order: z.enum(["asc", "desc"]).optional().describe("Message effective-time order. Default asc."),
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
     },
     async ({
@@ -365,21 +416,21 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       anchorMessageId,
       pageToken,
       scope,
-      afterMessageId: requestedAfterMessageId,
-      beforeMessageId: requestedBeforeMessageId,
+      afterTime: requestedAfterTime,
+      beforeTime: requestedBeforeTime,
+      platform: requestedPlatform,
       limit,
       order,
       includeBotMessages,
     }) => {
-      const afterMessageId = clampRowIdBound(requestedAfterMessageId);
-      const beforeMessageId = clampRowIdBound(requestedBeforeMessageId);
       if (
         pageToken &&
         (conversationRef ||
           anchorMessageId ||
           scope ||
-          afterMessageId ||
-          beforeMessageId ||
+          requestedAfterTime ||
+          requestedBeforeTime ||
+          requestedPlatform ||
           order ||
           includeBotMessages !== undefined)
       ) {
@@ -388,6 +439,133 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             {
               type: "text" as const,
               text: "pageToken can only be combined with limit.",
+            },
+          ],
+        };
+      }
+      const allChatsPageToken = pageToken ? parseAllChatsPageToken(pageToken) : null;
+      const crossReadPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
+      if (pageToken && !allChatsPageToken && !crossReadPageToken) return unavailableCrossConversationResult();
+
+      const normalizedAfterTime = allChatsPageToken
+        ? (allChatsPageToken.afterTime ?? undefined)
+        : normalizeTime(requestedAfterTime);
+      const normalizedBeforeTime = allChatsPageToken
+        ? (allChatsPageToken.beforeTime ?? undefined)
+        : normalizeTime(requestedBeforeTime);
+      if (
+        (requestedAfterTime !== undefined && normalizedAfterTime === null) ||
+        (requestedBeforeTime !== undefined && normalizedBeforeTime === null)
+      ) {
+        return {
+          content: [{ type: "text" as const, text: "afterTime and beforeTime must be valid ISO-8601 timestamps." }],
+        };
+      }
+      if (allChatsPageToken) {
+        const outcome = await handleAllChatsRead(
+          {
+            platform: allChatsPageToken.platform ?? undefined,
+            afterTime: allChatsPageToken.afterTime ?? undefined,
+            beforeTime: allChatsPageToken.beforeTime ?? undefined,
+            cursor: { effectiveAt: allChatsPageToken.lastEffectiveAt, messageId: allChatsPageToken.lastMessageId },
+            snapshotBeforeMessageId: allChatsPageToken.snapshotBeforeMessageId ?? undefined,
+            order: allChatsPageToken.order,
+            limit,
+            includeBotMessages: allChatsPageToken.includeBotMessages,
+          },
+          deps,
+          access,
+        );
+        if (!outcome.ok) return { content: [{ type: "text" as const, text: outcome.message }] };
+        const nextPageToken =
+          outcome.body.hasMore && outcome.body.nextCursor
+            ? encodeAllChatsPageToken({
+                version: 2,
+                scope: "all_chats",
+                lastEffectiveAt: outcome.body.nextCursor.effectiveAt,
+                lastMessageId: outcome.body.nextCursor.messageId,
+                snapshotBeforeMessageId: allChatsPageToken.snapshotBeforeMessageId,
+                afterTime: allChatsPageToken.afterTime,
+                beforeTime: allChatsPageToken.beforeTime,
+                platform: allChatsPageToken.platform,
+                includeBotMessages: allChatsPageToken.includeBotMessages,
+                order: allChatsPageToken.order,
+              })
+            : undefined;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  messages: outcome.body.messages,
+                  hasMore: outcome.body.hasMore,
+                  ...(nextPageToken ? { nextPageToken } : {}),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+      if (requestedPlatform && scope !== "all_chats") {
+        return { content: [{ type: "text" as const, text: "platform can only be used with all_chats scope." }] };
+      }
+      if (scope === "all_chats") {
+        if (conversationRef || anchorMessageId) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "all_chats scope cannot be combined with a conversationRef or anchorMessageId.",
+              },
+            ],
+          };
+        }
+        const snapshotBeforeMessageId = deps.conversationContext?.currentMessageId;
+        const outcome = await handleAllChatsRead(
+          {
+            platform: requestedPlatform,
+            afterTime: normalizedAfterTime ?? undefined,
+            beforeTime: normalizedBeforeTime ?? undefined,
+            snapshotBeforeMessageId,
+            order,
+            limit,
+            includeBotMessages,
+          },
+          deps,
+          access,
+        );
+        if (!outcome.ok) return { content: [{ type: "text" as const, text: outcome.message }] };
+        const nextPageToken =
+          outcome.body.hasMore && outcome.body.nextCursor
+            ? encodeAllChatsPageToken({
+                version: 2,
+                scope: "all_chats",
+                lastEffectiveAt: outcome.body.nextCursor.effectiveAt,
+                lastMessageId: outcome.body.nextCursor.messageId,
+                snapshotBeforeMessageId: snapshotBeforeMessageId ?? null,
+                afterTime: normalizedAfterTime ?? null,
+                beforeTime: normalizedBeforeTime ?? null,
+                platform: requestedPlatform ?? null,
+                includeBotMessages: includeBotMessages === true,
+                order: order ?? "asc",
+              })
+            : undefined;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  messages: outcome.body.messages,
+                  hasMore: outcome.body.hasMore,
+                  ...(nextPageToken ? { nextPageToken } : {}),
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
@@ -402,17 +580,17 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
           content: [
             {
               type: "text" as const,
-              text: "conversationRef must be combined with the anchorMessageId returned by SearchChatHistory.",
+              text: "conversationRef must be combined with anchorMessageId.",
             },
           ],
         };
       }
-      if (anchorMessageId && (afterMessageId || beforeMessageId || order)) {
+      if (anchorMessageId && (normalizedAfterTime || normalizedBeforeTime || order)) {
         return {
           content: [
             {
               type: "text" as const,
-              text: "anchorMessageId cannot be combined with row-id bounds or order.",
+              text: "anchorMessageId cannot be combined with time bounds or order.",
             },
           ],
         };
@@ -421,8 +599,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         return unavailableCrossConversationResult();
       }
 
-      const parsedPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
-      if (pageToken && !parsedPageToken) return unavailableCrossConversationResult();
+      const parsedPageToken = crossReadPageToken;
       const referencedConversationId =
         parsedPageToken?.conversationId ?? (conversationRef ? parseConversationRef(conversationRef) : null);
       if (conversationRef && !referencedConversationId) return unavailableCrossConversationResult();
@@ -442,10 +619,6 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       const providerThreadId = deps.conversationContext?.providerThreadId;
       const isThreadReply = deps.conversationContext?.isThreadReply;
       const currentMessageId = deps.conversationContext?.currentMessageId;
-      const effectiveBeforeMessageId =
-        beforeMessageId && currentMessageId
-          ? Math.min(beforeMessageId, currentMessageId)
-          : (beforeMessageId ?? currentMessageId);
       const effectiveScope = scope ?? (providerThreadId ? "current_thread" : "conversation");
       if (effectiveScope === "current_thread" && !providerThreadId) {
         return {
@@ -481,8 +654,9 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
               stream,
             })
           : await repo.listMessages(conversationId, {
-              afterMessageId,
-              beforeMessageId: effectiveBeforeMessageId,
+              beforeMessageId: currentMessageId,
+              afterEffectiveAt: normalizedAfterTime ?? undefined,
+              beforeEffectiveAt: normalizedBeforeTime ?? undefined,
               limit,
               order,
               includeBotMessages,
@@ -517,123 +691,6 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
                   : "nextCursor" in result
                     ? { nextCursor: result.nextCursor }
                     : {}),
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
-  );
-}
-
-export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
-  return tool(
-    SEARCH_CHAT_HISTORY_TOOL_NAME,
-    "Search persisted messages in the current chat conversation by keyword, topic, name, decision, project, phrase, or older chat reference. Use this as the first tool for targeted chat-history discovery, even when only some missed messages were inlined. Use scope 'all_chats' to search across every Slack channel and WhatsApp group the requesting user is a member of. Use ReadChatHistory only for chronological paging or reading around a known message id.",
-    {
-      query: z.string().min(1).describe("Keyword, topic, name, project, decision, or phrase to find in chat history."),
-      scope: z
-        .enum(["conversation", "current_thread", "all_chats"])
-        .optional()
-        .describe(
-          "Search the whole current conversation, only the active Slack thread, or (all_chats) every Slack channel and WhatsApp group the requesting user is a member of plus this conversation. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
-        ),
-      platform: z
-        .enum(["slack", "whatsapp"])
-        .optional()
-        .describe("With scope all_chats only: restrict results to one platform."),
-      afterMessageId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe(
-          "Search messages with row id greater than this. Omit to search from the start; never pass a sentinel.",
-        ),
-      beforeMessageId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe(
-          "Search messages with row id less than this. Defaults to the current trigger message id. Omit for no upper bound; never pass a sentinel.",
-        ),
-      limit: z
-        .number()
-        .int()
-        .positive()
-        .max(100)
-        .optional()
-        .describe(
-          "Max matches to return. Default 20, max 100. Results are relevance-ordered; hasMore signals truncation — narrow the query or raise limit rather than paging with row-id bounds.",
-        ),
-      includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
-    },
-    async ({
-      query,
-      scope,
-      platform,
-      afterMessageId: requestedAfterMessageId,
-      beforeMessageId: requestedBeforeMessageId,
-      limit,
-      includeBotMessages,
-    }) => {
-      const afterMessageId = clampRowIdBound(requestedAfterMessageId);
-      const beforeMessageId = clampRowIdBound(requestedBeforeMessageId);
-      if (platform && scope !== "all_chats") {
-        return {
-          content: [{ type: "text" as const, text: "The platform filter is only valid with scope 'all_chats'." }],
-        };
-      }
-      if (scope === "all_chats") {
-        const outcome = await handleAllChatsSearch(
-          { query, platform, afterMessageId, beforeMessageId, limit, includeBotMessages },
-          deps,
-          access,
-        );
-        if (!outcome.ok) {
-          return { content: [{ type: "text" as const, text: outcome.message }] };
-        }
-        return { content: [{ type: "text" as const, text: JSON.stringify(outcome.body, null, 2) }] };
-      }
-      const conversationId = deps.conversationContext?.conversationId;
-      if (!conversationId || !deps.conversationRepo) {
-        return { content: [{ type: "text" as const, text: "Chat history search is not available in this run." }] };
-      }
-      const providerThreadId = deps.conversationContext?.providerThreadId;
-      const currentMessageId = deps.conversationContext?.currentMessageId;
-      const effectiveBeforeMessageId =
-        beforeMessageId && currentMessageId
-          ? Math.min(beforeMessageId, currentMessageId)
-          : (beforeMessageId ?? currentMessageId);
-      const effectiveScope = scope ?? (providerThreadId ? "current_thread" : "conversation");
-      if (effectiveScope === "current_thread" && !providerThreadId) {
-        return {
-          content: [
-            { type: "text" as const, text: "Current-thread chat history search is not available in this run." },
-          ],
-        };
-      }
-
-      const result = await deps.conversationRepo.searchMessages(conversationId, {
-        query,
-        afterMessageId,
-        beforeMessageId: effectiveBeforeMessageId,
-        limit,
-        includeBotMessages,
-        providerThreadId: effectiveScope === "current_thread" ? providerThreadId : undefined,
-      });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                messages: result.messages.map(renderMessage),
-                hasMore: result.hasMore,
               },
               null,
               2,

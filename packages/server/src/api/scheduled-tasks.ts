@@ -46,7 +46,6 @@ import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import type { SlackBot } from "../slack/bot";
 import { notifyStealRequested } from "../whatsapp/lock-confirmations";
-import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -118,6 +117,8 @@ interface ScheduledTaskListItem {
   scheduleLabel: string;
   canPause: boolean;
   canResume: boolean;
+  canMuteResponses: boolean;
+  canUnmuteResponses: boolean;
   canDelete: boolean;
   isOwner: boolean;
   sharedWithMe: boolean;
@@ -423,6 +424,8 @@ async function buildTaskListItems(
       scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
+      canMuteResponses: (isOwner || isAdmin) && delivery.mode === "deliver",
+      canUnmuteResponses: (isOwner || isAdmin) && delivery.mode === "silent",
       canDelete: isOwner || isAdmin,
       isOwner,
       sharedWithMe,
@@ -491,7 +494,7 @@ async function toLockView(
   row: AutomationTaskLockRow,
   viewerUserId: string | null,
   usersRepo: ReturnType<typeof createUserRepository>,
-  viewerSessionId?: string,
+  _viewerSessionId?: string,
 ): Promise<AutomationLockView> {
   const [holder, requester] = await Promise.all([
     usersRepo.findById(row.holder_user_id),
@@ -511,8 +514,8 @@ async function toLockView(
     heldBySurface: row.holder_surface,
     generation: row.generation,
     expiresAt: row.expires_at,
-    isHeldByMe: sameUser && (viewerSessionId === undefined || row.holder_session_id === viewerSessionId),
-    isHeldByMyOtherSession: sameUser && viewerSessionId !== undefined && row.holder_session_id !== viewerSessionId,
+    isHeldByMe: sameUser,
+    isHeldByMyOtherSession: false,
     stealPending,
   };
 }
@@ -681,7 +684,7 @@ export function scheduledTaskRoutes(
     return { row: result.row, userId: result.userId, grantedTaskIds: result.grantedTaskIds };
   }
 
-  async function loadDeletableTask(
+  async function loadOwnerOrAdminTask(
     c: Context,
     id: string,
   ): Promise<{ response: Response } | { row: ScheduledTaskRow; userId: string; grantedTaskIds: Set<string> }> {
@@ -865,30 +868,7 @@ export function scheduledTaskRoutes(
     });
   });
 
-  // --- Edit-lock endpoints (pessimistic whole-automation locks) ---
-  // Lock holders carry their known chat surface when they have one so steal
-  // notifications can be delivered; pure web builders stay on the builder
-  // surface, whose polling owns approval.
-
-  /**
-   * Lock-holder surface for web API lock acquisition. Web users with a chat
-   * identity record that surface (so steal notifications and outcomes can be
-   * delivered); pure web users stay on the builder surface, whose polling owns
-   * approval.
-   */
-  async function webLockHolderFor(userId: string): Promise<LockHolderFields> {
-    const user = await users.findById(userId);
-    if (user?.slack_user_id) {
-      return { userId, platform: "slack", surface: "dm", conversationId: user.slack_user_id };
-    }
-    if (user?.whatsapp_number) {
-      return {
-        userId,
-        platform: "whatsapp",
-        surface: "dm",
-        conversationId: phoneE164ToWhatsAppJid(user.whatsapp_number),
-      };
-    }
+  function webLockHolderFor(userId: string): LockHolderFields {
     return { userId, platform: "web", surface: "builder", conversationId: null };
   }
 
@@ -1048,22 +1028,16 @@ export function scheduledTaskRoutes(
     const leaseRequest = await readLeaseRequest(c);
     if ("response" in leaseRequest) return leaseRequest.response;
     const existing = await createAutomationLocksRepository(db).getByTaskId(id);
-    const exactSessionIsActive =
-      existing &&
-      existing.expires_at > new Date().toISOString() &&
-      existing.holder_user_id === result.userId &&
-      existing.holder_session_id === leaseRequest.clientSessionId;
+    const sameUserIsActive =
+      existing && existing.expires_at > new Date().toISOString() && existing.holder_user_id === result.userId;
+    const exactSessionIsActive = sameUserIsActive && existing.holder_session_id === leaseRequest.clientSessionId;
     if (exactSessionIsActive && leaseRequest.generation === undefined) {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "generation is required to renew an active lease" } },
         400,
       );
     }
-    if (
-      exactSessionIsActive &&
-      leaseRequest.generation !== undefined &&
-      existing.generation !== leaseRequest.generation
-    ) {
+    if (sameUserIsActive && leaseRequest.generation !== undefined && existing.generation !== leaseRequest.generation) {
       const lock = await toLockView(existing, result.userId, users, leaseRequest.clientSessionId);
       logger?.warn(
         {
@@ -1079,7 +1053,8 @@ export function scheduledTaskRoutes(
     }
     const acquired = await acquireOrRenewLock(db, {
       taskId: id,
-      holder: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
+      holder: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
+      requestedGeneration: leaseRequest.generation,
     });
     const lock = await toLockView(acquired.lock, result.userId, users, leaseRequest.clientSessionId);
     if (acquired.kind === "locked") {
@@ -1148,7 +1123,7 @@ export function scheduledTaskRoutes(
     if ("response" in leaseRequest) return leaseRequest.response;
     const stolen = await requestSteal(db, {
       taskId: id,
-      requester: { ...(await webLockHolderFor(result.userId)), sessionId: leaseRequest.clientSessionId },
+      requester: { ...webLockHolderFor(result.userId), sessionId: leaseRequest.clientSessionId },
     });
     if (stolen.kind === "not_locked") {
       return c.json({ error: { code: "NOT_LOCKED", message: "Automation is not locked by another editor" } }, 409);
@@ -1628,9 +1603,36 @@ export function scheduledTaskRoutes(
     });
   });
 
+  routes.put("/:id/response-delivery", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadOwnerOrAdminTask(c, id);
+    if ("response" in result) return result.response;
+
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.muted !== "boolean") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "muted must be a boolean" } }, 400);
+    }
+
+    const outputMode = body.muted ? "silent" : "deliver";
+    const updated =
+      result.row.output_mode === outputMode
+        ? result.row
+        : ((await repo.update(id, { output_mode: outputMode })) ?? result.row);
+    return c.json({
+      task: (
+        await buildTaskListItems(db, [updated], {
+          baseUrl: options.baseUrl,
+          port: options.port,
+          encryptionKey: options.encryptionKey,
+          viewer: { userId: result.userId, grantedTaskIds: result.grantedTaskIds, role: c.get("role") },
+        })
+      )[0],
+    });
+  });
+
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const access = await loadDeletableTask(c, id);
+    const access = await loadOwnerOrAdminTask(c, id);
     if ("response" in access) return access.response;
     const request = await readOptionalLeaseRequest(c, { requireGeneration: true });
     if ("response" in request) return request.response;

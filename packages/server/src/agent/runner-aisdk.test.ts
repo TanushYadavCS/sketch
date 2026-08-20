@@ -502,7 +502,6 @@ describe("runAgent AI SDK runtime path", () => {
       "mcp__sketch__ReadChatHistory",
       "mcp__sketch__ResolveInboxWorkflow",
       "mcp__sketch__Search",
-      "mcp__sketch__SearchChatHistory",
       "mcp__sketch__SearchDeliveryTargets",
       "mcp__sketch__SearchEntities",
       "mcp__sketch__SearchUsers",
