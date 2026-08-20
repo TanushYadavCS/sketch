@@ -4,7 +4,7 @@ import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 import { whereLiveEntity } from "./entities";
 
-export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type RelationConfidence = "CONFIRMED" | "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 
 export interface RelationListEntry {
   id: string;
@@ -70,6 +70,7 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
         WHERE entity_relationship_evidence.relationship_id = entity_relationships.id
       )`;
       const confidenceOrder = sql<number>`CASE entity_relationships.confidence
+        WHEN 'CONFIRMED' THEN -1
         WHEN 'AMBIGUOUS' THEN 0
         WHEN 'EXTRACTED' THEN 1
         WHEN 'INFERRED' THEN 2

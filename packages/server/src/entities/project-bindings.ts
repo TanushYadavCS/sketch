@@ -6,6 +6,7 @@ import {
   createEntityProjectBindingsRepository,
 } from "../db/repositories/entity-project-bindings";
 import type { DB } from "../db/schema";
+import { relationshipSourceOrder } from "./relationship-provenance";
 
 const PART_OF = "part_of";
 const ENGAGEMENT_FOR = "engagement_for";
@@ -98,9 +99,7 @@ export async function assertNoPartOfCycle(db: Kysely<DB>, childId: string, paren
  * wrote. Lower is better; ties break by age (oldest first) at call sites.
  */
 export function rankRelationshipSource(source: string): number {
-  if (source === GROUPING_SOURCE) return 0;
-  if (source === "project_minting_acceptance") return 1;
-  return 2;
+  return relationshipSourceOrder(source);
 }
 
 type RankedEdge = { targetEntityId: string; source: string };

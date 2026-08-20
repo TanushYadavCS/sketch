@@ -22,6 +22,7 @@ import { normalizeName } from "../src/connectors/name-normalize";
 import { whereLiveEntity } from "../src/db/repositories/entities";
 import type { DB } from "../src/db/schema";
 import { buildCompanyDedupGroups, loadCompanyDedupMembers } from "../src/entities/company-dedup-groups";
+import { relationshipSourceOrder } from "../src/entities/relationship-provenance";
 
 loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env") });
 
@@ -190,10 +191,19 @@ async function main(): Promise<void> {
     const engagements = await db
       .selectFrom("entity_relationships as r")
       .innerJoin("entities as c", "c.id", "r.target_entity_id")
-      .select(["r.source_entity_id", "c.name as company"])
+      .select(["r.source_entity_id", "r.source", "c.name as company"])
       .where("r.relationship_type", "=", "engagement_for")
       .execute();
-    const engagedBy = new Map(engagements.map((row) => [row.source_entity_id, row.company]));
+    const engagedBy = new Map<string, string>();
+    const engagedOrder = new Map<string, number>();
+    for (const row of engagements) {
+      const order = relationshipSourceOrder(row.source);
+      const prev = engagedOrder.get(row.source_entity_id);
+      if (prev === undefined || order < prev) {
+        engagedOrder.set(row.source_entity_id, order);
+        engagedBy.set(row.source_entity_id, row.company);
+      }
+    }
 
     const relationCounts = new Map<string, number>();
     const relations = await db

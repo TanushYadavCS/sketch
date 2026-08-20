@@ -48,12 +48,9 @@ async function main(): Promise<void> {
     if (repointIds.length > 0) {
       const results = await repointEngagements(db, { projectEntityIds: repointIds, companyEntityId: entityId });
       for (const result of results) {
-        console.log(
-          `repoint ${result.projectEntityId}: ${result.action}` +
-            (result.action === "repointed"
-              ? ` (edge ${result.relationshipId}: ${result.oldTargetId} → ${entityId})`
-              : ""),
-        );
+        const detail =
+          result.action === "repointed" ? ` (edge ${result.relationshipId}: ${result.oldTargetId} → ${entityId})` : "";
+        console.log(`repoint ${result.projectEntityId}: ${result.action}${detail}`);
       }
       const refused = results.filter((result) => result.action === "no_engagement_edge");
       if (refused.length > 0) {

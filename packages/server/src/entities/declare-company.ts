@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { DECLARED_RELATIONSHIP_SOURCE } from "./relationship-provenance";
 
 /**
  * Manual declaration seam for counterparties that have no email domain (the
@@ -82,7 +83,13 @@ export async function repointEngagements(
     const edge = edges[0];
     await db
       .updateTable("entity_relationships")
-      .set({ target_entity_id: input.companyEntityId, updated_at: new Date().toISOString() })
+      .set({
+        target_entity_id: input.companyEntityId,
+        source: DECLARED_RELATIONSHIP_SOURCE,
+        confidence: "CONFIRMED",
+        confidence_score: 1,
+        updated_at: new Date().toISOString(),
+      })
       .where("id", "=", edge.id)
       .execute();
     const extras = edges.filter((other) => other.id !== edge.id);

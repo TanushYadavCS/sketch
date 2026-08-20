@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import type { ExpressionBuilder, Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { type EnrichmentResult, isEnrichmentActive } from "../connectors/enrichment";
@@ -10,6 +10,7 @@ import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "./co-mention-sweep";
 import { type MaterializeFactsSummary, type MaterializeProgress, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
+import { PROTECTED_RELATIONSHIP_SOURCES, PROTECTED_RELATIONSHIP_TYPES } from "./relationship-provenance";
 import { reconcileStructuralAssigneeContributesTo } from "./structural-assignee";
 
 export type { ReplayFactsSummary } from "./materialize";
@@ -61,8 +62,9 @@ async function countTable(db: Kysely<DB>, table: string): Promise<number> {
   }
 }
 
-async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
+async function deleteTable(db: Kysely<DB>, table: string, logger?: Logger): Promise<number> {
   if (table === "entities") return deleteRecreatableEntities(db);
+  if (table === "entity_relationships") return deleteRecreatableRelationships(db, logger);
   const count = await countTable(db, table);
   if (count === 0) return 0;
   try {
@@ -83,6 +85,68 @@ async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
  * `inferred`) are rebuilt from facts.
  */
 const PRESERVED_RESET_TIERS = ["declared", "human_confirmed"];
+
+/**
+ * Human-written edges (declared, reparents, accepted minting verdicts) encode
+ * operator decisions that replay cannot reconstruct, so they survive reset —
+ * but only when both endpoint entities are themselves preserved-tier.
+ * Otherwise the edge would dangle after `deleteRecreatableEntities`; those
+ * rows are dropped and counted in the log. Declared edges never hit that
+ * branch: declaring an edge promotes its endpoints to `human_confirmed`.
+ */
+async function deleteRecreatableRelationships(db: Kysely<DB>, logger?: Logger): Promise<number> {
+  try {
+    const preservedEndpoint = (
+      eb: ExpressionBuilder<DB, "entity_relationships">,
+      column: "source_entity_id" | "target_entity_id",
+    ) =>
+      eb.exists(
+        eb
+          .selectFrom("entities")
+          .select(sql`1`.as("x"))
+          .whereRef("entities.id", "=", `entity_relationships.${column}`)
+          .where("entities.provenance_tier", "in", PRESERVED_RESET_TIERS),
+      );
+    const protectedRow = (eb: ExpressionBuilder<DB, "entity_relationships">) =>
+      eb.and([
+        eb("source", "in", [...PROTECTED_RELATIONSHIP_SOURCES]),
+        eb("relationship_type", "in", [...PROTECTED_RELATIONSHIP_TYPES]),
+      ]);
+    const dangling = await db
+      .selectFrom("entity_relationships")
+      .select(db.fn.countAll<number>().as("count"))
+      .where(protectedRow)
+      .where((eb) =>
+        eb.or([eb.not(preservedEndpoint(eb, "source_entity_id")), eb.not(preservedEndpoint(eb, "target_entity_id"))]),
+      )
+      .executeTakeFirst();
+    const danglingCount = Number(dangling?.count ?? 0);
+    if (danglingCount > 0) {
+      logger?.warn(
+        { droppedProtectedRelationships: danglingCount },
+        "Reset dropped human-written relationships whose endpoints are not preserved-tier",
+      );
+    }
+    const before = await countTable(db, "entity_relationships");
+    if (before === 0) return 0;
+    const result = await db
+      .deleteFrom("entity_relationships")
+      .where((eb) =>
+        eb.not(
+          eb.and([
+            protectedRow(eb),
+            preservedEndpoint(eb, "source_entity_id"),
+            preservedEndpoint(eb, "target_entity_id"),
+          ]),
+        ),
+      )
+      .executeTakeFirst();
+    return Number(result.numDeletedRows ?? 0);
+  } catch (err) {
+    if (isMissingTableError(err)) return 0;
+    throw err;
+  }
+}
 
 async function deleteRecreatableEntities(db: Kysely<DB>): Promise<number> {
   try {
@@ -427,7 +491,7 @@ async function resetDerivedEntityDataInner(db: Kysely<DB>, logger: Logger): Prom
     // Derived domain rows go before the rest so any FK cascades from
     // `entities` deletion don't fire against rows we still need to inspect.
     appliedDeleted.entity_domains = await deleteDerivedEntityDomains(trx);
-    for (const table of DERIVED_TABLES) appliedDeleted[table] = await deleteTable(trx, table);
+    for (const table of DERIVED_TABLES) appliedDeleted[table] = await deleteTable(trx, table, logger);
     appliedFactsMarkedUnmaterialized = await clearMaterializedFlags(trx);
   });
   logger.warn(
