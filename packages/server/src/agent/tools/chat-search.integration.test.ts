@@ -1609,6 +1609,25 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(body.messages.map((message) => message.id)).toEqual([atLower.row.id, atUpper.row.id]);
       expect(body.messages.map((message) => message.text)).toEqual(["at lower bound", "at upper bound"]);
 
+      const blankOptionals = await readTool.handler({
+        scope: "all_chats",
+        platform: "slack",
+        afterTime: "",
+        beforeTime: "",
+        conversationRef: "",
+        pageToken: "",
+        limit: 10,
+      });
+      expect(blankOptionals.content[0]?.text).not.toBe("afterTime and beforeTime must be valid ISO-8601 timestamps.");
+      const blankOptionalsBody = JSON.parse(blankOptionals.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number }>;
+      };
+      expect(blankOptionalsBody.messages.map((message) => message.id)).toEqual([
+        seeded.messageId,
+        atLower.row.id,
+        atUpper.row.id,
+      ]);
+
       const empty = await readTool.handler({
         scope: "all_chats",
         platform: "slack",

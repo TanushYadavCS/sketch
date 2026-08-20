@@ -423,6 +423,11 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       order,
       includeBotMessages,
     }) => {
+      conversationRef = conversationRef?.trim() || undefined;
+      pageToken = pageToken?.trim() || undefined;
+      requestedAfterTime = requestedAfterTime?.trim() || undefined;
+      requestedBeforeTime = requestedBeforeTime?.trim() || undefined;
+
       if (
         pageToken &&
         (conversationRef ||
