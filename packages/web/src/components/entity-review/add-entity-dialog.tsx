@@ -125,11 +125,13 @@ export function AddEntityDialog({
               </p>
               <div className="mt-1 flex flex-col">
                 {similar.map((entity) => (
-                  <div key={entity.id} className="flex items-center gap-2 py-1">
-                    <span className="truncate text-xs font-medium">{entity.name}</span>
+                  <div key={entity.id} className="flex min-w-0 items-center gap-2 py-1">
+                    <span className="min-w-0 truncate text-xs font-medium">{entity.name}</span>
                     <span className="shrink-0 text-[10px] text-muted-foreground">{entity.sourceType}</span>
                     {entity.aliases.length > 0 ? (
-                      <span className="truncate text-[10px] text-muted-foreground">{entity.aliases.join(", ")}</span>
+                      <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+                        {entity.aliases.join(", ")}
+                      </span>
                     ) : null}
                     <Button
                       size="sm"
