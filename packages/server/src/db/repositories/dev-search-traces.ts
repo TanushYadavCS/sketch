@@ -264,7 +264,7 @@ export function createDevSearchTraceRepository(db: Kysely<DB>) {
         status: row.status,
         error: row.error,
         durationMs: row.duration_ms,
-        createdAtMs: row.created_at_ms,
+        createdAtMs: Number(row.created_at_ms),
       }));
     },
 
@@ -281,7 +281,7 @@ export function createDevSearchTraceRepository(db: Kysely<DB>) {
         status: row.status,
         error: row.error,
         durationMs: row.duration_ms,
-        createdAtMs: row.created_at_ms,
+        createdAtMs: Number(row.created_at_ms),
       };
     },
 

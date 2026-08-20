@@ -1,5 +1,5 @@
 import type { AutomationExecutionMode } from "@sketch/shared";
-import type { Generated } from "kysely";
+import type { ColumnType, Generated } from "kysely";
 
 export interface UsersTable {
   id: string;
@@ -1759,6 +1759,12 @@ export interface WebhookDeliveriesTable {
 /**
  * A captured trace of one real `Search` tool call. Written only while dev tools are on.
  */
+/**
+ * Epoch millis stored as `bigint` on Postgres, whose driver returns int8 as a string to
+ * avoid precision loss. Reads must coerce with `Number(...)`; writes stay numbers.
+ */
+type EpochMs = ColumnType<string | number, number, number>;
+
 export interface DevSearchTraceResultsTable {
   trace_id: string;
   position: number;
@@ -1772,7 +1778,8 @@ export interface DevSearchTraceResultsTable {
   summary: string | null;
   score: number;
   similarity: number | null;
-  created_at_ms: number;
+  /** Epoch millis. `bigint` on Postgres, which the driver hands back as a string. */
+  created_at_ms: EpochMs;
 }
 
 export interface DevSearchSynthesesTable {
@@ -1785,7 +1792,7 @@ export interface DevSearchSynthesesTable {
   status: string;
   error: string | null;
   duration_ms: number;
-  created_at_ms: number;
+  created_at_ms: EpochMs;
 }
 
 export interface DevSearchTracesTable {
