@@ -220,6 +220,80 @@ describe("project minting review", () => {
     expect(screen.getByRole("button", { name: "Accept as client · active" })).toBeDisabled();
   });
 
+  /**
+   * Junk is the action that closes the loop server-side: it must carry the
+   * project's covered review ids, or the accept degrades to a plain strike
+   * and the same junk re-proposes next week.
+   */
+  it("junking a struck project sends its covered review ids on accept", async () => {
+    let accepted: Record<string, unknown> | null = null;
+    const row = verdict();
+    row.verdict.projects[0].coveredReviewIds = ["review-1", "review-2"];
+    serve(row, {
+      onAccept: (body) => {
+        accepted = body;
+      },
+    });
+    renderWithProviders(<MintingQueue />);
+
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+    await userEvent.click(await screen.findByRole("checkbox", { name: "keep OW risk platform" }));
+    await userEvent.click(await screen.findByRole("button", { name: "junk" }));
+    const acceptButton = screen.getByRole("button", { name: "Accept as client · active" });
+    await waitFor(() => expect(acceptButton).toBeEnabled());
+    await userEvent.click(acceptButton);
+
+    await waitFor(() => expect(accepted).not.toBeNull());
+    expect(accepted).toEqual({
+      confirmedCounterpartyKind: "client",
+      confirmedClientStage: "active",
+      struckProjectNames: ["OW risk platform"],
+      junkReviewIds: ["review-1", "review-2"],
+    });
+  });
+
+  it("a plain strike stays a defer — no junkReviewIds in the accept payload", async () => {
+    let accepted: Record<string, unknown> | null = null;
+    const row = verdict();
+    row.verdict.projects[0].coveredReviewIds = ["review-1"];
+    serve(row, {
+      onAccept: (body) => {
+        accepted = body;
+      },
+    });
+    renderWithProviders(<MintingQueue />);
+
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+    await userEvent.click(await screen.findByRole("checkbox", { name: "keep OW risk platform" }));
+    const acceptButton = screen.getByRole("button", { name: "Accept as client · active" });
+    await waitFor(() => expect(acceptButton).toBeEnabled());
+    await userEvent.click(acceptButton);
+
+    await waitFor(() => expect(accepted).not.toBeNull());
+    expect(accepted).toEqual({
+      confirmedCounterpartyKind: "client",
+      confirmedClientStage: "active",
+      struckProjectNames: ["OW risk platform"],
+    });
+  });
+
+  it("shows the retirement consequence only while junk is selected", async () => {
+    const row = verdict();
+    row.verdict.projects[0].coveredReviewIds = ["review-1"];
+    serve(row);
+    renderWithProviders(<MintingQueue />);
+
+    await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
+    await userEvent.click(await screen.findByRole("checkbox", { name: "keep OW risk platform" }));
+    expect(screen.queryByText(/Retired as junk/)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "junk" }));
+    expect(await screen.findByText(/Retired as junk/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "defer" }));
+    expect(screen.queryByText(/Retired as junk/)).not.toBeInTheDocument();
+  });
+
   it("renders v2 verdicts as a tree, children indented under their parents", async () => {
     const row = verdict({
       promptVersion: "project-minting-verdict-v3",

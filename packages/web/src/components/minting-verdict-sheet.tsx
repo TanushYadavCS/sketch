@@ -109,6 +109,7 @@ function SheetBody({
   const [kind, setKind] = useState<CounterpartyKind | null>(null);
   const [stage, setStage] = useState<ClientStage | null>(null);
   const [struck, setStruck] = useState<Set<string>>(new Set());
+  const [junked, setJunked] = useState<Set<string>>(new Set());
   const [renames, setRenames] = useState<Record<string, string>>({});
   const [reparents, setReparents] = useState<Record<string, string | null>>({});
   const [override, setOverride] = useState(false);
@@ -175,6 +176,19 @@ function SheetBody({
       .map((entity) => entity.mergeInto as string),
   );
 
+  /**
+   * Junk is explicit and per-project — an ancestor's strike defers descendants
+   * but never junks them. Only explicitly struck projects can carry it, and it
+   * retires exactly that project's covered review rows.
+   */
+  const junkReviewIdPayload = [
+    ...new Set(
+      projects
+        .filter((project) => junked.has(project.name) && struck.has(project.name))
+        .flatMap((project) => project.coveredReviewIds ?? []),
+    ),
+  ];
+
   const renamePayload: Record<string, string> = {};
   for (const [name, value] of Object.entries(renames)) {
     const trimmed = value.trim();
@@ -192,6 +206,7 @@ function SheetBody({
       confirmedCounterpartyKind: kind,
       ...(kindCarriesStage(kind) && stage ? { confirmedClientStage: stage } : {}),
       ...(effectiveStruck.size > 0 ? { struckProjectNames: [...effectiveStruck] } : {}),
+      ...(junkReviewIdPayload.length > 0 ? { junkReviewIds: junkReviewIdPayload } : {}),
       ...(Object.keys(renamePayload).length > 0 ? { renameMap: renamePayload } : {}),
       ...(Object.keys(reparentPayload).length > 0 ? { reparentMap: reparentPayload } : {}),
       ...(dryRun ? { overrideTripwireFlags: true, dryRun: true } : override ? { overrideTripwireFlags: true } : {}),
@@ -214,7 +229,12 @@ function SheetBody({
    * gated) separately above — the preview should show the plan behind them.
    */
   const stageMissing = !!kind && kindCarriesStage(kind) && !stage;
-  const editKey = JSON.stringify([[...effectiveStruck].sort(), renamePayload, reparentPayload]);
+  const editKey = JSON.stringify([
+    [...effectiveStruck].sort(),
+    junkReviewIdPayload.sort(),
+    renamePayload,
+    reparentPayload,
+  ]);
   const dryRun = useQuery({
     queryKey: ["project-minting", "dry-run", verdictId, kind, stage, editKey],
     enabled: !!kind && !stageMissing,
@@ -254,10 +274,21 @@ function SheetBody({
   const error = accept.error ?? reject.error;
 
   const toggleStrike = (name: string) => {
+    if (struck.has(name)) setJunkFor(name, false);
     setStruck((current) => {
       const next = new Set(current);
       if (next.has(name)) next.delete(name);
       else next.add(name);
+      return next;
+    });
+  };
+
+  const setJunkFor = (name: string, junk: boolean) => {
+    setJunked((current) => {
+      if (current.has(name) === junk) return current;
+      const next = new Set(current);
+      if (junk) next.add(name);
+      else next.delete(name);
       return next;
     });
   };
@@ -410,6 +441,8 @@ function SheetBody({
                 const name = project.name;
                 const isStruck = effectiveStruck.has(name);
                 const struckViaAncestor = isStruck && !struck.has(name);
+                const isJunked = junked.has(name) && struck.has(name);
+                const canJunk = isStruck && !struckViaAncestor && (project.coveredReviewIds?.length ?? 0) > 0;
                 const isMergeTarget = mergeTargets.has(name);
                 const claim = claimByOriginal.get(name);
                 const draggable = !isStruck && projects.length > 1;
@@ -454,9 +487,17 @@ function SheetBody({
                         onChange={() => toggleStrike(name)}
                       />
                       {isStruck ? (
-                        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground line-through opacity-60">
-                          {name}
-                        </span>
+                        <>
+                          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground line-through opacity-60">
+                            {name}
+                          </span>
+                          {canJunk ? (
+                            <span className="flex shrink-0 gap-1.5">
+                              <Pick label="defer" selected={!isJunked} onClick={() => setJunkFor(name, false)} />
+                              <Pick label="junk" selected={isJunked} onClick={() => setJunkFor(name, true)} />
+                            </span>
+                          ) : null}
+                        </>
                       ) : (
                         <input
                           type="text"
@@ -494,6 +535,11 @@ function SheetBody({
                     {struckViaAncestor ? (
                       <span className="mt-0.5 block pl-6 text-[11px] text-muted-foreground">
                         Struck with its parent.
+                      </span>
+                    ) : null}
+                    {isJunked ? (
+                      <span className="mt-0.5 block pl-6 text-[11px] text-muted-foreground">
+                        Retired as junk — future weekly runs stop re-proposing it. New evidence reopens it.
                       </span>
                     ) : null}
                   </div>

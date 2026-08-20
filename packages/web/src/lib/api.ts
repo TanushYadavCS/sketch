@@ -442,6 +442,8 @@ export interface ProjectMintingProject {
   /** v2 verdicts only: existing project-entity ids cited as evidence. */
   evidenceFragments?: string[];
   evidencePeople: string[];
+  /** Weekly verdicts only: entity_review_queue rows this project covers — the ids a junk action retires. */
+  coveredReviewIds?: string[];
   reasoning?: string;
 }
 
@@ -530,6 +532,8 @@ export interface ProjectMintingAcceptBody {
   confirmedCounterpartyKind: CounterpartyKind;
   confirmedClientStage?: ClientStage;
   struckProjectNames?: string[];
+  /** Covered review ids to retire as junk — future weekly runs stop re-proposing them. */
+  junkReviewIds?: string[];
   renameMap?: Record<string, string>;
   /** Original project name → new parent's original name, or null for top level. */
   reparentMap?: Record<string, string | null>;
