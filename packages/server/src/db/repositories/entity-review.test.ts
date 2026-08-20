@@ -20,6 +20,40 @@ describe("entity review seed rows", () => {
     await db.destroy();
   });
 
+  async function seedEvidenceFile(id: string): Promise<void> {
+    const existing = await db
+      .selectFrom("connector_configs")
+      .select("id")
+      .where("id", "=", "conn-1")
+      .executeTakeFirst();
+    if (!existing) {
+      await db
+        .insertInto("connector_configs")
+        .values({
+          id: "conn-1",
+          connector_type: "fireflies",
+          auth_type: "api_key",
+          credentials: "{}",
+          scope_config: "{}",
+          created_by: USER_ID,
+        })
+        .execute();
+    }
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "conn-1",
+        provider_file_id: `provider-${id}`,
+        file_name: id,
+        content_category: "document",
+        source: "fireflies",
+        synced_at: new Date().toISOString(),
+        embedding_status: "pending",
+      })
+      .execute();
+  }
+
   it("dedupes seed rows by stable handle across renames and disambiguates name collisions", async () => {
     const first = await repo.upsertSeedReviewRow({
       proposedName: "Sketch",
@@ -155,5 +189,59 @@ describe("entity review seed rows", () => {
 
     const rows = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(rows).toHaveLength(3);
+  });
+
+  it("revives a retired queue row only for genuinely new evidence", async () => {
+    await seedEvidenceFile("known-file");
+    await seedEvidenceFile("new-file");
+    const first = await repo.upsertQueueRow({
+      proposedName: "Budget Dashboard",
+      normalizedName: normalizeName("Budget Dashboard"),
+      entityType: "project",
+      source: "llm_extraction",
+      sourceId: "known-source",
+      candidateEntityId: null,
+      candidateScore: null,
+      candidateReason: "name_alias",
+      triggeredByUserId: USER_ID,
+      evidenceIndexedFileIds: ["known-file"],
+    });
+    await repo.upsertEvidence({
+      reviewId: first.row.id,
+      indexedFileId: "known-file",
+      source: "llm_extraction",
+    });
+    await repo.markRetired([first.row.id], "weekly_junk", "weekly-mint", new Date().toISOString());
+
+    const replayed = await repo.upsertQueueRow({
+      proposedName: "Budget Dashboard",
+      normalizedName: normalizeName("Budget Dashboard"),
+      entityType: "project",
+      source: "llm_extraction",
+      sourceId: "known-source",
+      candidateEntityId: null,
+      candidateScore: null,
+      candidateReason: "name_alias",
+      triggeredByUserId: USER_ID,
+      evidenceIndexedFileIds: ["known-file"],
+    });
+    expect(replayed.skipEvidence).toBe(true);
+    expect(replayed.row.status).toBe("retired");
+
+    const revived = await repo.upsertQueueRow({
+      proposedName: "Budget Dashboard",
+      normalizedName: normalizeName("Budget Dashboard"),
+      entityType: "project",
+      source: "llm_extraction",
+      sourceId: "new-source",
+      candidateEntityId: null,
+      candidateScore: null,
+      candidateReason: "name_alias",
+      triggeredByUserId: USER_ID,
+      evidenceIndexedFileIds: ["new-file"],
+    });
+    expect(revived.skipEvidence).toBe(false);
+    expect(revived.row.status).toBe("pending");
+    expect(revived.row.retired_reason).toBeNull();
   });
 });

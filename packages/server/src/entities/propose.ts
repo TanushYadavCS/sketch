@@ -485,6 +485,7 @@ async function queueProposal(
     candidateScore,
     candidateReason: reason,
     triggeredByUserId: input.triggeredByUserId,
+    evidenceIndexedFileIds: input.evidence.map((e) => e.indexedFileId),
   });
 
   if (!upsertResult.skipEvidence) {

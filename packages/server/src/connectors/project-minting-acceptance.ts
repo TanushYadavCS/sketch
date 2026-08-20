@@ -10,6 +10,7 @@ import {
   resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import {
   type ProjectMintingVerdictRow,
@@ -47,6 +48,7 @@ export interface AcceptProjectMintingVerdictInput {
   confirmedCounterpartyKind: CounterpartyKind;
   confirmedClientStage: ClientStage | null;
   struckProjectNames?: string[];
+  junkReviewIds?: string[];
   renameMap?: Record<string, string>;
   reparentMap?: Record<string, string | null>;
   overrideTripwireFlags?: boolean;
@@ -169,6 +171,36 @@ export function parseJsonArray(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function coveredReviewIds(verdict: ClusterVerdict): Set<string> {
+  return new Set(verdict.projects.flatMap((project) => project.coveredReviewIds ?? []));
+}
+
+function projectNamesCoveredByReviewIds(verdict: ClusterVerdict, reviewIds: string[]): string[] {
+  const ids = new Set(reviewIds);
+  return verdict.projects
+    .filter((project) => (project.coveredReviewIds ?? []).some((reviewId) => ids.has(reviewId)))
+    .map((project) => project.name);
+}
+
+async function retireJunkReviewIds(
+  db: Kysely<DB>,
+  verdict: ClusterVerdict,
+  reviewIds: string[] | undefined,
+  actorUserId: string,
+): Promise<void> {
+  const allowed = coveredReviewIds(verdict);
+  const ids = [...new Set((reviewIds ?? []).filter((reviewId) => allowed.has(reviewId)))];
+  if (ids.length === 0) return;
+  const now = new Date().toISOString();
+  await createEntityReviewRepo(db).markRetired(ids, "weekly_junk", actorUserId, now);
+  await db
+    .updateTable("weekly_mint_candidates")
+    .set({ retired_at: now, retired_reason: "weekly_junk", updated_at: now })
+    .where("review_id", "in", ids)
+    .where("retired_at", "is", null)
+    .execute();
 }
 
 export function parseStoredAcceptedResult(row: ProjectMintingVerdictRow): ProjectMintingAcceptResult | null {
@@ -824,7 +856,12 @@ async function planAcceptance(
 ): Promise<AcceptancePlan> {
   const isV2 = isV2MintingVerdict(row.prompt_version);
   const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: isV2 });
-  const struckProjects = [...new Set(input.struckProjectNames ?? [])]
+  const struckProjects = [
+    ...new Set([
+      ...(input.struckProjectNames ?? []),
+      ...projectNamesCoveredByReviewIds(verdict, input.junkReviewIds ?? []),
+    ]),
+  ]
     .map((name) => name.trim())
     .filter(Boolean)
     .sort();
@@ -1466,6 +1503,7 @@ export async function acceptProjectMintingVerdict(
     const repo = createProjectMintingVerdictRepository(db);
     const row = await repo.findById(input.verdictId);
     if (!row) throw new ProjectMintingAcceptanceError("NOT_FOUND", "Project minting verdict not found");
+    const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: isV2MintingVerdict(row.prompt_version) });
     const result = await computeAcceptance(db, row, input);
     if (input.dryRun) return result;
     if (row.status === "pending" && row.superseded_at === null) {
@@ -1488,6 +1526,9 @@ export async function acceptProjectMintingVerdict(
           counterpartyKind: result.declaration.counterpartyKind,
           clientStage: result.declaration.clientStage,
         });
+      }
+      if (won) {
+        await retireJunkReviewIds(db, verdict, input.junkReviewIds, input.actorUserId);
       }
       if (!won) {
         const current = await repo.findById(input.verdictId);

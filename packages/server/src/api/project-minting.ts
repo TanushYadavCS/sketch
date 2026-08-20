@@ -523,6 +523,7 @@ export function projectMintingRoutes(
         logger,
         ...confirmedAxes,
         struckProjectNames: readStringArray(body.struckProjectNames),
+        junkReviewIds: readStringArray(body.junkReviewIds),
         renameMap: readRenameMap(body.renameMap),
         reparentMap: readReparentMap(body.reparentMap),
         overrideTripwireFlags: body.overrideTripwireFlags === true,
