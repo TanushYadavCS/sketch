@@ -17,6 +17,7 @@
  *   represented company.
  */
 import type { Kysely } from "kysely";
+import type { Logger } from "pino";
 import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
@@ -31,7 +32,10 @@ export interface AffiliationIndex {
 /**
  * One pass-level load of every high-trust works_at edge. Targets inside
  * `ownOrgCompanyIds` mark the person as own-org (excluded at use sites)
- * instead of contributing companies.
+ * instead of contributing companies. A person with a corporate email contact
+ * point on an organization domain is also own-org — an internal person
+ * resolved through a personal email or a WhatsApp phone must not attach files
+ * to a stray client edge either.
  */
 export async function loadAffiliationIndex(db: Kysely<DB>, ownOrgCompanyIds: Set<string>): Promise<AffiliationIndex> {
   const rows = await db
@@ -59,7 +63,33 @@ export async function loadAffiliationIndex(db: Kysely<DB>, ownOrgCompanyIds: Set
     }
     companies.add(row.companyId);
   }
+  for (const personId of await personsWithOrgDomainEmail(db, [...companiesByPerson.keys()])) {
+    ownOrgAffiliatedPersonIds.add(personId);
+    companiesByPerson.delete(personId);
+  }
   return { companiesByPerson, ownOrgAffiliatedPersonIds };
+}
+
+async function personsWithOrgDomainEmail(db: Kysely<DB>, personIds: string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  if (personIds.length === 0) return found;
+  const orgDomainRows = await db.selectFrom("organization_domains").select("domain").execute();
+  const orgDomains = new Set(orgDomainRows.map((row) => row.domain.toLowerCase()));
+  if (orgDomains.size === 0) return found;
+  for (const idChunk of chunk(personIds, QUERY_CHUNK)) {
+    const rows = await db
+      .selectFrom("entity_contact_points")
+      .select(["entity_id", "value"])
+      .where("kind", "=", "email")
+      .where("entity_id", "in", idChunk)
+      .execute();
+    for (const row of rows) {
+      if (!row.entity_id) continue;
+      const domain = row.value.split("@")[1]?.trim().toLowerCase();
+      if (domain && orgDomains.has(domain)) found.add(row.entity_id);
+    }
+  }
+  return found;
 }
 
 /**
@@ -146,7 +176,7 @@ async function resolveContactValuesToPersons(
   return resolved;
 }
 
-const CONVERSATION_CHUNK = 500;
+const QUERY_CHUNK = 500;
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -156,11 +186,17 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 /**
  * fileId → person entity ids of the non-bot senders inside each indexed
- * WhatsApp slice. Batched: one slice scan, chunked message scans, one
- * contact-point lookup. Ambiguous numbers (shared by two person entities)
- * resolve to nobody rather than guessing.
+ * WhatsApp slice. Batched: one slice scan, chunked message scans bounded per
+ * conversation to the min–max id range its indexed slices cover (a long group
+ * history outside any slice is never read), one contact-point lookup.
+ * Ambiguous numbers (shared by two person entities) resolve to nobody rather
+ * than guessing; unresolved and ambiguous senders are logged as coverage
+ * gaps (counts only, never identifiers).
  */
-export async function loadWhatsAppSenderPersonsByFile(db: Kysely<DB>): Promise<Map<string, Set<string>>> {
+export async function loadWhatsAppSenderPersonsByFile(
+  db: Kysely<DB>,
+  logger?: Logger,
+): Promise<Map<string, Set<string>>> {
   const slices = await db
     .selectFrom("conversation_slices")
     .select(["indexed_file_id", "conversation_id", "first_message_id", "last_message_id"])
@@ -168,13 +204,32 @@ export async function loadWhatsAppSenderPersonsByFile(db: Kysely<DB>): Promise<M
     .execute();
   if (slices.length === 0) return new Map();
 
-  const conversationIds = [...new Set(slices.map((slice) => slice.conversation_id))];
+  const boundsByConversation = new Map<number, { min: number; max: number }>();
+  for (const slice of slices) {
+    const bounds = boundsByConversation.get(slice.conversation_id);
+    if (!bounds) {
+      boundsByConversation.set(slice.conversation_id, { min: slice.first_message_id, max: slice.last_message_id });
+    } else {
+      bounds.min = Math.min(bounds.min, slice.first_message_id);
+      bounds.max = Math.max(bounds.max, slice.last_message_id);
+    }
+  }
   const messagesByConversation = new Map<number, { id: number; senderJid: string }[]>();
-  for (const idChunk of chunk(conversationIds, CONVERSATION_CHUNK)) {
+  for (const boundsChunk of chunk([...boundsByConversation.entries()], QUERY_CHUNK)) {
     const rows = await db
       .selectFrom("conversation_messages")
       .select(["id", "conversation_id", "sender_jid"])
-      .where("conversation_id", "in", idChunk)
+      .where((eb) =>
+        eb.or(
+          boundsChunk.map(([conversationId, bounds]) =>
+            eb.and([
+              eb("conversation_id", "=", conversationId),
+              eb("id", ">=", bounds.min),
+              eb("id", "<=", bounds.max),
+            ]),
+          ),
+        ),
+      )
       .where("is_bot", "=", 0)
       .where("sender_jid", "is not", null)
       .execute();
@@ -192,6 +247,7 @@ export async function loadWhatsAppSenderPersonsByFile(db: Kysely<DB>): Promise<M
   const jidsByFile = new Map<string, Set<string>>();
   const allValues: { kind: "phone" | "lid"; value: string }[] = [];
   const valueByJid = new Map<string, string>();
+  let unparsableJids = 0;
   for (const slice of slices) {
     if (!slice.indexed_file_id) continue;
     const messages = messagesByConversation.get(slice.conversation_id) ?? [];
@@ -209,6 +265,8 @@ export async function loadWhatsAppSenderPersonsByFile(db: Kysely<DB>): Promise<M
         if (contact) {
           valueByJid.set(message.senderJid, contact.value);
           allValues.push(contact);
+        } else {
+          unparsableJids += 1;
         }
       }
     }
@@ -230,41 +288,45 @@ export async function loadWhatsAppSenderPersonsByFile(db: Kysely<DB>): Promise<M
       set.add(personId);
     }
   }
+  const unresolvedValues = allValues.filter((value) => !personByValue.has(value.value)).length;
+  if (logger && (unparsableJids > 0 || unresolvedValues > 0)) {
+    logger.info(
+      { unparsableSenderJids: unparsableJids, unresolvedSenderContacts: unresolvedValues },
+      "participant_affiliation: WhatsApp senders without a unique person entity",
+    );
+  }
   return out;
 }
 
 /**
- * Companies the given persons are affiliated with, under the same trust
- * gates: high-trust works_at only, own-org targets excluded, and a person
- * with any own-org affiliation contributes nothing at all.
+ * Companies the given persons are affiliated with, under exactly the gates
+ * `loadAffiliationIndex` enforces — one implementation for both the weekly
+ * pass and this per-file anchor path, so the exclusions can never drift.
+ * Own-org here is the domain-based variant (corporate entity_domains on org
+ * domains, plus persons with org-domain email contact points); domainless
+ * own-org shards and duplicate-shard canonicalisation need the weekly pass's
+ * dedup groups, which are too expensive to build per file — anchor ids stay
+ * raw entity ids, like every other anchor this resolver returns.
  */
 export async function companiesForAffiliatedPersons(
   db: Kysely<DB>,
   personIds: string[],
 ): Promise<{ id: string; name: string; source_type: string; hotness: number | null }[]> {
   if (personIds.length === 0) return [];
-  const ownOrgCompanyIds = await loadOwnOrgCompanyIdsByDomain(db);
-  const rows = await db
-    .selectFrom("entity_relationships as r")
-    .innerJoin("entities as c", "c.id", "r.target_entity_id")
-    .select(["r.source_entity_id as personId", "c.id", "c.name", "c.source_type", "c.hotness"])
-    .where("r.source_entity_id", "in", personIds)
-    .where("r.relationship_type", "=", "works_at")
-    .where("r.source", "in", [...AFFILIATION_EDGE_SOURCES])
-    .where("r.valid_to", "is", null)
-    .where("c.source_type", "=", "company")
-    .where("c.status", "!=", "archived")
-    .where(whereLiveEntity("c"))
-    .execute();
-  const ownOrgAffiliated = new Set(rows.filter((row) => ownOrgCompanyIds.has(row.id)).map((row) => row.personId));
-  const out = new Map<string, { id: string; name: string; source_type: string; hotness: number | null }>();
-  for (const row of rows) {
-    if (ownOrgAffiliated.has(row.personId)) continue;
-    if (ownOrgCompanyIds.has(row.id)) continue;
-    if (!out.has(row.id))
-      out.set(row.id, { id: row.id, name: row.name, source_type: row.source_type, hotness: row.hotness });
+  const index = await loadAffiliationIndex(db, await loadOwnOrgCompanyIdsByDomain(db));
+  const companyIds = new Set<string>();
+  for (const personId of personIds) {
+    if (index.ownOrgAffiliatedPersonIds.has(personId)) continue;
+    for (const companyId of index.companiesByPerson.get(personId) ?? []) {
+      companyIds.add(companyId);
+    }
   }
-  return [...out.values()];
+  if (companyIds.size === 0) return [];
+  return db
+    .selectFrom("entities")
+    .select(["id", "name", "source_type", "hotness"])
+    .where("id", "in", [...companyIds])
+    .execute();
 }
 
 /** Per-file variant of the sender resolution, for the anchor resolver. */

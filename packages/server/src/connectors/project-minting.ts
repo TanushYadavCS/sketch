@@ -602,6 +602,7 @@ export function applyCandidacyFloor(groups: CandidateWorkstream[]): CandidateWor
 
 export interface ClusterClientFilesOptions {
   minFiles?: number;
+  logger?: Logger;
 }
 
 /**
@@ -726,8 +727,15 @@ export async function clusterClientFiles(
     for (const [email, matches] of personsByEmail) {
       if (matches.length === 1) personByEmail.set(email, matches[0].id);
     }
+    const unresolvedEmails = emailsToResolve.size - personByEmail.size;
+    if (options?.logger && unresolvedEmails > 0) {
+      options.logger.info(
+        { unresolvedParticipantEmails: unresolvedEmails },
+        "participant_affiliation: participant emails without a unique person entity",
+      );
+    }
 
-    const personsByFile = await loadWhatsAppSenderPersonsByFile(db);
+    const personsByFile = await loadWhatsAppSenderPersonsByFile(db, options?.logger);
     for (const [fileId, emails] of emailsByFile) {
       for (const email of emails) {
         const personId = personByEmail.get(email);
@@ -1785,7 +1793,7 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
   const promptVersion = input.promptVersion ?? PROJECT_MINTING_PROMPT_VERSION;
   const onlyTriggered = input.onlyTriggered ?? true;
   const votes = Math.max(1, Math.floor(input.votes ?? 1));
-  const clusters = await clusterClientFiles(input.db, { minFiles: input.minFiles });
+  const clusters = await clusterClientFiles(input.db, { minFiles: input.minFiles, logger: input.logger });
   const verdictRepo = createProjectMintingVerdictRepository(input.db);
 
   const declaredById = new Map(
