@@ -13,7 +13,7 @@ import {
   materializeFromFact,
   materializeUnmaterializedFacts,
 } from "./materialize";
-import { normalizeEntityMatchName } from "./materialize-deps";
+import { normalizeEntityMatchName } from "./name-keys";
 
 const ADMIN_ID = "admin-1";
 const CONNECTOR_ID = "cfg";

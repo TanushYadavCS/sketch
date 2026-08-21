@@ -1,9 +1,9 @@
-import { normalizeName } from "../connectors/name-normalize";
 import { createTaskActivityRepository } from "../db/repositories/task-activity";
 import { type TaskStatus, updateTaskStatusFromEvidence, upsertLlmTask } from "../db/repositories/tasks";
 import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
 import { readJsonObject } from "./materialize-json";
 import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { normalizeName } from "./name-keys";
 
 export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   const raw = readLlmTask(readJsonObject(fact.raw));

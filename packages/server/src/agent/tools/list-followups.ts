@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import type { z } from "zod/v4";
-import { normalizeName } from "../../connectors/name-normalize";
 import {
   type AgentOutputWithItems,
   type AgentRoute,
@@ -19,6 +18,7 @@ import {
 import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
+import { normalizeName } from "../../entities/name-keys";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const listFollowupsToolDescription =

@@ -19,9 +19,9 @@ import {
 import type { DB } from "../db/schema";
 import { withMaterializeReplayQueue } from "../entities/materialize-replay";
 import { EntityMergeError, mergeEntities } from "../entities/merge";
+import { normalizeName } from "../entities/name-keys";
 import { ProjectBindingError, assertNoPartOfCycle } from "../entities/project-bindings";
 import { confirmReview } from "../entities/resolve";
-import { normalizeName } from "./name-normalize";
 import {
   type ClientCluster,
   type ClusterFile,

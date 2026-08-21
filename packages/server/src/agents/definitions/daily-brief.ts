@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import { filterAccessibleFileIds } from "../../connectors/search";
 import type { AccessPrincipalInput } from "../../connectors/types";
 import {
@@ -26,6 +25,7 @@ import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-
 import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
+import { normalizeName } from "../../entities/name-keys";
 import { createLogger } from "../../logger";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { parseTimestampMs } from "../../timestamps";

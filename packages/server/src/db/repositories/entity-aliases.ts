@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import { parseAliasesString } from "../../entities/materialize-json";
+import { normalizeName } from "../../entities/name-keys";
 import type { DB } from "../schema";
 
 const MAX_ALIAS_MERGE_ATTEMPTS = 8;

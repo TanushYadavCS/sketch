@@ -10,7 +10,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
@@ -18,6 +17,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
 import type { IndexEntityRow } from "./materialize-types";
+import { normalizeName } from "./name-keys";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { ResolveError, confirmReview, dismissReview, rejectReview } from "./resolve";
 

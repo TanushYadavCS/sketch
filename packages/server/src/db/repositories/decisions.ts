@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Kysely } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import type { DecisionSeed } from "../../connectors/types";
+import { normalizeName } from "../../entities/name-keys";
 import type { DB, IndexedFileFactsTable } from "../schema";
 import { buildIndexedFileFactKey, createIndexedFileFactRepository } from "./indexed-file-facts";
 import { type SubEntityRow, createSubEntityRepository } from "./sub-entities";

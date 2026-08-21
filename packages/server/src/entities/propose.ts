@@ -20,15 +20,14 @@
  */
 import type { Selectable } from "kysely";
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
 import type { UpsertPersonEntityData, createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
 import { TOOL_NAME_DENYLIST } from "./graph";
-import { normalizeMatchName } from "./match-normalize";
 import type { IndexEntityRow } from "./materialize-types";
+import { normalizeEntityMatchName, normalizeName } from "./name-keys";
 import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
@@ -201,9 +200,13 @@ function lookupHasEntityTypeName(
 ): boolean {
   const directMatches = lookup
     .getByNormalizedName(normalized)
-    .some((entity) => entity.source_type === entityType && normalizeMatchName(entityType, entity.name) === normalized);
+    .some(
+      (entity) => entity.source_type === entityType && normalizeEntityMatchName(entityType, entity.name) === normalized,
+    );
   if (directMatches) return true;
-  return lookup.listByType(entityType).some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+  return lookup
+    .listByType(entityType)
+    .some((entity) => normalizeEntityMatchName(entityType, entity.name) === normalized);
 }
 
 async function repoHasEntityTypeName(
@@ -212,7 +215,7 @@ async function repoHasEntityTypeName(
   normalized: string,
 ): Promise<boolean> {
   const entities = await deps.entityRepo.getEntitiesBySourceType(entityType);
-  return entities.some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+  return entities.some((entity) => normalizeEntityMatchName(entityType, entity.name) === normalized);
 }
 
 function hasTrailingApiSdkToken(name: string): boolean {
@@ -223,7 +226,7 @@ async function productCollidesWithThirdParty(
   deps: ProposeDeps,
   name: string,
 ): Promise<{ hit: boolean; signal?: string }> {
-  const companyNormalized = normalizeMatchName("company", name);
+  const companyNormalized = normalizeEntityMatchName("company", name);
   if (
     lookupHasEntityTypeName(deps.lookup, "company", companyNormalized) ||
     (await repoHasEntityTypeName(deps, "company", companyNormalized))
@@ -231,7 +234,7 @@ async function productCollidesWithThirdParty(
     return { hit: true, signal: "existing_company_entity" };
   }
 
-  const toolNormalized = normalizeMatchName("tool", name);
+  const toolNormalized = normalizeEntityMatchName("tool", name);
   if (
     lookupHasEntityTypeName(deps.lookup, "tool", toolNormalized) ||
     (await repoHasEntityTypeName(deps, "tool", toolNormalized))
@@ -300,12 +303,12 @@ function isPrefixMatch(proposed: string[], existing: string[]): boolean {
  * falling through to a weaker rule.
  */
 function rank(entityType: ProposeEntityType, name: string, candidates: IndexEntityRow[]): RankedCandidate[] {
-  const proposedTokens = tokenize(normalizeMatchName(entityType, name));
+  const proposedTokens = tokenize(normalizeEntityMatchName(entityType, name));
   if (proposedTokens.length === 0) return [];
 
   const tokenSuperset: RankedCandidate[] = [];
   for (const c of candidates) {
-    if (isTokenSupersetOrSubset(proposedTokens, tokenize(normalizeMatchName(entityType, c.name)))) {
+    if (isTokenSupersetOrSubset(proposedTokens, tokenize(normalizeEntityMatchName(entityType, c.name)))) {
       tokenSuperset.push({ entity: c, score: 0.9, reason: "token-superset" });
     }
   }
@@ -313,7 +316,7 @@ function rank(entityType: ProposeEntityType, name: string, candidates: IndexEnti
 
   const prefix: RankedCandidate[] = [];
   for (const c of candidates) {
-    if (isPrefixMatch(proposedTokens, tokenize(normalizeMatchName(entityType, c.name)))) {
+    if (isPrefixMatch(proposedTokens, tokenize(normalizeEntityMatchName(entityType, c.name)))) {
       prefix.push({ entity: c, score: 0.7, reason: "prefix" });
     }
   }
@@ -651,7 +654,7 @@ async function decideNameCandidates(
 }
 
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
-  const normalized = normalizeMatchName(input.entityType, input.name);
+  const normalized = normalizeEntityMatchName(input.entityType, input.name);
   const rejectionKey = normalizeName(input.name);
 
   if (input.entityType === "product") {
@@ -731,9 +734,9 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   for (const e of nameMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
   for (const e of aliasMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
   for (const e of deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity))) {
-    if (normalizeMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
+    if (normalizeEntityMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
     for (const alias of parseAliases(e.aliases)) {
-      if (normalizeMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
+      if (normalizeEntityMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
     }
   }
   if (exactById.size === 1) {
@@ -753,11 +756,13 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     const domain = input.evidenceDomain.trim().toLowerCase();
     const companyIds = new Set(deps.lookup.getCompanyIdsByDomain?.(domain) ?? []);
     if (companyIds.size > 0) {
-      const proposedTokens = tokenize(normalizeMatchName(input.entityType, input.name));
+      const proposedTokens = tokenize(normalizeEntityMatchName(input.entityType, input.name));
       const domainMatches = deps.lookup
         .listByType("company")
         .filter((entity) => companyIds.has(entity.id))
-        .filter((entity) => hasTokenOverlap(proposedTokens, tokenize(normalizeMatchName("company", entity.name))));
+        .filter((entity) =>
+          hasTokenOverlap(proposedTokens, tokenize(normalizeEntityMatchName("company", entity.name))),
+        );
 
       if (domainMatches.length === 1) {
         const { entity } = await persistEntity(deps, input, domainMatches[0]);

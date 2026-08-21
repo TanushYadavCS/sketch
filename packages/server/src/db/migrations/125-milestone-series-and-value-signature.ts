@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 import { seriesKeyFor } from "../../entities/sub-entity-signatures";
 import { yieldToEventLoop } from "../../lib/event-loop";
 

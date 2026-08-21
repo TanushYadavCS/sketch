@@ -8,8 +8,8 @@ import {
 } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, getSharedPgDb } from "../test-utils";
-import { normalizeEntityMatchName } from "./match-normalize";
 import { buildMaterializeDeps } from "./materialize-deps";
+import { normalizeEntityMatchName } from "./name-keys";
 import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | null = null): Promise<void> {

@@ -1,9 +1,10 @@
 import { type NonPersonMentionType, coerceMentionType, normalizeMentionType } from "./graph";
-import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
+import { registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import { materializePersonFact } from "./materialize-person";
 import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { normalizeEntityMatchName } from "./name-keys";
 import { proposeEntity } from "./propose";
 
 export async function materializeLlmExtractedFact(

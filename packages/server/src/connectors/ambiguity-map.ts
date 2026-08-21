@@ -1,21 +1,4 @@
 /**
- * Canonicalize a person name for cross-map lookups. Lowercase, collapse
- * internal whitespace, strip trailing `.`/`,`. Conservative on purpose —
- * a stricter normalizer would risk spurious cross-name collisions.
- *
- * Used by every map that resolves speaker / attendee names to emails:
- * Fireflies' in-meeting `emailByName` and `contactsByName`, plus the
- * sync-dispatcher's `personEmailByName` and `userEmailByName`.
- */
-export function normalizeName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[.,]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
  * A Map<K, V> that drops a key when conflicting values arrive for it,
  * and refuses to re-set the key afterward. Same single-unambiguous-match
  * rule used across every name→email lookup map in the connector layer:

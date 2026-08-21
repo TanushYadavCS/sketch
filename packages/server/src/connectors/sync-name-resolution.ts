@@ -1,7 +1,8 @@
 import type { Kysely } from "kysely";
 import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
-import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
+import { normalizeName } from "../entities/name-keys";
+import { createAmbiguityAwareMap } from "./ambiguity-map";
 import { forEachChunk } from "./sync-utils";
 import type { NameResolution, NameResolver } from "./types";
 

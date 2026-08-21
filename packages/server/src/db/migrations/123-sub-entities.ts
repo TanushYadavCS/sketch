@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 
 interface CommitmentBackfillDb {
   indexed_file_facts: {

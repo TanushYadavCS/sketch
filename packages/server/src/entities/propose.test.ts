@@ -1,7 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EmbeddingProvider } from "../connectors/embeddings/types";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -9,6 +8,7 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { buildMaterializeDeps } from "./materialize-deps";
 import type { IndexEntityRow } from "./materialize-types";
+import { normalizeName } from "./name-keys";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 
 async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {

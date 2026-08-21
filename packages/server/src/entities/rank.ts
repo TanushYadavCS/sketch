@@ -1,5 +1,5 @@
-import { normalizeName } from "../connectors/name-normalize";
 import type { IndexEntityRow } from "./materialize-types";
+import { normalizeName } from "./name-keys";
 
 const LOW_SIGNAL_PERSON_TOKENS = new Set(["person", "people", "user", "unknown"]);
 

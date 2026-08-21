@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Transaction, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 import type { DB } from "../schema";
 import {
   type AgentOutputItemInput,

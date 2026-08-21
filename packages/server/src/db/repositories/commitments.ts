@@ -1,6 +1,6 @@
 import type { Kysely } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import type { CommitmentSeed, IndexedFileFactRaw } from "../../connectors/types";
+import { normalizeName } from "../../entities/name-keys";
 import type { DB, IndexedFileFactsTable } from "../schema";
 import {
   type IndexedFileFactRelation,

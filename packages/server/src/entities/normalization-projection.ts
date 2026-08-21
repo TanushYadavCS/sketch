@@ -1,5 +1,5 @@
 import { coerceMentionType, normalizeMentionType } from "./graph";
-import { normalizeEntityMatchName } from "./match-normalize";
+import { normalizeEntityMatchName } from "./name-keys";
 
 export interface LlmExtractedNormalization {
   raw_mention_type: string | null;

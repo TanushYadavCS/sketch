@@ -16,7 +16,6 @@ import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
 import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
-import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import { ENTITY_INDEX_COLUMNS } from "./materialize-types";
 import {
@@ -35,10 +34,9 @@ import {
   findTokenSetMatches,
   removeFromCandidatePool,
 } from "./name-dedup";
+import { normalizeEntityMatchName } from "./name-keys";
 import type { Entity, EntityLookup, ProposeEntityType, RankedCandidate } from "./propose";
 import { canUseEntityAsMatchTarget } from "./provenance";
-
-export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;

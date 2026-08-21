@@ -8,10 +8,11 @@ import {
   normalizeRelationType,
   relationDirectionAllowed,
 } from "./graph";
-import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
+import { registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { normalizeEntityMatchName } from "./name-keys";
 import { proposeEntity } from "./propose";
 
 interface CrmRelationEndpoint {

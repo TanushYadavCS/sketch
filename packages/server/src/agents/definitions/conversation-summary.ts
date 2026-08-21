@@ -1,5 +1,4 @@
 import type { Kysely } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import {
   type AgentOutputItemInput,
   type AgentSourceConfig,
@@ -16,6 +15,7 @@ import { createTaskDurabilityTransitionRepository } from "../../db/repositories/
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import type { DB } from "../../db/schema";
+import { normalizeName } from "../../entities/name-keys";
 import type {
   AgentApiItem,
   AgentDefinition,

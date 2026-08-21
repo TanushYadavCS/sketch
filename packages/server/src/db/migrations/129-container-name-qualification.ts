@@ -1,6 +1,6 @@
 import { type Kysely, sql } from "kysely";
 import { qualifyContainerName } from "../../connectors/container-name";
-import { normalizeEntityMatchName } from "../../entities/materialize-deps";
+import { normalizeEntityMatchName } from "../../entities/name-keys";
 
 interface SeedFactRow {
   subject_name: string | null;

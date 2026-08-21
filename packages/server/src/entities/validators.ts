@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
 import type { createEntityRepository } from "../db/repositories/entities";
+import { normalizeName } from "./name-keys";
 
 export type LlmMentionValidationResult =
   | { ok: true }

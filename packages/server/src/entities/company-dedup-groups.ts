@@ -13,15 +13,11 @@
  * than stopping at the row holding the domain.
  */
 import type { Kysely } from "kysely";
-import { normalizeName } from "../connectors/name-normalize";
 import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
-import { compactEntityNameKey } from "./match-normalize";
+import { MIN_COMPACT_NAME_KEY_LENGTH, compactEntityNameKey, normalizeName } from "./name-keys";
 
 export type CompanyDedupEdgeKind = "domain" | "name" | "name_alias";
-
-/** Compact keys below this length are too short to be evidence on their own. */
-const MIN_COMPACT_NAME_KEY_LENGTH = 3;
 
 export interface CompanyDedupMember {
   entityId: string;

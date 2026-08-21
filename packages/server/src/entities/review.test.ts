@@ -10,7 +10,6 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -19,8 +18,9 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import { normalizeMatchName } from "./match-normalize";
 import { buildMaterializeDeps } from "./materialize-deps";
+import { normalizeName } from "./name-keys";
+import { normalizeEntityMatchName } from "./name-keys";
 import { type ProposeEntityType, proposeEntity } from "./propose";
 
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -179,7 +179,7 @@ async function seedReviewRow(
     .values({
       id,
       proposed_name: opts.proposedName,
-      normalized_name: normalizeMatchName(opts.entityType, opts.proposedName),
+      normalized_name: normalizeEntityMatchName(opts.entityType, opts.proposedName),
       entity_type: opts.entityType,
       source: opts.source ?? null,
       source_id: opts.sourceId ?? null,
@@ -1140,7 +1140,7 @@ describe("entity-review A4 backend", () => {
     };
 
     const standard = await proposeProductReview("GPT4", "product:gpt4-reclassify");
-    expect(standard.normalized_name).toBe(normalizeMatchName("product", "GPT4"));
+    expect(standard.normalized_name).toBe(normalizeEntityMatchName("product", "GPT4"));
     const reclassifyRes = await app.request(`/api/entity-review/${standard.id}/reclassify-type`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: ownerCookie },
@@ -1151,7 +1151,7 @@ describe("entity-review A4 backend", () => {
       row: { id: string; normalized_name: string; candidate_entity_id: string | null };
     };
     expect(reclassified.row.id).toBe(standard.id);
-    expect(reclassified.row.normalized_name).toBe(normalizeMatchName("project", "GPT4"));
+    expect(reclassified.row.normalized_name).toBe(normalizeEntityMatchName("project", "GPT4"));
     expect(reclassified.row.candidate_entity_id).toBe(targetEntity.id);
 
     const collisionTarget = await seedReviewRow(db, {
@@ -1169,7 +1169,7 @@ describe("entity-review A4 backend", () => {
     const collision = (await collisionRes.json()) as { result: string; row: { id: string; normalized_name: string } };
     expect(collision.result).toBe("RECLASSIFY");
     expect(collision.row.id).toBe(collisionTarget.id);
-    expect(collision.row.normalized_name).toBe(normalizeMatchName("project", "GPT5"));
+    expect(collision.row.normalized_name).toBe(normalizeEntityMatchName("project", "GPT5"));
     await expect(
       db.selectFrom("entity_review_queue").select("id").where("id", "=", collisionSource.id).executeTakeFirst(),
     ).resolves.toBeUndefined();

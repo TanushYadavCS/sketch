@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import { parseAliasesString } from "../../entities/materialize-json";
+import { normalizeName } from "../../entities/name-keys";
 import { upsertSlackIdentity } from "../../slack/upsert-identity";
 import type { DB, EntitiesTable, SlackUserSyncStateTable, UsersTable } from "../schema";
 import { createEntityRepository, isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
