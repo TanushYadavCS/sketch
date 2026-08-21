@@ -1,10 +1,14 @@
 /**
- * Your Org — the single home for the entity graph. Six type tabs (People,
- * Companies, Teams, Projects, Products, Review) plus a divider-separated Graph
- * tab: the full knowledge graph as its own lens, not a per-tab view toggle.
+ * Your Org — the single home for the entity graph. Five type tabs (People,
+ * Companies, Teams, Projects, Products) plus a divider-separated Graph tab:
+ * the full knowledge graph as its own lens, not a per-tab view toggle.
  * (A List/Graph toggle was tried and rejected — switching type tabs while in
  * graph view read as incoherent, and the graph endpoint's hotness/component
  * filtering breaks the toggle's same-content promise.)
+ *
+ * There is no Review tab: each type tab's "Needs your review" band expands in
+ * place to the full type-scoped candidate list, so triage keeps its type
+ * context. Legacy `?tab=review` links fall back to People.
  *
  * Entity rows open the shared {@link EntityDrawer} via `openEntity`. The drawer
  * stays read-only in this run — the teach layer (contact-point CRUD, company
@@ -13,6 +17,8 @@
 import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
+import { useEntityUi } from "@/lib/entity-ui";
+import { EntityTable } from "@/routes/files/entity-explorer";
 import { type CoarseType, KnowledgeGraphView, NODE_COLOR } from "@/routes/files/knowledge-graph";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -22,13 +28,13 @@ import { useState } from "react";
 import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { OrgEntityTab, ProductsTab, TeamsEmpty } from "./entity-tab";
 import { PeopleTab } from "./people-tab";
-import { ReviewTab } from "./review-tab";
+import { ProjectsTree } from "./projects-tree";
 
-type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review" | "graph";
+export type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "graph";
 
-const ORG_TABS: OrgTab[] = ["people", "companies", "teams", "projects", "products", "review", "graph"];
+const ORG_TABS: OrgTab[] = ["people", "companies", "teams", "projects", "products", "graph"];
 
-const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, CoarseType> = {
+const TAB_TYPE: Record<Exclude<OrgTab, "graph">, CoarseType> = {
   people: "person",
   companies: "company",
   teams: "team",
@@ -36,12 +42,16 @@ const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, CoarseType> = {
   products: "product",
 };
 
+export function validateOrgTabSearch(search: Record<string, unknown>): { tab: OrgTab } {
+  return {
+    tab: typeof search.tab === "string" && ORG_TABS.includes(search.tab as OrgTab) ? (search.tab as OrgTab) : "people",
+  };
+}
+
 export const projectsRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: "/projects",
-  validateSearch: (search: Record<string, unknown>): { tab: OrgTab } => ({
-    tab: typeof search.tab === "string" && ORG_TABS.includes(search.tab as OrgTab) ? (search.tab as OrgTab) : "people",
-  }),
+  validateSearch: validateOrgTabSearch,
   component: RoutedProjectsPage,
 });
 
@@ -79,6 +89,7 @@ export function ProjectsPage({
   role?: "admin" | "member";
 } = {}) {
   const isAdmin = role === "admin";
+  const { openEntity } = useEntityUi();
   const [localTab, setLocalTab] = useState<OrgTab>("people");
   const [addOpen, setAddOpen] = useState(false);
   const [addType, setAddType] = useState("person");
@@ -90,25 +101,11 @@ export function ProjectsPage({
   const teamsCount = useEntityCount("team");
   const projectsCount = useEntityCount("project");
   const productsCount = useEntityCount("product");
-  const reviewCountQuery = useQuery({
-    queryKey: ["entity-review", "count", "all"],
-    queryFn: () => api.entityReview.list({ limit: 0 }),
-    refetchInterval: 30000,
-  });
   const teamReviewQuery = useQuery({
     queryKey: ["entity-review", "count", "team"],
     queryFn: () => api.entityReview.list({ limit: 0, types: ["team"] }),
     refetchInterval: 30000,
   });
-  const verdictCountQuery = useQuery({
-    queryKey: ["project-minting", "verdicts"],
-    queryFn: () => api.projectMinting.listVerdicts(),
-    enabled: isAdmin,
-    retry: false,
-    refetchInterval: 30000,
-  });
-  const verdictCount = isAdmin ? (verdictCountQuery.data?.verdicts.length ?? 0) : 0;
-  const reviewCount = reviewCountQuery.data ? reviewCountQuery.data.total + verdictCount : null;
 
   const openAdd = (type: string) => {
     setAddType(type);
@@ -121,10 +118,7 @@ export function ProjectsPage({
     { key: "teams", label: "Teams", count: teamsCount },
     { key: "projects", label: "Projects", count: projectsCount },
     { key: "products", label: "Products", count: productsCount },
-    { key: "review", label: "Review", count: reviewCount },
   ];
-
-  const goReview = () => setTab("review");
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
@@ -137,9 +131,7 @@ export function ProjectsPage({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <QuietAddButton onClick={() => openAdd(tab === "review" || tab === "graph" ? "person" : TAB_TYPE[tab])}>
-            Add
-          </QuietAddButton>
+          <QuietAddButton onClick={() => openAdd(tab === "graph" ? "person" : TAB_TYPE[tab])}>Add</QuietAddButton>
         </div>
       </div>
 
@@ -150,7 +142,7 @@ export function ProjectsPage({
             label={t.count !== null ? `${t.label} · ${t.count}` : t.label}
             isActive={tab === t.key}
             onClick={() => setTab(t.key)}
-            dot={tab === "graph" && t.key !== "review" ? NODE_COLOR[TAB_TYPE[t.key]] : undefined}
+            dot={tab === "graph" ? NODE_COLOR[TAB_TYPE[t.key]] : undefined}
           />
         ))}
         <div aria-hidden className="h-4 w-px self-center bg-border" />
@@ -161,22 +153,33 @@ export function ProjectsPage({
         {tab === "graph" ? (
           <KnowledgeGraphView />
         ) : tab === "people" ? (
-          <PeopleTab onSeeAllReview={goReview} />
+          <PeopleTab />
         ) : tab === "companies" ? (
-          <OrgEntityTab type="company" typeLabel="Companies" onSeeAllReview={goReview} />
+          <OrgEntityTab type="company" typeLabel="Companies" isAdmin={isAdmin} />
         ) : tab === "teams" ? (
           <OrgEntityTab
             type="team"
             typeLabel="Teams"
-            onSeeAllReview={goReview}
-            renderEmpty={() => <TeamsEmpty pendingCount={teamReviewQuery.data?.total ?? 0} onSeeAllReview={goReview} />}
+            isAdmin={isAdmin}
+            renderEmpty={(_search, expandReview) => (
+              <TeamsEmpty pendingCount={teamReviewQuery.data?.total ?? 0} onExpandReview={expandReview} />
+            )}
           />
         ) : tab === "projects" ? (
-          <OrgEntityTab type="project" typeLabel="Projects" onSeeAllReview={goReview} />
-        ) : tab === "products" ? (
-          <ProductsTab onSeeAllReview={goReview} onDeclare={() => openAdd("product")} />
+          <OrgEntityTab
+            type="project"
+            typeLabel="Projects"
+            isAdmin={isAdmin}
+            renderList={(entities, search) =>
+              search ? (
+                <EntityTable entities={entities} onSelect={openEntity} />
+              ) : (
+                <ProjectsTree entities={entities} onSelect={openEntity} isAdmin={isAdmin} />
+              )
+            }
+          />
         ) : (
-          <ReviewTab isAdmin={isAdmin} />
+          <ProductsTab onDeclare={() => openAdd("product")} />
         )}
       </TabContentContainer>
 

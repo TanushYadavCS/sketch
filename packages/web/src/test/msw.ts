@@ -571,12 +571,16 @@ export const handlers = [
     return HttpResponse.json({ verdicts: [] });
   }),
 
-  http.get("/api/project-minting/clusters", () => {
-    return HttpResponse.json({ clusters: [], passesEnabled: true });
+  http.get("/api/project-minting/runs", () => {
+    return HttpResponse.json({ runs: [] });
   }),
 
   http.get("/api/entity-review", () => {
     return HttpResponse.json({ rows: [], total: 0 });
+  }),
+
+  http.get("/api/entities/whatsapp/identities", () => {
+    return HttpResponse.json({ items: [], viewerHasWhatsAppIdentity: false });
   }),
 
   http.get("/api/web-chat/conversations", () => {

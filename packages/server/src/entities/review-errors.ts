@@ -25,6 +25,7 @@ export const REVIEW_ERROR_CODES = [
   // 422 — invalid input
   "EVIDENCE_TOO_LARGE",
   "TYPE_MISMATCH",
+  "PROJECT_BIRTH_BLOCKED",
   // 404
   "ROW_NOT_FOUND",
   // 403

@@ -8,7 +8,8 @@ import {
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
-import type { GeminiGenerator } from "./gemini-generate";
+import { WEEKLY_PASS_PROJECT_SOURCES, confirmReview } from "../entities/resolve";
+import type { GeminiGenerator, GenerateMeta } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
 import {
   CADENCE_TOKENS,
@@ -42,21 +43,20 @@ const INTERNAL_COMPANY_NAME = "Internal";
 const GITHUB_REPO_PATTERN = /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
 
 /**
- * Weekly minting only claims content-extraction project pool rows. The list is
+ * Weekly minting only claims content-extraction project pool rows. The set is
  * intentionally positive and narrow so structural connector seeds,
  * user_entity_link reviews, and any future review source stay invisible until
- * deliberately admitted here. `llm_relation` was historically excluded for its
+ * deliberately admitted. `llm_relation` was historically excluded for its
  * leak record, but the weekly pass carries the machinery that era lacked — the
  * recurrence floor, dedup against accepted projects, and a human accept gate —
  * and excluding it dropped real candidates (Traveller Segmentation Dashboard
  * only ever arrived through it).
+ *
+ * Derived from WEEKLY_PASS_PROJECT_SOURCES in entities/resolve.ts, where the
+ * same set gates one-row project births — the rows this pass consumes and the
+ * rows the review API refuses to birth must never drift apart.
  */
-export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST = [
-  "llm_extraction",
-  "llm_relation",
-  "candidate_promotion",
-  "entity_candidate_promotion",
-] as const;
+export const WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST: readonly string[] = [...WEEKLY_PASS_PROJECT_SOURCES];
 
 type WeeklyMintMode = "shadow" | "live";
 
@@ -69,10 +69,16 @@ export interface WeeklyMintResult {
   verdictsStored: number;
   agedOut: number;
   skippedGroups: number;
+  skippedCompanies: number;
 }
+
+export type ManualRunOutcome =
+  | { started: false; reason: "in_flight" }
+  | { started: true; completion: Promise<WeeklyMintResult> };
 
 export interface WeeklyMintService {
   runOnce(clock?: Date): Promise<WeeklyMintResult>;
+  tryRunManual(clock?: Date): ManualRunOutcome;
   start(): void;
   stop(): Promise<void>;
 }
@@ -103,6 +109,8 @@ type ClaimedCandidate = {
   proposedName: string;
   normalizedName: string;
   candidateEntityId: string | null;
+  /** CAS snapshot confirmReview requires; null on old rows → the auto-link falls back to stamping. */
+  candidateGeneratedAt: string | null;
   dryStreak: number;
   evidenceFileIds: string[];
 };
@@ -210,6 +218,7 @@ function resultFromRun(run: RunRow): WeeklyMintResult {
     verdictsStored: run.verdicts_stored,
     agedOut: run.aged_out,
     skippedGroups: 0,
+    skippedCompanies: 0,
   };
 }
 
@@ -374,6 +383,7 @@ async function readClaimedCandidates(
       "entity_review_queue.proposed_name as proposedName",
       "entity_review_queue.normalized_name as normalizedName",
       "entity_review_queue.candidate_entity_id as candidateEntityId",
+      "entity_review_queue.candidate_generated_at as candidateGeneratedAt",
       "weekly_mint_candidates.dry_streak as dryStreak",
     ])
     .where("weekly_mint_candidates.company_key", "=", companyKey)
@@ -407,6 +417,7 @@ async function readClaimedCandidates(
       proposedName: row.proposedName,
       normalizedName: row.normalizedName,
       candidateEntityId: row.candidateEntityId,
+      candidateGeneratedAt: row.candidateGeneratedAt,
       dryStreak: row.dryStreak,
       evidenceFileIds: [...new Set(evidenceByReview.get(row.reviewId) ?? [])].sort(),
     }))
@@ -871,7 +882,7 @@ async function groupHasInternalStructuralCoSignal(db: Kysely<DB>, group: Candida
 function splitAliasCandidates(
   candidates: ClaimedCandidate[],
   projects: ExistingProject[],
-): { aliases: Array<{ reviewIds: string[]; targetEntityId: string }>; rest: ClaimedCandidate[] } {
+): { aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }>; rest: ClaimedCandidate[] } {
   const projectByKey = new Map<string, string>();
   for (const project of projects) {
     for (const name of [project.name, ...project.aliases]) {
@@ -879,11 +890,11 @@ function splitAliasCandidates(
       if (!projectByKey.has(key)) projectByKey.set(key, project.entityId);
     }
   }
-  const aliases: Array<{ reviewIds: string[]; targetEntityId: string }> = [];
+  const aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }> = [];
   const rest: ClaimedCandidate[] = [];
   for (const candidate of candidates) {
     const targetEntityId = projectByKey.get(normalizeName(candidate.proposedName));
-    if (targetEntityId) aliases.push({ reviewIds: [candidate.reviewId], targetEntityId });
+    if (targetEntityId) aliases.push({ candidate, targetEntityId });
     else rest.push(candidate);
   }
   return { aliases, rest };
@@ -911,6 +922,58 @@ async function markAliasCandidates(
   }
 }
 
+/**
+ * Deterministic exact-name matches are auto-linked through the same
+ * confirmReview merge path a human Link click uses (user decision,
+ * 2026-08-20). A row the full path cannot take — null CAS snapshot, drift, a
+ * guard, an FK — falls back to the candidate stamp, degrading to the old
+ * human Link chore rather than ever losing the row. Model-asserted alias
+ * groups from the verdict deliberately stay on the stamp path.
+ */
+async function autoLinkAliasCandidates(
+  db: Kysely<DB>,
+  logger: Logger,
+  aliases: Array<{ candidate: ClaimedCandidate; targetEntityId: string }>,
+  now: string,
+): Promise<{ linked: number; stamped: number }> {
+  let linked = 0;
+  let stamped = 0;
+  for (const { candidate, targetEntityId } of aliases) {
+    const stamp = () =>
+      markAliasCandidates(db, [{ reviewIds: [candidate.reviewId], targetEntityId }], now).then(() => {
+        stamped += 1;
+      });
+    if (!candidate.candidateGeneratedAt) {
+      await stamp();
+      continue;
+    }
+    try {
+      const outcome = await confirmReview(
+        { db, userId: "weekly-mint-alias", machineActor: true, logger },
+        candidate.reviewId,
+        {
+          candidateGeneratedAt: candidate.candidateGeneratedAt,
+          mergeIntoEntityId: targetEntityId,
+        },
+      );
+      if (outcome.targetEntityId === targetEntityId) linked += 1;
+      else {
+        logger.warn(
+          { reviewId: candidate.reviewId, targetEntityId, resolvedInto: outcome.targetEntityId },
+          "Weekly mint alias auto-link replayed into a different target",
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, reviewId: candidate.reviewId, targetEntityId },
+        "Weekly mint alias auto-link failed; stamping for manual Link",
+      );
+      await stamp().catch(() => {});
+    }
+  }
+  return { linked, stamped };
+}
+
 async function ageOutStaleCandidates(db: Kysely<DB>, companyKey: string, clock: Date, now: string): Promise<number> {
   const cutoff = new Date(clock.getTime() - AGE_OUT_WEEKS * 7 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await db
@@ -930,6 +993,23 @@ async function ageOutStaleCandidates(db: Kysely<DB>, companyKey: string, clock: 
       .execute();
   }
   return rows.length;
+}
+
+/**
+ * storePending supersedes ALL of a company's pending verdicts, so a manual
+ * re-run that judges only uncovered groups would silently wipe an unreviewed
+ * dossier covering other groups. Manual runs skip such companies entirely.
+ */
+async function hasPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: string | null): Promise<boolean> {
+  const row = await db
+    .selectFrom("project_minting_verdicts")
+    .select("id")
+    .$if(companyEntityId === null, (qb) => qb.where("company_entity_id", "is", null))
+    .$if(companyEntityId !== null, (qb) => qb.where("company_entity_id", "=", companyEntityId))
+    .where("status", "=", "pending")
+    .where("superseded_at", "is", null)
+    .executeTakeFirst();
+  return row != null;
 }
 
 async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: string | null): Promise<Set<string>> {
@@ -1440,6 +1520,22 @@ function sameVerdictProjectNameForParent(
   return parentDisposition.projectName ?? defaultProjectName(parentGroup);
 }
 
+/**
+ * The final per-group action the code took, after every fallback and merge —
+ * distinct from the model's raw disposition, which loses `new` vs `child_of`
+ * conversions and alias fallbacks. Written to the `disposition` trace step so
+ * the eval reads actions instead of reconstructing them from verdict JSON.
+ */
+export type GroupDisposition = {
+  groupKey: string;
+  names: string[];
+  action: "new" | "child_of" | "alias" | "skip";
+  projectName?: string;
+  parentName?: string;
+  targetEntityId?: string;
+  reason?: string;
+};
+
 function buildStoredVerdict(
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
@@ -1451,6 +1547,7 @@ function buildStoredVerdict(
   storedGroups: CandidateGroup[];
   aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }>;
   skippedGroups: number;
+  groupDispositions: GroupDisposition[];
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
   const groupsByKey = new Map(groups.map((group) => [group.key, group]));
@@ -1478,19 +1575,34 @@ function buildStoredVerdict(
   const existingEntities: ClusterVerdict["existingEntities"] = [];
   const storedGroups: CandidateGroup[] = [];
   const aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }> = [];
+  const groupDispositions: GroupDisposition[] = [];
   let skippedGroups = 0;
 
   for (const group of groups) {
     const disposition = dispositions.get(group.key);
-    if (!disposition) continue;
+    if (!disposition) {
+      groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "no_disposition" });
+      continue;
+    }
     if (disposition.action === "skip") {
       skippedGroups += 1;
+      groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "model_skip" });
       continue;
     }
     if (disposition.action === "alias_of") {
       const targetEntityId =
         disposition.targetEntityId ?? (group.deterministic.action === "alias_of" ? group.deterministic.entityId : null);
-      if (targetEntityId) aliasGroups.push({ group, targetEntityId });
+      if (targetEntityId) {
+        aliasGroups.push({ group, targetEntityId });
+        groupDispositions.push({ groupKey: group.key, names: group.names, action: "alias", targetEntityId });
+      } else {
+        groupDispositions.push({
+          groupKey: group.key,
+          names: group.names,
+          action: "skip",
+          reason: "alias_without_target",
+        });
+      }
       continue;
     }
     if (disposition.action === "child_of") {
@@ -1514,17 +1626,39 @@ function buildStoredVerdict(
           projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
         );
         storedGroups.push(group);
+        groupDispositions.push({
+          groupKey: group.key,
+          names: group.names,
+          action: "new",
+          projectName: name,
+          reason: "child_without_parent",
+        });
         continue;
       }
       const childName = disposition.projectName ?? defaultProjectName(group);
       if (childName.toLowerCase() === resolvedParentName.toLowerCase()) {
-        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
-        else {
+        if (parentEntityId) {
+          aliasGroups.push({ group, targetEntityId: parentEntityId });
+          groupDispositions.push({
+            groupKey: group.key,
+            names: group.names,
+            action: "alias",
+            targetEntityId: parentEntityId,
+            reason: "child_named_as_parent",
+          });
+        } else {
           setOrMergeVerdictProject(
             verdictProjects,
             projectForGroup(group, childName, null, evidenceTitleFamiliesForGroup(container, group)),
           );
           storedGroups.push(group);
+          groupDispositions.push({
+            groupKey: group.key,
+            names: group.names,
+            action: "new",
+            projectName: childName,
+            reason: "child_named_as_parent",
+          });
         }
         continue;
       }
@@ -1554,6 +1688,14 @@ function buildStoredVerdict(
         projectForGroup(group, childName, resolvedParentName, evidenceTitleFamiliesForGroup(container, group)),
       );
       storedGroups.push(group);
+      groupDispositions.push({
+        groupKey: group.key,
+        names: group.names,
+        action: "child_of",
+        projectName: childName,
+        parentName: resolvedParentName,
+        ...(parentEntityId ? { targetEntityId: parentEntityId } : {}),
+      });
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
@@ -1563,6 +1705,7 @@ function buildStoredVerdict(
       projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
     );
     storedGroups.push(group);
+    groupDispositions.push({ groupKey: group.key, names: group.names, action: "new", projectName: name });
   }
 
   const verdict: ClusterVerdict = {
@@ -1575,7 +1718,7 @@ function buildStoredVerdict(
     notes: [`Weekly mint pass for ${container.companyName}.`],
   };
   readClusterVerdict(verdict, { strict: true });
-  return { verdict, storedGroups, aliasGroups, skippedGroups };
+  return { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions };
 }
 
 function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGroup[]): string {
@@ -1611,7 +1754,57 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
     return inflight;
   }
 
-  async function runSweep(clock: Date): Promise<WeeklyMintResult> {
+  /**
+   * Admin "Run now": forces THIS week's run under the same weekly key instead
+   * of minting a parallel run identity. A completed row is reset and re-run;
+   * a not-yet-run week simply runs early (the scheduled sweep then
+   * short-circuits on COMPLETED). The latch is claimed synchronously so a
+   * concurrent scheduled sweep can never interleave with the reset.
+   */
+  function tryRunManual(clock = deps.now?.() ?? new Date()): ManualRunOutcome {
+    if (inflight) return { started: false, reason: "in_flight" };
+    inflight = (async () => {
+      const week = clockWeek(clock);
+      const current = await ensureRun(deps.db, week);
+      if (current.status === COMPLETED) {
+        /**
+         * A rerun reuses the same run id, so the previous attempt's events and
+         * traces must go — otherwise the feed mixes stale rows and the trace
+         * seq unique index rejects the new steps.
+         */
+        await deps.db.deleteFrom("weekly_mint_traces").where("run_id", "=", current.id).execute();
+        await deps.db.deleteFrom("weekly_mint_run_events").where("run_id", "=", current.id).execute();
+        await deps.db
+          .updateTable("weekly_mint_runs")
+          .set({
+            status: QUEUED,
+            stage: COMPANIES_STAGE,
+            company_cursor: null,
+            lease_token: null,
+            heartbeat_at: null,
+            completed_at: null,
+            error: null,
+            candidates_grouped: 0,
+            verdicts_requested: 0,
+            verdicts_stored: 0,
+            aged_out: 0,
+            updated_at: timestamp(deps.now),
+          })
+          .where("id", "=", current.id)
+          .where("status", "=", COMPLETED)
+          .execute();
+      }
+      return runSweep(clock, { skipCompaniesWithPendingVerdicts: true });
+    })().finally(() => {
+      inflight = null;
+    });
+    return { started: true, completion: inflight };
+  }
+
+  async function runSweep(
+    clock: Date,
+    opts?: { skipCompaniesWithPendingVerdicts?: boolean },
+  ): Promise<WeeklyMintResult> {
     const week = clockWeek(clock);
     const current = await ensureRun(deps.db, week);
     if (current.status === COMPLETED) return resultFromRun(current);
@@ -1663,6 +1856,54 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       return updated;
     }
 
+    /**
+     * Observability writes must never fail the pass — a broken insert loses
+     * one feed row, not a week of minting (same posture as the per-company
+     * verdict try/catch).
+     */
+    async function writeRunEvent(
+      container: { key: string; companyEntityId: string | null; companyName: string },
+      kind: string,
+      detail?: Record<string, unknown>,
+    ): Promise<void> {
+      try {
+        await deps.db
+          .insertInto("weekly_mint_run_events")
+          .values({
+            id: randomUUID(),
+            run_id: ownedRun.id,
+            container_key: container.key,
+            company_entity_id: container.companyEntityId,
+            company_name: container.companyName,
+            kind,
+            detail: detail ? JSON.stringify(detail) : null,
+            created_at: timestamp(deps.now),
+          })
+          .execute();
+      } catch (error) {
+        deps.logger.warn({ err: error, kind, containerKey: container.key }, "Weekly mint event write failed");
+      }
+    }
+
+    async function writeTrace(containerKey: string, seq: number, kind: string, payload: unknown): Promise<void> {
+      try {
+        await deps.db
+          .insertInto("weekly_mint_traces")
+          .values({
+            id: randomUUID(),
+            run_id: ownedRun.id,
+            container_key: containerKey,
+            seq,
+            kind,
+            payload: JSON.stringify(payload),
+            created_at: timestamp(deps.now),
+          })
+          .execute();
+      } catch (error) {
+        deps.logger.warn({ err: error, kind, containerKey }, "Weekly mint trace write failed");
+      }
+    }
+
     const counters = {
       candidatesGrouped: ownedRun.candidates_grouped,
       verdictsRequested: ownedRun.verdicts_requested,
@@ -1671,6 +1912,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       vendorsSkipped: 0,
       skippedGroups: 0,
       companyMatchedSkips: 0,
+      skippedCompanies: 0,
     };
     const dbCounters = () => ({
       candidates_grouped: counters.candidatesGrouped,
@@ -1692,6 +1934,30 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       const companyGuards = await loadCompanyGuards(deps.db);
       for (const container of containers) {
         if (companyCursor && container.key <= companyCursor) continue;
+        if (
+          opts?.skipCompaniesWithPendingVerdicts &&
+          (await hasPendingWeeklyVerdict(deps.db, container.companyEntityId))
+        ) {
+          counters.skippedCompanies += 1;
+          deps.logger.info(
+            {
+              companyEntityId: container.companyEntityId,
+              containerKey: container.key,
+              companyName: container.companyName,
+            },
+            "Weekly mint manual run skipped company with unresolved pending verdict",
+          );
+          await writeRunEvent(container, "pending_dossier_skip");
+          companyCursor = container.key;
+          await updateOwnedRun({
+            stage: COMPANIES_STAGE,
+            company_cursor: companyCursor,
+            heartbeat_at: timestamp(deps.now),
+            ...dbCounters(),
+            updated_at: timestamp(deps.now),
+          });
+          continue;
+        }
         const declaration = container.cluster
           ? resolveDeclaration(
               container.cluster.groupMembers
@@ -1702,8 +1968,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const batchNow = timestamp(deps.now);
         const claimed = await claimCandidatesForCompany(deps.db, container, container.key, clock, batchNow);
         counters.candidatesGrouped += claimed;
+        await writeRunEvent(container, "claimed", { claimed });
         if (deps.mode === "live") {
-          counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
+          const agedOutNow = await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
+          counters.agedOut += agedOutNow;
+          if (agedOutNow > 0) await writeRunEvent(container, "aged_out", { agedOut: agedOutNow });
         }
         if (declaration?.counterparty_kind === "vendor") {
           counters.vendorsSkipped += 1;
@@ -1716,6 +1985,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             },
             "Weekly mint skipped vendor-declared container",
           );
+          await writeRunEvent(container, "vendor_skip");
           companyCursor = container.key;
           await updateOwnedRun({
             stage: COMPANIES_STAGE,
@@ -1732,7 +2002,8 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const existingProjects = await loadExistingProjects(deps.db, container.fileIds, container.companyEntityId);
         const { aliases: exactAliases, rest } = splitAliasCandidates(candidates, existingProjects);
         if (deps.mode === "live" && exactAliases.length > 0) {
-          await markAliasCandidates(deps.db, exactAliases, batchNow);
+          const { linked, stamped } = await autoLinkAliasCandidates(deps.db, deps.logger, exactAliases, batchNow);
+          await writeRunEvent(container, "alias_linked", { linked, stamped });
         }
         const groups = groupClaimedCandidates(rest, container.companyName).filter((group) => group.tokens.length > 0);
         const scanResults = await scanTokenRecurrence(deps.db, {
@@ -1743,6 +2014,9 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         await updateScanState(deps.db, container.key, groups, batchNow);
         const nonCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) < RECURRENCE_FLOOR_DAYS);
         await incrementDryStreak(deps.db, container.key, nonCrossing, batchNow);
+        if (nonCrossing.length > 0) {
+          await writeRunEvent(container, "floor_skip", { groups: nonCrossing.length });
+        }
         const recurrenceCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) >= RECURRENCE_FLOOR_DAYS);
         const crossing = container.companyEntityId === null ? [] : recurrenceCrossing;
         if (container.companyEntityId === null) {
@@ -1760,6 +2034,10 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 },
                 "Weekly mint skipped internal group matching a company entity",
               );
+              await writeRunEvent(container, "company_guard_skip", {
+                groupKey: group.key,
+                companyName: guardCompany.name,
+              });
               await incrementDryStreak(deps.db, container.key, [group], batchNow);
               continue;
             }
@@ -1783,30 +2061,54 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
             );
           } else {
             if (!deps.generator || !deps.model) throw new Error("weekly mint live mode requires a generator and model");
+            const prompt = await buildWeeklyPrompt(
+              deps.db,
+              container,
+              pendingCrossing,
+              existingProjects,
+              standingProducts,
+            );
+            await writeTrace(container.key, 1, "prompt", {
+              prompt,
+              model: deps.model,
+              maxTokens: 12_000,
+              reasoningEffort: "medium",
+              promptVersion: WEEKLY_MINT_PROMPT_VERSION,
+            });
+            let generateMeta: GenerateMeta | null = null;
+            let responseTraceWritten = false;
             /**
              * One company's bad model response must not fail the whole pass:
              * the candidates stay pooled and get another shot next week, while
              * every other company still stores its verdict this week.
              */
             try {
-              const raw = await deps.generator.generateJSON<unknown>(
-                await buildWeeklyPrompt(deps.db, container, pendingCrossing, existingProjects, standingProducts),
-                {
-                  maxTokens: 12_000,
-                  label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
-                  model: deps.model,
-                  reasoningEffort: "medium",
-                  thinkingBudget: null,
+              const raw = await deps.generator.generateJSON<unknown>(prompt, {
+                maxTokens: 12_000,
+                label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
+                model: deps.model,
+                reasoningEffort: "medium",
+                thinkingBudget: null,
+                onMeta: (meta) => {
+                  generateMeta = meta;
                 },
-              );
+              });
+              await writeTrace(container.key, 2, "response", generateMeta ?? { outcome: "ok", rawText: "" });
+              responseTraceWritten = true;
               const dispositions = readModelDispositions(raw, pendingCrossing);
-              const { verdict, storedGroups, aliasGroups, skippedGroups } = buildStoredVerdict(
+              const { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions } = buildStoredVerdict(
                 container,
                 pendingCrossing,
                 dispositions,
                 existingProjects,
                 standingProducts,
               );
+              await writeRunEvent(container, "judged", {
+                groups: pendingCrossing.length,
+                stored: storedGroups.length,
+                aliases: aliasGroups.length,
+                skipped: skippedGroups,
+              });
               counters.skippedGroups += skippedGroups;
               if (skippedGroups > 0) {
                 deps.logger.info(
@@ -1825,9 +2127,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   aliasGroups.map(({ group, targetEntityId }) => ({ reviewIds: group.reviewIds, targetEntityId })),
                   batchNow,
                 );
+                await writeRunEvent(container, "alias_marked", { count: aliasGroups.length, phase: "verdict" });
               }
+              let verdictId: string | null = null;
               if (verdict.projects.length > 0) {
-                await createProjectMintingVerdictRepository(deps.db).storePending({
+                const stored = await createProjectMintingVerdictRepository(deps.db).storePending({
                   companyEntityId: container.companyEntityId,
                   companyName: container.companyName,
                   fileCount: container.fileIds.length,
@@ -1840,6 +2144,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
                   declaredClientStage: declaration?.client_stage ?? null,
                 });
+                verdictId = stored.id;
                 counters.verdictsStored += 1;
                 deps.logger.info(
                   {
@@ -1850,10 +2155,23 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                   },
                   "Weekly mint stored verdict",
                 );
+                await writeRunEvent(container, "verdict_stored", { verdictId, projects: verdict.projects.length });
                 await resetDryStreak(deps.db, container.key, storedGroups, batchNow);
               }
+              await writeTrace(container.key, 3, "disposition", { groups: groupDispositions, verdictId });
             } catch (error) {
               if (error instanceof WeeklyMintProcessCrash) throw error;
+              if (!responseTraceWritten) {
+                await writeTrace(
+                  container.key,
+                  2,
+                  "response",
+                  generateMeta ?? { outcome: "error", error: error instanceof Error ? error.message : String(error) },
+                );
+              }
+              await writeRunEvent(container, "model_error", {
+                error: error instanceof Error ? error.message : String(error),
+              });
               deps.logger.warn(
                 { err: error, containerKey: container.key, companyName: container.companyName },
                 "Weekly mint verdict failed for container; candidates stay pooled",
@@ -1882,7 +2200,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       });
       ownedRunId = null;
       ownedLeaseToken = null;
-      return { ...resultFromRun(completed), skippedGroups: counters.skippedGroups };
+      return {
+        ...resultFromRun(completed),
+        skippedGroups: counters.skippedGroups,
+        skippedCompanies: counters.skippedCompanies,
+      };
     } catch (error) {
       ownedRunId = null;
       ownedLeaseToken = null;
@@ -1904,6 +2226,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
 
   return {
     runOnce,
+    tryRunManual,
     start() {
       if (timer) return;
       void runOnce().catch((error) => deps.logger.error({ err: error }, "Weekly mint pass failed"));

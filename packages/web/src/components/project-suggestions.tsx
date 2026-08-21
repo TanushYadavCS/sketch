@@ -1,26 +1,21 @@
 /**
- * "Project suggestions" — pending weekly-mint verdicts surfaced in the Your
- * Org review tab. Admin-only: every project-minting endpoint is behind a
- * blanket admin gate (accepting writes an org-wide company declaration), so
- * callers must not render this for members — the query here assumes it is
- * only mounted for admins. Dismiss rejects inline without opening the sheet;
- * junk should never cost a click more than it has to.
+ * "Project suggestions" — pending weekly-mint verdicts, rendered as the first
+ * section of the Projects review band. Presentational: the band owns the
+ * verdicts query (admin-gated there — every project-minting endpoint is
+ * behind a blanket admin gate, so members must never trigger the fetch) and
+ * passes rows in, which also lets verdict presence count toward the band's
+ * render/early-return decision. Dismiss rejects inline without opening the
+ * sheet; junk should never cost a click more than it has to.
  */
 import { MintingVerdictRow } from "@/components/minting-verdict-row";
 import { MintingVerdictSheet } from "@/components/minting-verdict-sheet";
-import { api } from "@/lib/api";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ProjectMintingVerdict, api } from "@/lib/api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-export function ProjectSuggestionsSection() {
+export function ProjectSuggestionsSection({ verdicts }: { verdicts: ProjectMintingVerdict[] }) {
   const queryClient = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({
-    queryKey: ["project-minting", "verdicts"],
-    queryFn: () => api.projectMinting.listVerdicts(),
-    retry: false,
-    refetchInterval: 30000,
-  });
   const dismiss = useMutation({
     mutationFn: (verdictId: string) => api.projectMinting.reject(verdictId),
     onSuccess: () => {
@@ -28,12 +23,11 @@ export function ProjectSuggestionsSection() {
     },
   });
 
-  const verdicts = data?.verdicts ?? [];
-  if (isLoading || verdicts.length === 0) return null;
+  if (verdicts.length === 0) return null;
 
   return (
     <section
-      className="mb-6 overflow-hidden rounded-xl border border-border"
+      className="overflow-hidden border-b border-amber-300/40 dark:border-amber-700/30"
       data-testid="review-band-project-suggestions"
     >
       <div className="flex items-baseline justify-between border-b border-border bg-muted/30 px-3 py-2">

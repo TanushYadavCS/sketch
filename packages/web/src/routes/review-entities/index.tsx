@@ -1,8 +1,9 @@
 /**
  * /review-entities — redirect shim.
  *
- * Entity review now lives on the Your Org surface (the Review tab), so this
- * legacy route redirects there to keep bookmarks and pasted links alive.
+ * Entity review now lives on the Your Org surface (each type tab's review
+ * band, expanding in place), so this legacy route redirects to the default
+ * tab to keep bookmarks and pasted links alive.
  */
 import { createRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
@@ -17,7 +18,7 @@ export const reviewEntitiesRoute = createRoute({
 function ReviewEntitiesRedirect() {
   const navigate = useNavigate();
   useEffect(() => {
-    navigate({ to: "/projects", search: { tab: "review" }, replace: true });
+    navigate({ to: "/projects", search: { tab: "people" }, replace: true });
   }, [navigate]);
   return null;
 }

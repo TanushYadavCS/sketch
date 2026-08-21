@@ -72,6 +72,12 @@ function copyForError(err: unknown): ResolveCopy {
           variant: "sticky-admin",
           message: "You picked an entity of a different type. Pick the same entity type instead.",
         };
+      case "PROJECT_BIRTH_BLOCKED":
+        return {
+          variant: "sticky-admin",
+          message:
+            "Projects are only created by the weekly mint pass. Link or merge into an existing project, or leave this pooling for the next pass.",
+        };
       case "ROW_NOT_FOUND":
         return { variant: "refresh", message: "This row no longer exists. Refresh the list." };
       case "OWNER_SCOPE_DENIED":

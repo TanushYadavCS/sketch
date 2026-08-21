@@ -14,7 +14,7 @@ import { type ProjectMintingAcceptance, api } from "@/lib/api";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { MintingClusters } from "./minting-clusters";
+import { WeeklyPass } from "./weekly-pass";
 
 export function MintingQueue() {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -48,7 +48,7 @@ export function MintingQueue() {
 
   return (
     <>
-      <MintingClusters />
+      <WeeklyPass />
       <section className="mt-8">
         <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Pending verdicts · {verdicts.length}
@@ -59,7 +59,7 @@ export function MintingQueue() {
         {verdicts.length === 0 ? (
           <div className="rounded-md border border-dashed border-border px-4 py-8 text-center">
             <p className="text-[13px] text-muted-foreground">Nothing waiting.</p>
-            <p className="mt-1.5 text-[12px] text-muted-foreground">Run a pass on a company above to fill this.</p>
+            <p className="mt-1.5 text-[12px] text-muted-foreground">Run the weekly pass above to fill this.</p>
           </div>
         ) : (
           <div className="divide-y divide-border rounded-md border border-border">

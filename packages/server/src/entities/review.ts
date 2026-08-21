@@ -80,6 +80,7 @@ function statusForError(code: ResolveError["code"]): 404 | 409 | 422 {
       return 404;
     case "EVIDENCE_TOO_LARGE":
     case "TYPE_MISMATCH":
+    case "PROJECT_BIRTH_BLOCKED":
       return 422;
     default:
       return 409;

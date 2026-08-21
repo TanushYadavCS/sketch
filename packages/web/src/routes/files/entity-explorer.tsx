@@ -46,8 +46,9 @@ import {
 import { Input } from "@sketch/ui/components/input";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
+import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { type HTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useDashboardAuth } from "../dashboard";
 import { formatRelativeTime } from "./file-list";
@@ -397,17 +398,46 @@ export function EntityTable({ entities, onSelect }: { entities: EntityListItem[]
   );
 }
 
-export function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id: string) => void }) {
+export function EntityRow({
+  entity,
+  onSelect,
+  depth = 0,
+  leading,
+  highlighted = false,
+  dimmed = false,
+  containerProps,
+}: {
+  entity: EntityListItem;
+  onSelect: (id: string) => void;
+  /** Tree indent level; shifts the whole row right by 20px per level. */
+  depth?: number;
+  /** Rendered before the row button — caret / drag grip slots. Must not contain the row's own click target. */
+  leading?: ReactNode;
+  highlighted?: boolean;
+  dimmed?: boolean;
+  containerProps?: HTMLAttributes<HTMLDivElement> & { draggable?: boolean };
+}) {
   const isPerson = entity.sourceType === "person";
   const source = sourceFromType(entity.sourceType);
   const context = entityContext(entity);
 
   return (
-    <div className="border-b border-border last:border-b-0" data-testid={`entity-row-${entity.id}`}>
+    <div
+      {...containerProps}
+      className={cn(
+        "flex items-center border-b border-border last:border-b-0",
+        highlighted && "bg-muted/60",
+        dimmed && "opacity-50",
+        containerProps?.className,
+      )}
+      style={depth > 0 ? { paddingLeft: depth * 20 } : undefined}
+      data-testid={`entity-row-${entity.id}`}
+    >
+      {leading}
       <button
         type="button"
         onClick={() => onSelect(entity.id)}
-        className="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-muted/30"
+        className="flex w-full min-w-0 flex-1 cursor-pointer items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-muted/30"
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           {isPerson ? (

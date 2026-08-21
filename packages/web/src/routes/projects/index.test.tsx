@@ -6,7 +6,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ProjectsPage } from "./index";
+import { ProjectsPage, validateOrgTabSearch } from "./index";
 
 function entity(
   overrides: Partial<EntityListItem> & Pick<EntityListItem, "id" | "name" | "sourceType">,
@@ -171,10 +171,59 @@ describe("ProjectsPage", () => {
     expect(screen.getByRole("button", { name: "company" })).toHaveAttribute("data-variant", "default");
   });
 
-  it("can render the review tab directly for legacy deep links", async () => {
-    renderWithProviders(<ProjectsPage activeTab="review" />);
+  it("has no Review tab, maps legacy ?tab=review to People, and expands the band in place", async () => {
+    server.use(
+      http.get("/api/entity-review", ({ request }) => {
+        const types = new URL(request.url).searchParams.get("types");
+        if (types !== "person") return HttpResponse.json({ rows: [], total: 0 });
+        return HttpResponse.json({
+          rows: [
+            {
+              id: "review-1",
+              proposed_name: "Nadia Rahman",
+              normalized_name: "nadia rahman",
+              entity_type: "person",
+              proposed_email: null,
+              candidate_entity_id: null,
+              candidate_score: null,
+              candidate_reason: null,
+              candidate_generated_at: "2026-08-14T09:00:00.000Z",
+              source: "fireflies",
+              source_id: "file-1",
+              seed_source: null,
+              seed_source_id: null,
+              first_seen_at: "2026-08-10T09:00:00.000Z",
+              last_seen_at: "2026-08-14T09:00:00.000Z",
+              occurrence_count: 2,
+              status: "pending",
+              triggered_by_user_id: "user-1",
+              review_started_at: null,
+              review_started_by: null,
+              backfill_cursor: null,
+              resolved_by: null,
+              resolved_at: null,
+              resolved_entity_id: null,
+              evidenceCount: 2,
+              sourceBreakdown: [{ source: "fireflies", count: 2 }],
+              candidate: null,
+            },
+          ],
+          total: 1,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<ProjectsPage />);
 
-    expect(await screen.findByPlaceholderText("Search the review queue…")).toBeInTheDocument();
-    expect(await screen.findByText(/Nothing waiting\./)).toBeInTheDocument();
+    await screen.findByText("Your Org");
+    expect(screen.queryByRole("button", { name: /^Review/ })).not.toBeInTheDocument();
+
+    expect(validateOrgTabSearch({ tab: "review" })).toEqual({ tab: "people" });
+    expect(validateOrgTabSearch({ tab: "projects" })).toEqual({ tab: "projects" });
+
+    await screen.findByText("Nadia Rahman");
+    await user.click(screen.getByTestId("review-band-toggle"));
+    expect(await screen.findByTestId("review-band-search")).toBeInTheDocument();
+    expect(screen.getByTestId("review-band-toggle")).toHaveTextContent("Collapse");
   });
 });

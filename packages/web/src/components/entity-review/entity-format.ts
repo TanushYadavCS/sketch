@@ -47,6 +47,45 @@ export function birthOrigin(row: EntityReviewQueueRow): { kind: "tracker" | "ai"
   return null;
 }
 
+/**
+ * Project queue rows the weekly mint pass owns: file-evidence candidates
+ * (LLM extraction sources, mirroring the server's WEEKLY_PASS_PROJECT_SOURCES)
+ * with no structural seed. These never get a create-new path in the UI — the
+ * server refuses the birth too (PROJECT_BIRTH_BLOCKED); the dossier is the
+ * only way a project is born from file evidence. Structural connector rows
+ * (tracker containers, seeded rows) keep the standard actions.
+ */
+const WEEKLY_PASS_PROJECT_SOURCES = new Set([
+  "llm_extraction",
+  "llm_relation",
+  "candidate_promotion",
+  "entity_candidate_promotion",
+]);
+
+export function isWeeklyPassProjectRow(row: EntityReviewQueueRow): boolean {
+  return (
+    row.entity_type === "project" &&
+    !row.seed_source &&
+    row.source !== null &&
+    WEEKLY_PASS_PROJECT_SOURCES.has(row.source)
+  );
+}
+
+/**
+ * The weekly pass dismisses pooled rows whose last_seen_at is older than
+ * AGE_OUT_WEEKS = 8 weeks (ageOutStaleCandidates in server
+ * connectors/weekly-mint.ts — the source of truth for the cliff). A row in
+ * its final two weeks is flagged "expiring" so the silent age-out stops
+ * being silent. A drifted constant only shifts the chip by a week; cosmetic.
+ */
+const EXPIRY_WARNING_MS = 6 * 7 * 24 * 60 * 60 * 1000;
+
+export function isExpiringSoon(row: EntityReviewQueueRow): boolean {
+  if (!isWeeklyPassProjectRow(row) || !row.last_seen_at) return false;
+  const lastSeen = Date.parse(row.last_seen_at);
+  return Number.isFinite(lastSeen) && Date.now() - lastSeen > EXPIRY_WARNING_MS;
+}
+
 /** Read an entity's email out of its metadata blob, if present. */
 export function entityEmail(entity: EntityListItem | null): string | null {
   const value = entity?.metadata?.email;

@@ -17,6 +17,7 @@ import {
   parseStoredAcceptedResult,
   rejectProjectMintingVerdict,
 } from "../connectors/project-minting-acceptance";
+import type { WeeklyMintService } from "../connectors/weekly-mint";
 import {
   type ClientStage,
   assertStageMatchesKind,
@@ -41,8 +42,20 @@ export interface ProjectMintingRouteConfig {
   encryptionKey?: string;
   openRouterApiKey?: string | null;
   projectMintingModel?: string | null;
-  /** Running a pass calls a reasoning model per cluster, so it is gated with the dev surface it is driven from. */
+  /**
+   * Carries DEV_TOOLS_ENABLED: gates the surfaces only dev-tools drives — the
+   * v1 per-cluster pass trigger and the weekly-run observability reads (runs,
+   * events, traces). The trace payloads hold raw prompts over org content, so
+   * they stay invisible outside a dev-tools deployment even for admins.
+   */
   passesEnabled: boolean;
+  /**
+   * The weekly mint service lives in bootstrap (background lifecycle), so the
+   * manual "Run now" route gets a handle injected rather than constructing its
+   * own — a second instance would have its own in-flight latch and race the
+   * scheduled sweep. Absent in processes that don't run background work.
+   */
+  weeklyMint?: WeeklyMintService | null;
 }
 
 function requireAdmin(c: Context) {
@@ -344,6 +357,142 @@ export function projectMintingRoutes(
     });
   });
 
+  /**
+   * Admin "Run now": forces this week's mint pass early instead of waiting for
+   * Monday. Responds 202 immediately — a live pass calls the model once per
+   * company and can take minutes; the UI polls the verdicts query for the
+   * outcome. Companies with an unresolved pending dossier are skipped inside
+   * the service so a re-run can never supersede unreviewed work.
+   */
+  routes.post("/runs", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    const weeklyMint = routeConfig.weeklyMint;
+    if (!weeklyMint) {
+      return c.json(
+        { error: { code: "WEEKLY_MINT_UNAVAILABLE", message: "Weekly mint is not running in this process" } },
+        503,
+      );
+    }
+    const outcome = weeklyMint.tryRunManual();
+    if (!outcome.started) {
+      return c.json({ error: { code: "RUN_IN_FLIGHT", message: "A mint pass is already running" } }, 409);
+    }
+    outcome.completion.catch((err) => logger.error({ err }, "Manual weekly mint run failed"));
+    return c.json({ run: { status: "started" } }, 202);
+  });
+
+  /**
+   * Weekly-run observability reads. Dev-tools is the only consumer; the routes
+   * 404 (not 403) without DEV_TOOLS_ENABLED so a production deployment doesn't
+   * advertise that the surface exists.
+   */
+  routes.get("/runs", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    if (!routeConfig.passesEnabled) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Weekly run observability is not enabled" } }, 404);
+    }
+
+    const rows = await db
+      .selectFrom("weekly_mint_runs")
+      .selectAll()
+      .orderBy("started_at", "desc")
+      .orderBy("id", "desc")
+      .limit(20)
+      .execute();
+    const eventCounts =
+      rows.length > 0
+        ? await db
+            .selectFrom("weekly_mint_run_events")
+            .select(["run_id", (eb) => eb.fn.countAll().as("count")])
+            .where(
+              "run_id",
+              "in",
+              rows.map((row) => row.id),
+            )
+            .groupBy("run_id")
+            .execute()
+        : [];
+    const countsByRun = new Map(eventCounts.map((row) => [row.run_id, Number(row.count)]));
+    return c.json({
+      runs: rows.map((row) => ({
+        id: row.id,
+        runKey: row.run_key,
+        status: row.status,
+        stage: row.stage,
+        clockWeek: row.clock_week,
+        candidatesGrouped: row.candidates_grouped,
+        verdictsRequested: row.verdicts_requested,
+        verdictsStored: row.verdicts_stored,
+        agedOut: row.aged_out,
+        heartbeatAt: row.heartbeat_at,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        error: row.error,
+        eventCount: countsByRun.get(row.id) ?? 0,
+      })),
+    });
+  });
+
+  routes.get("/runs/:id/events", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    if (!routeConfig.passesEnabled) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Weekly run observability is not enabled" } }, 404);
+    }
+
+    const run = await db
+      .selectFrom("weekly_mint_runs")
+      .select(["id"])
+      .where("id", "=", c.req.param("id"))
+      .executeTakeFirst();
+    if (!run) return c.json({ error: { code: "NOT_FOUND", message: "Run not found" } }, 404);
+    const rows = await db
+      .selectFrom("weekly_mint_run_events")
+      .selectAll()
+      .where("run_id", "=", run.id)
+      .orderBy("created_at", "asc")
+      .orderBy("id", "asc")
+      .execute();
+    return c.json({
+      events: rows.map((row) => ({
+        id: row.id,
+        containerKey: row.container_key,
+        companyEntityId: row.company_entity_id,
+        companyName: row.company_name,
+        kind: row.kind,
+        detail: row.detail ? JSON.parse(row.detail) : null,
+        createdAt: row.created_at,
+      })),
+    });
+  });
+
+  routes.get("/runs/:id/traces/:containerKey", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    if (!routeConfig.passesEnabled) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Weekly run observability is not enabled" } }, 404);
+    }
+
+    const rows = await db
+      .selectFrom("weekly_mint_traces")
+      .selectAll()
+      .where("run_id", "=", c.req.param("id"))
+      .where("container_key", "=", c.req.param("containerKey"))
+      .orderBy("seq", "asc")
+      .execute();
+    if (rows.length === 0) return c.json({ error: { code: "NOT_FOUND", message: "No trace for that judgment" } }, 404);
+    return c.json({
+      steps: rows.map((row) => ({
+        seq: row.seq,
+        kind: row.kind,
+        payload: JSON.parse(row.payload),
+        createdAt: row.created_at,
+      })),
+    });
+  });
+
   routes.get("/verdicts", async (c) => {
     const forbidden = requireAdmin(c);
     if (forbidden) return c.json(forbidden, 403);
@@ -371,6 +520,7 @@ export function projectMintingRoutes(
       const result = await acceptProjectMintingVerdict(db, {
         verdictId: c.req.param("id"),
         actorUserId: c.get("sub"),
+        logger,
         ...confirmedAxes,
         struckProjectNames: readStringArray(body.struckProjectNames),
         renameMap: readRenameMap(body.renameMap),

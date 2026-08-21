@@ -42,6 +42,21 @@ async function dumpCall(
  *  count thinking tokens against this budget depending on API version. */
 const DEFAULT_MAX_TOKENS = 8192;
 
+/**
+ * Raw call metadata handed to `GenerateOptions.onMeta`. `outcome` is
+ * "http_error" when the provider answered non-OK (rawText then carries the
+ * error body); "ok" covers every response that produced text, even ones the
+ * generator later rejects (truncation, JSON parse) — the observer still gets
+ * the raw text those errors hide.
+ */
+export interface GenerateMeta {
+  outcome: "ok" | "http_error";
+  rawText: string;
+  durationMs: number;
+  model: string;
+  usage?: { promptTokens: number; completionTokens: number };
+}
+
 export interface GenerateOptions {
   /** System instruction for the model. */
   systemPrompt?: string;
@@ -60,6 +75,16 @@ export interface GenerateOptions {
   dumpDir?: string;
   /** Gemini thinking budget. Null omits thinkingConfig; existing callers default to zero. */
   thinkingBudget?: number | null;
+  /** Observability hook: receives the raw response and usage per call. Errors thrown by the callback are swallowed. */
+  onMeta?: (meta: GenerateMeta) => void;
+}
+
+export function reportMeta(opts: GenerateOptions | undefined, meta: GenerateMeta): void {
+  try {
+    opts?.onMeta?.(meta);
+  } catch {
+    // The observer must never break the generation path.
+  }
 }
 
 export function createGeminiGenerator(apiKey: string, options?: GeminiClientOptions) {
@@ -84,6 +109,7 @@ export function createGeminiGenerator(apiKey: string, options?: GeminiClientOpti
    * Generate text from a prompt.
    */
   async function generate(prompt: string, opts?: GenerateOptions): Promise<string> {
+    const startedAt = Date.now();
     const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
     const config: Record<string, unknown> = {
       maxOutputTokens: maxTokens,
@@ -116,6 +142,16 @@ export function createGeminiGenerator(apiKey: string, options?: GeminiClientOpti
     const finishReason = candidate?.finishReason;
     const text = response.text;
     const usage = response.usageMetadata;
+
+    reportMeta(opts, {
+      outcome: "ok",
+      rawText: text ?? "",
+      durationMs: Date.now() - startedAt,
+      model: MODEL,
+      ...(usage?.promptTokenCount !== undefined && usage?.candidatesTokenCount !== undefined
+        ? { usage: { promptTokens: usage.promptTokenCount, completionTokens: usage.candidatesTokenCount } }
+        : {}),
+    });
 
     if (opts?.dumpDir) {
       await dumpCall(opts.dumpDir, {
