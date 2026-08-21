@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 import { ChatHistoryAccessResolver, type ProviderTargetRef, providerTargetKey } from "./chat-search";
+import { blankToUndefined } from "./optional-params";
 import type { SelectableUser, SketchMcpDeps, ToolResult } from "./types";
 
 function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
@@ -128,21 +129,16 @@ function toolError(message: string): ToolResult {
 const THREAD_TS_SCOPE_ERROR = "threadTs can only be used with a Slack channel target.";
 
 /**
- * Models routinely fill declared-but-unused optional string arguments with "".
  * A blank value carries no identity — an empty threadTs names no thread and an
  * empty recipientUserId names no person — so it means "absent", not "invalid".
  * Rejecting it produced an unrecoverable loop: the tool told the model to omit
  * the field, and the model could only re-send the same empty string.
  */
-function absentIfBlank(value: string | undefined): string | undefined {
-  return value?.trim() ? value : undefined;
-}
-
 function normalizeSendMessageParams(params: SendMessageParams): SendMessageParams {
   return {
     ...params,
-    threadTs: absentIfBlank(params.threadTs),
-    recipientUserId: absentIfBlank(params.recipientUserId),
+    threadTs: blankToUndefined(params.threadTs),
+    recipientUserId: blankToUndefined(params.recipientUserId),
   };
 }
 
@@ -234,9 +230,6 @@ export async function handleSendMessage(
   }
   if (params.recipientUserId === undefined) {
     return toolError("set exactly one of recipientUserId (for a direct message) or target (for a channel or group).");
-  }
-  if (!params.recipientUserId.trim()) {
-    return toolError("recipientUserId must not be empty. Use GetTeamDirectory or SearchUsers to find the user ID.");
   }
   if (params.threadTs !== undefined) return toolError(THREAD_TS_SCOPE_ERROR);
 

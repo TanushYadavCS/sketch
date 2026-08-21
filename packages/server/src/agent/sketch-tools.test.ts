@@ -929,6 +929,28 @@ describe("handleSendMessage to a channel or group", () => {
     expect(result.content[0].text).toContain("set exactly one of recipientUserId");
   });
 
+  it("trims a padded recipientUserId instead of failing the lookup", async () => {
+    const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: "S999" });
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    const result = await handleSendMessage(
+      { recipientUserId: "  user-bob  ", message: "hi" },
+      {
+        ...targetDeps(),
+        inboxMessagesRepo: {
+          ...makeInboxMessagesRepoMock(),
+          create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+        },
+        userRepo: makeUserRepoMock({ findById: async (id: string) => (id === "user-bob" ? bob : undefined) }),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+      accessAllowing(),
+    );
+
+    expect(result.content[0].text).not.toContain("Error:");
+    expect(sendDm).toHaveBeenCalledWith(expect.objectContaining({ userId: "user-bob" }));
+  });
+
   /**
    * Models fill declared-but-unused optional strings with "". Rejecting that
    * looped forever on the beta tenant: the tool said "omit it", and the model
