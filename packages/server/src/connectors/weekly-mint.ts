@@ -960,7 +960,7 @@ function mergeVerdictProjects(a: VerdictProject, b: VerdictProject): VerdictProj
   return {
     ...a,
     parentName: a.parentName ?? b.parentName,
-    ...(a.parentEntityId ?? b.parentEntityId ? { parentEntityId: a.parentEntityId ?? b.parentEntityId } : {}),
+    ...((a.parentEntityId ?? b.parentEntityId) ? { parentEntityId: a.parentEntityId ?? b.parentEntityId } : {}),
     evidenceTitleFamilies: [...new Set([...a.evidenceTitleFamilies, ...b.evidenceTitleFamilies])],
     evidenceRepos: [...new Set([...a.evidenceRepos, ...b.evidenceRepos])],
     evidenceFragments: [...new Set([...a.evidenceFragments, ...b.evidenceFragments])],
