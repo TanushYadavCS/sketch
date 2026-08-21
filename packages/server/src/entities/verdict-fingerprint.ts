@@ -13,6 +13,7 @@ export type VerdictFingerprintEntity = {
 export type VerdictFingerprintEvidence = {
   fileIds: string[];
   reviewIds: string[];
+  notes?: string[];
 };
 
 export type VerdictFingerprintInput = {
@@ -49,4 +50,39 @@ export function graphVerdictFingerprint(input: VerdictFingerprintInput): string 
     },
   };
   return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+}
+
+export function fingerprintEntity(
+  row: {
+    id: string;
+    name: string;
+    source_type: string;
+    status: string;
+    deleted_at: string | null;
+    merged_into_entity_id: string | null;
+  } | null,
+): VerdictFingerprintEntity | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    sourceType: row.source_type,
+    status: row.status,
+    deletedAt: row.deleted_at,
+    mergedIntoEntityId: row.merged_into_entity_id,
+  };
+}
+
+export function fingerprintFor(input: {
+  action: string;
+  subject: Parameters<typeof fingerprintEntity>[0];
+  target: Parameters<typeof fingerprintEntity>[0];
+  evidence: VerdictFingerprintEvidence;
+}): string {
+  return graphVerdictFingerprint({
+    action: input.action,
+    subject: fingerprintEntity(input.subject),
+    target: fingerprintEntity(input.target),
+    evidence: input.evidence,
+  });
 }

@@ -24,6 +24,7 @@ import { connectorRoutes } from "./api/connectors";
 import { devEnrichmentRoutes } from "./api/dev-enrichment";
 import { entityRoutes } from "./api/entities";
 import { graphPassRoutes } from "./api/graph-passes";
+import { graphVerdictRoutes } from "./api/graph-verdicts";
 import { healthRoutes } from "./api/health";
 import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
@@ -504,6 +505,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/graph-passes", graphPassRoutes(db, logger));
+  app.route("/api/graph-verdicts", graphVerdictRoutes(db, logger, { enabled: config.DEV_TOOLS_ENABLED }));
   app.route(
     "/api/project-minting",
     projectMintingRoutes(db, logger, {

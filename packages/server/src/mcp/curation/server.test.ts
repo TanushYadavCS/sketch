@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SESSION_COOKIE } from "../../api/auth";
 import { generateApiToken, getApiTokenDisplayPrefix, hashApiToken } from "../../auth/api-token";
+import { signJwt } from "../../auth/jwt";
 import { createApiTokenRepository } from "../../db/repositories/api-tokens";
 import { createSettingsRepository } from "../../db/repositories/settings";
 import { createUserRepository } from "../../db/repositories/users";
@@ -32,7 +34,10 @@ async function createPat(authRole: "admin" | "member" = "member", email = `${ran
     tokenHash: hashApiToken(plaintext),
     prefix: getApiTokenDisplayPrefix(plaintext),
   });
-  return { token: plaintext, user };
+  const row = await settings.get();
+  if (!row?.jwt_secret) throw new Error("test settings missing jwt secret");
+  const cookie = `${SESSION_COOKIE}=${await signJwt(user.id, authRole, row.jwt_secret)}`;
+  return { token: plaintext, user, cookie };
 }
 
 function mcpHeaders(token: string) {
@@ -61,6 +66,32 @@ async function callTool(app: ReturnType<typeof createApp>, token: string, name: 
   expect(res.status).toBe(200);
   const body = (await res.json()) as { result: { content: Array<{ type: "text"; text: string }> } };
   return JSON.parse(body.result.content[0]?.text ?? "null") as unknown;
+}
+
+function apiHeaders(cookie: string) {
+  return {
+    Cookie: cookie,
+    "Content-Type": "application/json",
+  };
+}
+
+async function apiPost(
+  app: ReturnType<typeof createApp>,
+  cookie: string,
+  path: string,
+  body?: Record<string, unknown>,
+) {
+  return app.request(path, {
+    method: "POST",
+    headers: apiHeaders(cookie),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function approveGraphVerdict(app: ReturnType<typeof createApp>, cookie: string, id: string) {
+  const res = await apiPost(app, cookie, `/api/graph-verdicts/${id}/approval`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as { verdict: { id: string; status: string } };
 }
 
 async function seedConnector(id: string, createdBy: string) {
@@ -454,7 +485,7 @@ describe("curation MCP server", () => {
     await seedEntity({ id: "scope-source", name: "Scope Source", sourceType: "project" });
     await seedEntity({ id: "scope-target", name: "Scope Target", sourceType: "project" });
 
-    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true, DEV_TOOLS_ENABLED: true }), {
       logger: createTestLogger(),
     });
     const first = (await callTool(app, admin.token, "propose_graph_verdicts", {
@@ -486,14 +517,25 @@ describe("curation MCP server", () => {
         },
       ],
     })) as { results: Array<{ verdictId: string }> };
+    await approveGraphVerdict(app, admin.cookie, second.results[0]?.verdictId ?? "");
+    const fourth = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "scope-source",
+          targetEntityId: "scope-target",
+          reason: "Approved merge remains active.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
 
     const rows = await db
       .selectFrom("graph_verdicts")
-      .select(["id", "action", "status", "superseded_at"])
+      .select(["id", "action", "status", "superseded_at", "validation_reason"])
       .where(
         "id",
         "in",
-        [first, second, third].map((response) => response.results[0]?.verdictId ?? ""),
+        [first, second, third, fourth].map((response) => response.results[0]?.verdictId ?? ""),
       )
       .execute();
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -504,7 +546,7 @@ describe("curation MCP server", () => {
     expect(byId.get(first.results[0]?.verdictId ?? "")?.superseded_at).toEqual(expect.any(String));
     expect(byId.get(second.results[0]?.verdictId ?? "")).toMatchObject({
       action: "merge_into",
-      status: "awaiting_human",
+      status: "approved",
       superseded_at: null,
     });
     expect(byId.get(third.results[0]?.verdictId ?? "")).toMatchObject({
@@ -512,5 +554,255 @@ describe("curation MCP server", () => {
       status: "awaiting_human",
       superseded_at: null,
     });
+    expect(byId.get(fourth.results[0]?.verdictId ?? "")).toMatchObject({
+      action: "merge_into",
+      status: "bounced",
+      validation_reason: "approved_verdict_pending",
+      superseded_at: null,
+    });
+  });
+
+  it("approves and applies graph verdicts with ledgered idempotent effects", async () => {
+    const admin = await createPat("admin", "proposal-apply@example.com");
+    await seedEntity({ id: "apply-source", name: "Apply Source", sourceType: "project" });
+    await seedEntity({ id: "apply-target", name: "Apply Target", sourceType: "project" });
+    await seedEntity({ id: "keep-project", name: "Keep Project", sourceType: "project" });
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true, DEV_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+
+    const proposed = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "apply-source",
+          targetEntityId: "apply-target",
+          reason: "Apply the merge.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const verdictId = proposed.results[0]?.verdictId ?? "";
+    await approveGraphVerdict(app, admin.cookie, verdictId);
+
+    const previewRes = await apiPost(app, admin.cookie, `/api/graph-verdicts/${verdictId}/application`, {
+      dryRun: true,
+    });
+    expect(previewRes.status).toBe(200);
+    const preview = (await previewRes.json()) as {
+      application: { dryRun: boolean; wouldChange: Record<string, number> };
+    };
+    expect(preview.application.dryRun).toBe(true);
+    expect(preview.application.wouldChange).toMatchObject({ entities: 2, entity_merges: 1 });
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["deleted_at", "merged_into_entity_id"])
+        .where("id", "=", "apply-source")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ deleted_at: null, merged_into_entity_id: null });
+
+    const applyRes = await apiPost(app, admin.cookie, `/api/graph-verdicts/${verdictId}/application`);
+    expect(applyRes.status).toBe(200);
+    const applied = (await applyRes.json()) as { application: { status: string; ledgerRef: string | null } };
+    expect(applied.application).toMatchObject({
+      status: "applied",
+      ledgerRef: `merge-group:graph-verdict:${verdictId}`,
+    });
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["deleted_at", "merged_into_entity_id"])
+        .where("id", "=", "apply-source")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ deleted_at: expect.any(String), merged_into_entity_id: "apply-target" });
+    await expect(
+      db
+        .selectFrom("entity_merges")
+        .select(["group_id", "merged_by_user_id"])
+        .where("group_id", "=", `graph-verdict:${verdictId}`)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ group_id: `graph-verdict:${verdictId}`, merged_by_user_id: admin.user.id });
+
+    const secondApplyRes = await apiPost(app, admin.cookie, `/api/graph-verdicts/${verdictId}/application`);
+    expect(secondApplyRes.status).toBe(200);
+    const secondApplied = (await secondApplyRes.json()) as {
+      application: { status: string; ledgerRef: string | null };
+    };
+    expect(secondApplied.application).toMatchObject(applied.application);
+    await expect(
+      db.selectFrom("entity_merges").select("id").where("group_id", "=", `graph-verdict:${verdictId}`).execute(),
+    ).resolves.toHaveLength(1);
+
+    const keep = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [{ action: "keep", subjectEntityId: "keep-project", reason: "Keep it." }],
+    })) as { results: Array<{ verdictId: string }> };
+    const keepId = keep.results[0]?.verdictId ?? "";
+    await approveGraphVerdict(app, admin.cookie, keepId);
+    const keepApply = await apiPost(app, admin.cookie, `/api/graph-verdicts/${keepId}/application`);
+    expect(keepApply.status).toBe(200);
+    await expect(
+      db
+        .selectFrom("graph_verdicts")
+        .select(["status", "applied_ledger_ref"])
+        .where("id", "=", keepId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "applied", applied_ledger_ref: "keep" });
+  });
+
+  it("refuses stale fingerprints and resolved-target drift while preserving approved verdicts", async () => {
+    const admin = await createPat("admin", "proposal-drift@example.com");
+    await seedEntity({ id: "stale-source", name: "Stale Source", sourceType: "project" });
+    await seedEntity({ id: "stale-target", name: "Stale Target", sourceType: "project" });
+    await seedEntity({ id: "drift-source", name: "Drift Source", sourceType: "project" });
+    await seedEntity({ id: "drift-target", name: "Drift Target", sourceType: "project" });
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true, DEV_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+
+    const stale = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "stale-source",
+          targetEntityId: "stale-target",
+          reason: "Stale merge.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const staleId = stale.results[0]?.verdictId ?? "";
+    await approveGraphVerdict(app, admin.cookie, staleId);
+    await db
+      .updateTable("entities")
+      .set({ deleted_at: "2026-08-22T01:00:00.000Z", merged_into_entity_id: "stale-target" })
+      .where("id", "=", "stale-source")
+      .execute();
+    const staleApply = await apiPost(app, admin.cookie, `/api/graph-verdicts/${staleId}/application`);
+    expect(staleApply.status).toBe(409);
+    expect(await staleApply.json()).toMatchObject({ error: { code: "STALE_VERDICT" } });
+    await expect(
+      db.selectFrom("graph_verdicts").select("status").where("id", "=", staleId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "approved" });
+
+    const drift = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "drift-source",
+          targetEntityId: "drift-target",
+          reason: "Drift merge.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const driftId = drift.results[0]?.verdictId ?? "";
+    await approveGraphVerdict(app, admin.cookie, driftId);
+    await db
+      .updateTable("graph_verdicts")
+      .set({ resolved_target_entity_id: "other-target" })
+      .where("id", "=", driftId)
+      .execute();
+    const driftApply = await apiPost(app, admin.cookie, `/api/graph-verdicts/${driftId}/application`);
+    expect(driftApply.status).toBe(409);
+    expect(await driftApply.json()).toMatchObject({ error: { code: "PLAN_DRIFT" } });
+    await expect(
+      db.selectFrom("graph_verdicts").select("status").where("id", "=", driftId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "approved" });
+  });
+
+  it("reverts nest and archive verdicts by ledger and fails closed for non-owned effects", async () => {
+    const admin = await createPat("admin", "proposal-undo@example.com");
+    await seedEntity({ id: "nest-child", name: "Nest Child", sourceType: "project" });
+    await seedEntity({ id: "nest-parent", name: "Nest Parent", sourceType: "project" });
+    await seedEntity({ id: "existing-child", name: "Existing Child", sourceType: "project" });
+    await seedEntity({ id: "existing-parent", name: "Existing Parent", sourceType: "project" });
+    await seedEntity({ id: "archive-project", name: "Archive Project", sourceType: "project" });
+    await seedEntity({ id: "archive-stale", name: "Archive Stale", sourceType: "project" });
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: "preexisting-part-of",
+        source_entity_id: "existing-child",
+        target_entity_id: "existing-parent",
+        relationship_type: "part_of",
+        confidence: "high",
+        confidence_score: 1,
+        source: "test",
+      })
+      .execute();
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true, DEV_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+
+    const proposed = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        { action: "nest_under", subjectEntityId: "nest-child", targetEntityId: "nest-parent", reason: "Nest it." },
+        {
+          action: "nest_under",
+          subjectEntityId: "existing-child",
+          targetEntityId: "existing-parent",
+          reason: "Already nested.",
+        },
+        { action: "archive", subjectEntityId: "archive-project", reason: "Archive it." },
+        { action: "archive", subjectEntityId: "archive-stale", reason: "Archive then interfere." },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const nestId = proposed.results[0]?.verdictId ?? "";
+    const existingId = proposed.results[1]?.verdictId ?? "";
+    const archiveId = proposed.results[2]?.verdictId ?? "";
+    const archiveStaleId = proposed.results[3]?.verdictId ?? "";
+    const verdictIds = [nestId, existingId, archiveId, archiveStaleId];
+    for (const id of verdictIds) await approveGraphVerdict(app, admin.cookie, id);
+    for (const id of verdictIds) {
+      const res = await apiPost(app, admin.cookie, `/api/graph-verdicts/${id}/application`);
+      expect(res.status).toBe(200);
+    }
+
+    const nestLedger = await db
+      .selectFrom("graph_verdicts")
+      .select("applied_ledger_ref")
+      .where("id", "=", nestId)
+      .executeTakeFirstOrThrow();
+    expect(nestLedger.applied_ledger_ref).toMatch(/^relationship:/);
+    const relationshipId = nestLedger.applied_ledger_ref?.slice("relationship:".length) ?? "";
+    const nestRevert = await apiPost(app, admin.cookie, `/api/graph-verdicts/${nestId}/reversion`);
+    expect(nestRevert.status).toBe(200);
+    await expect(
+      db.selectFrom("entity_relationships").select("id").where("id", "=", relationshipId).executeTakeFirst(),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      db
+        .selectFrom("graph_verdicts")
+        .select("applied_ledger_ref")
+        .where("id", "=", existingId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ applied_ledger_ref: "noop:existing" });
+    const existingRevert = await apiPost(app, admin.cookie, `/api/graph-verdicts/${existingId}/reversion`);
+    expect(existingRevert.status).toBe(409);
+    await expect(
+      db.selectFrom("graph_verdicts").select("status").where("id", "=", existingId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "applied" });
+
+    const archiveLedger = await db
+      .selectFrom("graph_verdicts")
+      .select("applied_ledger_ref")
+      .where("id", "=", archiveId)
+      .executeTakeFirstOrThrow();
+    expect(archiveLedger.applied_ledger_ref).toMatch(/^archived-at:/);
+    const archiveRevert = await apiPost(app, admin.cookie, `/api/graph-verdicts/${archiveId}/reversion`);
+    expect(archiveRevert.status).toBe(200);
+    await expect(
+      db.selectFrom("entities").select("deleted_at").where("id", "=", "archive-project").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ deleted_at: null });
+
+    await db
+      .updateTable("entities")
+      .set({ deleted_at: "2026-08-22T02:00:00.000Z" })
+      .where("id", "=", "archive-stale")
+      .execute();
+    const staleArchiveRevert = await apiPost(app, admin.cookie, `/api/graph-verdicts/${archiveStaleId}/reversion`);
+    expect(staleArchiveRevert.status).toBe(409);
+    await expect(
+      db.selectFrom("graph_verdicts").select("status").where("id", "=", archiveStaleId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "applied" });
   });
 });

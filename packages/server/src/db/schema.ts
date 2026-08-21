@@ -980,6 +980,7 @@ export interface GraphVerdictsTable {
   subject_name: string | null;
   subject_entity_type: string | null;
   target_entity_id: string | null;
+  resolved_target_entity_id: string | null;
   target_name: string | null;
   reason: string;
   evidence_json: string;
