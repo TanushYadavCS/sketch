@@ -173,6 +173,7 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].instructions).toContain("structured output for delivery");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("short headings and bullet lists");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.integrations.executeAction");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("never invoke CANVAS_CLI or INTEGRATION_CLI");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("fetch Slack urlPrivate without authentication");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("Do not implement this as polling");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("fixed recipe");
