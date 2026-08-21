@@ -9,7 +9,7 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { buildMaterializeDeps } from "./materialize-deps";
 import type { IndexEntityRow } from "./materialize-types";
-import { type Entity, type EntityLookup, proposeEntity } from "./propose";
+import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 
 async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
   return db.selectFrom("entities").selectAll().where("source_type", "=", "person").execute();
@@ -1820,7 +1820,101 @@ describe("proposeEntity", () => {
     expect(retrieveEmbeddingCandidates).not.toHaveBeenCalled();
   });
 
-  it("34. materialize deps leave embedding lookup off without provider and enable it with a provider", async () => {
+  it("34. project and product live birth gates queue unknown content terms", async () => {
+    const entityRepo = createEntityRepository(db);
+    await insertTestFile(db, "file-34a");
+    await insertTestFile(db, "file-34b");
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => []),
+      readEmail,
+      birthGateTypes: new Set<ProposeEntityType>(["project", "product", "team"]),
+      birthGateLiveTypes: new Set<ProposeEntityType>(["project", "product"]),
+      birthGateDryRun: true,
+    };
+
+    const project = await proposeEntity(deps, {
+      name: "Atlas Migration",
+      entityType: "project",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "project:atlas-migration",
+      evidence: [{ indexedFileId: "file-34a" }],
+      triggeredByUserId: "user-1",
+    });
+    const product = await proposeEntity(deps, {
+      name: "Canvas Copilot",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:canvas-copilot",
+      evidence: [{ indexedFileId: "file-34b" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(project.kind).toBe("queued");
+    expect(product.kind).toBe("queued");
+    const rows = await db.selectFrom("entity_review_queue").selectAll().orderBy("proposed_name", "asc").execute();
+    expect(rows.map((row) => [row.entity_type, row.proposed_name, row.candidate_reason, row.source])).toEqual([
+      ["project", "Atlas Migration", "birth-gated", "llm_extraction"],
+      ["product", "Canvas Copilot", "birth-gated", "llm_extraction"],
+    ]);
+    expect(
+      await db.selectFrom("entities").selectAll().where("source_type", "in", ["project", "product"]).execute(),
+    ).toEqual([]);
+  });
+
+  it("35. drops content-extracted team births without changing structural team births", async () => {
+    const entityRepo = createEntityRepository(db);
+    const info = vi.fn();
+    const contentDeps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => []),
+      readEmail,
+      logger: { info } as unknown as Parameters<typeof proposeEntity>[0]["logger"],
+      birthGateTypes: new Set<ProposeEntityType>(["project", "product", "team"]),
+      birthGateLiveTypes: new Set<ProposeEntityType>(["project", "product"]),
+      birthGateDryRun: true,
+    };
+
+    const dropped = await proposeEntity(contentDeps, {
+      name: "Atlas Team",
+      entityType: "team",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "team:atlas",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(dropped).toEqual({ kind: "suppressed", reason: "content_team_birth_dropped" });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "content_team_birth_dropped", type: "team", name: "Atlas Team" }),
+      "content_team_birth_dropped",
+    );
+    expect(await db.selectFrom("entity_review_queue").selectAll().execute()).toHaveLength(0);
+    expect(await db.selectFrom("entities").selectAll().where("source_type", "=", "team").execute()).toHaveLength(0);
+
+    const structural = await proposeEntity(
+      { ...contentDeps, logger: undefined, lookup: makeLookup(() => []) },
+      {
+        name: "Declared Team",
+        entityType: "team",
+        subtype: "external",
+        source: "connector_seed",
+        sourceId: "team:declared",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(structural.kind).toBe("created");
+    expect(await db.selectFrom("entities").selectAll().where("source_type", "=", "team").execute()).toHaveLength(1);
+  });
+
+  it("36. materialize deps leave embedding lookup off without provider and enable it with a provider", async () => {
     const provider = makeEmbeddingProvider();
     const withoutProvider = await buildMaterializeDeps(db, {});
     const withProvider = await buildMaterializeDeps(db, { embeddingProvider: provider });

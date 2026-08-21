@@ -346,7 +346,7 @@ export const SCAN_CANDIDACY_MIN_DAYS = 2;
  * "Weekly Standup" family recurs by definition and would otherwise top the
  * candidate ranking.
  */
-const CADENCE_TOKENS = new Set([
+export const CADENCE_TOKENS = new Set([
   "standup",
   "weekly",
   "daily",
@@ -1270,6 +1270,8 @@ export interface VerdictProject {
   confidence: VerdictConfidence;
   /** Exact name of the parent project in the same verdict, null for top-level. v1 rows: always null. */
   parentName: string | null;
+  /** Optional entity id of a live standing product parent. External v1/v2 rows never set it. */
+  parentEntityId?: string;
   evidenceTitleFamilies: string[];
   evidenceRepos: string[];
   /** Entity ids from the dossier fragments/candidates sections this project absorbs. v1 rows: empty. */
@@ -1398,6 +1400,9 @@ export function readClusterVerdict(value: unknown, options?: ReadClusterVerdictO
       status: raw.status as ProjectLifecycleStatus,
       confidence: confidence as VerdictConfidence,
       parentName: typeof raw.parentName === "string" && raw.parentName.trim() ? raw.parentName.trim() : null,
+      ...(typeof raw.parentEntityId === "string" && raw.parentEntityId.trim()
+        ? { parentEntityId: raw.parentEntityId.trim() }
+        : {}),
       evidenceTitleFamilies: readStringArray(raw.evidenceTitleFamilies),
       evidenceRepos: readStringArray(raw.evidenceRepos),
       evidenceFragments: [...new Set(readStringArray(raw.evidenceFragments))],

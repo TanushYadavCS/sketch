@@ -95,6 +95,8 @@ export type ProposeResult =
   | { kind: "queued"; reviewId: string; candidateEntityId: string | null }
   | { kind: "suppressed"; reason: string };
 
+const CONTENT_EXTRACTION_TEAM_SOURCES: ReadonlySet<string> = new Set(["llm_extraction"]);
+
 /**
  * Ambiguity-aware lookup over existing entities, keyed by `normalizeName(entity.name)`.
  * The Fireflies hot-path supplies a pre-built `Map<string, Entity[]>` to
@@ -510,6 +512,13 @@ async function birthGateOrCreate(
   branch: "skipFuzzy" | "ranked_empty",
 ): Promise<ProposeResult> {
   if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
+  if (input.entityType === "team" && CONTENT_EXTRACTION_TEAM_SOURCES.has(input.source)) {
+    deps.logger?.info(
+      { event: "content_team_birth_dropped", type: input.entityType, name: input.name, path: input.source, branch },
+      "content_team_birth_dropped",
+    );
+    return { kind: "suppressed", reason: "content_team_birth_dropped" };
+  }
   if (deps.birthGateTypes?.has(input.entityType)) {
     const effectiveDryRun = (deps.birthGateDryRun ?? true) && !deps.birthGateLiveTypes?.has(input.entityType);
     if (effectiveDryRun) {

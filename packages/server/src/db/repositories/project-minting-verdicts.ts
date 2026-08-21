@@ -13,7 +13,7 @@ import type { DB, ProjectMintingVerdictsTable } from "../schema";
 export type ProjectMintingVerdictRow = Selectable<ProjectMintingVerdictsTable>;
 
 export interface StorePendingVerdictInput {
-  companyEntityId: string;
+  companyEntityId: string | null;
   companyName: string;
   fileCount: number;
   dossier: string;
@@ -51,7 +51,8 @@ export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
       await db
         .updateTable("project_minting_verdicts")
         .set({ superseded_at: now, updated_at: now })
-        .where("company_entity_id", "=", input.companyEntityId)
+        .$if(input.companyEntityId === null, (qb) => qb.where("company_entity_id", "is", null))
+        .$if(input.companyEntityId !== null, (qb) => qb.where("company_entity_id", "=", input.companyEntityId))
         .where("status", "=", "pending")
         .where("superseded_at", "is", null)
         .execute();

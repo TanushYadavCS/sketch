@@ -21,6 +21,7 @@ import { ProjectBindingError, assertNoPartOfCycle } from "../entities/project-bi
 import { normalizeName } from "./name-normalize";
 import {
   type ClientCluster,
+  type ClusterFile,
   type ClusterVerdict,
   type ProjectLifecycleStatus,
   type VerdictConfidence,
@@ -31,6 +32,7 @@ import {
   readClusterVerdict,
 } from "./project-minting";
 import { scanTokenRecurrence } from "./token-recurrence-scan";
+import { partitionFiles } from "./weekly-mint";
 
 const ACCEPT_SOURCE = "project-minting";
 const RELATION_SOURCE = "project_minting_acceptance";
@@ -107,7 +109,7 @@ export interface ProjectMintingAcceptResult {
     subjectEntityId: string;
     counterpartyKind: CounterpartyKind;
     clientStage: ClientStage | null;
-  };
+  } | null;
   taskParentUpdates: number;
   /** True when the result was computed without any writes. */
   dryRun?: boolean;
@@ -182,12 +184,12 @@ function shouldWriteNoEntities(kind: CounterpartyKind, stage: ClientStage | null
   return stage === "dormant" || stage === "ended";
 }
 
-function projectSourceId(companyEntityId: string, originalName: string): string {
-  return `${ACCEPT_SOURCE}:${companyEntityId}:project:${normalizeProjectName(originalName)}`;
+function projectSourceId(companyEntityId: string | null, originalName: string): string {
+  return `${ACCEPT_SOURCE}:${companyEntityId ?? "internal"}:project:${normalizeProjectName(originalName)}`;
 }
 
-function engagementSourceId(companyEntityId: string, originalName: string): string {
-  return `${ACCEPT_SOURCE}:${companyEntityId}:engagement:${normalizeProjectName(originalName)}`;
+function engagementSourceId(companyEntityId: string | null, originalName: string): string {
+  return `${ACCEPT_SOURCE}:${companyEntityId ?? "internal"}:engagement:${normalizeProjectName(originalName)}`;
 }
 
 function relationId(sourceId: string, targetId: string, relationType: "engagement_for" | "part_of"): string {
@@ -196,13 +198,14 @@ function relationId(sourceId: string, targetId: string, relationType: "engagemen
 
 async function currentDeclarationForCluster(
   db: Kysely<DB>,
-  cluster: ClientCluster,
+  container: AcceptanceContainer,
 ): Promise<{ counterpartyKind: CounterpartyKind; clientStage: ClientStage | null } | null> {
+  if (container.companyEntityId === null) return null;
   const declaredById = new Map(
     (await createCompanyRelationshipDeclarationRepository(db).list()).map((row) => [row.subject_entity_id, row]),
   );
   const declaration = resolveDeclaration(
-    cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
+    container.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
   );
   if (!declaration) return null;
   return {
@@ -232,6 +235,7 @@ function acceptedProjectsForConfirmedAxes(
   input: { confirmedCounterpartyKind: CounterpartyKind; confirmedClientStage: ClientStage | null },
   struck: Set<string>,
   isV2: boolean,
+  isInternal: boolean,
 ): {
   acceptedProjects: ClusterVerdict["projects"];
   shouldWriteNothing: boolean;
@@ -241,6 +245,14 @@ function acceptedProjectsForConfirmedAxes(
   assertStageMatchesKind(input.confirmedCounterpartyKind, input.confirmedClientStage);
   const projectsAfterStrike = verdict.projects.filter((project) => !struck.has(project.name));
   const engagementName = verdict.engagement?.name ?? null;
+  if (isInternal) {
+    return {
+      acceptedProjects: projectsAfterStrike,
+      shouldWriteNothing: false,
+      shouldWriteEngagement: false,
+      droppedByGate: { engagement: engagementName, projects: [], unmergedFragments: [] },
+    };
+  }
   if (shouldWriteNoEntities(input.confirmedCounterpartyKind, input.confirmedClientStage)) {
     return {
       acceptedProjects: [],
@@ -300,7 +312,40 @@ function acceptedProjectsForConfirmedAxes(
   };
 }
 
-async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerdictRow): Promise<ClientCluster> {
+async function loadClusterFiles(db: Kysely<DB>, fileIds: string[]): Promise<ClusterFile[]> {
+  const files: ClusterFile[] = [];
+  for (let i = 0; i < fileIds.length; i += 500) {
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "file_name", "source", "source_created_at", "synced_at"])
+      .where("id", "in", fileIds.slice(i, i + 500))
+      .execute();
+    for (const row of rows) {
+      files.push({
+        fileId: row.id,
+        fileName: row.file_name,
+        source: row.source,
+        date: row.source_created_at ?? row.synced_at,
+        via: [],
+      });
+    }
+  }
+  return files.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "") || a.fileId.localeCompare(b.fileId));
+}
+
+async function findCurrentContainer(
+  db: Kysely<DB>,
+  verdictRow: ProjectMintingVerdictRow,
+): Promise<AcceptanceContainer> {
+  if (verdictRow.company_entity_id === null) {
+    const partition = await partitionFiles(db);
+    return {
+      companyEntityId: null,
+      companyName: verdictRow.company_name,
+      groupMembers: [],
+      files: await loadClusterFiles(db, [...partition.internal]),
+    };
+  }
   const clusters = await clusterClientFiles(db, { minFiles: 1 });
   const cluster = clusters.find((candidate) =>
     candidate.groupMembers.some((member) => member.entityId === verdictRow.company_entity_id),
@@ -314,7 +359,12 @@ async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerd
       },
     );
   }
-  return cluster;
+  return {
+    companyEntityId: cluster.companyEntityId,
+    companyName: cluster.companyName,
+    groupMembers: cluster.groupMembers,
+    files: cluster.files,
+  };
 }
 
 /**
@@ -324,7 +374,7 @@ async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerd
  * types than the dossier gathered — makes every anchor of that kind miss, and
  * the miss surfaces as a refusal to accept the whole verdict.
  */
-async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster, citedFragmentIds: string[]) {
+async function buildAnchorMaps(db: Kysely<DB>, cluster: AcceptanceContainer, citedFragmentIds: string[]) {
   const titleFamilies = new Map<string, Set<string>>();
   for (const file of cluster.files) {
     const family = normalizeTitleFamily(file.fileName).key;
@@ -472,7 +522,7 @@ async function attachSourceRef(db: Kysely<DB>, entityId: string, sourceId: strin
 async function adoptOrCreateProjectEntity(
   db: Kysely<DB>,
   input: {
-    companyEntityId: string;
+    companyEntityId: string | null;
     originalName: string;
     name: string;
     sourceId: string;
@@ -625,7 +675,7 @@ interface AcceptancePlan {
   row: ProjectMintingVerdictRow;
   verdict: ClusterVerdict;
   isV2: boolean;
-  cluster: ClientCluster;
+  container: AcceptanceContainer;
   input: AcceptProjectMintingVerdictInput;
   struckProjects: string[];
   acceptedProjects: ClusterVerdict["projects"];
@@ -642,6 +692,13 @@ interface AcceptancePlan {
   residualTarget: { kind: "engagement" } | { kind: "project"; originalName: string } | null;
   plannedMerges: { entityId: string; intoOriginalName: string }[];
 }
+
+type AcceptanceContainer = {
+  companyEntityId: string | null;
+  companyName: string;
+  groupMembers: ClientCluster["groupMembers"];
+  files: ClusterFile[];
+};
 
 /**
  * Everything acceptance decides, with zero writes: gates, strikes, anchors,
@@ -661,8 +718,8 @@ async function planAcceptance(
     throw new ProjectMintingAcceptanceError("TRIPWIRE_BLOCKED", "Tripwire flags require explicit override", { flags });
   }
 
-  const cluster = await findCurrentCluster(db, row);
-  const currentDeclared = await currentDeclarationForCluster(db, cluster);
+  const container = await findCurrentContainer(db, row);
+  const currentDeclared = await currentDeclarationForCluster(db, container);
   assertCurrentDeclarationMatchesSnapshot(row, currentDeclared);
 
   const struckProjects = [...new Set(input.struckProjectNames ?? [])]
@@ -699,10 +756,10 @@ async function planAcceptance(
 
   const renameMap = input.renameMap ?? {};
   const { acceptedProjects, shouldWriteNothing, shouldWriteEngagement, droppedByGate } =
-    acceptedProjectsForConfirmedAxes(verdict, input, struck, isV2);
+    acceptedProjectsForConfirmedAxes(verdict, input, struck, isV2, container.companyEntityId === null);
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const citedFragmentIds = [...new Set(acceptedProjects.flatMap((project) => project.evidenceFragments))];
-  const anchorMaps = await buildAnchorMaps(db, cluster, citedFragmentIds);
+  const anchorMaps = await buildAnchorMaps(db, container, citedFragmentIds);
   const { projectFiles, unresolvedAnchors, groundlessProjects } = resolveProjectAnchors(
     verdict,
     acceptedOriginalNames,
@@ -779,7 +836,7 @@ async function planAcceptance(
     row,
     verdict,
     isV2,
-    cluster,
+    container,
     input,
     struckProjects,
     acceptedProjects,
@@ -799,22 +856,26 @@ async function planAcceptance(
 function planResult(
   plan: AcceptancePlan,
 ): Omit<ProjectMintingAcceptResult, "entityIds" | "entities" | "mergeIds" | "taskParentUpdates"> {
+  const declaration =
+    plan.container.companyEntityId === null
+      ? null
+      : {
+          subjectEntityId: plan.container.companyEntityId,
+          counterpartyKind: plan.input.confirmedCounterpartyKind,
+          clientStage: plan.input.confirmedClientStage,
+        };
   return {
     verdictId: plan.row.id,
     status: "accepted",
     struckProjects: plan.struckProjects,
     droppedByGate: plan.droppedByGate,
     unresolvedAnchors: plan.unresolvedAnchors,
-    declaration: {
-      subjectEntityId: plan.cluster.companyEntityId,
-      counterpartyKind: plan.input.confirmedCounterpartyKind,
-      clientStage: plan.input.confirmedClientStage,
-    },
+    declaration,
     drift: {
       stance: "live_recompute",
       reviewedFileCount: plan.row.file_count,
-      acceptedFileCount: plan.cluster.files.length,
-      addedSinceVerdict: Math.max(0, plan.cluster.files.length - plan.row.file_count),
+      acceptedFileCount: plan.container.files.length,
+      addedSinceVerdict: Math.max(0, plan.container.files.length - plan.row.file_count),
     },
   };
 }
@@ -932,7 +993,7 @@ async function retroClaimFiles(
 
   const scan = await scanTokenRecurrence(db, {
     candidates,
-    fileIds: plan.cluster.files.map((file) => file.fileId),
+    fileIds: plan.container.files.map((file) => file.fileId),
   });
   const matchesByEntity = new Map<string, Set<string>>();
   for (const [key, recurrence] of scan) {
@@ -1007,8 +1068,20 @@ async function earliestFileDay(db: Kysely<DB>, fileIds: string[]): Promise<strin
   return earliest;
 }
 
+async function resolveStandingProductParent(db: Kysely<DB>, entityId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("entities")
+    .select("id")
+    .where("id", "=", entityId)
+    .where("source_type", "=", "product")
+    .where("provenance_tier", "in", ["declared", "human_confirmed"])
+    .where(whereLiveEntity())
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
 async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promise<ProjectMintingAcceptResult> {
-  const { verdict, cluster, renameMap, canonicalByName } = plan;
+  const { verdict, container, renameMap, canonicalByName } = plan;
   const projectIdsByOriginalName = new Map<string, string>();
   const parentIdByEntityId = new Map<string, string | null>();
   const projectIds: string[] = [];
@@ -1019,26 +1092,27 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
     const originalName = verdict.engagement.name;
     const name = renameFor(originalName, renameMap);
     engagementId = await adoptOrCreateProjectEntity(db, {
-      companyEntityId: cluster.companyEntityId,
+      companyEntityId: container.companyEntityId,
       originalName,
       name,
-      sourceId: engagementSourceId(cluster.companyEntityId, originalName),
+      sourceId: engagementSourceId(container.companyEntityId, originalName),
       canonicalEntityId: canonicalByName.get(originalName),
       subtype: "engagement",
       lifecycleStatus: null,
     });
     parentIdByEntityId.set(engagementId, null);
-    await ensureRelationship(db, engagementId, cluster.companyEntityId, "engagement_for");
+    if (container.companyEntityId)
+      await ensureRelationship(db, engagementId, container.companyEntityId, "engagement_for");
   }
 
   if (!plan.shouldWriteNothing) {
     for (const project of plan.orderedProjects) {
       const name = renameFor(project.name, renameMap);
       const entityId = await adoptOrCreateProjectEntity(db, {
-        companyEntityId: cluster.companyEntityId,
+        companyEntityId: container.companyEntityId,
         originalName: project.name,
         name,
-        sourceId: projectSourceId(cluster.companyEntityId, project.name),
+        sourceId: projectSourceId(container.companyEntityId, project.name),
         canonicalEntityId: canonicalByName.get(project.name),
         subtype: null,
         lifecycleStatus: project.status,
@@ -1047,6 +1121,10 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
       projectIds.push(entityId);
       const parentEntityId =
         plan.isV2 && project.parentName ? (projectIdsByOriginalName.get(project.parentName) ?? null) : null;
+      const productParentEntityId =
+        !parentEntityId && container.companyEntityId === null && project.parentEntityId
+          ? await resolveStandingProductParent(db, project.parentEntityId)
+          : null;
       if (parentEntityId) {
         try {
           await assertNoPartOfCycle(db, entityId, parentEntityId);
@@ -1059,14 +1137,22 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
         }
         await ensureRelationship(db, entityId, parentEntityId, "part_of");
         parentIdByEntityId.set(entityId, parentEntityId);
-      } else if (plan.isV2) {
-        await ensureRelationship(db, entityId, cluster.companyEntityId, "engagement_for");
+      } else if (productParentEntityId) {
+        await ensureRelationship(db, entityId, productParentEntityId, "part_of");
+        parentIdByEntityId.set(entityId, productParentEntityId);
+      } else if (project.parentEntityId && container.companyEntityId === null) {
+        plan.unresolvedAnchors.push(`standing product "${project.parentEntityId}" on project "${project.name}"`);
+        parentIdByEntityId.set(entityId, null);
+      } else if (plan.isV2 && container.companyEntityId) {
+        await ensureRelationship(db, entityId, container.companyEntityId, "engagement_for");
         parentIdByEntityId.set(entityId, null);
       } else if (engagementId) {
         await ensureRelationship(db, entityId, engagementId, "part_of");
         parentIdByEntityId.set(entityId, engagementId);
+      } else if (container.companyEntityId) {
+        await ensureRelationship(db, entityId, container.companyEntityId, "engagement_for");
+        parentIdByEntityId.set(entityId, null);
       } else {
-        await ensureRelationship(db, entityId, cluster.companyEntityId, "engagement_for");
         parentIdByEntityId.set(entityId, null);
       }
     }
@@ -1094,7 +1180,7 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
         : (projectIdsByOriginalName.get(plan.residualTarget.originalName) ?? null);
   if (residualTargetId) {
     const residual = filesByEntity.get(residualTargetId) ?? new Set<string>();
-    for (const file of cluster.files) {
+    for (const file of container.files) {
       if (!anchoredToAccepted.has(file.fileId)) residual.add(file.fileId);
     }
     filesByEntity.set(residualTargetId, residual);
@@ -1196,7 +1282,7 @@ export async function acceptProjectMintingVerdict(
         struckProjects: result.struckProjects,
         result,
       });
-      if (won) {
+      if (won && result.declaration) {
         await createCompanyRelationshipDeclarationRepository(db).declare({
           subjectEntityId: result.declaration.subjectEntityId,
           counterpartyKind: result.declaration.counterpartyKind,

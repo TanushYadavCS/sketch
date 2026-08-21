@@ -52,6 +52,12 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),
+  WEEKLY_MINT_MODE: z.enum(["off", "shadow", "live"]).default("off"),
+  WEEKLY_MINT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
   VISION_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")
