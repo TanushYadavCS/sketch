@@ -327,6 +327,9 @@ export interface RunAgentParams {
   claudeConfigDir?: string;
   userName: string;
   userEmail?: string | null;
+  integrationUserId?: string | null;
+  integrationUserName?: string | null;
+  integrationUserEmail?: string | null;
   slackEntitySyncEnabled?: boolean;
   devToolsEnabled?: boolean;
   userPhone?: string | null;
@@ -911,8 +914,10 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
 
   let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
   if (params.loadIntegrationProvider && params.claudeConfigDir) {
+    const integrationUserEmail =
+      params.integrationUserEmail === undefined ? (params.userEmail ?? null) : params.integrationUserEmail;
     integrationAccess = await startIntegrationAccess({
-      userEmail: params.userEmail ?? null,
+      userEmail: integrationUserEmail,
       claudeConfigDir: params.claudeConfigDir,
       workspaceDir,
       loadIntegrationProvider: params.loadIntegrationProvider,
@@ -925,7 +930,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
       },
       "Integration access resolved",
     );
-    logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
+    logger.debug({ userEmail: integrationUserEmail }, "Integration access resolved (user context)");
   }
 
   try {
@@ -1352,8 +1357,10 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   // into the real CLI child process.
   let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
   if (params.loadIntegrationProvider && params.claudeConfigDir) {
+    const integrationUserEmail =
+      params.integrationUserEmail === undefined ? (params.userEmail ?? null) : params.integrationUserEmail;
     integrationAccess = await startIntegrationAccess({
-      userEmail: params.userEmail ?? null,
+      userEmail: integrationUserEmail,
       claudeConfigDir: params.claudeConfigDir,
       workspaceDir,
       loadIntegrationProvider: params.loadIntegrationProvider,
@@ -1366,7 +1373,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       },
       "Integration access resolved",
     );
-    logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
+    logger.debug({ userEmail: integrationUserEmail }, "Integration access resolved (user context)");
   }
 
   /**
@@ -1511,7 +1518,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
         events: sdkStreamState.integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
         cliIntegrations: params.cliIntegrations,
-        currentUserId: params.currentUserId,
+        currentUserId: params.integrationUserId === undefined ? params.currentUserId : params.integrationUserId,
         runtimeContext:
           params.taskContext?.contextType === "channel" && params.platform === "slack"
             ? { platform: "slack", deliveryTarget: params.taskContext.deliveryTarget }
@@ -1519,8 +1526,8 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
               ? { platform: "whatsapp", deliveryTarget: params.taskContext.deliveryTarget }
               : undefined,
         collector: integrationConnectionCollector,
-        userEmail: params.userEmail ?? null,
-        userName: params.userName,
+        userEmail: params.integrationUserEmail === undefined ? (params.userEmail ?? null) : params.integrationUserEmail,
+        userName: params.integrationUserName === undefined ? params.userName : params.integrationUserName,
       });
     } catch (err) {
       logger.warn({ err }, "Failed to resolve integration cards from agent progress");
