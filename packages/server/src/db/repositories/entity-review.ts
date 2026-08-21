@@ -58,6 +58,7 @@ export interface UpsertQueueRowInput {
   candidateScore: number | null;
   candidateReason: string | null;
   triggeredByUserId: string;
+  evidenceIndexedFileIds?: string[];
 }
 
 export interface UpsertQueueRowResult {
@@ -112,6 +113,7 @@ export interface UpsertUserEntityLinkReviewInput {
 export const TERMINAL_STATUS_LIST = ["confirmed", "rejected", "confirming", "dismissed"] as const;
 
 const TERMINAL_STATUSES = new Set<string>(TERMINAL_STATUS_LIST);
+export type ReviewRetiredReason = "weekly_junk" | "dry_streak";
 const SPINE_ENTITY_TYPES = new Set(["project", "product", "team"]);
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 
@@ -206,6 +208,19 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     return db.selectFrom("entity_review_queue").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
   }
 
+  async function hasNewEvidence(existing: QueueRow, evidenceIndexedFileIds: string[] | undefined): Promise<boolean> {
+    const evidenceIds = [...new Set(evidenceIndexedFileIds ?? [])];
+    if (evidenceIds.length === 0) return false;
+    const rows = await db
+      .selectFrom("entity_review_evidence")
+      .select("indexed_file_id")
+      .where("review_id", "=", existing.id)
+      .where("indexed_file_id", "in", evidenceIds)
+      .execute();
+    const known = new Set(rows.map((row) => row.indexed_file_id));
+    return evidenceIds.some((indexedFileId) => !known.has(indexedFileId));
+  }
+
   return {
     /**
      * Insert or update a queue row keyed on (normalized_name, entity_type).
@@ -276,6 +291,18 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (TERMINAL_STATUSES.has(existing.status)) {
         return { row: existing, skipEvidence: true };
       }
+      const reviving = existing.status === "retired" && (await hasNewEvidence(existing, input.evidenceIndexedFileIds));
+      if (existing.status === "retired" && !reviving) {
+        return { row: existing, skipEvidence: true };
+      }
+      if (reviving) {
+        await db
+          .updateTable("weekly_mint_candidates")
+          .set({ retired_at: null, retired_reason: null, dry_streak: 0, updated_at: now })
+          .where("review_id", "=", existing.id)
+          .where("retired_at", "is not", null)
+          .execute();
+      }
 
       const reviewStartedAt = existing.review_started_at;
       const midReview = reviewStartedAt !== null && Date.now() - new Date(reviewStartedAt).getTime() < freezeMs;
@@ -290,6 +317,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           .set({
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            status: reviving ? "pending" : existing.status,
+            resolved_by: reviving ? null : existing.resolved_by,
+            resolved_at: reviving ? null : existing.resolved_at,
+            retired_reason: reviving ? null : existing.retired_reason,
             ...sourcePatch,
           })
           .where("id", "=", existing.id)
@@ -310,6 +341,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             candidate_generated_at: now,
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            status: reviving ? "pending" : existing.status,
+            resolved_by: reviving ? null : existing.resolved_by,
+            resolved_at: reviving ? null : existing.resolved_at,
+            retired_reason: reviving ? null : existing.retired_reason,
             ...sourcePatch,
           })
           .where("id", "=", existing.id)
@@ -942,6 +977,29 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .where("candidate_generated_at", "=", candidateGeneratedAt)
         .execute();
       return Number(result[0]?.numUpdatedRows ?? 0) > 0;
+    },
+
+    /**
+     * Covers `deferred` as well as `pending`: both are non-terminal and can
+     * return to the pool, and the caller retires the weekly candidate rows
+     * unconditionally — flipping only pending would leave a deferred row
+     * visible in the queue while its candidate is excluded from weekly runs.
+     */
+    async markRetired(reviewIds: string[], reason: ReviewRetiredReason, by: string, now = new Date().toISOString()) {
+      const ids = [...new Set(reviewIds.filter((reviewId) => reviewId.length > 0))];
+      if (ids.length === 0) return 0;
+      const result = await db
+        .updateTable("entity_review_queue")
+        .set({
+          status: "retired",
+          retired_reason: reason,
+          resolved_by: by,
+          resolved_at: now,
+        })
+        .where("id", "in", ids)
+        .where("status", "in", ["pending", "deferred"])
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
     },
 
     /**

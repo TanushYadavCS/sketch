@@ -29,8 +29,14 @@ export function inScope(
   ]);
 }
 
+/**
+ * `retired` is not terminal (the proposal upsert can revive it on new
+ * evidence), but the passes must not load it: every projection write is
+ * guarded to pending/deferred, so a retired row would only sit in the row set
+ * and count as frozen forever.
+ */
 export function nonTerminal(
   eb: ExpressionBuilder<DB, "entity_review_queue">,
 ): ExpressionWrapper<DB, "entity_review_queue", SqlBool> {
-  return eb("entity_review_queue.status", "not in", [...TERMINAL_STATUS_LIST]);
+  return eb("entity_review_queue.status", "not in", [...TERMINAL_STATUS_LIST, "retired"]);
 }

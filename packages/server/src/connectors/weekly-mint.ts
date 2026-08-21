@@ -144,6 +144,11 @@ type CandidateGroup = {
   deterministic: DeterministicDisposition;
 };
 
+type RetiredDryStreak = {
+  reviewId: string;
+  groupNames: string[];
+};
+
 type ExistingProject = {
   entityId: string;
   name: string;
@@ -373,16 +378,33 @@ async function claimCandidatesForCompany(
       .execute();
     for (const row of rows) reviewIds.add(row.id);
   }
+  let claimed = 0;
   for (const reviewId of reviewIds) {
-    await db
-      .insertInto("weekly_mint_candidates")
-      .values({ review_id: reviewId, company_key: companyKey, last_grouped_at: now, updated_at: now })
-      .onConflict((oc) =>
-        oc.columns(["review_id", "company_key"]).doUpdateSet({ last_grouped_at: now, updated_at: now }),
-      )
-      .execute();
+    const existing = await db
+      .selectFrom("weekly_mint_candidates")
+      .select("retired_at")
+      .where("review_id", "=", reviewId)
+      .where("company_key", "=", companyKey)
+      .executeTakeFirst();
+    if (existing?.retired_at) continue;
+    if (existing) {
+      await db
+        .updateTable("weekly_mint_candidates")
+        .set({ last_grouped_at: now, updated_at: now })
+        .where("review_id", "=", reviewId)
+        .where("company_key", "=", companyKey)
+        .where("retired_at", "is", null)
+        .execute();
+      claimed += 1;
+    } else {
+      await db
+        .insertInto("weekly_mint_candidates")
+        .values({ review_id: reviewId, company_key: companyKey, last_grouped_at: now, updated_at: now })
+        .execute();
+      claimed += 1;
+    }
   }
-  return reviewIds.size;
+  return claimed;
 }
 
 async function readClaimedCandidates(
@@ -407,6 +429,7 @@ async function readClaimedCandidates(
       "weekly_mint_candidates.dry_streak as dryStreak",
     ])
     .where("weekly_mint_candidates.company_key", "=", companyKey)
+    .where("weekly_mint_candidates.retired_at", "is", null)
     .where("entity_review_queue.status", "=", "pending")
     .where("entity_review_queue.entity_type", "=", "project")
     .where("entity_review_queue.source", "in", [...WEEKLY_MINT_REVIEW_SOURCE_ALLOWLIST])
@@ -776,23 +799,49 @@ async function incrementDryStreak(
   companyKey: string,
   groups: CandidateGroup[],
   now: string,
-): Promise<void> {
+): Promise<RetiredDryStreak[]> {
+  const retired: RetiredDryStreak[] = [];
   for (const group of groups) {
     for (const reviewId of group.reviewIds) {
       const row = await db
         .selectFrom("weekly_mint_candidates")
-        .select("dry_streak")
+        .select(["dry_streak", "retired_at"])
         .where("review_id", "=", reviewId)
         .where("company_key", "=", companyKey)
         .executeTakeFirst();
+      if (row?.retired_at) continue;
+      const nextDryStreak = (row?.dry_streak ?? 0) + 1;
+      const shouldRetire = nextDryStreak >= 3;
       await db
         .updateTable("weekly_mint_candidates")
-        .set({ dry_streak: (row?.dry_streak ?? 0) + 1, updated_at: now })
+        .set({
+          dry_streak: nextDryStreak,
+          retired_at: shouldRetire ? now : null,
+          retired_reason: shouldRetire ? "dry_streak" : null,
+          updated_at: now,
+        })
         .where("review_id", "=", reviewId)
         .where("company_key", "=", companyKey)
+        .where("retired_at", "is", null)
         .execute();
+      if (!shouldRetire) continue;
+      const result = await db
+        .updateTable("entity_review_queue")
+        .set({
+          status: "retired",
+          retired_reason: "dry_streak",
+          resolved_by: "weekly-mint-dry-streak",
+          resolved_at: now,
+        })
+        .where("id", "=", reviewId)
+        .where("status", "in", ["pending", "deferred"])
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) > 0) {
+        retired.push({ reviewId, groupNames: group.names });
+      }
     }
   }
+  return retired;
 }
 
 async function resetDryStreak(
@@ -808,6 +857,7 @@ async function resetDryStreak(
         .set({ dry_streak: 0, updated_at: now })
         .where("review_id", "=", reviewId)
         .where("company_key", "=", companyKey)
+        .where("retired_at", "is", null)
         .execute();
     }
   }
@@ -1585,7 +1635,7 @@ function buildStoredVerdict(
   verdict: ClusterVerdict;
   storedGroups: CandidateGroup[];
   aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }>;
-  skippedGroups: number;
+  skippedGroups: CandidateGroup[];
   groupDispositions: GroupDisposition[];
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
@@ -1615,16 +1665,17 @@ function buildStoredVerdict(
   const storedGroups: CandidateGroup[] = [];
   const aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }> = [];
   const groupDispositions: GroupDisposition[] = [];
-  let skippedGroups = 0;
+  const skippedGroups: CandidateGroup[] = [];
 
   for (const group of groups) {
     const disposition = dispositions.get(group.key);
     if (!disposition) {
+      skippedGroups.push(group);
       groupDispositions.push({ groupKey: group.key, names: group.names, action: "skip", reason: "no_disposition" });
       continue;
     }
     if (disposition.action === "skip") {
-      skippedGroups += 1;
+      skippedGroups.push(group);
       groupDispositions.push({
         groupKey: group.key,
         names: group.names,
@@ -1640,6 +1691,7 @@ function buildStoredVerdict(
         aliasGroups.push({ group, targetEntityId });
         groupDispositions.push({ groupKey: group.key, names: group.names, action: "alias", targetEntityId });
       } else {
+        skippedGroups.push(group);
         groupDispositions.push({
           groupKey: group.key,
           names: group.names,
@@ -1763,6 +1815,12 @@ function buildStoredVerdict(
   };
   readClusterVerdict(verdict, { strict: true });
   return { verdict, storedGroups, aliasGroups, skippedGroups, groupDispositions };
+}
+
+function retiredDryStreakGroupNames(retired: RetiredDryStreak[]): string[] {
+  return [...new Set(retired.flatMap((row) => (row.groupNames.length > 0 ? row.groupNames : [row.reviewId])))].sort(
+    (a, b) => a.localeCompare(b),
+  );
 }
 
 function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGroup[]): string {
@@ -2113,6 +2171,25 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       verdicts_stored: counters.verdictsStored,
       aged_out: counters.agedOut,
     });
+    async function recordRetiredDryStreak(
+      container: WeeklyMintContainer,
+      retired: RetiredDryStreak[],
+      phase: string,
+    ): Promise<void> {
+      if (retired.length === 0) return;
+      const groupNames = retiredDryStreakGroupNames(retired);
+      await writeRunEvent(container, "retired_dry_streak", { groupNames, count: retired.length, phase });
+      deps.logger.info(
+        {
+          containerKey: container.key,
+          companyName: container.companyName,
+          groupNames,
+          retired: retired.length,
+          phase,
+        },
+        "Weekly mint retired dry-streak candidates",
+      );
+    }
 
     try {
       const containers = await buildWeeklyMintContainers(deps.db, clock);
@@ -2206,7 +2283,11 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         for (const group of groups) group.scan = scanResults.get(group.key) ?? null;
         await updateScanState(deps.db, container.key, groups, batchNow);
         const nonCrossing = groups.filter((group) => (group.scan?.distinctDays ?? 0) < RECURRENCE_FLOOR_DAYS);
-        await incrementDryStreak(deps.db, container.key, nonCrossing, batchNow);
+        await recordRetiredDryStreak(
+          container,
+          await incrementDryStreak(deps.db, container.key, nonCrossing, batchNow),
+          "floor",
+        );
         if (nonCrossing.length > 0) {
           await writeRunEvent(container, "floor_skip", { groups: nonCrossing.length });
         }
@@ -2231,11 +2312,20 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 groupKey: group.key,
                 companyName: guardCompany.name,
               });
-              await incrementDryStreak(deps.db, container.key, [group], batchNow);
+              await recordRetiredDryStreak(
+                container,
+                await incrementDryStreak(deps.db, container.key, [group], batchNow),
+                "company_guard",
+              );
               continue;
             }
             if (await groupHasInternalStructuralCoSignal(deps.db, group)) crossing.push(group);
-            else await incrementDryStreak(deps.db, container.key, [group], batchNow);
+            else
+              await recordRetiredDryStreak(
+                container,
+                await incrementDryStreak(deps.db, container.key, [group], batchNow),
+                "internal_structural",
+              );
           }
         }
         for (const group of crossing) group.deterministic = chooseDeterministicDisposition(group, existingProjects);
@@ -2368,22 +2458,37 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 groups: pendingCrossing.length,
                 stored: storedGroups.length,
                 aliases: aliasGroups.length,
-                skipped: skippedGroups,
+                skipped: skippedGroups.length,
                 ...(judgeStats
                   ? { judgeMode: "agentic", toolCalls: judgeStats.toolCalls, rounds: judgeStats.rounds }
                   : {}),
               });
-              counters.skippedGroups += skippedGroups;
-              if (skippedGroups > 0) {
+              counters.skippedGroups += skippedGroups.length;
+              if (skippedGroups.length > 0) {
                 deps.logger.info(
                   {
                     containerKey: container.key,
                     companyName: container.companyName,
-                    skippedGroups,
+                    skippedGroups: skippedGroups.length,
                     skippedGroupsTotal: counters.skippedGroups,
                   },
                   "Weekly mint skipped model-disposed groups",
                 );
+                const retired = await incrementDryStreak(deps.db, container.key, skippedGroups, batchNow);
+                if (retired.length > 0) {
+                  const groupNames = retiredDryStreakGroupNames(retired);
+                  seq += 1;
+                  await writeTrace(container.key, seq, "retired_dry_streak", { groupNames, count: retired.length });
+                  deps.logger.info(
+                    {
+                      containerKey: container.key,
+                      companyName: container.companyName,
+                      groupNames,
+                      retired: retired.length,
+                    },
+                    "Weekly mint retired dry-streak candidates",
+                  );
+                }
               }
               if (aliasGroups.length > 0) {
                 await markAliasCandidates(

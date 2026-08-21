@@ -1256,6 +1256,8 @@ export interface WeeklyMintCandidatesTable {
   scan_days: Generated<number>;
   scan_first_day: string | null;
   scan_last_day: string | null;
+  retired_at: string | null;
+  retired_reason: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1456,6 +1458,7 @@ export interface EntityReviewQueueTable {
   resolved_by: string | null;
   resolved_at: string | null;
   resolved_entity_id: string | null;
+  retired_reason: string | null;
   seed_source: string | null;
   seed_source_id: string | null;
   seed_aliases: string | null;
