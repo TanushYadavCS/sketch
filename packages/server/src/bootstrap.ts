@@ -23,7 +23,11 @@ import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { AutomationLockSweeper } from "./automation/lock-service";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
-import { resolveOpenRouterEnrichmentConfig } from "./connectors/enrichment-providers";
+import {
+  buildEnrichmentProviderConfig,
+  createEnrichmentEmbeddingProvider,
+  resolveOpenRouterEnrichmentConfig,
+} from "./connectors/enrichment-providers";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
 import { createOpenRouterGenerator } from "./connectors/openrouter-generate";
 import { getPostSyncCoordinator } from "./connectors/post-sync-coordinator";
@@ -940,6 +944,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
    * scheduler — the only trigger is tryRunManual() via POST /runs. A dev/testing
    * posture: the whole mint path stays observable from the first click.
    */
+  const weeklyMintEmbeddings =
+    config.WEEKLY_MINT_MODE !== "off" && config.WEEKLY_MINT_JUDGE_MODE === "agentic" && weeklyMintSettings
+      ? createEnrichmentEmbeddingProvider(buildEnrichmentProviderConfig(weeklyMintSettings, config, logger))
+      : null;
   const weeklyMint =
     config.WEEKLY_MINT_MODE !== "off"
       ? createWeeklyMintService({
@@ -947,6 +955,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
           mode: config.WEEKLY_MINT_MODE === "shadow" ? "shadow" : "live",
           logger,
           generator: weeklyMintGenerator,
+          agenticGenerator: config.WEEKLY_MINT_JUDGE_MODE === "agentic" ? weeklyMintGenerator : null,
+          judgeMode: config.WEEKLY_MINT_JUDGE_MODE,
+          embeddingProvider: weeklyMintEmbeddings,
           model: weeklyMintModel,
           intervalMs: config.WEEKLY_MINT_INTERVAL_MS,
         })

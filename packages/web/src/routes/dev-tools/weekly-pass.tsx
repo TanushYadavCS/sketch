@@ -7,6 +7,7 @@
  */
 import { type WeeklyMintRun, type WeeklyMintRunEvent, api } from "@/lib/api";
 import { Button } from "@sketch/ui/components/button";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -154,7 +155,7 @@ function groupByContainer(events: WeeklyMintRunEvent[]): ContainerFeed[] {
 }
 
 function RunEvents({ runId, live }: { runId: string; live: boolean }) {
-  const [traceContainer, setTraceContainer] = useState<string | null>(null);
+  const [traceFeed, setTraceFeed] = useState<{ containerKey: string; companyName: string } | null>(null);
   const eventsQuery = useQuery({
     queryKey: ["project-minting", "runs", runId, "events"],
     queryFn: () => api.projectMinting.listRunEvents(runId),
@@ -176,7 +177,6 @@ function RunEvents({ runId, live }: { runId: string; live: boolean }) {
     <div className="mx-3 mb-2 divide-y divide-border rounded-md border border-border bg-muted/20">
       {feeds.map((feed) => {
         const judged = feed.kinds.includes("judged") || feed.kinds.includes("model_error");
-        const open = traceContainer === feed.containerKey;
         return (
           <div key={feed.containerKey} data-testid="weekly-run-container">
             <div className="flex items-center gap-3 px-3 py-1.5">
@@ -187,17 +187,25 @@ function RunEvents({ runId, live }: { runId: string; live: boolean }) {
               {judged ? (
                 <button
                   type="button"
-                  onClick={() => setTraceContainer(open ? null : feed.containerKey)}
+                  onClick={() => setTraceFeed({ containerKey: feed.containerKey, companyName: feed.companyName })}
                   className="shrink-0 text-[11px] text-muted-foreground underline"
                 >
-                  {open ? "hide trace" : "view trace"}
+                  view trace
                 </button>
               ) : null}
             </div>
-            {open ? <TraceView runId={runId} containerKey={feed.containerKey} /> : null}
           </div>
         );
       })}
+      <Sheet open={!!traceFeed} onOpenChange={(open) => !open && setTraceFeed(null)}>
+        <SheetContent side="right" className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-[800px]">
+          <SheetTitle className="text-[14px]">{traceFeed?.companyName} · judge trace</SheetTitle>
+          <SheetDescription className="sr-only">
+            The exact prompt, tool calls, raw response and final dispositions of this judgment.
+          </SheetDescription>
+          {traceFeed ? <TraceView runId={runId} containerKey={traceFeed.containerKey} /> : null}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
@@ -209,14 +217,14 @@ function TraceView({ runId, containerKey }: { runId: string; containerKey: strin
     retry: false,
   });
 
-  if (traceQuery.isLoading) return <Skeleton className="mx-3 mb-2 h-8 rounded-md" />;
+  if (traceQuery.isLoading) return <Skeleton className="mt-3 h-8 rounded-md" />;
   if (traceQuery.isError) {
-    return <p className="px-3 pb-2 text-[12px] text-destructive">Could not load trace: {String(traceQuery.error)}</p>;
+    return <p className="mt-3 text-[12px] text-destructive">Could not load trace: {String(traceQuery.error)}</p>;
   }
 
   const steps = traceQuery.data?.steps ?? [];
   return (
-    <div className="mx-3 mb-2 space-y-1.5" data-testid="weekly-trace">
+    <div className="mt-3 space-y-1.5" data-testid="weekly-trace">
       {steps.map((step) => (
         <details key={step.seq} className="rounded-md border border-border bg-background px-2.5 py-1.5">
           <summary className="cursor-pointer font-mono text-[11px] text-muted-foreground">
