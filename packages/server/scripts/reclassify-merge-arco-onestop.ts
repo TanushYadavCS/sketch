@@ -19,7 +19,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 loadEnv({ path: join(ROOT, ".env") });
 
 const PAIRS = [
-  { label: "Arco", loserId: "a83cfed8-dfde-4094-a6bf-80d8335c47f3", survivorId: "3790a37d-c7d4-464a-a4b1-7a2184d63c15" },
+  {
+    label: "Arco",
+    loserId: "a83cfed8-dfde-4094-a6bf-80d8335c47f3",
+    survivorId: "3790a37d-c7d4-464a-a4b1-7a2184d63c15",
+  },
   {
     label: "OneStop AI",
     loserId: "649cd9ce-a8ee-49c8-b9e0-40a7f1dd80f4",
@@ -70,7 +74,9 @@ async function main(): Promise<void> {
           mergeId: result.mergeId,
           moves: result.moves.length,
         });
-        console.log(`${pair.label}: merged ${loser.name} (${loser.id}) -> ${survivor.name}, ${result.moves.length} moves, mergeId ${result.mergeId}`);
+        console.log(
+          `${pair.label}: merged ${loser.name} (${loser.id}) -> ${survivor.name}, ${result.moves.length} moves, mergeId ${result.mergeId}`,
+        );
       });
     }
     const outPath = join(ROOT, "data/cleanup-apply/arco-onestop-reclassify-merge.json");

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
+import { isPg } from "../db/dialect";
 import type {
   DB,
   EntitiesTable,
@@ -18,7 +19,6 @@ import type {
   TaskEvidenceTable,
   TasksTable,
 } from "../db/schema";
-import { isPg } from "../db/dialect";
 import { parseAliasesString } from "./materialize-json";
 import { normalizeStrict } from "./name-dedup";
 import { strongestProvenanceTier } from "./provenance";
