@@ -30,6 +30,7 @@ import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
 import { productRoutes } from "./api/products";
+import { projectMintingRoutes } from "./api/project-minting";
 import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
 import { scheduledTaskConversationRoutes } from "./api/scheduled-task-conversations";
@@ -499,6 +500,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/graph-passes", graphPassRoutes(db, logger));
+  app.route("/api/project-minting", projectMintingRoutes(db, logger));
   app.route(
     "/api/skills",
     skillsRoutes(config, {

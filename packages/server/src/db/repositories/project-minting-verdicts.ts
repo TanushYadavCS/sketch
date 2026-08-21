@@ -20,9 +20,28 @@ export interface StorePendingVerdictInput {
   verdict: string;
   model: string;
   promptVersion: string;
-  relationshipState?: string;
+  counterpartyKind?: string;
+  clientStage?: string | null;
+  declaredCounterpartyKind?: string | null;
+  declaredClientStage?: string | null;
   flags?: string[];
   voteStats?: object;
+}
+
+export interface AcceptVerdictInput {
+  id: string;
+  actorUserId: string;
+  struckProjects: string[];
+  result: object;
+}
+
+export interface RejectVerdictInput {
+  id: string;
+  actorUserId: string;
+}
+
+function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
+  return Number(result?.numUpdatedRows ?? 0);
 }
 
 export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
@@ -50,7 +69,10 @@ export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
           prompt_version: input.promptVersion,
           status: "pending",
           superseded_at: null,
-          relationship_state: input.relationshipState ?? null,
+          counterparty_kind: input.counterpartyKind ?? null,
+          client_stage: input.clientStage ?? null,
+          declared_counterparty_kind: input.declaredCounterpartyKind ?? null,
+          declared_client_stage: input.declaredClientStage ?? null,
           flags: input.flags && input.flags.length > 0 ? JSON.stringify(input.flags) : null,
           vote_stats: input.voteStats ? JSON.stringify(input.voteStats) : null,
           created_at: now,
@@ -74,6 +96,42 @@ export function createProjectMintingVerdictRepository(db: Kysely<DB>) {
     async findById(id: string): Promise<ProjectMintingVerdictRow | null> {
       const row = await db.selectFrom("project_minting_verdicts").selectAll().where("id", "=", id).executeTakeFirst();
       return row ?? null;
+    },
+
+    async markAccepted(input: AcceptVerdictInput): Promise<boolean> {
+      const now = new Date().toISOString();
+      const result = await db
+        .updateTable("project_minting_verdicts")
+        .set({
+          status: "accepted",
+          decided_at: now,
+          decided_by_user_id: input.actorUserId,
+          struck_projects: JSON.stringify(input.struckProjects),
+          accepted_result: JSON.stringify(input.result),
+          updated_at: now,
+        })
+        .where("id", "=", input.id)
+        .where("status", "=", "pending")
+        .where("superseded_at", "is", null)
+        .executeTakeFirst();
+      return updatedCount(result) === 1;
+    },
+
+    async markRejected(input: RejectVerdictInput): Promise<boolean> {
+      const now = new Date().toISOString();
+      const result = await db
+        .updateTable("project_minting_verdicts")
+        .set({
+          status: "rejected",
+          decided_at: now,
+          decided_by_user_id: input.actorUserId,
+          updated_at: now,
+        })
+        .where("id", "=", input.id)
+        .where("status", "=", "pending")
+        .where("superseded_at", "is", null)
+        .executeTakeFirst();
+      return updatedCount(result) === 1;
     },
   };
 }

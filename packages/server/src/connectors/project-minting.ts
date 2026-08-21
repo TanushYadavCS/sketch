@@ -25,9 +25,11 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import {
-  type DeclaredRelationshipState,
+  type ClientStage,
+  type CompanyRelationshipDeclarationRow,
+  type CounterpartyKind,
   createCompanyRelationshipDeclarationRepository,
-  isDeclaredRelationshipState,
+  resolveDeclaration,
 } from "../db/repositories/company-relationship-declarations";
 import { whereLiveEntity } from "../db/repositories/entities";
 import { normalizeEmailDomain } from "../db/repositories/entity-domains";
@@ -136,7 +138,7 @@ export interface ClusterDossier {
   companyEntityId: string;
   companyName: string;
   groupMembers: ClusterGroupMember[];
-  declaredState: DeclaredRelationshipState | null;
+  declaredRelationship: CompanyRelationshipDeclarationRow | null;
   nominationSignals: NominationSignal[];
   fileCount: number;
   firstDate: string | null;
@@ -572,7 +574,7 @@ function normalizeLink(raw: string): { host: string; ref: string } | null {
 }
 
 export interface BuildClusterDossierOptions {
-  declaredState?: DeclaredRelationshipState | null;
+  declaredRelationship?: CompanyRelationshipDeclarationRow | null;
 }
 
 const ONBOARDING_FAMILY_PATTERN = /onboard/i;
@@ -796,7 +798,7 @@ export async function buildClusterDossier(
     companyEntityId: cluster.companyEntityId,
     companyName: cluster.companyName,
     groupMembers: cluster.groupMembers,
-    declaredState: options?.declaredState ?? null,
+    declaredRelationship: options?.declaredRelationship ?? null,
     nominationSignals: computeNominationSignals(cluster.channels, titleFamilies),
     fileCount: cluster.files.length,
     firstDate: dates[0] ?? null,
@@ -824,9 +826,9 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
     .join(" · ");
   lines.push(`${dossier.fileCount} files · ${dossier.firstDate ?? "?"} → ${dossier.lastDate ?? "?"} · ${sources}`);
   lines.push("");
-  if (dossier.declaredState) {
-    const statusText = dossier.declaredState === "paying" ? "paying customer" : "trial";
-    lines.push(`DECLARED (from tenant registry): managed tenant of ours, status = ${statusText}.`);
+  if (dossier.declaredRelationship) {
+    const { counterparty_kind: kind, client_stage: stage } = dossier.declaredRelationship;
+    lines.push(`DECLARED (from counterparty registry): counterpartyKind = ${kind}; clientStage = ${stage ?? "null"}.`);
     lines.push("");
   }
   if (dossier.nominationSignals.length > 0) {
@@ -892,7 +894,6 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
   return lines.join("\n");
 }
 
-export type RelationshipState = "lead" | "trial" | "customer" | "vendor" | "investor" | "none";
 export type ProjectLifecycleStatus = "proposed" | "active" | "delivered" | "lost";
 export type VerdictConfidence = "high" | "medium" | "low";
 export type TrackerFit =
@@ -920,7 +921,8 @@ export interface VerdictEntityDisposition {
 }
 
 export interface ClusterVerdict {
-  relationshipState: RelationshipState;
+  counterpartyKind: CounterpartyKind;
+  clientStage: ClientStage | null;
   engagement: { name: string; summary?: string } | null;
   projects: VerdictProject[];
   existingEntities: VerdictEntityDisposition[];
@@ -928,7 +930,8 @@ export interface ClusterVerdict {
   notes: string[];
 }
 
-const RELATIONSHIP_STATES: ReadonlySet<string> = new Set(["lead", "trial", "customer", "vendor", "investor", "none"]);
+const COUNTERPARTY_KINDS: ReadonlySet<string> = new Set(["client", "vendor", "investor", "partner", "other"]);
+const CLIENT_STAGES: ReadonlySet<string> = new Set(["prospect", "pilot", "active", "dormant", "ended"]);
 const PROJECT_STATUSES: ReadonlySet<string> = new Set(["proposed", "active", "delivered", "lost"]);
 const CONFIDENCES: ReadonlySet<string> = new Set(["high", "medium", "low"]);
 const TRACKER_FITS: ReadonlySet<string> = new Set([
@@ -948,9 +951,19 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
     throw new Error("Cluster verdict is not a JSON object");
   }
   const record = value as Record<string, unknown>;
-  const relationshipState = record.relationshipState;
-  if (typeof relationshipState !== "string" || !RELATIONSHIP_STATES.has(relationshipState)) {
-    throw new Error(`Cluster verdict has invalid relationshipState: ${String(relationshipState)}`);
+  const counterpartyKind = record.counterpartyKind;
+  if (typeof counterpartyKind !== "string" || !COUNTERPARTY_KINDS.has(counterpartyKind)) {
+    throw new Error(`Cluster verdict has invalid counterpartyKind: ${String(counterpartyKind)}`);
+  }
+  const rawClientStage = record.clientStage;
+  let clientStage: ClientStage | null = null;
+  if (counterpartyKind === "client" || counterpartyKind === "partner") {
+    if (typeof rawClientStage !== "string" || !CLIENT_STAGES.has(rawClientStage)) {
+      throw new Error(`Cluster verdict has invalid clientStage for ${counterpartyKind}: ${String(rawClientStage)}`);
+    }
+    clientStage = rawClientStage as ClientStage;
+  } else if (rawClientStage !== undefined && rawClientStage !== null) {
+    throw new Error(`Cluster verdict has clientStage for non-stage counterpartyKind: ${counterpartyKind}`);
   }
   const trackerFit = record.trackerFit;
   if (typeof trackerFit !== "string" || !TRACKER_FITS.has(trackerFit)) {
@@ -1002,7 +1015,8 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
     });
   }
   return {
-    relationshipState: relationshipState as RelationshipState,
+    counterpartyKind: counterpartyKind as CounterpartyKind,
+    clientStage,
     engagement,
     projects,
     existingEntities,
@@ -1012,37 +1026,46 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
 }
 
 /**
- * Two axes, deliberately separate: the relationship state says what this
- * company is to us, the work containers say what work exists. Trial and
- * customer are declared, never inferred — validated on two full re-runs where
- * inferred-trial precision was 2 of 6 and the richest paying customer
- * classified as trial for want of an invoice. A DECLARED line in the dossier
- * is therefore authoritative. The tracker-fit question stays directionally
+ * Two axes, deliberately separate: counterparty kind says what this company is
+ * to us, client stage says where a client or partner relationship stands, and
+ * work containers say what work exists. Stage 3 emits nominations, never
+ * declarations. A DECLARED line in the dossier is authoritative over the
+ * registry snapshot only; deterministic signals nominate candidates and never
+ * substitute for declared stage. The tracker-fit question stays directionally
  * neutral: both failure modes (too coarse, cross-cutting) exist across
- * customers, and the liveness stats travel as data, not editorial framing.
+ * clients, and the liveness stats travel as data, not editorial framing.
  */
 export function buildVerdictPrompt(dossierMarkdown: string): string {
   return `You are auditing how one company's observed activity relates to the organisation running this system, using only the evidence dossier below. The dossier is built deterministically from file metadata: recurring people with concentration, title families, artifact references, dedicated channels, existing tracker entities with their liveness stats, and an event line. No raw document content is included. A dossier may carry a DECLARED line from an operational registry; declared facts are authoritative and override inference. It may also carry a "Deterministic signals" line; those are indicative nominations only, never authority.
 
-First classify the RELATIONSHIP STATE — exactly one of:
-- "lead": a potential relationship being pursued. Meetings, demos, intros and follow-ups only. Our product is not established as running for them.
-- "trial": our product is actually running for them — a deployment or tenant, a dedicated support or shared operating channel, onboarding threads, operating or fixing work — but the relationship is not an established paying engagement.
-- "customer": an established paying client relationship (declared, or evidenced by sustained delivery work, contracting and invoicing over time).
-- "vendor": they provide a recurring administrative service to us (payroll, employment verification, banking, benefits). Recurring admin is not a project at any stage.
-- "investor": the thread is fundraising or investor relations, not client work.
-- "none": brand mention or no working relationship in this evidence.
+Return nominated axes, never declarations.
 
-Then decide the WORK CONTAINERS, under these state rules:
-- lead: mint no engagement and no projects — with ONE exception: if the dossier shows a client-side scoped work object (a named proposal, cost estimate, statement of work, or product-vision document describing work for THEM), mint that as a project at status "proposed". A meeting series named after our own product is not a work object.
-- trial: exactly one container is expected — a project named "<Client> deployment" (status "active") where onboarding, operating and support work files. Mint additional projects ONLY if a client-side scoped work object exists beyond operating our product.
-- customer: full treatment — an engagement (the account-level container: standups, weekly catch-ups, contracting) plus the projects the evidence supports.
-- vendor / investor / none: mint nothing; empty projects and null engagement.
+First nominate COUNTERPARTY KIND — exactly one of:
+- "client": a sustained account relationship in which we owe or oversee a body of work, where the work is our own output and not the paperwork of the relationship.
+- "partner": a sustained account relationship in which we co-deliver or oversee a body of work, where the work is our own output and not the paperwork of the relationship.
+- "vendor": a recurring administrative supplier — payroll, employment verification, banking, benefits. A subcontractor who helps deliver client work is not a vendor by this test; their delivery files sit in the client's cluster as well, where they mint correctly.
+- "investor": fundraising, investor relations, data room, diligence or board reporting. These are paperwork of the relationship, not our own output.
+- "other": brand mention, admin contact, or no qualifying working relationship in this evidence.
+
+Then, only for counterpartyKind "client" or "partner", nominate CLIENT STAGE — exactly one of:
+- "prospect": no container; projects only for a client-side work object, at most one each.
+- "pilot": a container project; more only with a client-side work object.
+- "active": a container project, plus the projects the evidence supports.
+- "dormant": nothing new; existing containers survive untouched.
+- "ended": nothing new; still-active children surface for review.
+
+Then decide the WORK CONTAINERS, under these nominated-axis rules:
+- client or partner / prospect: mint no engagement and no projects — with ONE exception: if the dossier shows a client-side scoped work object (a named proposal, cost estimate, statement of work, or product-vision document describing work for THEM), mint that as a project at status "proposed". A meeting series named after our own product is not a work object.
+- client or partner / pilot: exactly one container is expected — a project named "<Counterparty> deployment" (status "active") where onboarding, operating and support work files. Mint additional projects ONLY if a client-side scoped work object exists beyond operating our product.
+- client or partner / active: full treatment — an engagement (the account-level container: standups, weekly catch-ups, contracting) plus the projects the evidence supports.
+- client or partner / dormant or ended: mint nothing new; empty projects and null engagement.
+- vendor / investor / other: mint nothing; empty projects and null engagement.
 
 Rules that apply throughout:
 - The absence of delivery artifacts must never be the reason a project is suppressed; it only bounds status: "proposed" until there is delivery evidence, "active" when delivery evidence exists, "delivered" when handover evidence exists, "lost" only on explicit evidence.
 - Delivery evidence means artifacts: a repository, a working dashboard or demo link, a handover, reported hours, assigned engineers. Distinct repositories are the sharpest separator between concurrent workstreams.
 - Be explicit about tense: a kickoff or plan DESCRIBING future work is planned work, not delivery. Vocabulary lies in both directions; prefer artifacts over verbs.
-- Naming: never name a lead's project after our own product — if the only available name comes from our side, that is evidence the cluster is a lead. For a trial, the deployment container IS named "<Client> deployment".
+- Naming: never name a prospect's project after our own product — if the only available name comes from our side, that is evidence the cluster is a prospect. For a pilot, the deployment container IS named "<Counterparty> deployment".
 - Every project must carry evidence anchors: which title families, repositories, and people from the dossier support it. Do not propose a project you cannot anchor.
 
 Then classify how the existing tracker entities (the "suspected fragments" section) fit the activity:
@@ -1060,7 +1083,8 @@ Also note anything suspicious, e.g. evidence that the cluster's company label is
 
 Return only JSON:
 {
-  "relationshipState": "lead | trial | customer | vendor | investor | none",
+  "counterpartyKind": "client | vendor | investor | partner | other",
+  "clientStage": "prospect | pilot | active | dormant | ended" | null,
   "engagement": { "name": "Company name", "summary": "one sentence" } | null,
   "projects": [
     {
@@ -1080,7 +1104,7 @@ Return only JSON:
   "notes": ["anything suspicious or worth a human's attention"]
 }
 
-If relationshipState is vendor, investor or none, return an empty projects array and a null engagement.
+If counterpartyKind is vendor, investor or other, return an empty projects array and a null engagement. clientStage must be present only for client and partner; otherwise return null.
 
 Dossier:
 
@@ -1118,22 +1142,22 @@ export async function loadOwnOrgNames(db: Kysely<DB>): Promise<string[]> {
 }
 
 /**
- * State-conditional product-name tripwire. A minted project named after our
- * own org or product is forbidden under `lead` — on the first full run that
- * flag was a perfect lead detector (11 of 11) — and expected under `trial`,
- * where the deployment IS the work, so only `lead` verdicts are flagged.
+ * Stage-conditional product-name tripwire. A minted project named after our
+ * own org or product is forbidden under `prospect` and expected under
+ * `pilot`, where the deployment is the work. Undeclared clusters are checked
+ * as `prospect` outside this function so a nominated pilot cannot bypass it.
  * Matching reuses the complete-name contiguous-token rule.
  */
 export function productNameTripwireFlags(
-  state: RelationshipState,
+  stage: ClientStage | null,
   projects: VerdictProject[],
   ownNames: string[],
 ): string[] {
-  if (state !== "lead" || ownNames.length === 0) return [];
+  if (stage !== "prospect" || ownNames.length === 0) return [];
   const flags: string[] = [];
   for (const project of projects) {
     if (channelMatchesCompany(project.name, ownNames)) {
-      flags.push(`product_named_project_under_lead:${project.name}`);
+      flags.push(`product_named_project_under_prospect:${project.name}`);
     }
   }
   return flags;
@@ -1141,18 +1165,19 @@ export function productNameTripwireFlags(
 
 export interface VerdictVoteStats {
   votes: number;
-  stateCounts: Record<string, number>;
-  chosenState: RelationshipState;
-  stateAgreement: number;
+  axisCounts: Record<string, number>;
+  chosenCounterpartyKind: CounterpartyKind;
+  chosenClientStage: ClientStage | null;
+  axisAgreement: number;
   projectSetAgreement: number;
   projectNameCounts: Record<string, number>;
 }
 
 /**
  * Self-consistency vote over k stage-3 runs of the same dossier. Majority on
- * the relationship state (ties keep the first state seen, so the result is
- * deterministic given the run order); the stored verdict is the first run
- * that carries the majority state. The agreement numbers are metadata for
+ * the composite nominated axes (ties keep the first axes seen, so the result
+ * is deterministic given the run order); the stored verdict is the first run
+ * that carries the majority axes. The agreement numbers are metadata for
  * PR-P3's write gate, not a gate themselves — measured, 6 of 31 single-run
  * verdicts flipped between two byte-identical runs.
  */
@@ -1161,17 +1186,20 @@ export function chooseMajorityVerdict(verdicts: ClusterVerdict[]): {
   voteStats: VerdictVoteStats;
 } {
   if (verdicts.length === 0) throw new Error("chooseMajorityVerdict needs at least one verdict");
-  const stateCounts: Record<string, number> = {};
+  const axisCounts: Record<string, number> = {};
+  const axisKey = (verdict: ClusterVerdict) => `${verdict.counterpartyKind}:${verdict.clientStage ?? ""}`;
   for (const verdict of verdicts) {
-    stateCounts[verdict.relationshipState] = (stateCounts[verdict.relationshipState] ?? 0) + 1;
+    const key = axisKey(verdict);
+    axisCounts[key] = (axisCounts[key] ?? 0) + 1;
   }
-  let chosenState = verdicts[0].relationshipState;
+  let chosenKey = axisKey(verdicts[0]);
   for (const verdict of verdicts) {
-    if ((stateCounts[verdict.relationshipState] ?? 0) > (stateCounts[chosenState] ?? 0)) {
-      chosenState = verdict.relationshipState;
+    const key = axisKey(verdict);
+    if ((axisCounts[key] ?? 0) > (axisCounts[chosenKey] ?? 0)) {
+      chosenKey = key;
     }
   }
-  const chosen = verdicts.find((verdict) => verdict.relationshipState === chosenState) as ClusterVerdict;
+  const chosen = verdicts.find((verdict) => axisKey(verdict) === chosenKey) as ClusterVerdict;
   const projectNameCounts: Record<string, number> = {};
   for (const verdict of verdicts) {
     for (const project of verdict.projects) {
@@ -1183,16 +1211,17 @@ export function chooseMajorityVerdict(verdicts: ClusterVerdict[]): {
       .map((project) => project.name.toLowerCase())
       .sort()
       .join("|");
-  const chosenKey = projectSetKey(chosen);
+  const chosenProjectSetKey = projectSetKey(chosen);
   const projectSetAgreement =
-    verdicts.filter((verdict) => projectSetKey(verdict) === chosenKey).length / verdicts.length;
+    verdicts.filter((verdict) => projectSetKey(verdict) === chosenProjectSetKey).length / verdicts.length;
   return {
     verdict: chosen,
     voteStats: {
       votes: verdicts.length,
-      stateCounts,
-      chosenState,
-      stateAgreement: (stateCounts[chosenState] ?? 0) / verdicts.length,
+      axisCounts,
+      chosenCounterpartyKind: chosen.counterpartyKind,
+      chosenClientStage: chosen.clientStage,
+      axisAgreement: (axisCounts[chosenKey] ?? 0) / verdicts.length,
       projectSetAgreement,
       projectNameCounts,
     },
@@ -1262,19 +1291,19 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
   const clusters = await clusterClientFiles(input.db, { minFiles: input.minFiles });
   const verdictRepo = createProjectMintingVerdictRepository(input.db);
 
-  const declaredById = new Map<string, DeclaredRelationshipState>();
-  for (const row of await createCompanyRelationshipDeclarationRepository(input.db).list()) {
-    if (isDeclaredRelationshipState(row.declared_state)) declaredById.set(row.company_entity_id, row.declared_state);
-  }
+  const declaredById = new Map(
+    (await createCompanyRelationshipDeclarationRepository(input.db).list()).map((row) => [row.subject_entity_id, row]),
+  );
   const ownNames = await loadOwnOrgNames(input.db);
 
   const results: ClusterPassResult[] = [];
   for (const cluster of clusters) {
     if (onlyTriggered && !cluster.triggered) continue;
     if (input.companyFilter && !input.companyFilter(cluster.companyName)) continue;
-    const declaredState =
-      cluster.groupMembers.map((member) => declaredById.get(member.entityId)).find((state) => state != null) ?? null;
-    const dossier = await buildClusterDossier(input.db, cluster, { declaredState });
+    const declaration = resolveDeclaration(
+      cluster.groupMembers.map((member) => declaredById.get(member.entityId)).filter((row) => row != null),
+    );
+    const dossier = await buildClusterDossier(input.db, cluster, { declaredRelationship: declaration });
     const base = {
       companyEntityId: cluster.companyEntityId,
       companyName: cluster.companyName,
@@ -1301,7 +1330,12 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
       }
       if (collected.length === 0) throw lastError ?? new Error("No verdicts collected");
       const { verdict, voteStats } = chooseMajorityVerdict(collected);
-      const tripwireFlags = productNameTripwireFlags(verdict.relationshipState, verdict.projects, ownNames);
+      const tripwireStage = declaration
+        ? declaration.counterparty_kind === "client" || declaration.counterparty_kind === "partner"
+          ? (declaration.client_stage as ClientStage | null)
+          : null
+        : "prospect";
+      const tripwireFlags = productNameTripwireFlags(tripwireStage, verdict.projects, ownNames);
       let verdictId: string | undefined;
       if (input.storeVerdicts ?? true) {
         const stored = await verdictRepo.storePending({
@@ -1312,7 +1346,10 @@ export async function runProjectMintingPass(input: RunProjectMintingPassInput): 
           verdict: JSON.stringify(verdict),
           model: input.model,
           promptVersion,
-          relationshipState: verdict.relationshipState,
+          counterpartyKind: verdict.counterpartyKind,
+          clientStage: verdict.clientStage,
+          declaredCounterpartyKind: declaration?.counterparty_kind ?? null,
+          declaredClientStage: declaration?.client_stage ?? null,
           flags: tripwireFlags,
           ...(votes > 1 ? { voteStats } : {}),
         });

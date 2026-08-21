@@ -970,16 +970,24 @@ export interface ProjectMintingVerdictsTable {
   prompt_version: string;
   status: Generated<string>;
   superseded_at: string | null;
-  relationship_state: string | null;
+  counterparty_kind: string | null;
+  client_stage: string | null;
+  declared_counterparty_kind: string | null;
+  declared_client_stage: string | null;
   flags: string | null;
   vote_stats: string | null;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  struck_projects: string | null;
+  accepted_result: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
 export interface CompanyRelationshipDeclarationsTable {
-  company_entity_id: string;
-  declared_state: string;
+  subject_entity_id: string;
+  counterparty_kind: string;
+  client_stage: string | null;
   note: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -1111,6 +1119,7 @@ export interface EntitiesTable {
   metadata: string | null;
   source_ref_id: string | null;
   status: string;
+  project_lifecycle_status: string | null;
   provenance_tier: Generated<string>;
   hotness: number;
   created_at: string;
