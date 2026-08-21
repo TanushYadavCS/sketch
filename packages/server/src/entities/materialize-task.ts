@@ -1,4 +1,5 @@
 import { normalizeName } from "../connectors/name-normalize";
+import { createTaskActivityRepository } from "../db/repositories/task-activity";
 import { TEST_ACCOUNT_ENTITY_ID, type TaskStatus, createTaskRepository } from "../db/repositories/tasks";
 import { assignMembership, closeOpenMembershipForTask, upsertWorkCycle } from "../db/repositories/work-cycles";
 import { readJsonObject } from "./materialize-json";
@@ -51,6 +52,16 @@ export async function materializeStructuralTask(
     sourceTaskId: task.sourceTaskId,
   });
   await repo.upsertEvidence(result.taskId, "file", indexedFileId);
+  if (result.created) {
+    await createTaskActivityRepository(deps.db).append({
+      taskId: result.taskId,
+      eventKind: "created",
+      actorType: "system",
+      surface: "sync",
+      identityParts: [result.taskId],
+      occurredAt: new Date().toISOString(),
+    });
+  }
   const now = new Date().toISOString();
   if (task.cycle?.isSprint) {
     if (!fact.connector_config_id) throw new Error("Work cycle materialization requires connector_config_id");

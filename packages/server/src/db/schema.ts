@@ -1177,6 +1177,20 @@ export interface CrmObjectSummariesTable {
   updated_at: Generated<string>;
 }
 
+export interface ContainerClassificationsTable {
+  connector_config_id: string;
+  container_id: string;
+  container_name: string;
+  level: string;
+  proposed_target: string;
+  confidence: string;
+  reasoning: string;
+  digest_hash: string;
+  status: Generated<string>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface EntitySourceRefsTable {
   id: string;
   entity_id: string;
@@ -1862,6 +1876,7 @@ export interface DB {
   email_suppressed_messages: EmailSuppressedMessagesTable;
   email_thread_summaries: EmailThreadSummariesTable;
   crm_object_summaries: CrmObjectSummariesTable;
+  container_classifications: ContainerClassificationsTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;

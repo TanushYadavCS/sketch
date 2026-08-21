@@ -46,8 +46,24 @@ import { isPersonalOrSharedDomain } from "../entities/personal-domains";
 import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { GeminiGenerator } from "./gemini-generate";
+import { type TokenRecurrence, scanTokenRecurrence } from "./token-recurrence-scan";
 
-export const PROJECT_MINTING_PROMPT_VERSION = "project-minting-verdict-v2";
+export const PROJECT_MINTING_PROMPT_VERSION = "project-minting-verdict-v3";
+
+/**
+ * Verdict rows written before the one-noun schema carry these prompt
+ * versions. They keep the engagement-based parse, accept path and API shape
+ * forever; everything newer is the recursive-projects contract.
+ */
+const LEGACY_MINTING_PROMPT_VERSIONS: ReadonlySet<string> = new Set([
+  "project-minting-verdict-v1",
+  "project-minting-verdict-v2",
+]);
+
+export function isV2MintingVerdict(promptVersion: string | null): boolean {
+  if (!promptVersion) return false;
+  return !LEGACY_MINTING_PROMPT_VERSIONS.has(promptVersion);
+}
 
 const YIELD_EVERY = 500;
 const CONTENT_CHUNK = 25;
@@ -126,6 +142,25 @@ export interface DossierFragment {
   parentedTaskCount: number;
 }
 
+export interface CandidateWorkstreamMember {
+  entityId: string;
+  name: string;
+  clusterFileCount: number;
+}
+
+export interface CandidateWorkstream {
+  tokens: string[];
+  members: CandidateWorkstreamMember[];
+  clusterFileCount: number;
+  singletonTitleCount: number;
+  /** >=2 fragments, or >=3 files counting singleton-title support. */
+  meetsStructuralFloor: boolean;
+  /** Content recurrence for this group's tokens; null until scanned. */
+  scan: TokenRecurrence | null;
+  /** Set when the candidate came from a recurring meeting title with no stored fragment (e.g. Benchmarks). */
+  titleFamily?: string;
+}
+
 export interface DossierEvent {
   date: string;
   source: string;
@@ -149,6 +184,8 @@ export interface ClusterDossier {
   artifacts: DossierArtifact[];
   channels: ClusterChannel[];
   fragments: DossierFragment[];
+  ownedElsewhere: DossierFragment[];
+  candidateWorkstreams: CandidateWorkstream[];
   events: DossierEvent[];
   markdown: string;
 }
@@ -290,6 +327,269 @@ export function channelMatchesCompany(channelName: string, candidateNames: strin
     }
   }
   return false;
+}
+
+const FRAGMENT_OWNERSHIP_FLOOR = 0.5;
+const CANDIDATE_MIN_FRAGMENTS = 2;
+const CANDIDATE_MIN_FILES = 3;
+/**
+ * Scan-days floor for candidacy. Measured on Redseer: every junk fragment
+ * (bulk imports, one-off notes) scanned at exactly 1 distinct day; every
+ * real workstream at 2+. Habuild's Langraph — real, user-visible — sits at
+ * 2, which is why the floor is "recurred at all", not 3.
+ */
+export const SCAN_CANDIDACY_MIN_DAYS = 2;
+
+/**
+ * Tokens that name meeting cadence or back-office paperwork, not work
+ * streams. Used only to keep title-family candidates honest — a recurring
+ * "Weekly Standup" family recurs by definition and would otherwise top the
+ * candidate ranking.
+ */
+const CADENCE_TOKENS = new Set([
+  "standup",
+  "weekly",
+  "daily",
+  "monthly",
+  "quarterly",
+  "biweekly",
+  "fortnightly",
+  "review",
+  "retro",
+  "retrospective",
+  "catchup",
+  "checkin",
+  "townhall",
+  "huddle",
+  "alignment",
+  "discussion",
+  "intro",
+  "introduction",
+  "kickoff",
+  "demo",
+  "walkthrough",
+  "onboarding",
+  "invoice",
+  "invoices",
+  "payment",
+  "payments",
+  "payroll",
+  "sprint",
+  "planning",
+  "remaining",
+  "items",
+  "next",
+  "steps",
+  "agenda",
+  "notes",
+  "minutes",
+  "recap",
+  "summary",
+  "slack",
+  "support",
+  "connect",
+  "with",
+  "from",
+  "into",
+  "about",
+  "month",
+]);
+const FRAGMENT_STOP_TOKENS: ReadonlySet<string> = new Set([
+  "project",
+  "projects",
+  "work",
+  "team",
+  "the",
+  "and",
+  "of",
+  "for",
+  "a",
+  "an",
+  "app",
+  "platform",
+  "system",
+  "new",
+  "update",
+  "updates",
+  "call",
+  "meeting",
+  "sync",
+  "phase",
+  "feature",
+  "flow",
+  "poc",
+  "plan",
+]);
+
+export function fragmentNameTokens(name: string): string[] {
+  return tokenizeName(name).filter((token) => token.length > 1 && !FRAGMENT_STOP_TOKENS.has(token));
+}
+
+/**
+ * Deterministic name-token grouping of owned fragments — the "Nutrition
+ * Analysis is 4 entities and nothing joins them" fix. Fragments sharing any
+ * distinctive token union into one candidate; tokens carried by more than
+ * half the fragment names are corpus-generic and never join. The candidacy
+ * floor (>=2 fragments or >=3 cluster files) keeps one-file noise out;
+ * singleton title families whose tokens echo a group count as support so a
+ * stream whose meetings are all singletons still shows its real weight.
+ */
+export function groupFragmentCandidates(
+  fragments: DossierFragment[],
+  titleFamilies: TitleFamily[],
+): CandidateWorkstream[] {
+  if (fragments.length === 0) return [];
+  const frequency = new Map<string, number>();
+  for (const fragment of fragments) {
+    for (const token of new Set(fragmentNameTokens(fragment.name))) {
+      frequency.set(token, (frequency.get(token) ?? 0) + 1);
+    }
+  }
+  const corpusStop = new Set(
+    [...frequency.entries()].filter(([, count]) => count > fragments.length / 2).map(([token]) => token),
+  );
+  const distinctive = (name: string) => fragmentNameTokens(name).filter((token) => !corpusStop.has(token));
+
+  const parent = fragments.map((_, index) => index);
+  const find = (index: number): number => {
+    if (parent[index] === index) return index;
+    parent[index] = find(parent[index]);
+    return parent[index];
+  };
+  const firstByToken = new Map<string, number>();
+  fragments.forEach((fragment, index) => {
+    for (const token of distinctive(fragment.name)) {
+      const seen = firstByToken.get(token);
+      if (seen === undefined) firstByToken.set(token, index);
+      else parent[find(index)] = find(seen);
+    }
+  });
+
+  const groups = new Map<number, DossierFragment[]>();
+  fragments.forEach((fragment, index) => {
+    const root = find(index);
+    const list = groups.get(root);
+    if (list) list.push(fragment);
+    else groups.set(root, [fragment]);
+  });
+
+  const singletonFamilies = titleFamilies.filter((family) => family.count === 1);
+  const result: CandidateWorkstream[] = [];
+  for (const members of groups.values()) {
+    const clusterFileCount = members.reduce((sum, member) => sum + member.clusterFileCount, 0);
+    const tokenSets = members.map((member) => new Set(distinctive(member.name)));
+    const shared = [...(tokenSets[0] ?? [])].filter((token) => tokenSets.every((set) => set.has(token)));
+    const tokens = shared.length > 0 ? shared : [...(tokenSets[0] ?? [])];
+    const singletonTitleCount =
+      tokens.length > 0
+        ? singletonFamilies.filter((family) => {
+            const familyTokens = new Set(tokenizeName(family.key));
+            return tokens.some((token) => familyTokens.has(token));
+          }).length
+        : 0;
+    result.push({
+      tokens,
+      members: members.map((member) => ({
+        entityId: member.entityId,
+        name: member.name,
+        clusterFileCount: member.clusterFileCount,
+      })),
+      clusterFileCount,
+      singletonTitleCount,
+      meetsStructuralFloor:
+        members.length >= CANDIDATE_MIN_FRAGMENTS || clusterFileCount + singletonTitleCount >= CANDIDATE_MIN_FILES,
+      scan: null,
+    });
+  }
+  result.sort(
+    (a, b) => b.clusterFileCount - a.clusterFileCount || (a.tokens[0] ?? "").localeCompare(b.tokens[0] ?? ""),
+  );
+  return result;
+}
+
+/**
+ * Candidacy after the content scan: structural-floor groups stay, and a
+ * below-floor group (usually a single fragment with one stored mention) gets
+ * a second chance when its own name recurs in content on enough distinct
+ * days — stored mentions undercount content 5-6x, so a stream like Langraph
+ * (1 fragment, 1 mention, months of recurring discussion) only survives
+ * here. Ranking is by scan distinct-days; mention counts never rank.
+ */
+/**
+ * Every group gets scanned — including below-structural-floor singletons,
+ * which is the entire point: their second chance rides on the scan. The
+ * singleton fragment's own tokens are the candidate; groups whose distinctive
+ * tokens all got corpus-stopped scan as nothing and keep scan = null.
+ *
+ * Recurring title families with no stored fragment also enter as candidates
+ * (Benchmarks on Redseer: 0 fragments, 15+ scan days, user-confirmed real —
+ * missed by every stored-graph signal). Their tokens are stripped of company
+ * names and cadence words so "Weekly Standup" cannot top the ranking, and
+ * families whose tokens overlap a fragment group fold into that group
+ * instead of duplicating it.
+ */
+async function scanAndRankCandidates(
+  db: Kysely<DB>,
+  cluster: ClientCluster,
+  groups: CandidateWorkstream[],
+  titleFamilies: TitleFamily[],
+  people: DossierPerson[],
+): Promise<CandidateWorkstream[]> {
+  const companyTokens = [
+    ...new Set(
+      [cluster.companyName, ...cluster.groupMembers.map((member) => member.name)].flatMap((name) => tokenizeName(name)),
+    ),
+  ];
+  const personTokens = new Set(people.flatMap((person) => tokenizeName(person.name)));
+  const isCompanyToken = (token: string) =>
+    companyTokens.some(
+      (companyToken) =>
+        token === companyToken ||
+        (token.length >= 4 && companyToken.startsWith(token)) ||
+        (companyToken.length >= 4 && token.startsWith(companyToken)),
+    );
+  const groupTokens = new Set(groups.flatMap((group) => group.tokens));
+  for (const family of titleFamilies) {
+    if (family.count < 2) continue;
+    const tokens = fragmentNameTokens(family.key).filter(
+      (token) =>
+        !isCompanyToken(token) && !personTokens.has(token) && !CADENCE_TOKENS.has(token) && !groupTokens.has(token),
+    );
+    if (tokens.length === 0) continue;
+    for (const token of tokens) groupTokens.add(token);
+    groups.push({
+      tokens,
+      members: [],
+      clusterFileCount: family.count,
+      singletonTitleCount: 0,
+      meetsStructuralFloor: false,
+      scan: null,
+      titleFamily: family.display,
+    });
+  }
+
+  const scannable = groups.filter((group) => group.tokens.length > 0);
+  if (scannable.length > 0) {
+    const results = await scanTokenRecurrence(db, {
+      candidates: scannable.map((group, index) => ({ key: String(index), tokens: group.tokens })),
+      fileIds: cluster.files.map((file) => file.fileId),
+    });
+    scannable.forEach((group, index) => {
+      group.scan = results.get(String(index)) ?? null;
+    });
+  }
+  return applyCandidacyFloor(groups);
+}
+
+export function applyCandidacyFloor(groups: CandidateWorkstream[]): CandidateWorkstream[] {
+  return groups
+    .filter((group) => group.meetsStructuralFloor || (group.scan?.distinctDays ?? 0) >= SCAN_CANDIDACY_MIN_DAYS)
+    .sort(
+      (a, b) =>
+        (b.scan?.distinctDays ?? 0) - (a.scan?.distinctDays ?? 0) ||
+        b.clusterFileCount - a.clusterFileCount ||
+        (a.tokens[0] ?? "").localeCompare(b.tokens[0] ?? ""),
+    );
 }
 
 export interface ClusterClientFilesOptions {
@@ -762,7 +1062,7 @@ export async function buildClusterDossier(
       if (row.parent_entity_id) tasksByFragment.set(row.parent_entity_id, Number(row.total));
     }
   }
-  const fragments: DossierFragment[] = fragmentRows
+  const allFragments: DossierFragment[] = fragmentRows
     .map((row) => ({
       entityId: row.entityId,
       name: row.name,
@@ -773,6 +1073,19 @@ export async function buildClusterDossier(
       parentedTaskCount: tasksByFragment.get(row.entityId) ?? 0,
     }))
     .sort((a, b) => b.clusterFileCount - a.clusterFileCount || a.name.localeCompare(b.name));
+  /**
+   * Global fragment ownership: an entity is disposable here only when this
+   * cluster holds at least half of its mentioning files. GCC Dashboard sat in
+   * Habuild's dossier with 2 of its 21 files and got merged into Habuild work
+   * it never belonged to — ownership is what keeps a neighbour's project from
+   * being absorbed.
+   */
+  const fragments = allFragments.filter(
+    (fragment) => fragment.clusterFileCount / Math.max(fragment.totalFileCount, 1) >= FRAGMENT_OWNERSHIP_FLOOR,
+  );
+  const ownedElsewhere = allFragments.filter(
+    (fragment) => fragment.clusterFileCount / Math.max(fragment.totalFileCount, 1) < FRAGMENT_OWNERSHIP_FLOOR,
+  );
 
   const seenEvents = new Set<string>();
   const allEvents: DossierEvent[] = [];
@@ -809,6 +1122,14 @@ export async function buildClusterDossier(
     artifacts,
     channels: cluster.channels,
     fragments,
+    ownedElsewhere,
+    candidateWorkstreams: await scanAndRankCandidates(
+      db,
+      cluster,
+      groupFragmentCandidates(fragments, titleFamilies),
+      titleFamilies,
+      dossierPeople,
+    ),
     events,
     markdown: "",
   };
@@ -886,6 +1207,47 @@ export function renderDossierMarkdown(dossier: ClusterDossier): string {
   }
   lines.push("");
 
+  if (dossier.ownedElsewhere.length > 0) {
+    lines.push(
+      "Mentioned here but owned elsewhere (most of their files sit in another cluster; no disposition needed, do NOT merge or adopt):",
+    );
+    for (const fragment of dossier.ownedElsewhere) {
+      lines.push(
+        `- "${fragment.name}" — ${fragment.clusterFileCount} files here of ${fragment.totalFileCount} anywhere`,
+      );
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    "## Candidate workstreams (name-token groups of the fragments above, ranked by content recurrence — how often the tokens actually appear across file text, which stored mentions undercount)",
+  );
+  if (dossier.candidateWorkstreams.length === 0) lines.push("- none crossed the candidacy floor");
+  for (const candidate of dossier.candidateWorkstreams) {
+    const singleton =
+      candidate.singletonTitleCount > 0
+        ? `, ${candidate.singletonTitleCount} singleton meeting titles echo these tokens`
+        : "";
+    const scan = candidate.scan;
+    const monthly = scan
+      ? Object.entries(scan.monthly)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([month, count]) => `${month}:${count}`)
+          .join(" ")
+      : "";
+    const scanText =
+      scan && scan.files.length > 0
+        ? `recurs in content on ${scan.distinctDays} distinct days across ${scan.files.length} files (${scan.firstDay ?? "?"} → ${scan.lastDay ?? "?"}${monthly ? `; monthly ${monthly}` : ""}) · `
+        : "no content recurrence beyond the stored mentions · ";
+    const membership = candidate.titleFamily
+      ? `recurring meeting title "${candidate.titleFamily}" (${candidate.clusterFileCount} meetings, no stored fragment)`
+      : `${candidate.members.length} fragments, ${candidate.clusterFileCount} cluster files${singleton}: ${candidate.members
+          .map((member) => `"${member.name}" [id: ${member.entityId}]`)
+          .join(", ")}`;
+    lines.push(`- tokens [${candidate.tokens.join(", ")}] — ${scanText}${membership}`);
+  }
+  lines.push("");
+
   lines.push(`## Event line (${dossier.events.length} rows, deduped by day and title family)`);
   for (const event of dossier.events) {
     lines.push(`- ${event.date} ${event.source} — ${event.title}`);
@@ -906,8 +1268,12 @@ export interface VerdictProject {
   name: string;
   status: ProjectLifecycleStatus;
   confidence: VerdictConfidence;
+  /** Exact name of the parent project in the same verdict, null for top-level. v1 rows: always null. */
+  parentName: string | null;
   evidenceTitleFamilies: string[];
   evidenceRepos: string[];
+  /** Entity ids from the dossier fragments/candidates sections this project absorbs. v1 rows: empty. */
+  evidenceFragments: string[];
   evidencePeople: string[];
   reasoning?: string;
 }
@@ -946,7 +1312,46 @@ function readStringArray(value: unknown): string[] {
   return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
 }
 
-export function readClusterVerdict(value: unknown): ClusterVerdict {
+function assertProjectForestIsValid(projects: VerdictProject[]): void {
+  const byName = new Map<string, VerdictProject>();
+  for (const project of projects) {
+    const key = project.name.toLowerCase();
+    if (byName.has(key)) throw new Error(`Cluster verdict has duplicate project name: ${project.name}`);
+    byName.set(key, project);
+  }
+  for (const project of projects) {
+    if (!project.parentName) continue;
+    const parentKey = project.parentName.toLowerCase();
+    if (parentKey === project.name.toLowerCase()) {
+      throw new Error(`Cluster verdict project "${project.name}" is its own parent`);
+    }
+    if (!byName.has(parentKey)) {
+      throw new Error(`Cluster verdict project "${project.name}" names unknown parent "${project.parentName}"`);
+    }
+  }
+  for (const project of projects) {
+    const seen = new Set<string>([project.name.toLowerCase()]);
+    let current = project.parentName;
+    while (current) {
+      const key = current.toLowerCase();
+      if (seen.has(key)) throw new Error(`Cluster verdict parent chain cycles at "${current}"`);
+      seen.add(key);
+      current = byName.get(key)?.parentName ?? null;
+    }
+  }
+}
+
+export interface ReadClusterVerdictOptions {
+  /**
+   * Strict mode is for newly requested v2 verdicts: duplicate project names,
+   * unknown or self parentName, and parent cycles are rejected at parse time
+   * because acceptance resolves parents by name. Stored v1 rows are read
+   * without it and parse exactly as they always did.
+   */
+  strict?: boolean;
+}
+
+export function readClusterVerdict(value: unknown, options?: ReadClusterVerdictOptions): ClusterVerdict {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Cluster verdict is not a JSON object");
   }
@@ -992,12 +1397,15 @@ export function readClusterVerdict(value: unknown): ClusterVerdict {
       name: raw.name.trim(),
       status: raw.status as ProjectLifecycleStatus,
       confidence: confidence as VerdictConfidence,
+      parentName: typeof raw.parentName === "string" && raw.parentName.trim() ? raw.parentName.trim() : null,
       evidenceTitleFamilies: readStringArray(raw.evidenceTitleFamilies),
       evidenceRepos: readStringArray(raw.evidenceRepos),
+      evidenceFragments: [...new Set(readStringArray(raw.evidenceFragments))],
       evidencePeople: readStringArray(raw.evidencePeople),
       ...(typeof raw.reasoning === "string" && raw.reasoning.trim() ? { reasoning: raw.reasoning.trim() } : {}),
     });
   }
+  if (options?.strict) assertProjectForestIsValid(projects);
   const existingEntities: VerdictEntityDisposition[] = [];
   for (const item of Array.isArray(record.existingEntities) ? record.existingEntities : []) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
@@ -1055,18 +1463,21 @@ Then, only for counterpartyKind "client" or "partner", nominate CLIENT STAGE —
 - "ended": nothing new; still-active children surface for review.
 
 Then decide the WORK CONTAINERS, under these nominated-axis rules:
-- client or partner / prospect: mint no engagement and no projects — with ONE exception: if the dossier shows a client-side scoped work object (a named proposal, cost estimate, statement of work, or product-vision document describing work for THEM), mint that as a project at status "proposed". A meeting series named after our own product is not a work object.
-- client or partner / pilot: exactly one container is expected — a project named "<Counterparty> deployment" (status "active") where onboarding, operating and support work files. Mint additional projects ONLY if a client-side scoped work object exists beyond operating our product.
-- client or partner / active: full treatment — an engagement (the account-level container: standups, weekly catch-ups, contracting) plus the projects the evidence supports.
-- client or partner / dormant or ended: mint nothing new; empty projects and null engagement.
-- vendor / investor / other: mint nothing; empty projects and null engagement.
+- client or partner / prospect: mint no projects — with ONE exception: if the dossier shows a client-side scoped work object (a named proposal, cost estimate, statement of work, or product-vision document describing work for THEM), mint that as one project at status "proposed", parentName null. A meeting series named after our own product is not a work object.
+- client or partner / pilot: exactly one top-level project named "<Counterparty> deployment" (status "active") where onboarding, operating and support work files. Mint additional projects ONLY if a client-side scoped work object exists beyond operating our product; those nest under the deployment when they are part of operating it.
+- client or partner / active: EXACTLY ONE top-level project (parentName null) — the account container named after the counterparty, holding standups, weekly catch-ups, contracting and account operations. EVERY other project you propose must be a descendant of it: distinct work streams as its children, sub-efforts as their children. Never propose a second top-level project.
+- client or partner / dormant or ended: mint nothing new; empty projects.
+- vendor / investor / other: mint nothing; empty projects.
 
 Rules that apply throughout:
 - The absence of delivery artifacts must never be the reason a project is suppressed; it only bounds status: "proposed" until there is delivery evidence, "active" when delivery evidence exists, "delivered" when handover evidence exists, "lost" only on explicit evidence.
 - Delivery evidence means artifacts: a repository, a working dashboard or demo link, a handover, reported hours, assigned engineers. Distinct repositories are the sharpest separator between concurrent workstreams.
 - Be explicit about tense: a kickoff or plan DESCRIBING future work is planned work, not delivery. Vocabulary lies in both directions; prefer artifacts over verbs.
 - Naming: never name a prospect's project after our own product — if the only available name comes from our side, that is evidence the cluster is a prospect. For a pilot, the deployment container IS named "<Counterparty> deployment".
-- Every project must carry evidence anchors: which title families, repositories, and people from the dossier support it. Do not propose a project you cannot anchor.
+- Projects NEST: when a proposed project is a distinct stream inside a larger proposed project, set its parentName to that parent's exact name (the parent must appear in this same projects list; top-level projects use null). Sub-projects of sub-projects are allowed. A recurring sub-effort with its own identity — its own meeting series, its own fragments, its own people focus — deserves a child project rather than being flattened into its parent.
+- The "Candidate workstreams" section lists deterministic groupings of the existing fragments. For each group, either propose a project covering it (usually a child of the stream it belongs to) and cite its member ids in evidenceFragments, or explain in notes why it is not real work. Do not silently flatten a candidate group into a parent.
+- Fragments listed as "owned elsewhere" belong to another company's cluster: give them no disposition, never merge or adopt them.
+- Every project must carry evidence anchors: which title families, repositories, people, and fragment ids from the dossier support it. Do not propose a project you cannot anchor.
 
 Then classify how the existing tracker entities (the "suspected fragments" section) fit the activity:
 - cluster_matches_containers: existing entities already describe this work correctly — adopt them, propose nothing new for those.
@@ -1085,14 +1496,15 @@ Return only JSON:
 {
   "counterpartyKind": "client | vendor | investor | partner | other",
   "clientStage": "prospect | pilot | active | dormant | ended" | null,
-  "engagement": { "name": "Company name", "summary": "one sentence" } | null,
   "projects": [
     {
       "name": "Project name",
       "status": "proposed | active | delivered | lost",
       "confidence": "high | medium | low",
+      "parentName": "exact name of the parent project in this list, or null for top-level",
       "evidenceTitleFamilies": ["exact title family strings from the dossier"],
       "evidenceRepos": ["repo refs from the dossier"],
+      "evidenceFragments": ["entity ids from the fragments/candidates sections"],
       "evidencePeople": ["names from the dossier"],
       "reasoning": "one sentence"
     }
@@ -1104,7 +1516,7 @@ Return only JSON:
   "notes": ["anything suspicious or worth a human's attention"]
 }
 
-If counterpartyKind is vendor, investor or other, return an empty projects array and a null engagement. clientStage must be present only for client and partner; otherwise return null.
+If counterpartyKind is vendor, investor or other, return an empty projects array. clientStage must be present only for client and partner; otherwise return null.
 
 Dossier:
 
@@ -1242,7 +1654,7 @@ export async function requestClusterVerdict(input: RequestClusterVerdictInput): 
     ...(input.dumpDir ? { dumpDir: input.dumpDir } : {}),
     thinkingBudget: null,
   });
-  return readClusterVerdict(raw);
+  return readClusterVerdict(raw, { strict: true });
 }
 
 export interface RunProjectMintingPassInput {

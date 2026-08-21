@@ -21,7 +21,7 @@ import { materializeLlmTask } from "../entities/materialize-llm-task";
 import type { StageOutcome, StageReporter } from "./enrichment-stage-report";
 import type { GeminiGenerator } from "./gemini-generate";
 import { LLM_TASK_CONTENT_LIMIT, LLM_TASK_PROMPT_VERSION, extractLlmTaskCandidates } from "./llm-task-extraction";
-import { normalizeName } from "./name-normalize";
+import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 
 export const TASK_MINTING_PROJECT_CAP = 100;
 export const TASK_MINTING_EXISTING_TASK_CAP = 60;
@@ -56,6 +56,7 @@ export interface MintedTaskCandidate {
   sourceExcerpt?: string | null;
   projectName?: string | null;
   taskId?: string | null;
+  updated?: boolean;
 }
 
 export interface SimilarFile {
@@ -174,6 +175,8 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
       priorTitles: priorTitles.items,
       projects: projects.items,
       existingTasks: existingTasks.items,
+      existingTaskIdMap: existingTasks.idMap,
+      logger: input.logger,
       generator: input.generator,
       promptVersion: LLM_TASK_PROMPT_VERSION,
       dumpDir: input.dumpDir,
@@ -212,6 +215,7 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
 
   for (const [candidateIndex, candidate] of candidates.entries()) {
     let taskId: string | undefined;
+    let updated = false;
     try {
       const candidateId = buildLlmTaskCandidateId(input.file.id, `${input.userId}:${candidate.title}`);
       const upserted = await upsertLlmTaskFact(input.db, {
@@ -244,7 +248,10 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
           .where("id", "=", fact.id)
           .execute();
       }
-      if (result.kind === "task_materialized") taskId = result.taskId;
+      if (result.kind === "task_materialized") {
+        taskId = result.taskId;
+        updated = result.updated === true;
+      }
       writeOutcomes.push(mintWriteOutcome(candidate.title, result));
     } catch (err) {
       input.logger.warn({ err, fileId: input.file.id, candidateIndex }, "Minted task materialization failed");
@@ -263,6 +270,7 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
       sourceExcerpt: candidate.sourceExcerpt,
       projectName: candidate.projectName ?? null,
       ...(taskId ? { taskId } : {}),
+      ...(updated ? { updated: true } : {}),
     });
   }
 
@@ -305,6 +313,7 @@ export async function mintTasksFromFile(input: MintTasksFromFileInput): Promise<
 function mintWriteOutcome(title: string, result: Awaited<ReturnType<typeof materializeLlmTask>>): StageOutcome {
   const base = { subject: title, kind: "candidate" };
   if (result.kind === "task_materialized") {
+    if (result.updated) return { ...base, result: "updated" };
     return { ...base, result: result.created ? "created" : "linked" };
   }
   if (result.kind === "deferred_below_threshold") {
@@ -325,7 +334,7 @@ function buildMintContext(args: {
   priorTitles: { total: number; items: string[] };
   /** `items` is the model-facing shape; only its length is read here, for the truncation flag. */
   projects: { total: number; labels: string[]; items: readonly unknown[] };
-  existingTasks: { total: number; items: string[]; selection: string };
+  existingTasks: { total: number; items: string[]; idMap: Map<string, string | null>; selection: string };
 }): MintContextBlock[] {
   const { file, sentContent, sourceDate, attendees, parentRefs, priorTitles, projects, existingTasks } = args;
   return [
@@ -622,8 +631,17 @@ async function loadExistingTasks(
     if (!tasksById.has(task.id)) tasksById.set(task.id, task);
   }
   const tasks = [...tasksById.values()].slice(0, TASK_MINTING_EXISTING_TASK_CAP);
+  const parentIds = [...new Set(tasks.map((task) => task.parent_entity_id).filter((id): id is string => Boolean(id)))];
+  const parentRows =
+    parentIds.length === 0
+      ? []
+      : await db.selectFrom("entities").select(["id", "name"]).where("id", "in", parentIds).execute();
+  const parentNames = new Map(parentRows.map((row) => [row.id, row.name]));
+  const idMap = createAmbiguityAwareMap<string, string>();
+  for (const task of tasks) idMap.add(task.id.slice(0, 8), task.id);
   return {
-    items: tasks.map(formatExistingTask),
+    items: tasks.map((task) => formatExistingTask(task, parentNames.get(task.parent_entity_id ?? ""))),
+    idMap: new Map(tasks.map((task) => [task.id.slice(0, 8), idMap.get(task.id.slice(0, 8)) ?? null])),
     total,
     selection:
       neighbourhood.kind === "available"
@@ -634,10 +652,23 @@ async function loadExistingTasks(
   };
 }
 
-function formatExistingTask(task: { title: string; status: string; assignee_name: string | null }) {
+function formatExistingTask(
+  task: {
+    id: string;
+    title: string;
+    status: string;
+    assignee_name: string | null;
+    provenance: string;
+    status_authority: string;
+  },
+  parentName: string | undefined,
+) {
   const clauses = [
     ...(task.status === "in_progress" ? ["in_progress"] : []),
     ...(task.assignee_name?.trim() ? [`owner: ${task.assignee_name.trim()}`] : []),
+    ...(parentName?.trim() ? [`parent: ${parentName.trim()}`] : []),
+    ...(task.provenance === "structural" && task.status_authority === "external" ? ["tracker"] : []),
   ];
-  return clauses.length > 0 ? `${task.title} [${clauses.join("; ")}]` : task.title;
+  const prefix = `[t:${task.id.slice(0, 8)}] ${task.title}`;
+  return clauses.length > 0 ? `${prefix} [${clauses.join("; ")}]` : prefix;
 }

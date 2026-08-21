@@ -78,6 +78,12 @@ export async function subtreeIds(db: Kysely<DB>, rootId: string): Promise<string
   return [...seen];
 }
 
+/**
+ * Shared cycle guard for every part_of writer, not just user grouping: adding
+ * child→parent is illegal when the parent already sits inside the child's
+ * subtree. The BFS is source-agnostic on purpose — a cycle through a
+ * different writer's edges is still a cycle.
+ */
 export async function assertNoPartOfCycle(db: Kysely<DB>, childId: string, parentId: string): Promise<void> {
   if (childId === parentId) throw new ProjectBindingError("WOULD_CYCLE");
   if ((await subtreeIds(db, childId)).includes(parentId)) throw new ProjectBindingError("WOULD_CYCLE");

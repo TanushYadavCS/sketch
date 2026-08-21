@@ -135,7 +135,7 @@ export type MaterializeResult =
       mentionsWritten: number;
       relationshipsWritten: number;
     }
-  | { kind: "task_materialized"; taskId: string; created: boolean }
+  | { kind: "task_materialized"; taskId: string; created: boolean; updated?: boolean }
   | { kind: "commitment_materialized" }
   | { kind: "decision_materialized" }
   | { kind: "milestone_materialized" }

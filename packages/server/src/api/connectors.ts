@@ -16,7 +16,13 @@ import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
-import { browseClickUpWorkspaces } from "../connectors/clickup";
+import { browseClickUpWorkspaces, collectClickUpContainerDigest } from "../connectors/clickup";
+import {
+  classifyContainerDigest,
+  listContainerClassifications,
+  markAcceptedContainerOverrides,
+  upsertContainerClassifications,
+} from "../connectors/container-digest";
 import {
   CanvasConnectorCredentialProvider,
   ConnectorCredentialConfigError,
@@ -426,6 +432,8 @@ export function connectorRoutes(
       | "TASK_MINTING_MODEL"
       | "LLM_TASK_CORROBORATION_THRESHOLD"
       | "SLACK_ENTITY_SYNC"
+      | "CONTAINER_CLASSIFICATION_ENABLED"
+      | "PROJECT_MINTING_MODEL"
     >
   >,
   deps?: {
@@ -442,6 +450,7 @@ export function connectorRoutes(
      * until the worker adopts the captured history into a range.
      */
     wakeWhatsAppBackfill?: () => Promise<void> | void;
+    containerClassificationGenerator?: GeminiGenerator;
   },
 ) {
   const routes = new Hono();
@@ -496,6 +505,11 @@ export function connectorRoutes(
 
   function configEnabled(config: { connector_type: string; sync_status?: string }): boolean {
     return configVisible(config) && config.sync_status !== "disabled";
+  }
+
+  function containerClassificationEnabled(config: { connector_type: string }): boolean {
+    const meta = getConnector(config.connector_type as ConnectorType);
+    return appConfig?.CONTAINER_CLASSIFICATION_ENABLED === true && Boolean(meta.hierarchyLevels?.length);
   }
 
   function localConnectorBlockedResponse(c: Context, connectorType: ConnectorType) {
@@ -650,6 +664,7 @@ export function connectorRoutes(
           perUserAuth: meta.perUserAuth,
           requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
           hierarchyLevels: meta.hierarchyLevels ?? null,
+          containerClassificationEnabled: containerClassificationEnabled(cfg),
           ...permissionFields(permissions),
         };
       }),
@@ -1965,6 +1980,83 @@ export function connectorRoutes(
     }
   });
 
+  if (appConfig?.CONTAINER_CLASSIFICATION_ENABLED === true) {
+    routes.get("/:id/container-classification", async (c) => {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
+
+      const config = await connectorRepo.findConfigById(c.req.param("id"));
+      if (!config || !configEnabled(config)) {
+        return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+      }
+      if (!containerClassificationEnabled(config)) {
+        return c.json(
+          { error: { code: "UNSUPPORTED_CONNECTOR", message: "Connector classification is not enabled" } },
+          400,
+        );
+      }
+
+      return c.json({ proposals: await listContainerClassifications(db, config.id) });
+    });
+
+    routes.post("/:id/container-classification", async (c) => {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
+
+      const config = await connectorRepo.findConfigById(c.req.param("id"));
+      if (!config || !configEnabled(config)) {
+        return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+      }
+      if (config.connector_type !== "clickup" || !containerClassificationEnabled(config)) {
+        return c.json(
+          {
+            error: {
+              code: "UNSUPPORTED_CONNECTOR",
+              message: "Only hierarchy-enabled ClickUp connectors can be classified",
+            },
+          },
+          400,
+        );
+      }
+
+      const resolved = await resolveStoredCredentials(config);
+      const scopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+      const digest = await collectClickUpContainerDigest({
+        credentials: resolved.credentials,
+        scopeConfig,
+        logger: logger.child({ connectorId: config.id, component: "container-classification" }),
+      });
+      const existing = await listContainerClassifications(db, config.id);
+      if (existing.length > 0 && existing.every((proposal) => proposal.digestHash === digest.hash)) {
+        return c.json({ run: { status: "unchanged", digestHash: digest.hash }, proposals: existing });
+      }
+
+      const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+      const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+      const model = appConfig?.PROJECT_MINTING_MODEL ?? openRouterConfig.openRouterModel;
+      const generator =
+        deps?.containerClassificationGenerator ??
+        (openRouterConfig.openRouterApiKey
+          ? createOpenRouterGenerator(openRouterConfig.openRouterApiKey, { model, reasoningEffort: "medium" })
+          : null);
+      if (!generator) {
+        return c.json(
+          {
+            error: {
+              code: "LLM_NOT_CONFIGURED",
+              message: "Configure an OpenRouter key before classifying containers",
+            },
+          },
+          503,
+        );
+      }
+
+      const proposals = await classifyContainerDigest({ digest, generator, model });
+      await upsertContainerClassifications(db, config.id, proposals);
+      return c.json({ run: { status: "completed", digestHash: digest.hash }, proposals });
+    });
+  }
+
   /* ── Dynamic :id routes ─────────────────────────────── */
 
   /** Get a single connector. */
@@ -1997,6 +2089,7 @@ export function connectorRoutes(
         perUserAuth: meta.perUserAuth,
         requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
         hierarchyLevels: meta.hierarchyLevels ?? null,
+        containerClassificationEnabled: containerClassificationEnabled(config),
         ...permissionFields(permissions),
       },
     });
@@ -2401,6 +2494,14 @@ export function connectorRoutes(
           syncCursor: null,
           errorMessage: null,
         });
+        const hierarchyMapping = mergedScope.hierarchyMapping;
+        const containers =
+          hierarchyMapping && typeof hierarchyMapping === "object" && !Array.isArray(hierarchyMapping)
+            ? (hierarchyMapping as Record<string, unknown>).containers
+            : undefined;
+        if (containers && typeof containers === "object" && !Array.isArray(containers)) {
+          await markAcceptedContainerOverrides(trx, config.id, containers as Record<string, unknown>);
+        }
         return scope;
       });
     } catch (err) {

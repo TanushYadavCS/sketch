@@ -3,7 +3,12 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { resolveOpenRouterEnrichmentConfig } from "../connectors/enrichment-providers";
 import { createOpenRouterGenerator } from "../connectors/openrouter-generate";
-import { clusterClientFiles, readClusterVerdict, runProjectMintingPass } from "../connectors/project-minting";
+import {
+  clusterClientFiles,
+  isV2MintingVerdict,
+  readClusterVerdict,
+  runProjectMintingPass,
+} from "../connectors/project-minting";
 import {
   ProjectMintingAcceptanceError,
   acceptProjectMintingVerdict,
@@ -60,6 +65,8 @@ function serializeVerdict(row: ProjectMintingVerdictRow, includeDossier = false)
     declaredClientStage: row.declared_client_stage,
     flags: parseJsonArray(row.flags),
     voteStats: row.vote_stats ? JSON.parse(row.vote_stats) : null,
+    promptVersion: row.prompt_version,
+    schemaV2: isV2MintingVerdict(row.prompt_version),
     verdict,
     dossier: includeDossier ? row.dossier : undefined,
     status: row.status,
@@ -350,6 +357,7 @@ export function projectMintingRoutes(
         struckProjectNames: readStringArray(body.struckProjectNames),
         renameMap: readRenameMap(body.renameMap),
         overrideTripwireFlags: body.overrideTripwireFlags === true,
+        dryRun: body.dryRun === true,
       });
       return c.json({ acceptance: result });
     } catch (err) {

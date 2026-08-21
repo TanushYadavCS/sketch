@@ -204,6 +204,7 @@ import * as m201 from "./migrations/201-counterparty-axes";
 import * as m202 from "./migrations/202-verdict-counterparty-axes";
 import * as m203 from "./migrations/203-verdict-declaration-snapshot";
 import * as m204 from "./migrations/204-indexed-file-source-meta";
+import * as m205 from "./migrations/205-container-classifications";
 import type { DB } from "./schema";
 
 /**
@@ -417,6 +418,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "202-verdict-counterparty-axes": m202,
           "203-verdict-declaration-snapshot": m203,
           "204-indexed-file-source-meta": m204,
+          "205-container-classifications": m205,
         };
       },
     },

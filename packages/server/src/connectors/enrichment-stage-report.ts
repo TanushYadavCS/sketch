@@ -45,7 +45,7 @@ export type EnrichmentStageStatus = "done" | "failed" | "skipped";
 export type StageOutcome = {
   subject: string;
   kind: string;
-  result: "kept" | "dropped" | "created" | "linked" | "queued" | "suppressed" | "deferred";
+  result: "kept" | "dropped" | "created" | "updated" | "linked" | "queued" | "suppressed" | "deferred";
   reason?: string;
 };
 

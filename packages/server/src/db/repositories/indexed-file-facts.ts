@@ -795,6 +795,8 @@ export async function upsertLlmTaskFact(
     owner: input.candidate.owner,
     dueDate: readOptionalDueDate(input.candidate.dueDate),
     hasOwnerVerbObject: input.candidate.hasOwnerVerbObject,
+    updateOf: input.candidate.updateOf,
+    statusHint: input.candidate.statusHint,
     corroborationKey: input.corroborationKey,
     parentRef: input.parentRef,
     parentEntityId: input.parentEntityId,
@@ -825,6 +827,11 @@ function readOptionalDueDate(value: unknown): string | undefined {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
 }
 
+/**
+ * Candidate identity intentionally remains title-derived. A model rephrasing a
+ * task can still fork fact identity; explicit update references and mechanical
+ * title-overlap dedup stop that fork from becoming another task row.
+ */
 export function buildLlmTaskCandidateId(indexedFileId: string, title: string): string {
   return createHash("sha256")
     .update([indexedFileId, normalizeName(title)].join(LLM_TASK_ID_SEPARATOR))

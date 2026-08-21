@@ -223,6 +223,7 @@ export function ManageConnectorDialog({
                 connectorType={connector.connectorType}
                 scopeConfig={connector.scopeConfig}
                 hierarchyLevels={connector.hierarchyLevels}
+                containerClassificationEnabled={connector.containerClassificationEnabled === true}
                 scopeConfigKey={definition.scopeConfigKey}
                 flatScopeShape={definition.flatScopeShape}
                 scopeLabel={definition.scopeLabel}
@@ -437,6 +438,7 @@ function ScopeEditorDispatch({
   connectorType,
   scopeConfig,
   hierarchyLevels,
+  containerClassificationEnabled,
   scopeConfigKey,
   flatScopeShape,
   scopeLabel,
@@ -449,6 +451,7 @@ function ScopeEditorDispatch({
   connectorType: string;
   scopeConfig: Record<string, unknown>;
   hierarchyLevels?: HierarchyLevel[] | null;
+  containerClassificationEnabled?: boolean;
   scopeConfigKey?: string;
   flatScopeShape?: IntegrationDefinition["flatScopeShape"];
   scopeLabel: string;
@@ -468,6 +471,7 @@ function ScopeEditorDispatch({
       connectorId={connectorId}
       levels={hierarchyLevels}
       scopeConfig={scopeConfig}
+      containerClassificationEnabled={containerClassificationEnabled === true}
     />
   ) : null;
 

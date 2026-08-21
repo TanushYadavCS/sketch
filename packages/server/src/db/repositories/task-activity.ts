@@ -18,6 +18,7 @@ export interface AppendTaskActivityInput {
   evidence?: {
     messageIds?: number[];
     fileIds?: string[];
+    excerpt?: string;
   };
   identityParts: Array<string | number | null>;
   occurredAt: string;
@@ -76,6 +77,7 @@ function normalizeEvidence(evidence: AppendTaskActivityInput["evidence"]) {
     messageCount: messageIds.length,
     fileIds: fileIds.slice(0, EVIDENCE_IDENTIFIER_LIMIT),
     fileCount: fileIds.length,
+    ...(evidence.excerpt?.trim() ? { excerpt: evidence.excerpt.trim() } : {}),
     truncated: messageIds.length > EVIDENCE_IDENTIFIER_LIMIT || fileIds.length > EVIDENCE_IDENTIFIER_LIMIT,
   };
 }

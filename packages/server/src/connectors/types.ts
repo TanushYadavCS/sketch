@@ -79,6 +79,16 @@ export function toEmailPrincipals(emails: string[]): AccessPrincipal[] {
 }
 
 export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+export type ContainerTarget =
+  | "team"
+  | "project"
+  | "program"
+  | "cycle"
+  | "register"
+  | "person_queue"
+  | "status"
+  | "archive"
+  | "ignore";
 
 export interface HierarchyLevelDeclaration {
   key: string;
@@ -322,6 +332,8 @@ export interface LlmTaskCandidate {
   dueDate?: string;
   hasOwnerVerbObject: boolean;
   sourceExcerpt?: string;
+  updateOf?: string;
+  statusHint?: "done" | "in_progress" | "blocked";
 }
 
 export interface LlmTaskFactRaw {
@@ -330,6 +342,8 @@ export interface LlmTaskFactRaw {
   owner?: { name?: string; email?: string };
   dueDate?: string;
   hasOwnerVerbObject: boolean;
+  updateOf?: string;
+  statusHint?: "done" | "in_progress" | "blocked";
   corroborationKey: string;
   parentRef?: { source: string; sourceId: string };
   parentEntityId?: string;

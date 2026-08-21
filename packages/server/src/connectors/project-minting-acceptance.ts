@@ -25,9 +25,12 @@ import {
   type ProjectLifecycleStatus,
   type VerdictConfidence,
   clusterClientFiles,
+  fragmentNameTokens,
+  isV2MintingVerdict,
   normalizeTitleFamily,
   readClusterVerdict,
 } from "./project-minting";
+import { scanTokenRecurrence } from "./token-recurrence-scan";
 
 const ACCEPT_SOURCE = "project-minting";
 const RELATION_SOURCE = "project_minting_acceptance";
@@ -42,13 +45,25 @@ export interface AcceptProjectMintingVerdictInput {
   struckProjectNames?: string[];
   renameMap?: Record<string, string>;
   overrideTripwireFlags?: boolean;
+  /** Plan without writing: full validation and gate math, zero graph writes, no CAS, no declaration. */
+  dryRun?: boolean;
 }
 
 export interface AcceptedEntitySummary {
   id: string;
   name: string;
   kind: "engagement" | "project";
+  /** Entity id of the parent project (v2 verdicts); null for top-level and every v1 entity. */
+  parentId: string | null;
   fileIds: string[];
+  /** v2 accepts only: files claimed by the content scan and tasks re-parented because of them. */
+  retroClaim?: { filesClaimed: number; tasksReparented: number };
+  /**
+   * Earliest file day attached to this entity — a left-censored floor, never
+   * the project start: connector history routinely begins mid-assignment
+   * (Redseer's Fireflies starts 4 months into a 12-month engagement).
+   */
+  activeSinceAtLeast?: string | null;
 }
 
 export interface ProjectMintingAcceptResult {
@@ -82,12 +97,20 @@ export interface ProjectMintingAcceptResult {
    * Absent on results stored before this was recorded.
    */
   unresolvedAnchors: string[];
+  /**
+   * Where files matching no accepted project will attach (post-rename name),
+   * or null when nothing catches them. Populated on dry runs so the sheet can
+   * say it without mirroring the gate; absent on stored accepted results.
+   */
+  residualTarget?: string | null;
   declaration: {
     subjectEntityId: string;
     counterpartyKind: CounterpartyKind;
     clientStage: ClientStage | null;
   };
   taskParentUpdates: number;
+  /** True when the result was computed without any writes. */
+  dryRun?: boolean;
   drift: {
     stance: "live_recompute";
     reviewedFileCount: number;
@@ -105,9 +128,9 @@ export class ProjectMintingAcceptanceError extends Error {
       | "TRIPWIRE_BLOCKED"
       | "ANCHOR_NOT_FOUND"
       | "STRIKE_CASCADE"
+      | "WOULD_CYCLE"
       | "CLUSTER_NOT_FOUND"
       | "INVALID_ACCEPTANCE_SHAPE"
-      | "WOULD_CYCLE"
       | "INVALID_ACCEPTANCE",
     message: string,
     public readonly details?: Record<string, unknown>,
@@ -171,10 +194,6 @@ function relationId(sourceId: string, targetId: string, relationType: "engagemen
   return `${RELATION_SOURCE}:${relationType}:${sourceId}:${targetId}`;
 }
 
-function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
-  return Number(result?.numUpdatedRows ?? 0);
-}
-
 async function currentDeclarationForCluster(
   db: Kysely<DB>,
   cluster: ClientCluster,
@@ -212,6 +231,7 @@ function acceptedProjectsForConfirmedAxes(
   verdict: ClusterVerdict,
   input: { confirmedCounterpartyKind: CounterpartyKind; confirmedClientStage: ClientStage | null },
   struck: Set<string>,
+  isV2: boolean,
 ): {
   acceptedProjects: ClusterVerdict["projects"];
   shouldWriteNothing: boolean;
@@ -255,6 +275,20 @@ function acceptedProjectsForConfirmedAxes(
       droppedByGate: { engagement: engagementName, projects: [], unmergedFragments: [] },
     };
   }
+  if (isV2) {
+    if (!projectsAfterStrike.some((project) => project.parentName === null)) {
+      throw new ProjectMintingAcceptanceError(
+        "INVALID_ACCEPTANCE_SHAPE",
+        "active acceptance requires the top-level account project",
+      );
+    }
+    return {
+      acceptedProjects: projectsAfterStrike,
+      shouldWriteNothing: false,
+      shouldWriteEngagement: false,
+      droppedByGate: { engagement: null, projects: [], unmergedFragments: [] },
+    };
+  }
   if (!verdict.engagement) {
     throw new ProjectMintingAcceptanceError("INVALID_ACCEPTANCE_SHAPE", "active acceptance requires an engagement");
   }
@@ -290,7 +324,7 @@ async function findCurrentCluster(db: Kysely<DB>, verdictRow: ProjectMintingVerd
  * types than the dossier gathered — makes every anchor of that kind miss, and
  * the miss surfaces as a refusal to accept the whole verdict.
  */
-async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster) {
+async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster, citedFragmentIds: string[]) {
   const titleFamilies = new Map<string, Set<string>>();
   for (const file of cluster.files) {
     const family = normalizeTitleFamily(file.fileName).key;
@@ -341,7 +375,25 @@ async function buildAnchorMaps(db: Kysely<DB>, cluster: ClientCluster) {
     }
   }
 
-  return { titleFamilies, repos, people };
+  const fragmentMentions = new Map<string, Set<string>>();
+  if (fileIds.length > 0 && citedFragmentIds.length > 0) {
+    for (let i = 0; i < citedFragmentIds.length; i += 500) {
+      const rows = await db
+        .selectFrom("entity_mentions")
+        .select(["entity_id as entityId", "indexed_file_id as fileId"])
+        .where("entity_id", "in", citedFragmentIds.slice(i, i + 500))
+        .where("indexed_file_id", "in", fileIds)
+        .execute();
+      for (const row of rows) {
+        if (!row.fileId) continue;
+        const set = fragmentMentions.get(row.entityId) ?? new Set<string>();
+        set.add(row.fileId);
+        fragmentMentions.set(row.entityId, set);
+      }
+    }
+  }
+
+  return { titleFamilies, repos, people, fragmentMentions };
 }
 
 /**
@@ -386,6 +438,15 @@ function resolveProjectAnchors(
       const matched = maps.people.get(person.trim().toLowerCase());
       if (!matched) unresolvedAnchors.push(`person "${person}" on project "${project.name}"`);
       else for (const fileId of matched) files.add(fileId);
+    }
+    for (const fragmentId of project.evidenceFragments) {
+      declaredAnchors++;
+      const matched = maps.fragmentMentions.get(fragmentId);
+      if (!matched || matched.size === 0) {
+        unresolvedAnchors.push(`fragment "${fragmentId}" on project "${project.name}"`);
+      } else {
+        for (const fileId of matched) files.add(fileId);
+      }
     }
     if (declaredAnchors > 0 && files.size === 0) groundlessProjects.push(project.name);
     projectFiles.set(project.name, files);
@@ -533,19 +594,6 @@ async function insertMention(db: Kysely<DB>, entityId: string, fileId: string): 
   `.execute(db);
 }
 
-async function parentTasksForFiles(db: Kysely<DB>, entityId: string, fileIds: string[]): Promise<number> {
-  if (fileIds.length === 0) return 0;
-  const result = await db
-    .updateTable("tasks")
-    .set({ parent_entity_id: entityId, updated_at: new Date().toISOString() })
-    .where("parent_entity_id", "is", null)
-    .where("id", "in", (eb) =>
-      eb.selectFrom("task_evidence").select("task_id").where("kind", "=", "file").where("ref_id", "in", fileIds),
-    )
-    .executeTakeFirst();
-  return updatedCount(result);
-}
-
 async function mergeFragment(
   db: Kysely<DB>,
   input: { survivorId: string; loserId: string; actorUserId: string; survivorName: string; verdictId: string },
@@ -573,18 +621,41 @@ async function mergeFragment(
   }
 }
 
-async function computeAcceptance(
+interface AcceptancePlan {
+  row: ProjectMintingVerdictRow;
+  verdict: ClusterVerdict;
+  isV2: boolean;
+  cluster: ClientCluster;
+  input: AcceptProjectMintingVerdictInput;
+  struckProjects: string[];
+  acceptedProjects: ClusterVerdict["projects"];
+  shouldWriteNothing: boolean;
+  shouldWriteEngagement: boolean;
+  droppedByGate: ProjectMintingAcceptResult["droppedByGate"];
+  unresolvedAnchors: string[];
+  projectFiles: Map<string, Set<string>>;
+  canonicalByName: Map<string, string>;
+  renameMap: Record<string, string>;
+  /** Accepted projects ordered parents-before-children (v1 order = verdict order). */
+  orderedProjects: ClusterVerdict["projects"];
+  /** Residual files land here; null when nothing should catch them. */
+  residualTarget: { kind: "engagement" } | { kind: "project"; originalName: string } | null;
+  plannedMerges: { entityId: string; intoOriginalName: string }[];
+}
+
+/**
+ * Everything acceptance decides, with zero writes: gates, strikes, anchors,
+ * parent ordering, merge routing, residual routing. `applyAcceptancePlan`
+ * only executes this plan, which is what makes dryRun honest — the dry run
+ * and the real accept share every branch up to the first write.
+ */
+async function planAcceptance(
   db: Kysely<DB>,
   row: ProjectMintingVerdictRow,
   input: AcceptProjectMintingVerdictInput,
-): Promise<ProjectMintingAcceptResult> {
-  if (row.status !== "pending" || row.superseded_at !== null) {
-    const stored = parseStoredAcceptedResult(row);
-    if (stored) return stored;
-    throw new ProjectMintingAcceptanceError("NOT_PENDING", "Verdict has already been decided", { status: row.status });
-  }
-
-  const verdict = readClusterVerdict(JSON.parse(row.verdict));
+): Promise<AcceptancePlan> {
+  const isV2 = isV2MintingVerdict(row.prompt_version);
+  const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: isV2 });
   const flags = parseJsonArray(row.flags);
   if (flags.length > 0 && !input.overrideTripwireFlags) {
     throw new ProjectMintingAcceptanceError("TRIPWIRE_BLOCKED", "Tripwire flags require explicit override", { flags });
@@ -608,12 +679,30 @@ async function computeAcceptance(
       );
     }
   }
+  if (isV2) {
+    const projectByName = new Map(verdict.projects.map((project) => [project.name, project]));
+    for (const project of verdict.projects) {
+      if (struck.has(project.name)) continue;
+      let ancestor = project.parentName;
+      while (ancestor) {
+        if (struck.has(ancestor)) {
+          throw new ProjectMintingAcceptanceError(
+            "STRIKE_CASCADE",
+            "Striking a parent project would orphan a surviving child",
+            { struckParent: ancestor, survivingChild: project.name },
+          );
+        }
+        ancestor = projectByName.get(ancestor)?.parentName ?? null;
+      }
+    }
+  }
 
   const renameMap = input.renameMap ?? {};
   const { acceptedProjects, shouldWriteNothing, shouldWriteEngagement, droppedByGate } =
-    acceptedProjectsForConfirmedAxes(verdict, input, struck);
+    acceptedProjectsForConfirmedAxes(verdict, input, struck, isV2);
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
-  const anchorMaps = await buildAnchorMaps(db, cluster);
+  const citedFragmentIds = [...new Set(acceptedProjects.flatMap((project) => project.evidenceFragments))];
+  const anchorMaps = await buildAnchorMaps(db, cluster, citedFragmentIds);
   const { projectFiles, unresolvedAnchors, groundlessProjects } = resolveProjectAnchors(
     verdict,
     acceptedOriginalNames,
@@ -632,12 +721,301 @@ async function computeAcceptance(
     if (disposition.disposition === "canonical") canonicalByName.set(disposition.name, disposition.entityId);
   }
 
+  const orderedProjects: ClusterVerdict["projects"] = [];
+  if (isV2) {
+    const placed = new Set<string>();
+    let remaining = [...acceptedProjects];
+    while (remaining.length > 0) {
+      const next = remaining.filter(
+        (project) =>
+          !project.parentName || placed.has(project.parentName) || !acceptedOriginalNames.has(project.parentName),
+      );
+      if (next.length === 0) {
+        throw new ProjectMintingAcceptanceError("WOULD_CYCLE", "Accepted projects do not form a forest");
+      }
+      for (const project of next) {
+        orderedProjects.push(project);
+        placed.add(project.name);
+      }
+      remaining = remaining.filter((project) => !placed.has(project.name));
+    }
+  } else {
+    orderedProjects.push(...acceptedProjects);
+  }
+
+  let residualTarget: AcceptancePlan["residualTarget"] = null;
+  if (isV2) {
+    const topLevel = acceptedProjects.filter(
+      (project) => !project.parentName || !acceptedOriginalNames.has(project.parentName),
+    );
+    if (topLevel.length === 1) residualTarget = { kind: "project", originalName: topLevel[0].name };
+  } else if (shouldWriteEngagement && verdict.engagement) {
+    residualTarget = { kind: "engagement" };
+  } else if (acceptedProjects.length === 1 || (input.confirmedClientStage === "pilot" && acceptedProjects.length > 0)) {
+    residualTarget = { kind: "project", originalName: acceptedProjects[0].name };
+  }
+
+  const plannedMerges: AcceptancePlan["plannedMerges"] = [];
+  if (!shouldWriteNothing) {
+    for (const disposition of verdict.existingEntities) {
+      if (disposition.disposition !== "merge_into" || !disposition.mergeInto) continue;
+      const targetsAcceptedProject = acceptedOriginalNames.has(disposition.mergeInto);
+      const targetsEngagement = !isV2 && shouldWriteEngagement && disposition.mergeInto === verdict.engagement?.name;
+      if (targetsAcceptedProject || targetsEngagement) {
+        plannedMerges.push({ entityId: disposition.entityId, intoOriginalName: disposition.mergeInto });
+      } else {
+        droppedByGate.unmergedFragments.push({ entityId: disposition.entityId, intoName: disposition.mergeInto });
+      }
+    }
+  } else {
+    for (const disposition of verdict.existingEntities) {
+      if (disposition.disposition === "merge_into" && disposition.mergeInto) {
+        droppedByGate.unmergedFragments.push({ entityId: disposition.entityId, intoName: disposition.mergeInto });
+      }
+    }
+  }
+
+  return {
+    row,
+    verdict,
+    isV2,
+    cluster,
+    input,
+    struckProjects,
+    acceptedProjects,
+    shouldWriteNothing,
+    shouldWriteEngagement,
+    droppedByGate,
+    unresolvedAnchors,
+    projectFiles,
+    canonicalByName,
+    renameMap,
+    orderedProjects,
+    residualTarget,
+    plannedMerges,
+  };
+}
+
+function planResult(
+  plan: AcceptancePlan,
+): Omit<ProjectMintingAcceptResult, "entityIds" | "entities" | "mergeIds" | "taskParentUpdates"> {
+  return {
+    verdictId: plan.row.id,
+    status: "accepted",
+    struckProjects: plan.struckProjects,
+    droppedByGate: plan.droppedByGate,
+    unresolvedAnchors: plan.unresolvedAnchors,
+    declaration: {
+      subjectEntityId: plan.cluster.companyEntityId,
+      counterpartyKind: plan.input.confirmedCounterpartyKind,
+      clientStage: plan.input.confirmedClientStage,
+    },
+    drift: {
+      stance: "live_recompute",
+      reviewedFileCount: plan.row.file_count,
+      acceptedFileCount: plan.cluster.files.length,
+      addedSinceVerdict: Math.max(0, plan.cluster.files.length - plan.row.file_count),
+    },
+  };
+}
+
+/**
+ * Dry run: the plan's shape without ids that only exist after writes.
+ * Adopted entities show their canonical id; to-be-created ones show null.
+ */
+function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
+  const entities: AcceptedEntitySummary[] = [];
+  if (plan.shouldWriteEngagement && plan.verdict.engagement) {
+    const originalName = plan.verdict.engagement.name;
+    entities.push({
+      id: plan.canonicalByName.get(originalName) ?? "",
+      name: renameFor(originalName, plan.renameMap),
+      kind: "engagement",
+      parentId: null,
+      fileIds: [],
+    });
+  }
+  if (!plan.shouldWriteNothing) {
+    for (const project of plan.orderedProjects) {
+      entities.push({
+        id: plan.canonicalByName.get(project.name) ?? "",
+        name: renameFor(project.name, plan.renameMap),
+        kind: "project",
+        parentId: null,
+        fileIds: [...(plan.projectFiles.get(project.name) ?? [])].sort(),
+      });
+    }
+  }
+  const residualTarget =
+    plan.residualTarget === null
+      ? null
+      : plan.residualTarget.kind === "engagement"
+        ? plan.verdict.engagement
+          ? renameFor(plan.verdict.engagement.name, plan.renameMap)
+          : null
+        : renameFor(plan.residualTarget.originalName, plan.renameMap);
+  return {
+    ...planResult(plan),
+    entityIds: { engagementId: null, projectIds: [] },
+    entities,
+    mergeIds: [],
+    taskParentUpdates: 0,
+    residualTarget,
+    dryRun: true,
+  };
+}
+
+async function parentTasksForFiles(db: Kysely<DB>, entityId: string, fileIds: string[]): Promise<string[]> {
+  if (fileIds.length === 0) return [];
+  const rows = await db
+    .selectFrom("tasks")
+    .select("id")
+    .where("parent_entity_id", "is", null)
+    .where("id", "in", (eb) =>
+      eb.selectFrom("task_evidence").select("task_id").where("kind", "=", "file").where("ref_id", "in", fileIds),
+    )
+    .execute();
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => row.id).sort();
+  await db
+    .updateTable("tasks")
+    .set({ parent_entity_id: entityId, updated_at: new Date().toISOString() })
+    .where("parent_entity_id", "is", null)
+    .where("id", "in", ids)
+    .execute();
+  return ids;
+}
+
+/**
+ * Retro-claim: after a v2 accept decides which entities exist, scan the
+ * cluster's file CONTENT for each accepted project's names (the project name,
+ * its renamed form, every fragment merged into it, and every cited evidence
+ * fragment) and claim matching files the anchors missed — stored mentions
+ * undercount content 5-6x. Children are claimed before parents so an account
+ * container named after the company cannot swallow a workstream's files;
+ * whatever nothing claims still falls to the residual target afterwards.
+ */
+async function retroClaimFiles(
+  db: Kysely<DB>,
+  plan: AcceptancePlan,
+  projectIdsByOriginalName: Map<string, string>,
+  filesByEntity: Map<string, Set<string>>,
+  anchoredToAccepted: Set<string>,
+): Promise<Map<string, Set<string>>> {
+  const fragmentNameById = new Map(plan.verdict.existingEntities.map((entity) => [entity.entityId, entity.name]));
+  const candidates: { key: string; tokens: string[] }[] = [];
+  const entityByKey = new Map<string, string>();
+  for (const project of plan.orderedProjects) {
+    const entityId = projectIdsByOriginalName.get(project.name);
+    if (!entityId) continue;
+    const names = new Set<string>([project.name, renameFor(project.name, plan.renameMap)]);
+    for (const merge of plan.plannedMerges) {
+      if (merge.intoOriginalName === project.name) {
+        const fragmentName = fragmentNameById.get(merge.entityId);
+        if (fragmentName) names.add(fragmentName);
+      }
+    }
+    for (const fragmentId of project.evidenceFragments) {
+      const fragmentName = fragmentNameById.get(fragmentId);
+      if (fragmentName) names.add(fragmentName);
+    }
+    for (const name of names) {
+      const tokens = fragmentNameTokens(name);
+      if (tokens.length === 0) continue;
+      const key = `${entityId}:${candidates.length}`;
+      candidates.push({ key, tokens });
+      entityByKey.set(key, entityId);
+    }
+  }
+  const claimedByEntity = new Map<string, Set<string>>();
+  if (candidates.length === 0) return claimedByEntity;
+
+  const scan = await scanTokenRecurrence(db, {
+    candidates,
+    fileIds: plan.cluster.files.map((file) => file.fileId),
+  });
+  const matchesByEntity = new Map<string, Set<string>>();
+  for (const [key, recurrence] of scan) {
+    const entityId = entityByKey.get(key);
+    if (!entityId) continue;
+    const set = matchesByEntity.get(entityId) ?? new Set<string>();
+    for (const fileId of recurrence.files) set.add(fileId);
+    matchesByEntity.set(entityId, set);
+  }
+
+  const claimedGlobally = new Set<string>();
+  for (const project of [...plan.orderedProjects].reverse()) {
+    const entityId = projectIdsByOriginalName.get(project.name);
+    if (!entityId) continue;
+    const own = filesByEntity.get(entityId) ?? new Set<string>();
+    const claimed = new Set<string>();
+    for (const fileId of matchesByEntity.get(entityId) ?? []) {
+      if (own.has(fileId) || claimedGlobally.has(fileId)) continue;
+      own.add(fileId);
+      claimed.add(fileId);
+      claimedGlobally.add(fileId);
+      anchoredToAccepted.add(fileId);
+    }
+    filesByEntity.set(entityId, own);
+    claimedByEntity.set(entityId, claimed);
+  }
+  return claimedByEntity;
+}
+
+/**
+ * Tasks re-parented because their evidence sits on a retro-claimed file get
+ * a task_evidence row pointing at the project entity — the WHY of the
+ * re-parent, recorded where task evidence already lives.
+ */
+async function recordClaimEvidence(
+  db: Kysely<DB>,
+  entityId: string,
+  reparentedTaskIds: string[],
+  claimedFileIds: Set<string>,
+): Promise<number> {
+  if (reparentedTaskIds.length === 0 || claimedFileIds.size === 0) return 0;
+  const rows = await db
+    .selectFrom("task_evidence")
+    .select("task_id")
+    .where("kind", "=", "file")
+    .where("ref_id", "in", [...claimedFileIds])
+    .where("task_id", "in", reparentedTaskIds)
+    .execute();
+  const taskIds = [...new Set(rows.map((row) => row.task_id))].sort();
+  for (const taskId of taskIds) {
+    await db
+      .insertInto("task_evidence")
+      .values({ task_id: taskId, kind: "entity", ref_id: entityId })
+      .onConflict((oc) => oc.doNothing())
+      .execute();
+  }
+  return taskIds.length;
+}
+
+async function earliestFileDay(db: Kysely<DB>, fileIds: string[]): Promise<string | null> {
+  if (fileIds.length === 0) return null;
+  let earliest: string | null = null;
+  for (let i = 0; i < fileIds.length; i += 200) {
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(sql<string | null>`min(coalesce(source_created_at, synced_at))`.as("first"))
+      .where("id", "in", fileIds.slice(i, i + 200))
+      .executeTakeFirst();
+    const value = row?.first ? row.first.slice(0, 10) : null;
+    if (value && (!earliest || value < earliest)) earliest = value;
+  }
+  return earliest;
+}
+
+async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promise<ProjectMintingAcceptResult> {
+  const { verdict, cluster, renameMap, canonicalByName } = plan;
   const projectIdsByOriginalName = new Map<string, string>();
+  const parentIdByEntityId = new Map<string, string | null>();
   const projectIds: string[] = [];
   let engagementId: string | null = null;
   const entities: AcceptedEntitySummary[] = [];
 
-  if (shouldWriteEngagement && verdict.engagement) {
+  if (plan.shouldWriteEngagement && verdict.engagement) {
     const originalName = verdict.engagement.name;
     const name = renameFor(originalName, renameMap);
     engagementId = await adoptOrCreateProjectEntity(db, {
@@ -649,11 +1027,12 @@ async function computeAcceptance(
       subtype: "engagement",
       lifecycleStatus: null,
     });
+    parentIdByEntityId.set(engagementId, null);
     await ensureRelationship(db, engagementId, cluster.companyEntityId, "engagement_for");
   }
 
-  if (!shouldWriteNothing) {
-    for (const project of acceptedProjects) {
+  if (!plan.shouldWriteNothing) {
+    for (const project of plan.orderedProjects) {
       const name = renameFor(project.name, renameMap);
       const entityId = await adoptOrCreateProjectEntity(db, {
         companyEntityId: cluster.companyEntityId,
@@ -666,24 +1045,53 @@ async function computeAcceptance(
       });
       projectIdsByOriginalName.set(project.name, entityId);
       projectIds.push(entityId);
-      if (engagementId) await ensureRelationship(db, entityId, engagementId, "part_of");
-      else await ensureRelationship(db, entityId, cluster.companyEntityId, "engagement_for");
+      const parentEntityId =
+        plan.isV2 && project.parentName ? (projectIdsByOriginalName.get(project.parentName) ?? null) : null;
+      if (parentEntityId) {
+        try {
+          await assertNoPartOfCycle(db, entityId, parentEntityId);
+        } catch {
+          throw new ProjectMintingAcceptanceError(
+            "WOULD_CYCLE",
+            `Parenting "${project.name}" under "${project.parentName}" would create a cycle`,
+            { childId: entityId, parentId: parentEntityId },
+          );
+        }
+        await ensureRelationship(db, entityId, parentEntityId, "part_of");
+        parentIdByEntityId.set(entityId, parentEntityId);
+      } else if (plan.isV2) {
+        await ensureRelationship(db, entityId, cluster.companyEntityId, "engagement_for");
+        parentIdByEntityId.set(entityId, null);
+      } else if (engagementId) {
+        await ensureRelationship(db, entityId, engagementId, "part_of");
+        parentIdByEntityId.set(entityId, engagementId);
+      } else {
+        await ensureRelationship(db, entityId, cluster.companyEntityId, "engagement_for");
+        parentIdByEntityId.set(entityId, null);
+      }
     }
   }
 
   const anchoredToAccepted = new Set<string>();
   const filesByEntity = new Map<string, Set<string>>();
-  for (const project of acceptedProjects) {
+  for (const project of plan.acceptedProjects) {
     const entityId = projectIdsByOriginalName.get(project.name);
     if (!entityId) continue;
-    const files = projectFiles.get(project.name) ?? new Set<string>();
+    const files = plan.projectFiles.get(project.name) ?? new Set<string>();
     filesByEntity.set(entityId, files);
     for (const fileId of files) anchoredToAccepted.add(fileId);
   }
 
+  const retroClaimByEntity = plan.isV2
+    ? await retroClaimFiles(db, plan, projectIdsByOriginalName, filesByEntity, anchoredToAccepted)
+    : new Map<string, Set<string>>();
+
   const residualTargetId =
-    engagementId ??
-    (projectIds.length === 1 ? projectIds[0] : input.confirmedClientStage === "pilot" ? projectIds[0] : null);
+    plan.residualTarget === null
+      ? null
+      : plan.residualTarget.kind === "engagement"
+        ? engagementId
+        : (projectIdsByOriginalName.get(plan.residualTarget.originalName) ?? null);
   if (residualTargetId) {
     const residual = filesByEntity.get(residualTargetId) ?? new Set<string>();
     for (const file of cluster.files) {
@@ -693,21 +1101,20 @@ async function computeAcceptance(
   }
 
   const mergeIds: string[] = [];
-  for (const disposition of verdict.existingEntities) {
-    if (disposition.disposition !== "merge_into" || !disposition.mergeInto) continue;
+  for (const merge of plan.plannedMerges) {
     const survivorId =
-      projectIdsByOriginalName.get(disposition.mergeInto) ??
-      (engagementId && disposition.mergeInto === verdict.engagement?.name ? engagementId : null);
+      projectIdsByOriginalName.get(merge.intoOriginalName) ??
+      (engagementId && merge.intoOriginalName === verdict.engagement?.name ? engagementId : null);
     if (!survivorId) {
-      droppedByGate.unmergedFragments.push({ entityId: disposition.entityId, intoName: disposition.mergeInto });
+      plan.droppedByGate.unmergedFragments.push({ entityId: merge.entityId, intoName: merge.intoOriginalName });
       continue;
     }
     const mergeId = await mergeFragment(db, {
       survivorId,
-      loserId: disposition.entityId,
-      actorUserId: input.actorUserId,
-      survivorName: renameFor(disposition.mergeInto, renameMap),
-      verdictId: row.id,
+      loserId: merge.entityId,
+      actorUserId: plan.input.actorUserId,
+      survivorName: renameFor(merge.intoOriginalName, renameMap),
+      verdictId: plan.row.id,
     });
     if (mergeId) mergeIds.push(mergeId);
   }
@@ -716,38 +1123,53 @@ async function computeAcceptance(
   for (const [entityId, fileIds] of filesByEntity) {
     const orderedFileIds = [...fileIds].sort();
     for (const fileId of orderedFileIds) await insertMention(db, entityId, fileId);
-    taskParentUpdates += await parentTasksForFiles(db, entityId, orderedFileIds);
+    const reparentedTaskIds = await parentTasksForFiles(db, entityId, orderedFileIds);
+    taskParentUpdates += reparentedTaskIds.length;
+    const claimed = retroClaimByEntity.get(entityId) ?? new Set<string>();
+    const tasksReparentedByClaim = await recordClaimEvidence(db, entityId, reparentedTaskIds, claimed);
     const kind = entityId === engagementId ? "engagement" : "project";
     const entity = await db
       .selectFrom("entities")
       .select(["id", "name"])
       .where("id", "=", entityId)
       .executeTakeFirstOrThrow();
-    entities.push({ id: entity.id, name: entity.name, kind, fileIds: orderedFileIds });
+    entities.push({
+      id: entity.id,
+      name: entity.name,
+      kind,
+      parentId: parentIdByEntityId.get(entityId) ?? null,
+      fileIds: orderedFileIds,
+      ...(plan.isV2
+        ? {
+            retroClaim: { filesClaimed: claimed.size, tasksReparented: tasksReparentedByClaim },
+            activeSinceAtLeast: await earliestFileDay(db, orderedFileIds),
+          }
+        : {}),
+    });
   }
 
   return {
-    verdictId: row.id,
-    status: "accepted",
+    ...planResult(plan),
     entityIds: { engagementId, projectIds },
     entities: entities.sort((a, b) => a.name.localeCompare(b.name)),
     mergeIds: mergeIds.sort(),
-    struckProjects,
-    droppedByGate,
-    unresolvedAnchors,
-    declaration: {
-      subjectEntityId: cluster.companyEntityId,
-      counterpartyKind: input.confirmedCounterpartyKind,
-      clientStage: input.confirmedClientStage,
-    },
     taskParentUpdates,
-    drift: {
-      stance: "live_recompute",
-      reviewedFileCount: row.file_count,
-      acceptedFileCount: cluster.files.length,
-      addedSinceVerdict: Math.max(0, cluster.files.length - row.file_count),
-    },
   };
+}
+
+async function computeAcceptance(
+  db: Kysely<DB>,
+  row: ProjectMintingVerdictRow,
+  input: AcceptProjectMintingVerdictInput,
+): Promise<ProjectMintingAcceptResult> {
+  if (row.status !== "pending" || row.superseded_at !== null) {
+    const stored = parseStoredAcceptedResult(row);
+    if (stored) return stored;
+    throw new ProjectMintingAcceptanceError("NOT_PENDING", "Verdict has already been decided", { status: row.status });
+  }
+  const plan = await planAcceptance(db, row, input);
+  if (input.dryRun) return dryRunResult(plan);
+  return applyAcceptancePlan(db, plan);
 }
 
 export async function acceptProjectMintingVerdict(
@@ -759,9 +1181,10 @@ export async function acceptProjectMintingVerdict(
     const row = await repo.findById(input.verdictId);
     if (!row) throw new ProjectMintingAcceptanceError("NOT_FOUND", "Project minting verdict not found");
     const result = await computeAcceptance(db, row, input);
+    if (input.dryRun) return result;
     if (row.status === "pending" && row.superseded_at === null) {
       /**
-       * Keep this order: read the registry in `computeAcceptance`, check
+       * Keep this order: read the registry in `planAcceptance`, check
        * staleness, gate the confirmed shape, write the graph, win the verdict
        * CAS, then declare. Declaring before staleness makes a verdict stale
        * against its own row; declaring before the CAS lets a losing concurrent
