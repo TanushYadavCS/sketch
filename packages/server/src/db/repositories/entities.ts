@@ -1195,6 +1195,124 @@ export function createEntityRepository(db: Kysely<DB>) {
         .slice(0, opts?.limit ?? 50);
     },
 
+    async searchEntitiesForCuration(opts: {
+      queries: string[];
+      sourceTypes?: string[];
+      includeTombstones?: boolean;
+      tierLimit?: number;
+    }): Promise<
+      Array<{
+        query: string;
+        tier: "exact" | "substring" | "tombstone";
+        row: Selectable<EntitiesTable>;
+        mergedInto: { id: string; name: string | null } | null;
+      }>
+    > {
+      const tierLimit = opts.tierLimit ?? 25;
+      const seen = new Set<string>();
+      const out: Array<{
+        query: string;
+        tier: "exact" | "substring" | "tombstone";
+        row: Selectable<EntitiesTable>;
+        mergedInto: { id: string; name: string | null } | null;
+      }> = [];
+      const push = async (
+        query: string,
+        tier: "exact" | "substring" | "tombstone",
+        rows: Selectable<EntitiesTable>[],
+      ) => {
+        for (const row of rows) {
+          if (seen.has(row.id)) continue;
+          seen.add(row.id);
+          let mergedInto: { id: string; name: string | null } | null = null;
+          if (row.merged_into_entity_id) {
+            const id = await resolveLiveEntityId(db, row.id);
+            const target = await db
+              .selectFrom("entities")
+              .select(["id", "name"])
+              .where("id", "=", id)
+              .executeTakeFirst();
+            mergedInto = target ? { id: target.id, name: target.name } : { id, name: null };
+          }
+          out.push({ query, tier, row, mergedInto });
+        }
+      };
+
+      for (const query of opts.queries.map((value) => value.trim()).filter(Boolean)) {
+        const needle = query.trim().toLowerCase();
+        const aliasPattern = `%${JSON.stringify(needle)}%`;
+        let exactQuery = db
+          .selectFrom("entities")
+          .selectAll()
+          .where(whereLiveEntity())
+          .where((eb) =>
+            eb.or([
+              eb(sql<string>`lower(trim(entities.name))`, "=", needle),
+              eb(sql<string>`lower(entities.aliases)`, "like", aliasPattern),
+            ]),
+          );
+        if (opts.sourceTypes && opts.sourceTypes.length > 0) {
+          exactQuery = exactQuery.where("source_type", "in", opts.sourceTypes);
+        }
+        const exactRows = await exactQuery.orderBy("hotness", "desc").orderBy("id", "asc").limit(tierLimit).execute();
+        await push(
+          query,
+          "exact",
+          exactRows.filter((row) =>
+            matchesNameOrAliasExactly(query, { name: row.name, aliases: parseAliasesString(row.aliases) }),
+          ),
+        );
+
+        const substringPattern = `%${needle}%`;
+        let substringQuery = db
+          .selectFrom("entities")
+          .selectAll()
+          .where(whereLiveEntity())
+          .where((eb) =>
+            eb.or([
+              eb(sql<string>`lower(entities.name)`, "like", substringPattern),
+              eb(sql<string>`lower(entities.aliases)`, "like", substringPattern),
+            ]),
+          );
+        if (opts.sourceTypes && opts.sourceTypes.length > 0) {
+          substringQuery = substringQuery.where("source_type", "in", opts.sourceTypes);
+        }
+        await push(
+          query,
+          "substring",
+          await substringQuery.orderBy("hotness", "desc").orderBy("id", "asc").limit(tierLimit).execute(),
+        );
+        if (opts.includeTombstones ?? true) {
+          const substringPattern = `%${needle}%`;
+          let q = db
+            .selectFrom("entities")
+            .selectAll()
+            .where((eb) => eb.or([eb("deleted_at", "is not", null), eb("merged_into_entity_id", "is not", null)]))
+            .where((eb) =>
+              eb.or([
+                eb(sql<string>`lower(trim(entities.name))`, "=", needle),
+                eb(sql<string>`lower(entities.aliases)`, "like", aliasPattern),
+                eb(sql<string>`lower(entities.name)`, "like", substringPattern),
+                eb(sql<string>`lower(entities.aliases)`, "like", substringPattern),
+              ]),
+            );
+          if (opts.sourceTypes && opts.sourceTypes.length > 0) q = q.where("source_type", "in", opts.sourceTypes);
+          const rows = await q.orderBy("hotness", "desc").orderBy("id", "asc").limit(tierLimit).execute();
+          await push(
+            query,
+            "tombstone",
+            rows.filter(
+              (row) =>
+                matchesNameOrAliasExactly(query, { name: row.name, aliases: parseAliasesString(row.aliases) }) ||
+                row.name.toLowerCase().includes(needle) ||
+                parseAliasesString(row.aliases).some((alias) => alias.toLowerCase().includes(needle)),
+            ),
+          );
+        }
+      }
+      return out;
+    },
+
     // ── Hotness ──
 
     async getHotEntities(limit: number) {
