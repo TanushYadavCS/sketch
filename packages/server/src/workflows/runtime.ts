@@ -1011,6 +1011,8 @@ interface ActionStepParams {
   recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
+const MAX_INTEGRATION_ACTION_CALLS_PER_STEP = 25;
+
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorId, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
   const usesIntegrationActions = workflowStepUsesIntegrationActions(step);
@@ -1065,6 +1067,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       );
     });
     let capabilityFailure: Error | null = null;
+    let integrationActionCalls = 0;
 
     const ctx = buildScriptContext({
       taskId: params.taskId,
@@ -1101,6 +1104,12 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
         if (!usesIntegrationActions || !integrationProvider?.executeAction || !creatorEmail) {
           throw new Error("The configured integration provider cannot execute server-owned actions");
         }
+        if (integrationActionCalls >= MAX_INTEGRATION_ACTION_CALLS_PER_STEP) {
+          throw new Error(
+            `Action step ${step.id} can execute at most ${MAX_INTEGRATION_ACTION_CALLS_PER_STEP} integration actions per run`,
+          );
+        }
+        integrationActionCalls += 1;
         const configuredProps = await materializeIntegrationActionFiles({
           request,
           workspaceDir,
