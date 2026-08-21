@@ -1026,6 +1026,40 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(text).not.toContain("message that lives elsewhere");
     });
 
+    it("treats null optional params as omitted and reads chronologically", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "null params marker",
+        members: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: null,
+        pageToken: null,
+        scope: null,
+        afterTime: null,
+        beforeTime: null,
+        platform: null,
+        limit: null,
+        order: null,
+        includeBotMessages: null,
+      });
+
+      const text = result.content[0]?.text ?? "";
+      expect(text).not.toContain("no longer have access");
+      const body = JSON.parse(text);
+      expect(body.ignoredAnchorMessageId).toBeUndefined();
+      expect(body.messages.length).toBeGreaterThan(0);
+      expect(text).toContain("null params marker");
+    });
+
     it("ignores an out-of-range anchor id instead of failing the read", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "out of range anchor marker",

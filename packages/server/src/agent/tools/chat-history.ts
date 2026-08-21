@@ -373,52 +373,60 @@ async function boundaryBelongsToCrossReadStream(
 export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
-    "Read persisted messages chronologically from the current chat, an authorized conversation, or every Slack channel and WhatsApp group the requester belongs to. Use all_chats for broad chronological history and continue it with nextPageToken as pageToken. Use conversationRef on its own to read one specific authorized chat. Every other parameter is optional \u2014 omit anything you do not explicitly need rather than sending a placeholder value.",
+    "Read persisted messages chronologically from the current chat, an authorized conversation, or every Slack channel and WhatsApp group the requester belongs to. Use all_chats for broad chronological history and continue it with nextPageToken as pageToken. Use conversationRef on its own to read one specific authorized chat. Every other parameter is optional: send null for anything you do not explicitly need rather than inventing a placeholder value.",
     {
       conversationRef: z
         .string()
-        .optional()
-        .describe("Opaque conversation ref such as conversation:42. Omit to read the current chat."),
+        .nullish()
+        .describe("Opaque conversation ref such as conversation:42. Send null to read the current chat."),
       anchorMessageId: z
         .number()
         .int()
         .positive()
         .max(INT4_MAX)
-        .optional()
+        .nullish()
         .describe(
-          "Optional, and normally omitted. Leave it out to read the conversation chronologically. Set it only to centre the read on a message row id that an earlier read of this same conversation returned.",
+          "Send null to read the conversation chronologically -- that is the normal case. Set a number only to centre the read on a message row id that an earlier read of this same conversation returned.",
         ),
-      pageToken: z.string().optional().describe("Opaque continuation token returned by a prior read."),
+      pageToken: z.string().nullish().describe("Opaque continuation token returned by a prior read."),
       scope: z
         .enum(["conversation", "current_thread", "all_chats"])
-        .optional()
+        .nullish()
         .describe(
           "Read the current conversation, only the active Slack thread, or all authorized chats. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
         ),
-      afterTime: z.string().optional().describe("Inclusive ISO-8601 lower bound on the message effective time."),
-      beforeTime: z.string().optional().describe("Inclusive ISO-8601 upper bound on the message effective time."),
+      afterTime: z.string().nullish().describe("Inclusive ISO-8601 lower bound on the message effective time."),
+      beforeTime: z.string().nullish().describe("Inclusive ISO-8601 upper bound on the message effective time."),
       platform: z
         .enum(["slack", "whatsapp"])
-        .optional()
+        .nullish()
         .describe("With scope all_chats only, restrict results to one platform."),
-      limit: z.number().int().positive().max(100).optional().describe("Max messages to return. Default 50, max 100."),
-      order: z.enum(["asc", "desc"]).optional().describe("Message effective-time order. Default asc."),
-      includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
+      limit: z.number().int().positive().max(100).nullish().describe("Max messages to return. Default 50, max 100."),
+      order: z.enum(["asc", "desc"]).nullish().describe("Message effective-time order. Default asc."),
+      includeBotMessages: z.boolean().nullish().describe("Include Sketch's persisted visible replies. Default false."),
     },
     async ({
-      conversationRef: requestedConversationRef,
-      anchorMessageId,
-      pageToken: requestedPageToken,
-      scope,
-      afterTime: requestedAfterTime,
-      beforeTime: requestedBeforeTime,
-      platform: requestedPlatform,
-      limit,
-      order,
-      includeBotMessages,
+      conversationRef: rawConversationRef,
+      anchorMessageId: rawAnchorMessageId,
+      pageToken: rawPageToken,
+      scope: rawScope,
+      afterTime: rawAfterTime,
+      beforeTime: rawBeforeTime,
+      platform: rawPlatform,
+      limit: rawLimit,
+      order: rawOrder,
+      includeBotMessages: rawIncludeBotMessages,
     }) => {
-      const conversationRef = blankToUndefined(requestedConversationRef);
-      const pageToken = blankToUndefined(requestedPageToken);
+      const anchorMessageId = rawAnchorMessageId ?? undefined;
+      const scope = rawScope ?? undefined;
+      const requestedAfterTime = rawAfterTime ?? undefined;
+      const requestedBeforeTime = rawBeforeTime ?? undefined;
+      const requestedPlatform = rawPlatform ?? undefined;
+      const limit = rawLimit ?? undefined;
+      const order = rawOrder ?? undefined;
+      const includeBotMessages = rawIncludeBotMessages ?? undefined;
+      const conversationRef = blankToUndefined(rawConversationRef ?? undefined);
+      const pageToken = blankToUndefined(rawPageToken ?? undefined);
       const allChatsPageToken = pageToken ? parseAllChatsPageToken(pageToken) : null;
       const crossReadPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
       if (pageToken && !allChatsPageToken && !crossReadPageToken) return unavailableCrossConversationResult();
@@ -647,7 +655,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
                 ...(ignoredAnchorMessageId
                   ? {
                       ignoredAnchorMessageId,
-                      note: `anchorMessageId ${ignoredAnchorMessageId} is not a message in this conversation, so it was ignored and the conversation was read chronologically. Omit anchorMessageId unless you are centring the read on a message id a previous read of this same conversation returned.`,
+                      note: `anchorMessageId ${ignoredAnchorMessageId} is not a message in this conversation, so it was ignored and the conversation was read chronologically. Send anchorMessageId: null unless you are centring the read on a message id a previous read of this same conversation returned.`,
                     }
                   : {}),
                 messages,
