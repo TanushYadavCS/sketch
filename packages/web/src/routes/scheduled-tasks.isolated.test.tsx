@@ -192,10 +192,9 @@ describe("ScheduledTasksPage", () => {
         "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
       ),
     ).toBeInTheDocument();
-    const createButtons = screen.getAllByRole("button", { name: "Create with Sketch" });
+    const createButtons = screen.getAllByRole("button", { name: "Create automation" });
     expect(createButtons).toHaveLength(2);
     for (const button of createButtons) {
-      expect(button).toHaveAttribute("data-variant", "default");
       expect(button.querySelector("svg")).toBeInTheDocument();
     }
   });
@@ -212,7 +211,7 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
-    await user.click(screen.getAllByRole("button", { name: "Create with Sketch" })[0]);
+    await user.click(screen.getAllByRole("button", { name: "Create automation" })[0]);
 
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({
@@ -230,7 +229,7 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => expect(screen.getByText("No automations yet")).toBeInTheDocument());
-    expect(screen.getAllByRole("button", { name: "Create with Sketch" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Create automation" })).toHaveLength(2);
   });
 
   it("refreshes the list graph and run history after an external run starts", async () => {

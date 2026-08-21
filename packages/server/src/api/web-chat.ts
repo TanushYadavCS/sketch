@@ -1017,17 +1017,6 @@ const AUTOMATION_BUILDER_MAX_TOOL_CALLS = 20;
 const AUTOMATION_BUILDER_MAX_REPEATED_TOOL_CALLS = 3;
 const AUTOMATION_BUILDER_MAX_ELAPSED_MS = 2 * 60_000;
 const AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES = 24 * 1024;
-const AUTOMATION_BUILDER_ALLOWED_TOOLS = [
-  "mcp__sketch__ManageScheduledTasks",
-  "mcp__sketch__ManageAutomationShares",
-  "mcp__sketch__SearchDeliveryTargets",
-  "mcp__sketch__Search",
-  "mcp__sketch__SearchEntities",
-  "mcp__sketch__GetEntityContext",
-  "mcp__sketch__GetFileContent",
-  "mcp__sketch__AskUserQuestion",
-  "mcp__sketch__AskUserQuestions",
-];
 
 function isAutomationBuilderPlanOnlyMessage(message: string): boolean {
   return /\b(?:plan only|just plan|planning only|do not (?:make )?(?:any )?changes|don't (?:make )?(?:any )?changes|without (?:making|applying) changes|no changes)\b/i.test(
@@ -1084,6 +1073,18 @@ function isExecutionModeSelectionMessage(message: string): boolean {
 function builderQuestionIdSuffix(messageId: string): string {
   const suffix = messageId.replace(/[^A-Za-z0-9._-]/g, "").slice(-32);
   return suffix || "current";
+}
+
+const namedAutomationInputSourcePattern =
+  /\b(?:airtable|asana|clickup|fireflies|github|gmail|google\s+(?:calendar|drive|sheets)|hubspot|jira|linear|notion|otter|outlook|salesforce|slack|teams|trello|whatsapp|zoho)\b/i;
+
+function hasExplicitAutomationInputSource(sourceText: string): boolean {
+  return (
+    namedAutomationInputSourcePattern.test(sourceText) ||
+    /\b(?:from|use|using|via)\s+(?:(?:my|our|the)\s+)?(?:[a-z0-9][a-z0-9+._-]*\s+){0,3}(?:account|integration|workspace)\b/i.test(
+      sourceText,
+    )
+  );
 }
 
 function deterministicBuilderSetupQuestion(sourceText: string, messageId: string): WebChatQuestion {
@@ -2646,7 +2647,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
-    const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
+    const integrationUser = automationBuilderContext?.task.createdBy
+      ? await deps.users.findById(automationBuilderContext.task.createdBy)
+      : currentUser;
+    const integrationMcpServers = deps.buildMcpServers
+      ? await deps.buildMcpServers(integrationUser?.email ?? null)
+      : {};
     const builderPlanOnly = Boolean(automationBuilderContext && isAutomationBuilderPlanOnlyMessage(message));
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
@@ -2959,13 +2965,15 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,
             userName: currentUser.name,
             userEmail: currentUser.email,
+            integrationUserId: integrationUser?.id ?? null,
+            integrationUserName: integrationUser?.name ?? null,
+            integrationUserEmail: integrationUser?.email ?? null,
             userPhone: currentUser.whatsapp_number,
             logger: deps.logger,
             getSlack: deps.getSlack,
             platform: deliveryPlatform,
             responseSurface: "web",
             contextType: runtimeContextType,
-            stopAfterCreateAutomationSkill: true,
             automationBuilderChat: Boolean(automationBuilderContext),
             onProgressEvent: async (event) => {
               if (automationBuilderContext && event.kind === "tool_use") {
@@ -3023,7 +3031,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               ? {
                   maxTurns: AUTOMATION_BUILDER_MAX_TURNS,
                   maxPersistedTextBytes: AUTOMATION_BUILDER_MAX_PERSISTED_TEXT_BYTES,
-                  agentAllowedTools: AUTOMATION_BUILDER_ALLOWED_TOOLS,
                 }
               : {}),
             orgName: settingsRow?.org_name,
@@ -3137,18 +3144,17 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           );
           return;
         }
+        const builderSourceText = builderHistory.map((historyMessage) => historyMessage.text).join("\n");
         const fallbackBuilderQuestion =
           !pendingInteraction &&
           automationBuilderContext &&
           automationBuilderContext.isPlaceholderDraft &&
           isExecutionModeSelectionMessage(message) &&
+          !hasExplicitAutomationInputSource(builderSourceText) &&
           fileParts.length === 0 &&
           automationArtifacts.length === 0 &&
           integrationCards.length === 0
-            ? deterministicBuilderSetupQuestion(
-                builderHistory.map((historyMessage) => historyMessage.text).join("\n"),
-                transcriptUserMessage.id,
-              )
+            ? deterministicBuilderSetupQuestion(builderSourceText, transcriptUserMessage.id)
             : undefined;
         const questionPart: WebChatQuestionPart | undefined = pendingInteraction
           ? questionPartFromInteraction(pendingInteraction)

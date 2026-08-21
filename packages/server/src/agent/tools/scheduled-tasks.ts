@@ -59,7 +59,7 @@ const workflowStepSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Script content for deterministic action steps. Use for fixed mapping, filtering, normalization, calculations, bounded JSON transformations, routing, or known integration operations. Action scripts use the existing action executor, receive (input, ctx, signal), and must return JSON-serializable output. Stored in automation_step_content, not in steps JSON.",
+      "Script content for deterministic action steps. Use for fixed mapping, filtering, normalization, calculations, bounded JSON transformations, routing, or known integration operations. Action scripts receive (input, ctx, signal), must return JSON-serializable output, and must call known Canvas integration operations through ctx.integrations.executeAction. Never invoke CANVAS_CLI or INTEGRATION_CLI from an action script. Stored in automation_step_content, not in steps JSON.",
     ),
   agentPrompt: z
     .string()
@@ -85,7 +85,7 @@ const workflowStepSchema = z.object({
     .describe("MCP servers available to an agent step. Not used by action steps."),
   actionCapabilities: automationActionCapabilitiesSchema
     .describe(
-      "Capabilities available to action scripts. Sketch tools are creator-scoped and read-only. For managed GitHub CLI access, declare cliIntegrations: ['github'] with usesIntegrationActions: false; any gh subcommand, including write operations, is allowed once declared.",
+      "Capabilities available to action scripts. Sketch tools are creator-scoped and read-only. Set usesIntegrationActions to true only when the script calls ctx.integrations.executeAction. For managed GitHub CLI access, declare cliIntegrations: ['github'] with usesIntegrationActions: false; any gh subcommand, including write operations, is allowed once declared.",
     )
     .optional(),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
@@ -849,27 +849,6 @@ async function refreshTaskAfterMutation(
   }
 }
 
-async function automaticAutomationTestRun(scheduler: TaskScheduler, taskId: string): Promise<string> {
-  try {
-    const result = await scheduler.executeTaskById(taskId, { preserveTaskState: true, runMode: "test" });
-    if (!result) {
-      return `Automatic test run for automation ${taskId} did not execute because the task is already complete.`;
-    }
-    const outcome = result.status === "failed" || result.aborted ? "failed" : "completed";
-    return [
-      `Automatic test run ${outcome} for automation ${taskId}:`,
-      JSON.stringify(result, null, 2),
-      "Inspect this result and repair the automation if the test exposed an issue before reporting completion.",
-    ].join("\n");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return [
-      `Automatic test run for automation ${taskId} could not be completed: ${message}`,
-      "Inspect the automation and repair the issue before reporting completion.",
-    ].join("\n");
-  }
-}
-
 function buildArtifactTags(params: {
   steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
@@ -1560,8 +1539,7 @@ export async function handleManageScheduledTasks(
         ...refreshedTask,
         ...(webhookMetadata ?? {}),
       };
-      const testRun = await automaticAutomationTestRun(deps.scheduler, refreshedTask.id);
-      return text(["Automation created:", JSON.stringify(response, null, 2), testRun].join("\n"));
+      return text(["Automation created:", JSON.stringify(response, null, 2)].join("\n"));
     }
 
     case "update": {
@@ -1677,8 +1655,7 @@ export async function handleManageScheduledTasks(
       const updatedTrigger = saved.request.steps.find((step) => step.type === "trigger")?.triggerConfig;
       const webhookMetadata = await webhookResponseMetadata(deps, updated.id, updatedTrigger);
       const response = { ...updated, ...(webhookMetadata ?? {}) };
-      const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
-      return text(["Automation updated:", JSON.stringify(response, null, 2), testRun].join("\n"));
+      return text(["Automation updated:", JSON.stringify(response, null, 2)].join("\n"));
     }
 
     case "open": {

@@ -146,7 +146,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
         events: integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
         cliIntegrations: params.cliIntegrations,
-        currentUserId: params.currentUserId,
+        currentUserId: params.integrationUserId === undefined ? params.currentUserId : params.integrationUserId,
         runtimeContext:
           params.taskContext?.contextType === "channel" && params.platform === "slack"
             ? { platform: "slack", deliveryTarget: params.taskContext.deliveryTarget }
@@ -154,8 +154,8 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
               ? { platform: "whatsapp", deliveryTarget: params.taskContext.deliveryTarget }
               : undefined,
         collector: integrationConnectionCollector,
-        userEmail: params.userEmail ?? null,
-        userName: params.userName,
+        userEmail: params.integrationUserEmail === undefined ? (params.userEmail ?? null) : params.integrationUserEmail,
+        userName: params.integrationUserName === undefined ? params.userName : params.integrationUserName,
       });
     },
     drain(params) {

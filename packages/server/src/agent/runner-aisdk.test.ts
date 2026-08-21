@@ -890,6 +890,7 @@ describe("runAgent AI SDK runtime path", () => {
     const result = await runAgent(
       makeRunParams(bashThenTextModel(command, "brokered done"), {
         userEmail: "alice@example.com",
+        integrationUserEmail: "owner@example.com",
         loadIntegrationProvider,
         agentEnv: { AGENT_ONLY: "agent-value" },
       }),
@@ -902,7 +903,7 @@ describe("runAgent AI SDK runtime path", () => {
       input: { command },
     });
     expect(loadIntegrationProvider).toHaveBeenCalled();
-    expect(provider.getBrokerSpec).toHaveBeenCalledWith({ userEmail: "alice@example.com", claudeConfigDir: workspace });
+    expect(provider.getBrokerSpec).toHaveBeenCalledWith({ userEmail: "owner@example.com", claudeConfigDir: workspace });
     expect(brokerOutput).toMatchObject({
       mode: "env-check",
       agentValue: "agent-value",

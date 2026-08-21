@@ -22,6 +22,7 @@ import {
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
+  PlusIcon,
   RobotIcon,
   ShareNetworkIcon,
   SlackLogoIcon,
@@ -525,17 +526,15 @@ export function ScheduledTasksPage() {
         </div>
         <Button
           type="button"
-          size="sm"
-          className="shrink-0"
+          size="icon"
+          variant="outline"
+          className="size-8 shrink-0 rounded-[8px]"
+          aria-label="Create automation"
+          title="Create automation"
           onClick={() => createMutation.mutate()}
           disabled={createMutation.isPending}
         >
-          {createMutation.isPending ? (
-            <SpinnerGapIcon size={14} className="animate-spin" />
-          ) : (
-            <RobotIcon size={14} weight="fill" aria-hidden />
-          )}
-          {createMutation.isPending ? "Opening builder…" : "Create with Sketch"}
+          {createMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={15} />}
         </Button>
       </div>
       {createMutation.isError ? (
@@ -1556,12 +1555,8 @@ function EmptyState({
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
       <Button type="button" size="sm" className="mt-4" onClick={onCreate} disabled={isCreating}>
-        {isCreating ? (
-          <SpinnerGapIcon size={14} className="animate-spin" />
-        ) : (
-          <RobotIcon size={14} weight="fill" aria-hidden />
-        )}
-        {isCreating ? "Opening builder…" : "Create with Sketch"}
+        {isCreating ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} aria-hidden />}
+        {isCreating ? "Opening builder…" : "Create automation"}
       </Button>
     </div>
   );
