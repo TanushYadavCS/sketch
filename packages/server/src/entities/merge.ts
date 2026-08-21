@@ -8,14 +8,17 @@ import type {
   EntityContactPointsTable,
   EntityDomainsTable,
   EntityMentionsTable,
+  EntityNameProposalsTable,
   EntityProjectBindingsTable,
   EntityProjectMemberOverridesTable,
   EntityRelationshipsTable,
   EntityReviewQueueTable,
   EntityShareEmailsTable,
+  SubEntitiesTable,
   TaskEvidenceTable,
   TasksTable,
 } from "../db/schema";
+import { isPg } from "../db/dialect";
 import { parseAliasesString } from "./materialize-json";
 import { normalizeStrict } from "./name-dedup";
 import { strongestProvenanceTier } from "./provenance";
@@ -30,10 +33,12 @@ type EntityCandidate = Selectable<EntityCandidatesTable>;
 type ReviewQueueRow = Selectable<EntityReviewQueueTable>;
 type ShareEmail = Selectable<EntityShareEmailsTable>;
 type Domain = Selectable<EntityDomainsTable>;
+type NameProposal = Selectable<EntityNameProposalsTable>;
 type ProjectBinding = Selectable<EntityProjectBindingsTable>;
 type MemberOverride = Selectable<EntityProjectMemberOverridesTable>;
 type TaskRow = Selectable<TasksTable>;
 type TaskEvidence = Selectable<TaskEvidenceTable>;
+type SubEntity = Selectable<SubEntitiesTable>;
 
 export type EntityMergeMove =
   | {
@@ -322,7 +327,13 @@ async function repointTasks(
   const rows = await db
     .selectFrom("tasks")
     .selectAll()
-    .where((eb) => eb.or([eb("parent_entity_id", "=", loserId), eb("assignee_entity_id", "=", loserId)]))
+    .where((eb) =>
+      eb.or([
+        eb("parent_entity_id", "=", loserId),
+        eb("assignee_entity_id", "=", loserId),
+        eb("client_entity_id", "=", loserId),
+      ]),
+    )
     .execute();
   for (const row of rows) {
     const repoint: Record<string, { from: string | null; to: string | null }> = {};
@@ -334,6 +345,10 @@ async function repointTasks(
     if (row.assignee_entity_id === loserId) {
       repoint.assignee_entity_id = { from: loserId, to: survivorId };
       updates.assignee_entity_id = survivorId;
+    }
+    if (row.client_entity_id === loserId) {
+      repoint.client_entity_id = { from: loserId, to: survivorId };
+      updates.client_entity_id = survivorId;
     }
     await db
       .updateTable("tasks")
@@ -572,6 +587,79 @@ async function repointDomains(
   }
 }
 
+/** entity_name_embeddings only exists on Postgres (pgvector); SQLite merges must skip it. */
+async function repointNameEmbeddings(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  if (!isPg(db)) return;
+  const row = await db
+    .selectFrom("entity_name_embeddings")
+    .selectAll()
+    .where("entity_id", "=", loserId)
+    .executeTakeFirst();
+  if (!row) return;
+  const collision = await db
+    .selectFrom("entity_name_embeddings")
+    .select("entity_id")
+    .where("entity_id", "=", survivorId)
+    .executeTakeFirst();
+  if (collision) {
+    moves.push({ table: "entity_name_embeddings", collided: true, payload: rowPayload(row) });
+    await db.deleteFrom("entity_name_embeddings").where("entity_id", "=", loserId).execute();
+    return;
+  }
+  await db
+    .updateTable("entity_name_embeddings")
+    .set({ entity_id: survivorId })
+    .where("entity_id", "=", loserId)
+    .execute();
+  moves.push({
+    table: "entity_name_embeddings",
+    rowId: loserId,
+    repoint: { entity_id: { from: loserId, to: survivorId } },
+  });
+}
+
+async function findNameProposalCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: NameProposal,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_name_proposals")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("source", "=", row.source)
+    .where("normalized_value", "=", row.normalized_value)
+    .executeTakeFirst();
+}
+
+async function repointNameProposals(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db.selectFrom("entity_name_proposals").selectAll().where("entity_id", "=", loserId).execute();
+  for (const row of rows) {
+    const collision = await findNameProposalCollision(db, survivorId, row);
+    if (collision) {
+      moves.push({ table: "entity_name_proposals", collided: true, payload: rowPayload(row) });
+      await db.deleteFrom("entity_name_proposals").where("id", "=", row.id).execute();
+      continue;
+    }
+    await db.updateTable("entity_name_proposals").set({ entity_id: survivorId }).where("id", "=", row.id).execute();
+    moves.push({
+      table: "entity_name_proposals",
+      rowId: row.id,
+      repoint: { entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
 async function findProjectBindingCollision(
   db: Kysely<DB>,
   survivorId: string,
@@ -789,6 +877,27 @@ function rewriteObservedPeople(raw: string | null, loserId: string, survivorId: 
   return JSON.stringify(next);
 }
 
+function rewriteEntityIdList(raw: string | null, loserId: string, survivorId: string): string | null {
+  if (!raw) return raw;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!Array.isArray(parsed)) return raw;
+  const next: string[] = [];
+  let changed = false;
+  for (const value of parsed) {
+    if (typeof value !== "string") continue;
+    const rewritten = value === loserId ? survivorId : value;
+    if (rewritten !== value) changed = true;
+    if (!next.includes(rewritten)) next.push(rewritten);
+  }
+  if (!changed) return raw;
+  return next.length > 0 ? JSON.stringify(next) : null;
+}
+
 async function repointCandidates(
   db: Kysely<DB>,
   loserId: string,
@@ -823,7 +932,13 @@ async function repointReviewQueue(
   const rows = await db
     .selectFrom("entity_review_queue")
     .selectAll()
-    .where((eb) => eb.or([eb("candidate_entity_id", "=", loserId), eb("resolved_entity_id", "=", loserId)]))
+    .where((eb) =>
+      eb.or([
+        eb("candidate_entity_id", "=", loserId),
+        eb("resolved_entity_id", "=", loserId),
+        eb("candidate_entity_ids", "like", `%${loserId}%`),
+      ]),
+    )
     .execute();
   for (const row of rows) {
     const repoint: Record<string, { from: string | null; to: string | null }> = {};
@@ -836,8 +951,195 @@ async function repointReviewQueue(
       repoint.resolved_entity_id = { from: loserId, to: survivorId };
       updates.resolved_entity_id = survivorId;
     }
+    const rewrittenCandidates = rewriteEntityIdList(row.candidate_entity_ids, loserId, survivorId);
+    if (rewrittenCandidates !== row.candidate_entity_ids) {
+      repoint.candidate_entity_ids = { from: row.candidate_entity_ids, to: rewrittenCandidates };
+      updates.candidate_entity_ids = rewrittenCandidates;
+    }
+    if (Object.keys(updates).length === 0) continue;
     await db.updateTable("entity_review_queue").set(updates).where("id", "=", row.id).execute();
     moves.push({ table: "entity_review_queue", rowId: row.id, repoint });
+  }
+}
+
+async function repointSlackUserSyncState(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db.selectFrom("slack_user_sync_state").selectAll().where("entity_id", "=", loserId).execute();
+  for (const row of rows) {
+    await db
+      .updateTable("slack_user_sync_state")
+      .set({ entity_id: survivorId, updated_at: new Date().toISOString() })
+      .where("team_id", "=", row.team_id)
+      .where("slack_user_id", "=", row.slack_user_id)
+      .execute();
+    moves.push({
+      table: "slack_user_sync_state",
+      rowId: `${row.team_id}\u0000${row.slack_user_id}`,
+      repoint: { entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointUserEntityLinks(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db.selectFrom("user_entity_links").selectAll().where("entity_id", "=", loserId).execute();
+  for (const row of rows) {
+    const collision = await db
+      .selectFrom("user_entity_links")
+      .select("id")
+      .where("entity_id", "=", survivorId)
+      .executeTakeFirst();
+    if (collision) {
+      moves.push({ table: "user_entity_links", collided: true, payload: rowPayload(row) });
+      await db.deleteFrom("user_entity_links").where("id", "=", row.id).execute();
+      continue;
+    }
+    await db.updateTable("user_entity_links").set({ entity_id: survivorId }).where("id", "=", row.id).execute();
+    moves.push({
+      table: "user_entity_links",
+      rowId: row.id,
+      repoint: { entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointProjectMintingVerdicts(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("project_minting_verdicts")
+    .selectAll()
+    .where("company_entity_id", "=", loserId)
+    .execute();
+  for (const row of rows) {
+    await db
+      .updateTable("project_minting_verdicts")
+      .set({ company_entity_id: survivorId, updated_at: new Date().toISOString() })
+      .where("id", "=", row.id)
+      .execute();
+    moves.push({
+      table: "project_minting_verdicts",
+      rowId: row.id,
+      repoint: { company_entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointWeeklyMintRunEvents(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("weekly_mint_run_events")
+    .selectAll()
+    .where("company_entity_id", "=", loserId)
+    .execute();
+  for (const row of rows) {
+    await db
+      .updateTable("weekly_mint_run_events")
+      .set({ company_entity_id: survivorId })
+      .where("id", "=", row.id)
+      .execute();
+    moves.push({
+      table: "weekly_mint_run_events",
+      rowId: row.id,
+      repoint: { company_entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointCompanyRelationshipDeclarations(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const row = await db
+    .selectFrom("company_relationship_declarations")
+    .selectAll()
+    .where("subject_entity_id", "=", loserId)
+    .executeTakeFirst();
+  if (!row) return;
+  const collision = await db
+    .selectFrom("company_relationship_declarations")
+    .select("subject_entity_id")
+    .where("subject_entity_id", "=", survivorId)
+    .executeTakeFirst();
+  if (collision) {
+    moves.push({ table: "company_relationship_declarations", collided: true, payload: rowPayload(row) });
+    await db.deleteFrom("company_relationship_declarations").where("subject_entity_id", "=", loserId).execute();
+    return;
+  }
+  await db
+    .updateTable("company_relationship_declarations")
+    .set({ subject_entity_id: survivorId, updated_at: new Date().toISOString() })
+    .where("subject_entity_id", "=", loserId)
+    .execute();
+  moves.push({
+    table: "company_relationship_declarations",
+    rowId: loserId,
+    repoint: { subject_entity_id: { from: loserId, to: survivorId } },
+  });
+}
+
+async function repointWorkCycles(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db.selectFrom("work_cycles").selectAll().where("scope_entity_id", "=", loserId).execute();
+  for (const row of rows) {
+    await db
+      .updateTable("work_cycles")
+      .set({ scope_entity_id: survivorId, updated_at: new Date().toISOString() })
+      .where("id", "=", row.id)
+      .execute();
+    moves.push({
+      table: "work_cycles",
+      rowId: row.id,
+      repoint: { scope_entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointSubEntities(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("sub_entities")
+    .selectAll()
+    .where((eb) => eb.or([eb("parent_entity_id", "=", loserId), eb("parent_scope_key", "=", loserId)]))
+    .execute();
+  for (const row of rows) {
+    const updates: Partial<SubEntity> = { updated_at: new Date().toISOString() };
+    const repoint: Record<string, { from: string | null; to: string | null }> = {};
+    if (row.parent_entity_id === loserId) {
+      updates.parent_entity_id = survivorId;
+      repoint.parent_entity_id = { from: loserId, to: survivorId };
+    }
+    if (row.parent_scope_key === loserId) {
+      updates.parent_scope_key = survivorId;
+      repoint.parent_scope_key = { from: loserId, to: survivorId };
+    }
+    await db.updateTable("sub_entities").set(updates).where("id", "=", row.id).execute();
+    moves.push({ table: "sub_entities", rowId: row.id, repoint });
   }
 }
 
@@ -848,6 +1150,8 @@ async function applyMergeMoves(
   moves: EntityMergeMove[],
 ): Promise<void> {
   await repointSourceRefs(db, loserId, survivorId, moves);
+  await repointNameEmbeddings(db, loserId, survivorId, moves);
+  await repointNameProposals(db, loserId, survivorId, moves);
   await repointMentions(db, loserId, survivorId, moves);
   await repointRelationships(db, loserId, survivorId, moves);
   await repointContactPoints(db, loserId, survivorId, moves);
@@ -860,6 +1164,13 @@ async function applyMergeMoves(
   await repointTaskEvidence(db, loserId, survivorId, moves);
   await repointCandidates(db, loserId, survivorId, moves);
   await repointReviewQueue(db, loserId, survivorId, moves);
+  await repointSlackUserSyncState(db, loserId, survivorId, moves);
+  await repointUserEntityLinks(db, loserId, survivorId, moves);
+  await repointProjectMintingVerdicts(db, loserId, survivorId, moves);
+  await repointWeeklyMintRunEvents(db, loserId, survivorId, moves);
+  await repointCompanyRelationshipDeclarations(db, loserId, survivorId, moves);
+  await repointWorkCycles(db, loserId, survivorId, moves);
+  await repointSubEntities(db, loserId, survivorId, moves);
 }
 
 async function carryLoserAliasesToSurvivor(
@@ -1175,6 +1486,22 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
     }
     return;
   }
+  if (move.table === "entity_name_embeddings" && updates.entity_id) {
+    await db
+      .updateTable("entity_name_embeddings")
+      .set({ entity_id: updates.entity_id })
+      .where("entity_id", "=", move.repoint.entity_id.to)
+      .execute();
+    return;
+  }
+  if (move.table === "entity_name_proposals" && updates.entity_id) {
+    await db
+      .updateTable("entity_name_proposals")
+      .set({ entity_id: updates.entity_id })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
   if (move.table === "entity_mentions" && updates.entity_id) {
     await db
       .updateTable("entity_mentions")
@@ -1262,15 +1589,75 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
       .execute();
     return;
   }
-  if (move.table === "entity_review_queue") {
+  if (move.table === "slack_user_sync_state" && updates.entity_id) {
+    const [teamId, slackUserId] = move.rowId.split("\u0000");
     await db
-      .updateTable("entity_review_queue")
+      .updateTable("slack_user_sync_state")
+      .set({ entity_id: updates.entity_id, updated_at: new Date().toISOString() })
+      .where("team_id", "=", teamId ?? "")
+      .where("slack_user_id", "=", slackUserId ?? "")
+      .execute();
+    return;
+  }
+  if (move.table === "user_entity_links" && updates.entity_id) {
+    await db
+      .updateTable("user_entity_links")
+      .set({ entity_id: updates.entity_id })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "project_minting_verdicts" && updates.company_entity_id) {
+    await db
+      .updateTable("project_minting_verdicts")
+      .set({ company_entity_id: updates.company_entity_id, updated_at: new Date().toISOString() })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "weekly_mint_run_events" && updates.company_entity_id) {
+    await db
+      .updateTable("weekly_mint_run_events")
+      .set({ company_entity_id: updates.company_entity_id })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "company_relationship_declarations" && updates.subject_entity_id) {
+    await db
+      .updateTable("company_relationship_declarations")
+      .set({ subject_entity_id: updates.subject_entity_id, updated_at: new Date().toISOString() })
+      .where("subject_entity_id", "=", move.repoint.subject_entity_id.to)
+      .execute();
+    return;
+  }
+  if (move.table === "work_cycles" && updates.scope_entity_id) {
+    await db
+      .updateTable("work_cycles")
+      .set({ scope_entity_id: updates.scope_entity_id, updated_at: new Date().toISOString() })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "sub_entities") {
+    await db
+      .updateTable("sub_entities")
       .set({
-        candidate_entity_id: updates.candidate_entity_id,
-        resolved_entity_id: updates.resolved_entity_id,
+        ...("parent_entity_id" in move.repoint ? { parent_entity_id: updates.parent_entity_id } : {}),
+        ...("parent_scope_key" in move.repoint ? { parent_scope_key: updates.parent_scope_key ?? "" } : {}),
+        updated_at: new Date().toISOString(),
       })
       .where("id", "=", move.rowId)
       .execute();
+    return;
+  }
+  if (move.table === "entity_review_queue") {
+    const reviewUpdates: Partial<ReviewQueueRow> = {};
+    if ("candidate_entity_id" in move.repoint) reviewUpdates.candidate_entity_id = updates.candidate_entity_id ?? null;
+    if ("candidate_entity_ids" in move.repoint)
+      reviewUpdates.candidate_entity_ids = updates.candidate_entity_ids ?? null;
+    if ("resolved_entity_id" in move.repoint) reviewUpdates.resolved_entity_id = updates.resolved_entity_id ?? null;
+    await db.updateTable("entity_review_queue").set(reviewUpdates).where("id", "=", move.rowId).execute();
   }
 }
 

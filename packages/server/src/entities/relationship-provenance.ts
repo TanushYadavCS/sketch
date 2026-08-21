@@ -15,6 +15,7 @@ export const HUMAN_RELATIONSHIP_SOURCES: readonly string[] = [DECLARED_RELATIONS
 export const PROTECTED_RELATIONSHIP_SOURCES: readonly string[] = [
   ...HUMAN_RELATIONSHIP_SOURCES,
   "project_minting_acceptance",
+  "project_cleanup_apply",
 ];
 
 export const PROTECTED_RELATIONSHIP_TYPES: readonly string[] = [
@@ -35,7 +36,7 @@ export function isHumanRelationshipSource(source: string | null | undefined): bo
  */
 export function relationshipSourceOrder(source: string | null | undefined): number {
   if (source != null && HUMAN_RELATIONSHIP_SOURCES.includes(source)) return 0;
-  if (source === "project_minting_acceptance") return 1;
+  if (source === "project_minting_acceptance" || source === "project_cleanup_apply") return 1;
   if (source === "structural_assignee") return 2;
   if (source === "llm_extraction") return 3;
   if (source === "co_mention") return 4;
