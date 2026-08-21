@@ -25,6 +25,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { RunStatusBadge } from "./enrichment-trace";
+import { GraphVerdicts } from "./graph-verdicts";
 import { MintingQueue } from "./minting-queue";
 import { SearchTraces } from "./search-traces";
 import { TraceDialog } from "./trace-dialog";
@@ -40,7 +41,7 @@ function DevToolsPage() {
   const [traceFile, setTraceFile] = useState<{ id: string; name: string } | null>(null);
   const [traceKind, setTraceKind] = useState<DevTraceRunKind>("enrichment");
   const [openRun, setOpenRun] = useState<{ id: string; kind: DevTraceRunKind } | null>(null);
-  const [tab, setTab] = useState<"enrichment" | "search" | "minting">("enrichment");
+  const [tab, setTab] = useState<"enrichment" | "search" | "minting" | "graph-verdicts">("enrichment");
   const isAdmin = auth.role === "admin";
 
   /**
@@ -92,12 +93,19 @@ function DevToolsPage() {
             <TabButton active={tab === "enrichment"} onClick={() => setTab("enrichment")} label="Enrichment" />
             <TabButton active={tab === "search"} onClick={() => setTab("search")} label="Search" />
             <TabButton active={tab === "minting"} onClick={() => setTab("minting")} label="Project minting" />
+            <TabButton
+              active={tab === "graph-verdicts"}
+              onClick={() => setTab("graph-verdicts")}
+              label="Graph verdicts"
+            />
           </div>
 
           {tab === "search" ? (
             <SearchTraces />
           ) : tab === "minting" ? (
             <MintingQueue />
+          ) : tab === "graph-verdicts" ? (
+            <GraphVerdicts />
           ) : (
             <EnrichmentTab
               runs={runsQuery.data?.runs ?? []}
