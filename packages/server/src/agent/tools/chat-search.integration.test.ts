@@ -992,6 +992,35 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       );
     });
 
+    it("reports a wrong anchor id as a bad anchor, not as an access denial", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "anchor mismatch marker",
+        members: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const other = await seedWhatsAppGroup(db, {
+        text: "message that lives elsewhere",
+        members: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: other.messageId,
+      });
+
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain(`anchorMessageId ${other.messageId} is not a message in this conversation`);
+      expect(text).not.toContain("no longer have access");
+    });
+
     it("reads a referenced conversation chronologically when no anchor is given", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "anchor required marker",

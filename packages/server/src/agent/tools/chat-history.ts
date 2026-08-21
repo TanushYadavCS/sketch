@@ -328,12 +328,28 @@ async function renderCrossConversationRead(
   return renderAllChatsSearchResults(deps.db, enriched);
 }
 
+/**
+ * Authorization for the conversation is already settled before the anchor is resolved, so an
+ * anchor that is simply not in this conversation must not be reported as an access failure.
+ * The model needs to know the id is wrong, not that it lost permission.
+ */
+function anchorNotInConversationResult(anchorMessageId: number): ToolResult {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `anchorMessageId ${anchorMessageId} is not a message in this conversation. Omit anchorMessageId to read the conversation chronologically, or pass a message id returned by an earlier read of this same conversation.`,
+      },
+    ],
+  };
+}
+
 async function loadCrossConversationAnchorStream(
   deps: SketchMcpDeps,
   conversationId: number,
   anchorMessageId: number,
-): Promise<{ ok: true; stream: CrossReadStream } | { ok: false }> {
-  if (!deps.db) return { ok: false };
+): Promise<{ ok: true; stream: CrossReadStream } | { ok: false; reason: "unavailable" | "anchor-not-found" }> {
+  if (!deps.db) return { ok: false, reason: "unavailable" };
   const row = await deps.db
     .selectFrom("conversation_messages")
     .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
@@ -341,7 +357,7 @@ async function loadCrossConversationAnchorStream(
     .where("conversation_messages.conversation_id", "=", conversationId)
     .where("conversation_messages.id", "=", anchorMessageId)
     .executeTakeFirst();
-  if (!row) return { ok: false };
+  if (!row) return { ok: false, reason: "anchor-not-found" };
   if (row.platform !== "slack") return { ok: true, stream: {} };
   if (row.provider_thread_id === null) return { ok: true, stream: { providerThreadId: null } };
   return { ok: true, stream: { providerThreadId: row.provider_thread_id } };
@@ -595,7 +611,11 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       const referencedAnchorMessageId = parsedPageToken?.anchorMessageId ?? effectiveAnchorMessageId;
       if (isReferencedConversation && referencedAnchorMessageId) {
         const anchor = await loadCrossConversationAnchorStream(deps, conversationId, referencedAnchorMessageId);
-        if (!anchor.ok) return unavailableCrossConversationResult();
+        if (!anchor.ok) {
+          return anchor.reason === "anchor-not-found"
+            ? anchorNotInConversationResult(referencedAnchorMessageId)
+            : unavailableCrossConversationResult();
+        }
         stream = anchor.stream;
       }
       if (parsedPageToken && !(await boundaryBelongsToCrossReadStream(deps, parsedPageToken, stream))) {
