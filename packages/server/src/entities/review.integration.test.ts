@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { createTestPgDb } from "../test-utils";
+import { normalizeMatchName } from "./match-normalize";
 import { reclassifyReview } from "./resolve";
 
 const USER_ID = "a4-pg-user";
@@ -70,7 +70,7 @@ async function seedReviewRow(
     .values({
       id,
       proposed_name: opts.proposedName,
-      normalized_name: normalizeName(opts.proposedName),
+      normalized_name: normalizeMatchName(opts.entityType, opts.proposedName),
       entity_type: opts.entityType,
       source: opts.source ?? null,
       source_id: opts.sourceId ?? null,

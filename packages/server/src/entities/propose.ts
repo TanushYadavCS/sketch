@@ -540,6 +540,7 @@ async function embeddingCandidatesThenCreate(
   deps: ProposeDeps,
   input: ProposeInput,
   normalized: string,
+  rejectionKey: string,
   createReason: "skipFuzzy" | "ranked_empty",
 ): Promise<ProposeResult> {
   if ((input.entityType === "person" || input.entityType === "company") && deps.lookup.retrieveEmbeddingCandidates) {
@@ -548,7 +549,7 @@ async function embeddingCandidatesThenCreate(
       const ranked: RankedCandidate[] = [];
       for (const candidate of retrieved) {
         if (!isEligibleMatchTarget(input, candidate.entity)) continue;
-        if (await deps.reviewRepo.isRejected(candidate.entity.id, normalized)) continue;
+        if (await deps.reviewRepo.isRejected(candidate.entity.id, rejectionKey)) continue;
         ranked.push(candidate);
       }
       if (ranked.length > 0) return queueProposal(deps, input, normalized, ranked, "embedding");
@@ -651,6 +652,7 @@ async function decideNameCandidates(
 
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
   const normalized = normalizeMatchName(input.entityType, input.name);
+  const rejectionKey = normalizeName(input.name);
 
   if (input.entityType === "product") {
     const collision = await productCollidesWithThirdParty(deps, input.name);
@@ -789,7 +791,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     }));
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
       if (!rejected) filtered.push(r);
     }
     ranked = filtered;
@@ -806,7 +808,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
       }));
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
       if (!rejected) filtered.push(r);
     }
     ranked = filtered;
@@ -816,7 +818,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
-    return embeddingCandidatesThenCreate(deps, input, normalized, "skipFuzzy");
+    return embeddingCandidatesThenCreate(deps, input, normalized, rejectionKey, "skipFuzzy");
   }
 
   // 4) Fuzzy-rank against same-type entities.
@@ -827,7 +829,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   if (ranked.length > 0) {
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
       if (!rejected) filtered.push(r);
     }
     ranked = filtered;
@@ -835,7 +837,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
-    return embeddingCandidatesThenCreate(deps, input, normalized, "ranked_empty");
+    return embeddingCandidatesThenCreate(deps, input, normalized, rejectionKey, "ranked_empty");
   }
   if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);

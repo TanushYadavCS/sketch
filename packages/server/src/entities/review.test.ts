@@ -11,6 +11,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
 import { normalizeName } from "../connectors/name-normalize";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createTaskRepository } from "../db/repositories/tasks";
@@ -18,6 +19,9 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { normalizeMatchName } from "./match-normalize";
+import { buildMaterializeDeps } from "./materialize-deps";
+import { type ProposeEntityType, proposeEntity } from "./propose";
 
 const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const PASSWORD = "testpassword123";
@@ -175,7 +179,7 @@ async function seedReviewRow(
     .values({
       id,
       proposed_name: opts.proposedName,
-      normalized_name: normalizeName(opts.proposedName),
+      normalized_name: normalizeMatchName(opts.entityType, opts.proposedName),
       entity_type: opts.entityType,
       source: opts.source ?? null,
       source_id: opts.sourceId ?? null,
@@ -1092,6 +1096,103 @@ describe("entity-review A4 backend", () => {
       body: JSON.stringify({ newEntityType: "tool", candidateGeneratedAt: target.candidateGeneratedAt }),
     });
     expect(invalidTypeRes.status).toBe(400);
+  });
+
+  it("reclassify recomputes product-derived keys, detects target collisions, and preserves custom keys", async () => {
+    const entityRepo = createEntityRepository(db);
+    const targetEntity = await entityRepo.upsertEntity({
+      name: "GPT4",
+      sourceType: "project",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const productDeps = await buildMaterializeDeps(db, {
+      birthGateTypes: new Set<ProposeEntityType>(["product"]),
+      birthGateLiveTypes: new Set<ProposeEntityType>(["product"]),
+    });
+    const proposeProductReview = async (name: string, sourceId: string) => {
+      const result = await proposeEntity(
+        {
+          entityRepo: productDeps.entityRepo,
+          reviewRepo: productDeps.reviewRepo,
+          lookup: productDeps.lookup,
+          readEmail: productDeps.readEmail,
+          birthGateTypes: productDeps.birthGateTypes,
+          birthGateLiveTypes: productDeps.birthGateLiveTypes,
+        },
+        {
+          name,
+          entityType: "product",
+          subtype: "external",
+          source: "llm_extraction",
+          sourceId,
+          evidence: [],
+          triggeredByUserId: ownerId,
+        },
+      );
+      expect(result.kind).toBe("queued");
+      return db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("source", "=", "llm_extraction")
+        .where("source_id", "=", sourceId)
+        .executeTakeFirstOrThrow();
+    };
+
+    const standard = await proposeProductReview("GPT4", "product:gpt4-reclassify");
+    expect(standard.normalized_name).toBe(normalizeMatchName("product", "GPT4"));
+    const reclassifyRes = await app.request(`/api/entity-review/${standard.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "project", candidateGeneratedAt: standard.candidate_generated_at }),
+    });
+    expect(reclassifyRes.status).toBe(200);
+    const reclassified = (await reclassifyRes.json()) as {
+      row: { id: string; normalized_name: string; candidate_entity_id: string | null };
+    };
+    expect(reclassified.row.id).toBe(standard.id);
+    expect(reclassified.row.normalized_name).toBe(normalizeMatchName("project", "GPT4"));
+    expect(reclassified.row.candidate_entity_id).toBe(targetEntity.id);
+
+    const collisionTarget = await seedReviewRow(db, {
+      proposedName: "GPT5",
+      entityType: "project",
+      triggeredBy: ownerId,
+    });
+    const collisionSource = await proposeProductReview("GPT5", "product:gpt5-reclassify");
+    const collisionRes = await app.request(`/api/entity-review/${collisionSource.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "project", candidateGeneratedAt: collisionSource.candidate_generated_at }),
+    });
+    expect(collisionRes.status).toBe(200);
+    const collision = (await collisionRes.json()) as { result: string; row: { id: string; normalized_name: string } };
+    expect(collision.result).toBe("RECLASSIFY");
+    expect(collision.row.id).toBe(collisionTarget.id);
+    expect(collision.row.normalized_name).toBe(normalizeMatchName("project", "GPT5"));
+    await expect(
+      db.selectFrom("entity_review_queue").select("id").where("id", "=", collisionSource.id).executeTakeFirst(),
+    ).resolves.toBeUndefined();
+
+    const custom = await seedReviewRow(db, {
+      proposedName: "GPT6",
+      entityType: "product",
+      triggeredBy: ownerId,
+    });
+    await db
+      .updateTable("entity_review_queue")
+      .set({ normalized_name: "custom:gpt6" })
+      .where("id", "=", custom.id)
+      .execute();
+    const customRes = await app.request(`/api/entity-review/${custom.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "project", candidateGeneratedAt: custom.candidateGeneratedAt }),
+    });
+    expect(customRes.status).toBe(200);
+    const customBody = (await customRes.json()) as { row: { id: string; normalized_name: string } };
+    expect(customBody.row.id).toBe(custom.id);
+    expect(customBody.row.normalized_name).toBe("custom:gpt6");
   });
 
   it("separates tracker and inferred bulk accept paths", async () => {

@@ -1110,12 +1110,17 @@ export function createEntityRepository(db: Kysely<DB>) {
       query: string,
       opts?: { sourceTypes?: string[]; limit?: number; sortBy?: "relevance" | "recency" },
     ) {
-      const pattern = `%${query}%`;
+      const pattern = `%${query.toLowerCase()}%`;
       let q = db
         .selectFrom("entities")
         .selectAll()
         .where(whereLiveEntity())
-        .where((eb) => eb.or([eb("name", "like", pattern), eb("aliases", "like", pattern)]));
+        .where((eb) =>
+          eb.or([
+            eb(sql<string>`lower(entities.name)`, "like", pattern),
+            eb(sql<string>`lower(entities.aliases)`, "like", pattern),
+          ]),
+        );
 
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
         q = q.where("source_type", "in", opts.sourceTypes);

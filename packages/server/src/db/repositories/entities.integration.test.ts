@@ -108,4 +108,21 @@ describe("createEntityRepository deleteEntitiesForFiles postgres", () => {
 
     expect(matches.get("pg-metadata@example.com")).toMatchObject([{ id: metadataOnly.id }]);
   });
+
+  it("searches names and aliases case-insensitively in postgres", async () => {
+    const repo = createEntityRepository(db);
+    const entity = await repo.upsertEntity({
+      name: "Oxane Partners",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+      aliases: ["OxanePartners"],
+    });
+
+    const nameMatches = await repo.searchEntities("oxane");
+    expect(nameMatches.map((match) => match.id)).toContain(entity.id);
+
+    const aliasMatches = await repo.searchEntities("oXaNeP");
+    expect(aliasMatches.map((match) => match.id)).toContain(entity.id);
+  });
 });
