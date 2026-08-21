@@ -9,7 +9,9 @@ import type { RunAgentParams } from "../agent/runner";
 import { getSessionId, saveSessionId } from "../agent/sessions";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { createAutomationDraft } from "../automation/persistence";
 import { createAutomationSharesRepository } from "../db/repositories/automation-shares";
+import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -1575,9 +1577,8 @@ describe("web chat API", () => {
       maxPersistedTextBytes: 24 * 1024,
       taskContext: { planOnly: false },
     });
-    expect(runAgent.mock.calls[0]?.[0].agentAllowedTools).toContain("mcp__sketch__ManageScheduledTasks");
-    expect(runAgent.mock.calls[0]?.[0].agentAllowedTools).not.toContain("Bash");
-    expect(runAgent.mock.calls[0]?.[0].agentAllowedTools).not.toContain("Skill");
+    expect(runAgent.mock.calls[0]?.[0].agentAllowedTools).toBeUndefined();
+    expect(runAgent.mock.calls[0]?.[0].stopAfterCreateAutomationSkill).toBeUndefined();
 
     const otherSession = await app.request("/api/web-chat?conversationId=builder-lease", {
       method: "POST",
@@ -2266,6 +2267,115 @@ describe("web chat API", () => {
     );
   });
 
+  it("does not ask for an input source already named in the originating chat", async () => {
+    const admin = await seedAdmin(db);
+    const sourceConversationId = "source-clickup-automation";
+    const builderConversationId = "builder-clickup-automation";
+    const taskId = "task-clickup-automation";
+    await mkdir(join(dataDir, "web-chat", admin.id), { recursive: true });
+    await writeFile(
+      webChatTranscriptPath(dataDir, admin.id, sourceConversationId),
+      JSON.stringify({
+        messages: [
+          {
+            id: "source-clickup-request",
+            role: "user",
+            parts: [{ type: "text", text: "I want to monitor any updates on my ClickUp tasks." }],
+          },
+        ],
+      }),
+    );
+    await createAutomationDraft({
+      db,
+      context: {
+        id: taskId,
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D_BUILDER",
+        threadTs: null,
+        createdBy: admin.id,
+        originPlatform: "web",
+        originConversationId: sourceConversationId,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      timezone: "UTC",
+      taskConversationAssociations: [
+        { conversationId: sourceConversationId, transcriptUserId: admin.id, kind: "web_chat" },
+        { conversationId: builderConversationId, transcriptUserId: admin.id, kind: "builder" },
+      ],
+    });
+    const task = {
+      id: taskId,
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_BUILDER",
+      threadTs: null,
+      prompt: "Describe the automation.",
+      executionMode: "hybrid",
+      scheduleType: "interval",
+      scheduleValue: "3600",
+      timezone: "UTC",
+      sessionMode: "fresh",
+      nextRunAt: null,
+      lastRunAt: null,
+      status: "paused",
+      createdBy: admin.id,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      revision: 0,
+      title: "New automation",
+      description: null,
+      originChat: {
+        platform: "web",
+        conversationId: sourceConversationId,
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+      steps: null,
+      edges: null,
+      outputTarget: "D_BUILDER",
+      outputPlatform: "slack",
+      outputThreadTs: null,
+      outputMode: "deliver",
+      delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
+    };
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I'll use ClickUp as the source and continue setup."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue(task),
+      listTasks: vi.fn().mockResolvedValue([task]),
+    } as never;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+      stepContentRepo: createAutomationStepContentRepository(db),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request(`/api/web-chat?conversationId=${builderConversationId}`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: '[automation-setup-mode-selection] I chose the "hybrid" execution mode (Hybrid).',
+        automationTaskId: taskId,
+        clientSessionId: "test-builder-session",
+        generation: 1,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(runAgent.mock.calls[0]?.[0].userMessage).toContain("I want to monitor any updates on my ClickUp tasks.");
+    expect(stream).toContain("I'll use ClickUp as the source and continue setup.");
+    expect(stream).not.toContain("Where should this automation get the information it needs?");
+    expect(stream).not.toContain("Let's start by identifying the input source.");
+  });
+
   it("re-grants an admin task access but keeps the owner transcript viewer-scoped", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
@@ -2392,10 +2502,11 @@ describe("web chat API", () => {
         delivery: { platform: "slack", targetType: "dm", targetId: "D_OWNER", threadTs: null, mode: "deliver" },
       }),
     };
+    const buildMcpServers = vi.fn().mockResolvedValue({});
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       runAgent,
-      buildMcpServers: vi.fn().mockResolvedValue({}),
+      buildMcpServers,
       scheduler,
     });
     const cookie = await login(app);
@@ -2414,6 +2525,9 @@ describe("web chat API", () => {
     expect(res.status).toBe(200);
     await res.text();
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(buildMcpServers).toHaveBeenCalledWith(owner.email);
+    expect(call.userEmail).toBe(admin.email);
+    expect(call.integrationUserEmail).toBe(owner.email);
     expect(call.userMessage).toContain("task_id: task-foreign-admin");
     expect(call.taskContext).toMatchObject({
       platform: "slack",
