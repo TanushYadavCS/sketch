@@ -217,10 +217,10 @@ describe("buildSystemContext", () => {
     it("uses the same plain-language execution mode names as the builder", () => {
       const result = buildSystemContext({ platform: "slack" });
 
-      expect(result).toContain("Fixed recipe runs action steps exactly as saved and has no AI steps");
-      expect(result).toContain("Recipe + AI combines deterministic action steps with bounded agent steps");
-      expect(result).toContain("Agent-led uses AI steps only and has no code or action steps");
-      expect(result).toContain("with Fixed recipe, Recipe + AI, and Agent-led as the choices");
+      expect(result).toContain("Deterministic runs saved code and action steps exactly as written with no agent steps");
+      expect(result).toContain("Hybrid combines deterministic steps with bounded agent steps");
+      expect(result).toContain("Agent uses agent steps only and has no code or action steps");
+      expect(result).toContain("with Deterministic, Hybrid, and Agent as the choices");
     });
 
     it("prefers deterministic action steps for fixed automation work", () => {
@@ -432,6 +432,20 @@ describe("buildSystemContext", () => {
       expect(result).toContain("call action 'open' with that task_id");
       expect(result).toContain("The builder conversation owns all setup questions and edits");
       expect(result).not.toContain("Create or update the automation directly with ManageScheduledTasks");
+    });
+
+    it("treats provider discovery as authoritative in the automation builder", () => {
+      const result = buildSystemContext({ platform: "web", automationBuilderChat: true });
+
+      expect(result).toContain("use the same Skills and integration tools available in normal chat");
+      expect(result).toContain("that integration is the first and authoritative source");
+      expect(result).toContain("ClickUp get workspaces, then lists");
+      expect(result).toContain(
+        "Treat returned account, workspace, list, component, and configured-property identifiers",
+      );
+      expect(result).toContain("copy them exactly into ManageScheduledTasks");
+      expect(result).toContain("Only after the relevant integration cannot find or resolve");
+      expect(result).toContain("Search results never replace provider discovery");
     });
 
     it("tells the agent to resolve integration status without UI-render side effects", () => {
