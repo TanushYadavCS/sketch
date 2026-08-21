@@ -859,7 +859,7 @@ export interface EntitySourceRef {
   lastSeenAt: string;
 }
 
-export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type RelationConfidence = "CONFIRMED" | "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 
 export interface EntityRelationView {
   id: string;
@@ -3699,6 +3699,17 @@ export const api = {
     },
     remove(id: string) {
       return request<{ success: boolean }>(`/api/entities/${id}`, { method: "DELETE" });
+    },
+    declareRelationship(id: string, body: { targetEntityId: string; relationshipType: "works_at" | "engaged_with" }) {
+      return request<{ relationshipId: string; replacedRelationshipIds: string[] }>(
+        `/api/entities/${id}/relationships`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+    },
+    removeDeclaredRelationship(id: string, relationshipId: string) {
+      return request<{ success: boolean }>(`/api/entities/${id}/relationships/${relationshipId}`, {
+        method: "DELETE",
+      });
     },
     list(opts?: {
       type?: string;

@@ -38,6 +38,7 @@ import { resolvePersonEntitiesForEmails } from "../db/repositories/user-entity-r
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { companiesForAffiliatedPersons, resolveWhatsAppSenderPersonsForFile } from "./participant-affiliation";
 
 export const HALF_LIFE_DAYS = 60;
 export const MIN_SCORE = 0.5;
@@ -172,10 +173,6 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
     });
   }
 
-  const companies = Array.from(companyMap.values())
-    .sort((a, b) => b.hotness - a.hotness)
-    .slice(0, MAX_ANCHORS_PER_SIDE);
-
   const personsByEmail = await resolvePersonEntitiesForEmails(deps.db, participantEmails);
   const personMap = new Map<string, AnchorEntity>();
   for (const matches of personsByEmail.values()) {
@@ -190,6 +187,31 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
       hotness: Number(person.hotness ?? 0),
     });
   }
+
+  /**
+   * Domainless companies anchor through their people: participants (email
+   * attendees, or WhatsApp slice senders for files with no attendee facts)
+   * holding a high-trust works_at edge pull their company in — same trust
+   * gates as the weekly pass's participant_affiliation signal. Sender persons
+   * feed only this company lookup, not the person-anchor list.
+   */
+  const senderPersonIds =
+    personMap.size === 0 ? await resolveWhatsAppSenderPersonsForFile(deps.db, fileId) : new Set<string>();
+  const affiliatedPersonIds = [...new Set([...personMap.keys(), ...senderPersonIds])];
+  const affiliationCompanies = await companiesForAffiliatedPersons(deps.db, affiliatedPersonIds);
+  for (const company of affiliationCompanies) {
+    if (companyMap.has(company.id)) continue;
+    companyMap.set(company.id, {
+      id: company.id,
+      name: company.name,
+      sourceType: company.source_type,
+      hotness: Number(company.hotness ?? 0),
+    });
+  }
+
+  const companies = Array.from(companyMap.values())
+    .sort((a, b) => b.hotness - a.hotness)
+    .slice(0, MAX_ANCHORS_PER_SIDE);
 
   const nonHubIds = await loadNonHubPersonIds(deps, [...personMap.keys()]);
   const persons = Array.from(personMap.values())

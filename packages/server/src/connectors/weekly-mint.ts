@@ -8,6 +8,7 @@ import {
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
+import { relationshipSourceOrder } from "../entities/relationship-provenance";
 import { WEEKLY_PASS_PROJECT_SOURCES, confirmReview } from "../entities/resolve";
 import { retrieveNameDedupCandidates } from "./embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -581,20 +582,30 @@ function groupClaimedCandidates(candidates: ClaimedCandidate[], companyName: str
  * "Canvas") out-competed the correct same-company parent. The internal container
  * has no company to scope by and keeps the full list.
  */
-async function loadExistingProjects(
+export async function loadExistingProjects(
   db: Kysely<DB>,
   clusterFileIds: string[],
   companyEntityId: string | null,
 ): Promise<ExistingProject[]> {
   let scopedIds: Set<string> | null = null;
   if (companyEntityId !== null) {
-    const engaged = await db
+    const engagedRows = await db
       .selectFrom("entity_relationships")
-      .select(["source_entity_id"])
+      .select(["source_entity_id", "target_entity_id", "source"])
       .where("relationship_type", "=", "engagement_for")
-      .where("target_entity_id", "=", companyEntityId)
       .execute();
-    scopedIds = new Set(engaged.map((row) => row.source_entity_id));
+    const bestOrder = new Map<string, number>();
+    for (const row of engagedRows) {
+      const order = relationshipSourceOrder(row.source);
+      const prev = bestOrder.get(row.source_entity_id);
+      if (prev === undefined || order < prev) bestOrder.set(row.source_entity_id, order);
+    }
+    scopedIds = new Set(
+      engagedRows
+        .filter((row) => row.target_entity_id === companyEntityId)
+        .filter((row) => relationshipSourceOrder(row.source) === bestOrder.get(row.source_entity_id))
+        .map((row) => row.source_entity_id),
+    );
     if (scopedIds.size > 0) {
       const partOf = await db
         .selectFrom("entity_relationships")

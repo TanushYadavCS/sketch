@@ -19,6 +19,7 @@ import type {
 import { parseAliasesString } from "./materialize-json";
 import { normalizeStrict } from "./name-dedup";
 import { strongestProvenanceTier } from "./provenance";
+import { relationshipSourceOrder } from "./relationship-provenance";
 
 type Entity = Selectable<EntitiesTable>;
 type Mention = Selectable<EntityMentionsTable>;
@@ -260,10 +261,10 @@ async function findRelationshipCollision(
   row: Relationship,
   sourceEntityId: string,
   targetEntityId: string,
-): Promise<{ id: string } | undefined> {
+): Promise<{ id: string; source: string; confidence: string } | undefined> {
   return db
     .selectFrom("entity_relationships")
-    .select("id")
+    .select(["id", "source", "confidence"])
     .where("source_entity_id", "=", sourceEntityId)
     .where("target_entity_id", "=", targetEntityId)
     .where("relationship_type", "=", row.relationship_type)
@@ -694,6 +695,37 @@ async function dropRelationshipWithEvidence(
   await db.deleteFrom("entity_relationships").where("id", "=", relationship.id).execute();
 }
 
+/**
+ * When a colliding pair merges, the occupant row survives for ledger
+ * reversibility (row identity never changes hands, so unmerge's collided
+ * reinsert keeps working). But if the deleted mover carried stronger
+ * provenance — a declared or user-grouped edge folding into an inferred
+ * one — the occupant adopts its source and confidence, recorded as a
+ * reversible column move. confidence_score stays: the move ledger is
+ * string-typed and score does not drive precedence.
+ */
+async function adoptStrongerProvenance(
+  db: Kysely<DB>,
+  mover: Relationship,
+  occupant: { id: string; source: string; confidence: string },
+  moves: EntityMergeMove[],
+): Promise<void> {
+  if (relationshipSourceOrder(mover.source) >= relationshipSourceOrder(occupant.source)) return;
+  await db
+    .updateTable("entity_relationships")
+    .set({ source: mover.source, confidence: mover.confidence, updated_at: new Date().toISOString() })
+    .where("id", "=", occupant.id)
+    .execute();
+  moves.push({
+    table: "entity_relationships",
+    rowId: occupant.id,
+    repoint: {
+      source: { from: occupant.source, to: mover.source },
+      confidence: { from: occupant.confidence, to: mover.confidence },
+    },
+  });
+}
+
 async function repointRelationships(
   db: Kysely<DB>,
   loserId: string,
@@ -718,6 +750,7 @@ async function repointRelationships(
 
     if (collision) {
       await moveRelationshipEvidence(db, row.id, collision.id, moves);
+      await adoptStrongerProvenance(db, row, collision, moves);
       moves.push({ table: "entity_relationships", collided: true, payload: rowPayload(row) });
       await db.deleteFrom("entity_relationships").where("id", "=", row.id).execute();
       continue;
@@ -1222,6 +1255,8 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
       .set({
         source_entity_id: updates.source_entity_id ?? undefined,
         target_entity_id: updates.target_entity_id ?? undefined,
+        ...("source" in move.repoint ? { source: updates.source ?? undefined } : {}),
+        ...("confidence" in move.repoint ? { confidence: updates.confidence ?? undefined } : {}),
       })
       .where("id", "=", move.rowId)
       .execute();

@@ -19,6 +19,11 @@ import { createEntitySharesRepository } from "../../db/repositories/entity-share
 import { createEntitySuppressionRepository } from "../../db/repositories/entity-suppressions";
 import { createEntityTimelineRepository } from "../../db/repositories/entity-timeline";
 import type { DB } from "../../db/schema";
+import {
+  DeclareRelationshipError,
+  declareRelationship,
+  removeDeclaredRelationship,
+} from "../../entities/declare-relationship";
 import { normalizeEntityMatchName } from "../../entities/materialize-deps";
 import {
   type EntityProfileFacts,
@@ -303,7 +308,7 @@ function joinList(items: string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 }
 
-const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
+const CONFIDENCE_ORDER: Record<string, number> = { CONFIRMED: -1, AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
 
 function relationCompare(a: RelationListEntry, b: RelationListEntry): number {
   const ac = CONFIDENCE_ORDER[a.confidence] ?? 3;
@@ -1055,6 +1060,65 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       truncated: result.truncated,
       totalCount: result.totalCount,
     });
+  });
+
+  /**
+   * POST /api/entities/:id/relationships
+   * Manual person→company declaration. The closed vocabulary and endpoint
+   * validation live in declareRelationship; this route just maps its typed
+   * errors onto HTTP statuses.
+   */
+  routes.post("/:id/relationships", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    let body: { targetEntityId?: string; relationshipType?: string };
+    try {
+      body = (await c.req.json()) as { targetEntityId?: string; relationshipType?: string };
+    } catch {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
+    if (typeof body.targetEntityId !== "string" || body.targetEntityId.length === 0) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "targetEntityId is required" } }, 400);
+    }
+    if (body.relationshipType !== "works_at" && body.relationshipType !== "engaged_with") {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "relationshipType must be works_at or engaged_with" } },
+        400,
+      );
+    }
+    try {
+      const result = await declareRelationship(db, {
+        personEntityId: c.req.param("id"),
+        companyEntityId: body.targetEntityId,
+        relationshipType: body.relationshipType,
+      });
+      return c.json(result, 201);
+    } catch (err) {
+      if (err instanceof DeclareRelationshipError) {
+        const status = err.code === "ENTITY_NOT_FOUND" ? 404 : 400;
+        return c.json({ error: { code: err.code, message: err.message } }, status);
+      }
+      throw err;
+    }
+  });
+
+  /**
+   * DELETE /api/entities/:id/relationships/:relationshipId
+   * Removes a declared edge. Inferred edges are pipeline-owned and cannot be
+   * deleted here, so a wrong declaration is undoable without opening a
+   * general edge editor.
+   */
+  routes.delete("/:id/relationships/:relationshipId", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const removed = await removeDeclaredRelationship(db, {
+      entityId: c.req.param("id"),
+      relationshipId: c.req.param("relationshipId"),
+    });
+    if (!removed) {
+      return c.json({ error: { code: "NOT_FOUND", message: "No declared relationship to remove" } }, 404);
+    }
+    return c.json({ success: true });
   });
 
   /**

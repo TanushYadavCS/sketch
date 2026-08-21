@@ -15,21 +15,9 @@ import { Badge } from "@sketch/ui/components/badge";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@sketch/ui/components/dialog";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
+import { formatRelative } from "./drawer-kit";
 
-function formatRelative(iso: string | null): string {
-  if (!iso) return "unknown";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "unknown";
-  const days = Math.floor((Date.now() - t) / 86_400_000);
-  if (days <= 0) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 7) return `${days}d ago`;
-  if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
-}
-
-const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
+const CONFIDENCE_ORDER: Record<string, number> = { CONFIRMED: -1, AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
 
 function topRelationships(outgoing: EntityRelationView[], incoming: EntityRelationView[]): EntityRelationView[] {
   return [...outgoing, ...incoming]

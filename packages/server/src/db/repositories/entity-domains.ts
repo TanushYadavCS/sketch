@@ -5,12 +5,17 @@ import { sql } from "kysely";
 import { compactEntityNameKey } from "../../entities/match-normalize";
 import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
 import { ProjectBindingError, assertNoPartOfCycle } from "../../entities/project-bindings";
+import {
+  HUMAN_RELATIONSHIP_SOURCES,
+  PROTECTED_RELATIONSHIP_SOURCES,
+  PROTECTED_RELATIONSHIP_TYPES,
+} from "../../entities/relationship-provenance";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { whereLiveEntity } from "./entities";
 
 export type DomainKind = "corporate" | "personal" | "shared";
-export type RelationshipConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type RelationshipConfidence = "CONFIRMED" | "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 export type EntityRelationshipType =
   | "works_at"
   | "engaged_with"
@@ -262,6 +267,9 @@ export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: 
       ELSE 0
     END`;
     const preserveRankedOwner = sql<boolean>`EXCLUDED.relationship_type = 'contributes_to' AND ${incomingRank} < ${existingRank}`;
+    const humanSources = sql.join(HUMAN_RELATIONSHIP_SOURCES.map((source) => sql.lit(source)));
+    const preserveHumanOwner = sql<boolean>`entity_relationships.source IN (${humanSources}) AND EXCLUDED.source NOT IN (${humanSources})`;
+    const preserveExisting = sql<boolean>`(${preserveRankedOwner}) OR (${preserveHumanOwner})`;
     const greatest = isPg(db)
       ? sql`GREATEST(entity_relationships.confidence_score, EXCLUDED.confidence_score)`
       : sql`max(entity_relationships.confidence_score, EXCLUDED.confidence_score)`;
@@ -273,12 +281,12 @@ export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: 
       ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
       DO UPDATE SET
         confidence = CASE
-          WHEN ${preserveRankedOwner} THEN entity_relationships.confidence
+          WHEN ${preserveExisting} THEN entity_relationships.confidence
           ELSE EXCLUDED.confidence
         END,
         confidence_score = ${greatest},
         source = CASE
-          WHEN ${preserveRankedOwner} THEN entity_relationships.source
+          WHEN ${preserveExisting} THEN entity_relationships.source
           ELSE EXCLUDED.source
         END,
         updated_at = CURRENT_TIMESTAMP
@@ -534,6 +542,14 @@ export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: 
         .where((eb) => eb.not(eb.and([eb("relationship_type", "=", "works_at"), eb("source", "=", "email_domain")])))
         .where((eb) =>
           eb.not(
+            eb.and([
+              eb("source", "in", [...PROTECTED_RELATIONSHIP_SOURCES]),
+              eb("relationship_type", "in", [...PROTECTED_RELATIONSHIP_TYPES]),
+            ]),
+          ),
+        )
+        .where((eb) =>
+          eb.not(
             eb.exists(
               eb
                 .selectFrom("entity_relationship_evidence")
@@ -571,6 +587,14 @@ export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: 
       const result = await db
         .deleteFrom("entity_relationships")
         .where("id", "in", ids)
+        .where((eb) =>
+          eb.not(
+            eb.and([
+              eb("source", "in", [...PROTECTED_RELATIONSHIP_SOURCES]),
+              eb("relationship_type", "in", [...PROTECTED_RELATIONSHIP_TYPES]),
+            ]),
+          ),
+        )
         .where((eb) =>
           eb.not(
             eb.exists(
