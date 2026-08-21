@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 import { ChatHistoryAccessResolver, type ProviderTargetRef, providerTargetKey } from "./chat-search";
+import { blankToUndefined } from "./optional-params";
 import type { SelectableUser, SketchMcpDeps, ToolResult } from "./types";
 
 function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
@@ -127,6 +128,20 @@ function toolError(message: string): ToolResult {
 
 const THREAD_TS_SCOPE_ERROR = "threadTs can only be used with a Slack channel target.";
 
+/**
+ * A blank value carries no identity — an empty threadTs names no thread and an
+ * empty recipientUserId names no person — so it means "absent", not "invalid".
+ * Rejecting it produced an unrecoverable loop: the tool told the model to omit
+ * the field, and the model could only re-send the same empty string.
+ */
+function normalizeSendMessageParams(params: SendMessageParams): SendMessageParams {
+  return {
+    ...params,
+    threadTs: blankToUndefined(params.threadTs),
+    recipientUserId: blankToUndefined(params.recipientUserId),
+  };
+}
+
 function validateTarget(target: SendMessageTarget, threadTs: string | undefined): string | null {
   if (!target.targetId.trim()) {
     return "target.targetId is required. Use SearchDeliveryTargets to find the channel or group first.";
@@ -137,10 +152,7 @@ function validateTarget(target: SendMessageTarget, threadTs: string | undefined)
   if (target.platform === "whatsapp" && target.targetType !== "group") {
     return "A WhatsApp target must use targetType 'group'.";
   }
-  if (threadTs !== undefined) {
-    if (!threadTs.trim()) return "threadTs must not be empty. Omit it to post a top-level message.";
-    if (target.platform !== "slack") return THREAD_TS_SCOPE_ERROR;
-  }
+  if (threadTs !== undefined && target.platform !== "slack") return THREAD_TS_SCOPE_ERROR;
   return null;
 }
 
@@ -202,10 +214,11 @@ async function sendToTarget(
 }
 
 export async function handleSendMessage(
-  params: SendMessageParams,
+  rawParams: SendMessageParams,
   deps: SendMessageDeps,
   access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
 ): Promise<ToolResult> {
+  const params = normalizeSendMessageParams(rawParams);
   if (!params.message.trim()) {
     return toolError("message must not be empty.");
   }
@@ -217,9 +230,6 @@ export async function handleSendMessage(
   }
   if (params.recipientUserId === undefined) {
     return toolError("set exactly one of recipientUserId (for a direct message) or target (for a channel or group).");
-  }
-  if (!params.recipientUserId.trim()) {
-    return toolError("recipientUserId must not be empty. Use GetTeamDirectory or SearchUsers to find the user ID.");
   }
   if (params.threadTs !== undefined) return toolError(THREAD_TS_SCOPE_ERROR);
 
@@ -246,10 +256,11 @@ export async function handleSendMessage(
 }
 
 export async function handleSendMessageToTarget(
-  params: SendMessageParams,
+  rawParams: SendMessageParams,
   deps: SendMessageDeps,
   access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
 ): Promise<ToolResult> {
+  const params = normalizeSendMessageParams(rawParams);
   if (!params.message.trim()) return toolError("message must not be empty.");
   if (params.recipientUserId !== undefined) return toolError("set only target for channel or group posting.");
   if (params.target === undefined) return toolError("target is required for channel or group posting.");
@@ -384,7 +395,7 @@ export function createMessagingTools(deps: SketchMcpDeps) {
         recipientUserId: z.string().optional().describe("The user ID from GetTeamDirectory. Use this to send a DM."),
       },
       async (params) => {
-        const rawParams = params as SendMessageParams;
+        const rawParams = normalizeSendMessageParams(params as SendMessageParams);
         if (rawParams.target !== undefined || rawParams.threadTs !== undefined) {
           return toolError("channel and group posting requires SendMessageToTarget.");
         }
@@ -401,7 +412,9 @@ export function createMessagingTools(deps: SketchMcpDeps) {
         threadTs: z
           .string()
           .optional()
-          .describe("Slack thread timestamp to reply in. Only valid with a Slack channel target."),
+          .describe(
+            "Slack thread timestamp to reply in. Only valid with a Slack channel target. Omit it or pass an empty string to post a top-level message.",
+          ),
       },
       async (params) => handleSendMessageToTarget(params, deps),
     ),

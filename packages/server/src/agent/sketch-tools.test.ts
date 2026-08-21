@@ -899,10 +899,22 @@ describe("handleSendMessage to a channel or group", () => {
     expect(sendDm).not.toHaveBeenCalled();
   });
 
-  it("treats an empty recipientUserId alongside a target as both being set", async () => {
+  it("treats an empty recipientUserId alongside a target as posting to the target", async () => {
     const deps = targetDeps();
     const result = await handleSendMessage(
       { recipientUserId: "", target: slackTarget, message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toContain('"status":"sent"');
+    expect(deps.sendTargetMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rejects a real recipientUserId alongside a target", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { recipientUserId: "user-bob", target: slackTarget, message: "hi" },
       deps,
       accessAllowing("slack:C123"),
     );
@@ -911,13 +923,41 @@ describe("handleSendMessage to a channel or group", () => {
     expect(deps.sendTargetMessage).not.toHaveBeenCalled();
   });
 
-  it("rejects an empty recipientUserId", async () => {
+  it("asks for a destination when recipientUserId is blank and no target is given", async () => {
     const result = await handleSendMessage({ recipientUserId: "  ", message: "hi" }, targetDeps(), accessAllowing());
 
-    expect(result.content[0].text).toContain("recipientUserId must not be empty");
+    expect(result.content[0].text).toContain("set exactly one of recipientUserId");
   });
 
-  it("rejects an empty threadTs on a Slack channel target", async () => {
+  it("trims a padded recipientUserId instead of failing the lookup", async () => {
+    const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: "S999" });
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    const result = await handleSendMessage(
+      { recipientUserId: "  user-bob  ", message: "hi" },
+      {
+        ...targetDeps(),
+        inboxMessagesRepo: {
+          ...makeInboxMessagesRepoMock(),
+          create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+        },
+        userRepo: makeUserRepoMock({ findById: async (id: string) => (id === "user-bob" ? bob : undefined) }),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+      accessAllowing(),
+    );
+
+    expect(result.content[0].text).not.toContain("Error:");
+    expect(sendDm).toHaveBeenCalledWith(expect.objectContaining({ userId: "user-bob" }));
+  });
+
+  /**
+   * Models fill declared-but-unused optional strings with "". Rejecting that
+   * looped forever on the beta tenant: the tool said "omit it", and the model
+   * could only re-send "". A blank threadTs names no thread, so it means the
+   * message is top-level.
+   */
+  it("posts top-level when threadTs is an empty string on a Slack channel target", async () => {
     const deps = targetDeps();
     const result = await handleSendMessage(
       { target: slackTarget, threadTs: "", message: "hi" },
@@ -925,8 +965,43 @@ describe("handleSendMessage to a channel or group", () => {
       accessAllowing("slack:C123"),
     );
 
-    expect(result.content[0].text).toContain("threadTs must not be empty");
-    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain('"status":"sent"');
+    expect(deps.sendTargetMessage).toHaveBeenCalledTimes(1);
+    expect(deps.sendTargetMessage).toHaveBeenCalledWith(expect.not.objectContaining({ threadTs: expect.anything() }));
+  });
+
+  it("posts to a WhatsApp group when threadTs is an empty string", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: whatsappTarget, threadTs: "", message: "hi" },
+      deps,
+      accessAllowing("whatsapp:12345@g.us"),
+    );
+
+    expect(result.content[0].text).toContain('"status":"sent"');
+    expect(deps.sendTargetMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a DM when threadTs is an empty string", async () => {
+    const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: "S999" });
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    const result = await handleSendMessage(
+      { recipientUserId: "user-bob", threadTs: "", message: "hi" },
+      {
+        ...targetDeps(),
+        inboxMessagesRepo: {
+          ...makeInboxMessagesRepoMock(),
+          create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+        },
+        userRepo: makeUserRepoMock({ findById: async (id: string) => (id === "user-bob" ? bob : undefined) }),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+      accessAllowing(),
+    );
+
+    expect(result.content[0].text).not.toContain("Error:");
+    expect(sendDm).toHaveBeenCalledTimes(1);
   });
 
   it("does not let the current conversation context bypass a membership denial", async () => {
