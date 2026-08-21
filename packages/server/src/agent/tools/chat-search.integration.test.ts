@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-emission";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
@@ -105,7 +106,7 @@ async function linkSliceScopeFile(
     source: "slack" | "whatsapp";
     scopeType: "slack_channel" | "whatsapp_group";
     providerScopeId: string;
-    members: string[];
+    members: AccessPrincipalInput[];
     firstMessageId: number;
     lastMessageId: number;
     rosterSnapshot?: string | null;
@@ -151,6 +152,36 @@ async function linkSliceScopeFile(
     .execute();
   await db.updateTable("conversation_slices").set({ indexed_file_id: fileId }).where("id", "=", slice.row.id).execute();
   return { scopeId, fileId, sliceId: slice.row.id };
+}
+
+/**
+ * Slack chat-history access is granted by access_scope_members, the same group-membership
+ * model file access uses. Dropping the member row is what a roster reconciliation does when
+ * someone leaves the channel.
+ */
+/**
+ * Mirrors what a Slack roster reconciliation writes: the channel's access scope plus its
+ * member principals. Slack chat-history access is granted from access_scope_members.
+ */
+async function grantSlackScopeMembership(db: Kysely<DB>, channelId: string, connectorConfigId: string): Promise<void> {
+  await createConnectorRepository(db).upsertAccessScope(connectorConfigId, {
+    scopeType: "slack_channel",
+    providerScopeId: channelId,
+    label: `#${channelId}`,
+    members: [USER_EMAIL, { type: "slack_user" as const, value: USER_SLACK_ID }],
+  });
+}
+
+async function revokeSlackScopeMembership(db: Kysely<DB>, channelId: string): Promise<void> {
+  const scopes = await db
+    .selectFrom("access_scopes")
+    .select("id")
+    .where("scope_type", "=", "slack_channel")
+    .where("provider_scope_id", "=", channelId)
+    .execute();
+  for (const scope of scopes) {
+    await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scope.id).execute();
+  }
 }
 
 async function seedSlackChannel(
@@ -204,7 +235,9 @@ async function seedSlackChannel(
     source: "slack",
     scopeType: "slack_channel",
     providerScopeId: options.channelId,
-    members: options.members,
+    members: options.members.includes(USER_EMAIL)
+      ? [...options.members, { type: "slack_user" as const, value: USER_SLACK_ID }]
+      : options.members,
     firstMessageId: message.row.id,
     lastMessageId: message.row.id,
     rosterSnapshot: options.rosterSnapshot,
@@ -479,31 +512,27 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const before = await readAllChats({}, deps, access);
       expect(before.ok && before.body.messages).toHaveLength(1);
 
-      await createSlackChannelParticipantsRepository(db).remove("C-LEAVE-CACHE", USER_SLACK_ID);
+      await revokeSlackScopeMembership(db, "C-LEAVE-CACHE");
 
       const after = await readAllChats({}, deps, access);
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("fails closed when passive Slack membership is stale", async () => {
+    it("fails closed when the channel access scope no longer lists the member", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",
         text: "provider failure secret",
         members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      await db
-        .updateTable("slack_channel_participants")
-        .set({ last_seen_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString() })
-        .where("channel_id", "=", "C2-ERROR")
-        .execute();
+      await revokeSlackScopeMembership(db, "C2-ERROR");
       const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
     });
 
-    it("revokes passive Slack history access when disconnect clears the roster", async () => {
+    it("revokes Slack history access when disconnect clears the channel roster", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-DISCONNECT",
         text: "disconnect revocation marker",
@@ -513,7 +542,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const before = await readAllChats({}, depsFor(db));
       expect(before.ok && before.body.messages).toHaveLength(1);
 
-      await createSlackChannelParticipantsRepository(db).clearAll();
+      await revokeSlackScopeMembership(db, "C2-DISCONNECT");
 
       const after = await readAllChats({}, depsFor(db));
       expect(after.ok && after.body.messages).toHaveLength(0);
@@ -1016,14 +1045,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-THREADS",
       });
-      await db
-        .insertInto("slack_channel_participants")
-        .values({
-          channel_id: "C-THREADS",
-          slack_user_id: USER_SLACK_ID,
-          last_seen_at: new Date().toISOString(),
-        })
-        .execute();
+      await grantSlackScopeMembership(db, "C-THREADS", slackConfigId);
       const firstRoot = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "1000.000",
@@ -1182,14 +1204,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-LONG-THREAD",
       });
-      await db
-        .insertInto("slack_channel_participants")
-        .values({
-          channel_id: "C-LONG-THREAD",
-          slack_user_id: USER_SLACK_ID,
-          last_seen_at: new Date().toISOString(),
-        })
-        .execute();
+      await grantSlackScopeMembership(db, "C-LONG-THREAD", slackConfigId);
       const target: number[] = [];
       let anchorMessageId = 0;
       for (let index = 0; index < 121; index += 1) {
@@ -1293,14 +1308,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-LEGACY",
       });
-      await db
-        .insertInto("slack_channel_participants")
-        .values({
-          channel_id: "C-LEGACY",
-          slack_user_id: USER_SLACK_ID,
-          last_seen_at: new Date().toISOString(),
-        })
-        .execute();
+      await grantSlackScopeMembership(db, "C-LEGACY", slackConfigId);
       const before = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "legacy-1",
@@ -1834,7 +1842,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(secondBody.messages.map((message) => message.id)).toEqual([aEarlier.row.id, bEarlier.row.id]);
     });
 
-    it("denies without an authenticated requester or any usable provider identity", async () => {
+    it("denies anonymous requesters but matches scope membership on any identifier", async () => {
       await seedSlackChannel(db, {
         channelId: "C8",
         text: "gated content",
@@ -1848,8 +1856,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ slack_user_id: null }).where("id", "=", USER_ID).execute();
-      const unverified = await readAllChats({}, depsFor(db));
-      expect(unverified.ok).toBe(false);
+      const emailOnly = await readAllChats({}, depsFor(db));
+      expect(emailOnly.ok).toBe(true);
+      if (!emailOnly.ok) return;
+      expect(emailOnly.body.messages).toHaveLength(1);
+
+      await db.updateTable("users").set({ email: "someone-else@example.com" }).where("id", "=", USER_ID).execute();
+      const noMatch = await readAllChats({}, depsFor(db));
+      if (noMatch.ok) expect(noMatch.body.messages).toHaveLength(0);
     });
 
     it("works from a shared group context and includes the current conversation without an access scope", async () => {

@@ -1,5 +1,8 @@
 import { type Expression, type Kysely, sql } from "kysely";
+import type { AccessPrincipal, AccessPrincipalInput } from "../../connectors/types";
+import { normalizeAccessPrincipals } from "../../connectors/types";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
+import { accessPrincipalPredicateSql } from "../../db/repositories/file-visibility-rule";
 import type { DB } from "../../db/schema";
 import {
   normalizeWhatsAppIdentityLid,
@@ -7,7 +10,6 @@ import {
   whatsappNumberLookupValues,
 } from "../../identity-normalization";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
-import { SLACK_MEMBERSHIP_FRESHNESS_MS } from "../../slack/membership-reconciler";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
 import { whatsappJidToPhoneE164 } from "../../whatsapp/provider";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
@@ -40,13 +42,27 @@ export type AllChatsReadOutcome =
 
 export interface ChatHistoryAccessIdentity {
   slackUserId: string | null;
+  email: string | null;
   whatsappPhone: string | null;
   whatsappLids: string[];
 }
 
+/**
+ * Slack chat-history access reuses the file-access group-membership model: a channel's
+ * access_scope members are replaced wholesale on every roster refresh, so a departed member
+ * loses access immediately. The previous slack_channel_participants join was add-only and
+ * merely went stale after a freshness window, which never revoked access on leave.
+ */
+function slackAccessPrincipals(identity: ChatHistoryAccessIdentity): AccessPrincipal[] {
+  const principals: AccessPrincipalInput[] = [];
+  if (identity.slackUserId) principals.push({ type: "slack_user", value: identity.slackUserId });
+  if (identity.email) principals.push(identity.email);
+  return normalizeAccessPrincipals(principals);
+}
+
 export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Promise<ChatHistoryAccessIdentity> {
   if (!deps.currentUserId || !deps.userRepo) {
-    return { slackUserId: null, whatsappPhone: null, whatsappLids: [] };
+    return { slackUserId: null, email: null, whatsappPhone: null, whatsappLids: [] };
   }
   const user = await deps.userRepo.findById(deps.currentUserId);
   const lids = deps.db
@@ -54,6 +70,7 @@ export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Pro
     : [];
   return {
     slackUserId: user?.slack_user_id?.trim() || null,
+    email: user?.email?.trim() || null,
     whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
     whatsappLids: [
       ...new Set(
@@ -128,16 +145,18 @@ export class ChatHistoryAccessResolver {
     const identity = await this.loadIdentity();
     const authorized = new Set<number>();
 
-    if (identity.slackUserId && platform !== "whatsapp") {
-      const freshAfter = new Date(Date.now() - SLACK_MEMBERSHIP_FRESHNESS_MS).toISOString();
+    const allChatsSlackPrincipals = slackAccessPrincipals(identity);
+    if (allChatsSlackPrincipals.length > 0 && platform !== "whatsapp") {
       const rows = await this.deps.db
         .selectFrom("conversations as c")
-        .innerJoin("slack_channel_participants as p", "p.channel_id", "c.provider_conversation_id")
+        .innerJoin("access_scopes as s", (join) =>
+          join.onRef("s.provider_scope_id", "=", "c.provider_conversation_id").on("s.scope_type", "=", "slack_channel"),
+        )
+        .innerJoin("access_scope_members as asm", "asm.access_scope_id", "s.id")
         .select("c.id")
         .where("c.platform", "=", "slack")
         .where("c.kind", "=", "channel")
-        .where("p.slack_user_id", "=", identity.slackUserId)
-        .where("p.last_seen_at", ">=", freshAfter)
+        .where(accessPrincipalPredicateSql("asm", allChatsSlackPrincipals))
         .execute();
       for (const row of rows) authorized.add(row.id);
     }
@@ -197,18 +216,19 @@ export class ChatHistoryAccessResolver {
     const slackRows = rows.filter((row) => row.platform === "slack");
     const whatsappRows = rows.filter((row) => row.platform === "whatsapp");
 
-    if (identity.slackUserId && slackRows.length > 0) {
-      const freshAfter = new Date(Date.now() - SLACK_MEMBERSHIP_FRESHNESS_MS).toISOString();
+    const slackPrincipals = slackAccessPrincipals(identity);
+    if (slackPrincipals.length > 0 && slackRows.length > 0) {
       const memberChannels = await this.deps.db
-        .selectFrom("slack_channel_participants")
-        .select("channel_id")
+        .selectFrom("access_scopes as s")
+        .innerJoin("access_scope_members as asm", "asm.access_scope_id", "s.id")
+        .select("s.provider_scope_id as channel_id")
+        .where("s.scope_type", "=", "slack_channel")
         .where(
-          "channel_id",
+          "s.provider_scope_id",
           "in",
           slackRows.map((row) => row.providerConversationId),
         )
-        .where("slack_user_id", "=", identity.slackUserId)
-        .where("last_seen_at", ">=", freshAfter)
+        .where(accessPrincipalPredicateSql("asm", slackPrincipals))
         .execute();
       const channelIds = new Set(memberChannels.map((row) => row.channel_id));
       for (const row of slackRows) {
