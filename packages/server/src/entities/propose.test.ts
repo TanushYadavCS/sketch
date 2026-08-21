@@ -5,10 +5,10 @@ import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
-import { createTestDb } from "../test-utils";
-import { buildMaterializeDeps } from "./materialize-deps";
+import { createTestDb, spyOnExecutedSql } from "../test-utils";
+import { buildLookupIndex, buildMaterializeDeps, createEntityLookupFromIndex } from "./materialize-deps";
 import type { IndexEntityRow } from "./materialize-types";
-import { normalizeName } from "./name-keys";
+import { normalizeEntityMatchName, normalizeName } from "./name-keys";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 
 async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
@@ -24,7 +24,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
       const list = getList();
       const out: Entity[] = [];
       for (const e of list) {
-        if (normalizeName(e.name) === n) out.push(e);
+        if (normalizeEntityMatchName(e.source_type, e.name) === n) out.push(e);
       }
       return out;
     },
@@ -33,7 +33,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
       const out: Entity[] = [];
       for (const e of list) {
         const aliases: string[] = e.aliases ? JSON.parse(e.aliases) : [];
-        if (aliases.some((a) => normalizeName(a) === n)) out.push(e);
+        if (aliases.some((a) => normalizeEntityMatchName(e.source_type, a) === n)) out.push(e);
       }
       return out;
     },
@@ -477,6 +477,90 @@ describe("proposeEntity", () => {
     // After rejection filter only Simran Kumar survives → candidate = Kumar.
     const kumar = before.find((b) => b.name === "Simran Kumar");
     expect(queue[0].candidate_entity_id).toBe(kumar?.id);
+  });
+
+  it("batches rejection filtering once per proposal while preserving name-dedup and fuzzy outcomes", async () => {
+    const entityRepo = createEntityRepository(db);
+    const reviewRepo = createEntityReviewRepo(db);
+    const product = await entityRepo.upsertEntity({
+      name: "GPT 4 Pro",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+      provenanceTier: "human_confirmed",
+    });
+    await reviewRepo.addRejection({ entityId: product.id, rejectedName: "GPT4", rejectedBy: "user-1" });
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const productLookup: EntityLookup = {
+      ...makeLookup(() => entities),
+      findNameDedupCandidates: () => [{ entity: product, score: 1, reason: "strict-normalized" }],
+    };
+    const spy = spyOnExecutedSql(db);
+
+    const created = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo,
+        lookup: productLookup,
+        readEmail,
+      },
+      {
+        name: "GPT4",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:gpt4-batched",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(created.kind).toBe("created");
+    expect(spy.sqls.filter((sql) => sql.includes('from "entity_alias_rejections"'))).toHaveLength(1);
+
+    spy.sqls.length = 0;
+    const simranSuri = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:batched-suri",
+    });
+    const simranKumar = await entityRepo.upsertPersonEntity({
+      name: "Simran Kumar",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:batched-kumar",
+    });
+    await reviewRepo.addRejection({ entityId: simranSuri.id, rejectedName: "Simran", rejectedBy: "user-1" });
+    await insertTestFile(db, "file-batched-rejection");
+    const people = await fetchPersonEntities(db);
+
+    const queued = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo,
+        lookup: makeLookup(() => people),
+        readEmail,
+      },
+      {
+        name: "Simran",
+        entityType: "person",
+        subtype: "external",
+        source: "fireflies",
+        sourceId: "fireflies:batched-rejection",
+        evidence: [{ indexedFileId: "file-batched-rejection" }],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(queued.kind).toBe("queued");
+    const queue = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("source_id", "=", "fireflies:batched-rejection")
+      .executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(simranKumar.id);
+    expect(spy.sqls.filter((sql) => sql.includes('from "entity_alias_rejections"'))).toHaveLength(1);
   });
 
   it("8. mid-review row only bumps occurrence_count + last_seen_at", async () => {
@@ -1714,6 +1798,117 @@ describe("proposeEntity", () => {
     expect(result).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
     const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(queue).toHaveLength(0);
+  });
+
+  it("keeps product collision parity from index buckets with scoped fallback", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntity({
+      name: "Inferred Vendor",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+      provenanceTier: "inferred",
+    });
+    await entityRepo.upsertEntity({
+      name: "Alias Owner",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+      aliases: ["Alias Product"],
+    });
+    await db
+      .insertInto("entity_domains")
+      .values({
+        id: "domain-nullcorp",
+        entity_id: null,
+        domain: "nullcorp.com",
+        kind: "corporate",
+        is_primary: 0,
+        confidence: 1,
+        source: "test",
+      })
+      .execute();
+    const materializeDeps = await buildMaterializeDeps(db);
+    const deps = {
+      entityRepo: materializeDeps.entityRepo,
+      reviewRepo: materializeDeps.reviewRepo,
+      domainsRepo: materializeDeps.domainsRepo,
+      lookup: materializeDeps.lookup,
+      readEmail: materializeDeps.readEmail,
+    };
+    const spy = spyOnExecutedSql(db);
+
+    const companyCollision = await proposeEntity(deps, {
+      name: "Inferred Vendor",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:inferred-vendor",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(companyCollision).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
+    expect(
+      spy.sqls.filter((sql) => sql.startsWith('select * from "entities"') && sql.includes('"source_type"')),
+    ).toHaveLength(0);
+
+    const aliasOnly = await proposeEntity(deps, {
+      name: "Alias Product",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:alias-product",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(aliasOnly.kind).toBe("created");
+
+    const domainCollision = await proposeEntity(deps, {
+      name: "Nullcorp",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:nullcorp",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(domainCollision).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
+
+    await entityRepo.upsertEntity({
+      name: "Scoped Tool",
+      sourceType: "tool",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const scopedIndex = await buildLookupIndex(db, { types: ["company"] });
+    const scopedLookup = createEntityLookupFromIndex({
+      db,
+      index: scopedIndex,
+      normalizationBackfillComplete: false,
+    });
+    const scopedFallback = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo: createEntityReviewRepo(db),
+        domainsRepo: createEntityDomainsRepository(db),
+        lookup: scopedLookup,
+        readEmail,
+      },
+      {
+        name: "Scoped Tool",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:scoped-tool",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(scopedFallback).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
   });
 
   it("31. suppresses trailing API product names without suppressing the base product name", async () => {

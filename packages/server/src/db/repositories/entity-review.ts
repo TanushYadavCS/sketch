@@ -551,16 +551,6 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return new Set(rows.map((row) => `${row.entity_id}:${row.normalized_rejected_name}`));
     },
 
-    async isRejected(entityId: string, normalizedRejectedName: string): Promise<boolean> {
-      const row = await db
-        .selectFrom("entity_alias_rejections")
-        .select("id")
-        .where("entity_id", "=", entityId)
-        .where("normalized_rejected_name", "=", normalizedRejectedName)
-        .executeTakeFirst();
-      return row !== undefined;
-    },
-
     /**
      * Read-side listing for direct DB inspection and the ECR-02 GET route.
      * Owner scope filters to rows triggered by the caller, unless `isAdmin`

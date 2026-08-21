@@ -9,7 +9,7 @@
  *
  * When Gemini is unavailable, callers skip AI extraction and mark summaries accordingly.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
@@ -36,7 +36,6 @@ import {
   normalizeRelationType,
 } from "../entities/graph";
 import {
-  buildMaterializeDeps,
   cleanupEmptyRelationships,
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
@@ -44,7 +43,7 @@ import {
 import { normalizeName } from "../entities/name-keys";
 import { tokenizeName } from "../entities/name-tokenize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
-import { type ProposeEntityType, proposeEntity } from "../entities/propose";
+import type { ProposeEntityType } from "../entities/propose";
 import {
   isDomainOrUrlOrEmailName,
   isEmailProviderName,
@@ -76,9 +75,6 @@ import { SLACK_CONVERSATION_SLICE_FILE_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TY
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
 const MAX_CONTENT_CHARS = 32000;
-
-/** Minimum files a candidate must appear in before auto-promotion. */
-const CANDIDATE_PROMOTION_THRESHOLD = 2;
 
 /**
  * Minimum distinct people sharing an email domain before a
@@ -827,193 +823,6 @@ export async function matchEntities(
   }
 
   return { matched, unmatched };
-}
-
-/**
- * Filter a list of file IDs down to those still present in `indexed_files`.
- * Preserves input order. Used to keep `entity_candidates.seen_file_ids`
- * (a JSON blob, not a FK) in sync with reality before FK-guarded inserts.
- */
-async function pruneMissingFileIds(db: Kysely<DB>, fileIds: string[]): Promise<string[]> {
-  if (fileIds.length === 0) return [];
-  const rows = await db.selectFrom("indexed_files").select("id").where("id", "in", fileIds).execute();
-  const live = new Set(rows.map((r) => r.id));
-  return fileIds.filter((id) => live.has(id));
-}
-
-/**
- * Handle unmatched mentions: create or update entity candidates.
- * Promotes candidates to real entities when seen in enough files.
- */
-export async function handleCandidates(
-  deps: SmartEnrichmentDeps,
-  fileId: string,
-  unmatched: ExtractedMention[],
-  allowedTypes = proposableEntityTypes(),
-): Promise<MatchedEntity[]> {
-  const { db, logger } = deps;
-  const entityRepo = createEntityRepository(db);
-  const promoted: MatchedEntity[] = [];
-
-  for (const rawMention of unmatched) {
-    const mention = {
-      ...rawMention,
-      type: coerceMentionType(rawMention.mention, rawMention.type),
-    };
-    if (!allowedTypes.has(mention.type as ProposeEntityType)) continue;
-    if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
-    if ((mention.type === "project" || mention.type === "product") && isGenericEngagementName(mention.mention)) {
-      logger.info(
-        { fileId, displayName: mention.mention, reason: "generic_engagement_name" },
-        "Dropped generic engagement-name mention",
-      );
-      continue;
-    }
-
-    // Check if candidate already exists (case-insensitive name match)
-    const existing = await db
-      .selectFrom("entity_candidates")
-      .selectAll()
-      .where(sql`lower(name)`, "=", mention.mention.toLowerCase())
-      .where("promoted_entity_id", "is", null)
-      .executeTakeFirst();
-
-    if (existing) {
-      // Update existing candidate. Prune any file IDs whose indexed_files row
-      // no longer exists (dev resets, manual DB ops) — seen_file_ids is a JSON
-      // blob, not a FK, so stale IDs accumulate and would break the FK-guarded
-      // backfill below on promotion.
-      const rawSeenFileIds: string[] = JSON.parse(existing.seen_file_ids);
-      if (rawSeenFileIds.includes(fileId)) continue; // Already counted this file
-
-      const seenFileIds = await pruneMissingFileIds(db, rawSeenFileIds);
-      seenFileIds.push(fileId);
-      const newCount = seenFileIds.length;
-
-      await db
-        .updateTable("entity_candidates")
-        .set({
-          seen_file_ids: JSON.stringify(seenFileIds),
-          seen_count: newCount,
-          updated_at: new Date().toISOString(),
-        })
-        .where("id", "=", existing.id)
-        .execute();
-
-      // Promote if threshold met
-      if (newCount >= CANDIDATE_PROMOTION_THRESHOLD) {
-        const owner = await db
-          .selectFrom("indexed_files")
-          .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
-          .select("connector_configs.created_by")
-          .where("indexed_files.id", "=", fileId)
-          .executeTakeFirst();
-        const materializeDeps = await buildMaterializeDeps(db);
-        const proposal = await proposeEntity(
-          {
-            entityRepo: materializeDeps.entityRepo,
-            reviewRepo: materializeDeps.reviewRepo,
-            domainsRepo: materializeDeps.domainsRepo,
-            lookup: materializeDeps.lookup,
-            logger: materializeDeps.logger,
-            birthGateTypes: materializeDeps.birthGateTypes,
-            birthGateLiveTypes: materializeDeps.birthGateLiveTypes,
-            birthGateDryRun: materializeDeps.birthGateDryRun,
-            readEmail: materializeDeps.readEmail,
-          },
-          {
-            name: mention.mention,
-            entityType: mention.type as ProposeEntityType,
-            subtype: "external",
-            source: "llm_extraction",
-            sourceId: `candidate:${existing.id}`,
-            evidence: seenFileIds.map((indexedFileId) => ({ indexedFileId })),
-            triggeredByUserId: owner?.created_by ?? "system",
-            aliases: mention.variations,
-            metadata: { origin: "ai" },
-            provenanceTier: "inferred",
-          },
-        );
-
-        if (proposal.kind === "queued") {
-          logger.info(
-            { entityName: mention.mention, reviewId: proposal.reviewId },
-            "Queued entity candidate promotion",
-          );
-          continue;
-        }
-        if (proposal.kind === "suppressed") {
-          logger.info(
-            { entityName: mention.mention, reason: proposal.reason },
-            "Suppressed entity candidate promotion",
-          );
-          continue;
-        }
-
-        const entity = proposal.entity;
-
-        await db
-          .updateTable("entity_candidates")
-          .set({ promoted_entity_id: entity.id, updated_at: new Date().toISOString() })
-          .where("id", "=", existing.id)
-          .execute();
-
-        // Backfill entity_mentions. The prune above makes this mostly a no-op,
-        // but re-check at insert time so a file deleted between prune and loop
-        // can't crash the whole promotion.
-        const liveFileIds = await pruneMissingFileIds(db, seenFileIds);
-        for (const seenFileId of liveFileIds) {
-          await entityRepo.createMention({
-            entityId: entity.id,
-            indexedFileId: seenFileId,
-            confidence: "INFERRED",
-            source: "llm_extraction",
-            relation: "mentioned",
-          });
-          await yieldToEventLoop();
-        }
-        if (liveFileIds.length < seenFileIds.length) {
-          logger.warn(
-            { entityId: entity.id, total: seenFileIds.length, skipped: seenFileIds.length - liveFileIds.length },
-            "Skipped mention backfill for missing indexed files",
-          );
-        }
-
-        logger.info(
-          { entityName: mention.mention, entityId: entity.id, fileCount: liveFileIds.length },
-          "Promoted entity candidate",
-        );
-
-        promoted.push({
-          entityId: entity.id,
-          name: entity.name,
-          sourceType: entity.source_type,
-          definition: null,
-          learnedFacts: [],
-        });
-      }
-    } else {
-      // Create new candidate
-      await db
-        .insertInto("entity_candidates")
-        .values({
-          id: randomUUID(),
-          name: mention.mention,
-          type: mention.type,
-          variations: JSON.stringify(mention.variations),
-          first_seen_file_id: fileId,
-          seen_file_ids: JSON.stringify([fileId]),
-          seen_count: 1,
-          promoted_entity_id: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .execute();
-    }
-    await yieldToEventLoop();
-  }
-
-  return promoted;
 }
 
 // ── Summary Generation ───────────────────────────────────────────────────

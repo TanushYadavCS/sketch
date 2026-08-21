@@ -74,10 +74,12 @@ export interface LookupIndex {
   entitiesByType: Map<ProposeEntityType, IndexEntityRow[]>;
   byNormalizedName: Map<string, IndexEntityRow[]>;
   byNormalizedAlias: Map<string, IndexEntityRow[]>;
+  collisionNameKeysByType: Map<ProposeEntityType, Set<string>>;
   dedupEntriesByType: Map<ProposeEntityType, CandidatePoolEntry[]>;
   dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, IndexEntityRow>;
   companyIdsByDomain: Map<string, string[]>;
+  corporateDomains: Set<string>;
   personScopeKeysByEntityId: Map<string, string[]>;
   personScopeKeyReads: number;
 }

@@ -31,6 +31,11 @@ export function isTrustedPersonScopeKey(scopeKey: string): boolean {
   return scopeKey.startsWith("company:");
 }
 
+export function personScopeKeyForDomain(domain: string, companyIds: readonly string[]): PersonScopeKey {
+  if (companyIds.length > 0) return { kind: "company", value: [...companyIds].sort()[0] };
+  return { kind: "domain", value: domain };
+}
+
 export async function personScopeKey(
   email: string | null | undefined,
   domainsRepo: EntityDomainsRepository,
@@ -42,8 +47,7 @@ export async function personScopeKey(
   const companyIds = companyIdsByDomain
     ? (companyIdsByDomain.get(domain) ?? [])
     : await domainsRepo.getCompanyIdsByDomain(domain);
-  if (companyIds.length > 0) return { kind: "company", value: [...companyIds].sort()[0] };
-  return { kind: "domain", value: domain };
+  return personScopeKeyForDomain(domain, companyIds);
 }
 
 /**

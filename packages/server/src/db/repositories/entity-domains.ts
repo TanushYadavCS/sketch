@@ -210,7 +210,7 @@ function parseJsonArray(raw: string | null): string[] {
   return [];
 }
 
-function domainMatchesName(domain: string, name: string): boolean {
+export function domainMatchesName(domain: string, name: string): boolean {
   const nameKey = compactEntityNameKey("company", name);
   if (!nameKey) return false;
   const normalizedDomain = normalizeWebsiteDomain(domain) ?? domain.trim().toLowerCase();
@@ -310,6 +310,23 @@ export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: 
       const row = await db.selectFrom("entity_domains").select("kind").where("domain", "=", domain).executeTakeFirst();
       if (!row) return false;
       return row.kind === "personal" || row.kind === "shared";
+    },
+
+    async getDomainKinds(domains: string[]): Promise<Map<string, DomainKind>> {
+      const normalizedDomains = [...new Set(domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean))];
+      if (normalizedDomains.length === 0) return new Map();
+      const rows = await db
+        .selectFrom("entity_domains")
+        .select(["domain", "kind"])
+        .where("domain", "in", normalizedDomains)
+        .execute();
+      const kinds = new Map<string, DomainKind>();
+      for (const row of rows) {
+        if (row.kind === "corporate" || row.kind === "personal" || row.kind === "shared") {
+          kinds.set(row.domain, row.kind);
+        }
+      }
+      return kinds;
     },
 
     async lookupCompanyByDomain(domain: string): Promise<EntitiesTable | null> {

@@ -9,11 +9,11 @@ import {
   WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
 } from "../connectors/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
-import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { createEntityDomainsRepository, domainMatchesName } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
-import { personScopeKey, personScopeKeyId } from "./affiliations";
+import { personScopeKeyForDomain, personScopeKeyId } from "./affiliations";
 import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
@@ -35,6 +35,7 @@ import {
   removeFromCandidatePool,
 } from "./name-dedup";
 import { normalizeEntityMatchName } from "./name-keys";
+import { isPersonalOrSharedDomain } from "./personal-domains";
 import type { Entity, EntityLookup, ProposeEntityType, RankedCandidate } from "./propose";
 import { canUseEntityAsMatchTarget } from "./provenance";
 
@@ -123,16 +124,21 @@ export async function buildLookupIndex(
   for (const t of indexedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, IndexEntityRow[]>();
   const byNormalizedAlias = new Map<string, IndexEntityRow[]>();
+  const collisionNameKeysByType = new Map<ProposeEntityType, Set<string>>();
   const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
-  for (const t of indexedTypes) dedupEntriesByType.set(t, []);
+  for (const t of indexedTypes) {
+    collisionNameKeysByType.set(t, new Set());
+    dedupEntriesByType.set(t, []);
+  }
   for (const e of entityRows) {
     if (!supportedTypeSet.has(e.source_type)) continue;
     if (!indexedTypeSet.has(e.source_type)) continue;
-    if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
+    const nameKey = normalizeEntityMatchName(entityType, e.name);
+    if (nameKey) collisionNameKeysByType.get(entityType)?.add(nameKey);
+    if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     entitiesByType.get(entityType)?.push(e);
     dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
-    const nameKey = normalizeEntityMatchName(entityType, e.name);
     if (nameKey) {
       const bucket = byNormalizedName.get(nameKey);
       if (bucket) bucket.push(e);
@@ -159,7 +165,15 @@ export async function buildLookupIndex(
     }
   }
   const companyIdsByDomain = new Map<string, string[]>();
+  const corporateDomains = new Set<string>();
   if (includeCompanyDomains) {
+    const corporateDomainRows = await db
+      .selectFrom("entity_domains")
+      .select("domain")
+      .where("kind", "=", "corporate")
+      .execute();
+    for (const row of corporateDomainRows) corporateDomains.add(row.domain.toLowerCase());
+
     const domainRows = await db
       .selectFrom("entity_domains")
       .innerJoin("entities", "entities.id", "entity_domains.entity_id")
@@ -190,10 +204,12 @@ export async function buildLookupIndex(
     entitiesByType,
     byNormalizedName,
     byNormalizedAlias,
+    collisionNameKeysByType,
     dedupEntriesByType,
     dedupPoolsByType,
     bySourceRef,
     companyIdsByDomain,
+    corporateDomains,
     personScopeKeysByEntityId,
     personScopeKeyReads: 0,
   };
@@ -228,17 +244,27 @@ async function buildPersonScopeKeys(
   for (const person of persons) scopeKeys.set(person.id, new Set());
   const domainsRepo = createEntityDomainsRepository(db);
   const personDomains = new Map<string, string>();
-  const domains = new Set<string>();
+  const domainsForDb = new Set<string>();
+  const scopesByDomain = new Map<string, { kind: "company" | "domain"; value: string } | null>();
   for (const person of persons) {
     const email = readPersonEmailFromMetadata(person.metadata);
     const domain = domainsRepo.normalizeEmailDomain(email);
     if (!domain) continue;
     personDomains.set(person.id, domain);
-    domains.add(domain);
+    if (isPersonalOrSharedDomain(domain)) {
+      scopesByDomain.set(domain, null);
+    } else {
+      domainsForDb.add(domain);
+    }
   }
-  const scopesByDomain = new Map<string, Awaited<ReturnType<typeof personScopeKey>>>();
-  for (const domain of domains) {
-    scopesByDomain.set(domain, await personScopeKey(`person@${domain}`, domainsRepo, companyIdsByDomain));
+  const domainKinds = await domainsRepo.getDomainKinds([...domainsForDb]);
+  for (const domain of domainsForDb) {
+    const kind = domainKinds.get(domain);
+    if (kind === "personal" || kind === "shared") {
+      scopesByDomain.set(domain, null);
+      continue;
+    }
+    scopesByDomain.set(domain, personScopeKeyForDomain(domain, companyIdsByDomain.get(domain) ?? []));
   }
   for (const person of persons) {
     const domain = personDomains.get(person.id);
@@ -379,11 +405,20 @@ function isNameDedupEntityType(entityType: ProposeEntityType): entityType is Nam
   return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
 }
 
+/**
+ * Collision-name keys are append-only within one materialization run. A key can
+ * be shared by multiple entities, so removing on re-register would require
+ * refcounts to avoid reopening a live collision. Keeping an old renamed key
+ * until the next index build is conservative and matches the old repo-scan
+ * freshness more closely than a build-only snapshot.
+ */
 export function registerEntity(index: LookupIndex, entity: IndexEntityRow): void {
   const entityType = entity.source_type as ProposeEntityType;
   if (!lookupIndexIncludesType(index, entityType)) return;
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
+  const collisionNameKey = normalizeEntityMatchName(entityType, entity.name);
+  if (collisionNameKey) index.collisionNameKeysByType.get(entityType)?.add(collisionNameKey);
   if (!canUseEntityAsMatchTarget(entityType, entity.provenance_tier)) return;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
@@ -610,6 +645,17 @@ export function createEntityLookupFromIndex(opts: {
       assertLookupIndexIncludesType(index, "person");
       index.personScopeKeyReads++;
       return index.personScopeKeysByEntityId.get(entityId) ?? [];
+    },
+    hasLiveTypeName: (entityType, normalizedName) => {
+      if (!lookupIndexIncludesType(index, entityType)) return null;
+      return index.collisionNameKeysByType.get(entityType)?.has(normalizedName) ?? false;
+    },
+    matchesCorporateDomain: (name) => {
+      if (!lookupIndexIncludesType(index, "company")) return null;
+      for (const domain of index.corporateDomains) {
+        if (domainMatchesName(domain, name)) return true;
+      }
+      return false;
     },
   };
   if (lookupIndexIncludesType(index, "product")) {
