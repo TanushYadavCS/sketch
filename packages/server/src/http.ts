@@ -150,6 +150,7 @@ interface AppDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
   agentRunService?: AgentRunService;
@@ -254,6 +255,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           whatsapp: deps.whatsapp,
           whatsappRuntime: deps.whatsappRuntime,
           sendDm: deps.sendDm,
+          sendTargetMessage: deps.sendTargetMessage,
         })
       : null;
 
@@ -579,6 +581,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         deps?.listAgentEnvForRuntime ?? ((context) => agentEnvVars.listForRuntimeContext(context)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
+      sendTargetMessage: deps?.sendTargetMessage,
       queueManager: deps?.queueManager,
       limitAgentExecution: deps?.limitAgentExecution,
     }),
@@ -608,6 +611,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         automationRunsRepo: deps.automationRunsRepo,
         queueManager: deps.queueManager,
         sendDm: deps.sendDm,
+        sendTargetMessage: deps.sendTargetMessage,
       }),
     );
     app.route(
@@ -630,6 +634,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         queueManager: deps.queueManager,
         getSlack: deps.getSlack,
         sendDm: deps.sendDm,
+        sendTargetMessage: deps.sendTargetMessage,
       }),
     );
   }

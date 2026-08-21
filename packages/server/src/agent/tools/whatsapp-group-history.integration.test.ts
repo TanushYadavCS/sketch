@@ -371,6 +371,15 @@ function runWhatsAppGroupHistorySuite(label: string, createDb: () => Promise<Kys
       expect(result.content[0].text).not.toMatch(/@s\.whatsapp\.net|@lid/u);
     });
 
+    it("denies a WhatsApp group read after the requester leaves despite the file scope membership", async () => {
+      const seeded = await seedIndexedGroupSlice(db);
+      await db.deleteFrom("whatsapp_group_participants").where("group_jid", "=", seeded.groupJid).execute();
+
+      const result = await runTool(db, seeded.memberUserId, { sliceId: seeded.sliceId, limit: 10 });
+
+      expect(result.content[0].text).toBe(WHATSAPP_GROUP_HISTORY_DENIED_TEXT);
+    });
+
     it("authorizes a phone-only teammate through the typed scope", async () => {
       const seeded = await seedIndexedGroupSlice(db);
       await db.updateTable("users").set({ email: null }).where("id", "=", seeded.memberUserId).execute();

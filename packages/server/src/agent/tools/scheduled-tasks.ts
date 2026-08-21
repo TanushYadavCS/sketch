@@ -10,6 +10,7 @@ import {
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
+import { deliveryAuthorizationError } from "../../access/delivery";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
@@ -750,7 +751,19 @@ function automationPersistenceError(error: unknown): string | null {
   return null;
 }
 
-function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContext) {
+async function buildDeliveryFields(
+  params: ManageScheduledTasksParams,
+  ctx: TaskContext,
+  deps: ManageScheduledTasksDeps,
+): Promise<
+  | {
+      outputTarget: string | undefined;
+      outputPlatform: "slack" | "whatsapp" | undefined;
+      outputThreadTs: string | null | undefined;
+      outputMode: "deliver" | "silent" | undefined;
+    }
+  | { error: string }
+> {
   const delivery = params.delivery;
   let outputPlatform = delivery?.platform ?? params.output_platform;
   let outputTarget = delivery?.targetId ?? params.output_target;
@@ -1432,7 +1445,8 @@ export async function handleManageScheduledTasks(
       }
 
       const sessionMode = "fresh";
-      const deliveryFields = buildDeliveryFields(params, ctx);
+      const deliveryFields = await buildDeliveryFields(params, ctx, deps);
+      if ("error" in deliveryFields) return text(deliveryFields.error);
 
       // Strip content from steps (stored separately in automation_step_content)
       const steps = params.steps as NonNullable<typeof params.steps>;
@@ -1456,6 +1470,19 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
+      const deliveryError = await deliveryAuthorizationError({
+        db: deps.db,
+        userRepo: deps.userRepo,
+        userId: ctx.createdBy,
+        delivery: {
+          platform: outputPlatform,
+          targetType:
+            params.delivery?.targetType ??
+            (outputThreadTs ? "thread" : ctx.contextType === "channel" ? "channel" : ctx.contextType),
+          targetId: outputTarget,
+        },
+      });
+      if (deliveryError) return text(deliveryError);
 
       let saved: Awaited<ReturnType<typeof createAutomationDefinition>>;
       try {
@@ -1571,6 +1598,16 @@ export async function handleManageScheduledTasks(
         (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       const patch = definitionPatchFromParams(params, ctx);
       if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision;
+      if (patch.delivery) {
+        if (!guardedTask) return text("Error: task not found.");
+        const deliveryError = await deliveryAuthorizationError({
+          db,
+          userRepo: deps.userRepo,
+          userId: ctx.createdBy,
+          delivery: { ...guardedTask.delivery, ...patch.delivery },
+        });
+        if (deliveryError) return text(deliveryError);
+      }
 
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
       let agentLease: AgentLease | undefined;

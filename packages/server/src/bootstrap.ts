@@ -15,6 +15,7 @@ import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "./agent/runtime/provider";
+import type { SendTargetMessage } from "./agent/tools/types";
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
@@ -74,11 +75,13 @@ import { createLogger } from "./logger";
 import type { Logger } from "./logger";
 import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
+import { createSendTargetMessage } from "./messaging/target-delivery";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
 import { createOperationalAlertService } from "./operational-alerts/service";
 import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/whatsapp-transport";
 import { OperationalAlertWorker } from "./operational-alerts/worker";
 import { QueueManager } from "./queue";
+import { createWorkflowDeliveryCapture } from "./scheduler/delivery-capture";
 import { TaskScheduler } from "./scheduler/service";
 import { ensureBuiltinManagedSkills } from "./skills/builtin";
 import { syncFeaturedSkills } from "./skills/sync";
@@ -103,7 +106,7 @@ import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
 import { WhatsAppInboundConsumer } from "./whatsapp/inbound-consumer";
 import { safeWhatsAppErrorFields } from "./whatsapp/privacy";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
-import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
@@ -310,6 +313,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   });
   const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
   const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
+  const whatsappRuntimeRef: { current: ReturnType<typeof createWhatsAppRuntime> | null } = { current: null };
+
   /**
    * Current LLM provider context, refreshed at startup and on settings change
    * via applyLlmEnvFromDb. Drives provider-aware cost recomputation without an
@@ -343,6 +348,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         : null;
     const enrichedParams = {
       ...params,
+      getWhatsApp: params.getWhatsApp ?? (() => whatsappRuntimeRef.current),
       loadTranscriptionSettings,
       visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
       geminiConfig: params.geminiConfig ?? {
@@ -603,6 +609,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     ],
     logger,
   });
+  whatsappRuntimeRef.current = whatsappRuntime;
   const whatsappUserLidRefresh = new WhatsAppUserLidRefresh({
     whatsapp,
     store: userWhatsAppLids,
@@ -731,6 +738,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
     throw new Error(`Unsupported platform: ${platform}`);
   };
 
+  const targetDeliveryCapture = createWorkflowDeliveryCapture({
+    conversations: conversationsRepo,
+    settingsRepo,
+    logger,
+  });
+
+  const sendTargetMessage: SendTargetMessage = createSendTargetMessage({
+    getSlack: () => slack,
+    whatsapp: whatsappRuntime,
+    capture: targetDeliveryCapture,
+  });
+
   /**
    * Resolves the full status of the active integration provider, including the
    * load-failure branch. Wraps the row-level finder
@@ -824,6 +843,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userRepo: users,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    sendTargetMessage,
     recordWorkflowStep,
     limitAgentExecution,
     limitScheduledAgentExecution,
@@ -957,6 +977,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
     slackEntitySync,
+    sendTargetMessage,
     recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
     recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>
@@ -1053,6 +1074,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    sendTargetMessage,
   };
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, whatsappAdapterDeps);
   const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
@@ -1215,6 +1237,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       await applyLlmEnvFromDb();
     },
     sendDm: sendDirectMessage,
+    sendTargetMessage,
     onSmtpUpdated: async () => {
       logger.info("SMTP configuration updated");
     },

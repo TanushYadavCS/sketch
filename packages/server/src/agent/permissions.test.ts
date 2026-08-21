@@ -736,7 +736,7 @@ describe("createCanUseTool", () => {
       const builtIn = await agentTool("Read", { file_path: `${workspace}/notes.md` });
       expect(builtIn.behavior).toBe("deny");
 
-      const mcp = await agentTool("mcp__sketch__SendMessageToUser", { message: "hi" });
+      const mcp = await agentTool("mcp__sketch__SendMessage", { message: "hi" });
       expect(mcp.behavior).toBe("deny");
     });
 
@@ -747,7 +747,7 @@ describe("createCanUseTool", () => {
       const builtIn = await agentTool("Read", { file_path: `${workspace}/notes.md` });
       expect(builtIn.behavior).toBe("allow");
 
-      const mcp = await agentTool("mcp__sketch__SendMessageToUser", { message: "hi" });
+      const mcp = await agentTool("mcp__sketch__SendMessage", { message: "hi" });
       expect(mcp.behavior).toBe("allow");
     });
   });

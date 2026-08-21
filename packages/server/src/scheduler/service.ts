@@ -231,6 +231,7 @@ export interface TaskSchedulerDeps {
   userRepo: ReturnType<typeof createUserRepository>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: Parameters<typeof runAgent>[0]["sendDm"];
+  sendTargetMessage?: Parameters<typeof runAgent>[0]["sendTargetMessage"];
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   limitScheduledAgentExecution: <T>(work: () => Promise<T>) => Promise<T>;
@@ -422,6 +423,7 @@ export class TaskScheduler {
       getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
+      sendTargetMessage: this.deps.sendTargetMessage,
       sendMessage: sendMessage ?? undefined,
       recordWorkflowStep: this.deps.recordWorkflowStep,
       limitAgentExecution:
@@ -1161,6 +1163,7 @@ export class TaskScheduler {
       getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
+      sendTargetMessage: this.deps.sendTargetMessage,
       recordWorkflowStep: this.deps.recordWorkflowStep,
       limitAgentExecution: this.deps.limitAgentExecution,
       loadAgentRuntimeProviderConfig: async () =>

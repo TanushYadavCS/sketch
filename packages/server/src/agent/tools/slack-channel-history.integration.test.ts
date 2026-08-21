@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { authorizedTargets } from "../../access/membership";
 import type { AccessPrincipalInput } from "../../connectors/types";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
@@ -38,8 +39,20 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       db = await createDb();
       await db
         .insertInto("users")
-        .values({ id: "user-admin", name: "Roopak", email: "roopak@example.com", role: "admin" })
+        .values({
+          id: "user-admin",
+          name: "Roopak",
+          email: "roopak@example.com",
+          email_verified_at: "2026-07-17T09:00:00.000Z",
+          role: "admin",
+        })
         .execute();
+      await db.insertInto("settings").values({ id: "default", slack_team_id: "T1" }).execute();
+      await db
+        .insertInto("slack_user_sync_state")
+        .values({ team_id: "T1", slack_user_id: "U0TEAM", email: "roopak@example.com" })
+        .execute();
+      await db.insertInto("slack_channel_participants").values({ channel_id: "C1", slack_user_id: "U0TEAM" }).execute();
 
       const conversations = createConversationRepository(db);
       const conversation = await conversations.getOrCreate({
@@ -195,6 +208,24 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
       const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["departed@example.com"]));
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
+    });
+
+    it("denies both Slack history reads and shared-target authorization after channel removal", async () => {
+      await db
+        .deleteFrom("slack_channel_participants")
+        .where("channel_id", "=", "C1")
+        .where("slack_user_id", "=", "U0TEAM")
+        .execute();
+
+      const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["roopak@example.com"]));
+      expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
+      await expect(
+        authorizedTargets(
+          db,
+          [{ type: "email", value: "roopak@example.com" }],
+          [{ platform: "slack", targetId: "C1" }],
+        ),
+      ).resolves.toEqual(new Set());
     });
 
     it("denies when no caller emails resolve", async () => {

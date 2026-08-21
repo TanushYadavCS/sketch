@@ -94,6 +94,7 @@ import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
   QuestionCollector,
+  type SendTargetMessage,
   UploadCollector,
 } from "./tools/types";
 
@@ -377,6 +378,7 @@ export interface RunAgentParams {
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
+  getWhatsApp?: () => { isConnected: boolean } | null;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   sendDm?: (params: {
@@ -393,6 +395,7 @@ export interface RunAgentParams {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: SendTargetMessage;
   channelContext?: {
     channelName: string;
   };
@@ -1304,6 +1307,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     workspaceKey: params.workspaceKey,
     originThreadTs: params.threadTs,
     sendDm: params.sendDm,
+    sendTargetMessage: params.sendTargetMessage,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),

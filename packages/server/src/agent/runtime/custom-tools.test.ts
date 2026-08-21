@@ -226,7 +226,11 @@ describe("AI SDK custom Sketch tool provider", () => {
       mcp__sketch__GetTeamDirectory: {},
       mcp__sketch__SetUserTimezone: { timezone: "Asia/Kolkata" },
       mcp__sketch__SearchUsers: { queries: ["alice"] },
-      mcp__sketch__SendMessageToUser: { recipientUserId: "user-2", message: "hello" },
+      mcp__sketch__SendMessage: { recipientUserId: "user-2", message: "hello" },
+      mcp__sketch__SendMessageToTarget: {
+        target: { platform: "slack", targetType: "channel", targetId: "C123" },
+        message: "hello",
+      },
       mcp__sketch__SendMessageToUsers: { recipientUserIds: ["user-2"], message: "hello" },
       mcp__sketch__UpdateInboxWorkflow: { inboxMessageId: "msg-1", metadata: { stage: "draft" } },
       mcp__sketch__ResolveInboxWorkflow: { inboxMessageId: "msg-1" },

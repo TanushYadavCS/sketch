@@ -87,6 +87,7 @@ export interface ExecuteAutomationParams {
   getSlack?: RunAgentParams["getSlack"];
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   sendMessage?: (text: string) => Promise<void>;
   onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
   recordWorkflowStep?: RecordWorkflowStep;
@@ -733,6 +734,7 @@ async function executeWorkflowStep(params: {
       userRepo: runtimeParams.userRepo,
       inboxMessagesRepo: runtimeParams.inboxMessagesRepo,
       sendDm: runtimeParams.sendDm,
+      sendTargetMessage: runtimeParams.sendTargetMessage,
       outputPlatform: resolveWorkflowDelivery(task).platform,
       isMessageDeliveryStep: params.isMessageDeliveryStep ?? false,
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
@@ -1300,6 +1302,7 @@ interface AgentStepParams {
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   outputPlatform: "slack" | "whatsapp";
   isMessageDeliveryStep: boolean;
   recordWorkflowStep?: RecordWorkflowStep;
@@ -1603,6 +1606,7 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
       userRepo: params.userRepo,
       inboxMessagesRepo: params.inboxMessagesRepo,
       sendDm: params.sendDm,
+      sendTargetMessage: params.sendTargetMessage,
       toolConfig: { BASE_URL: params.config.BASE_URL, PORT: params.config.PORT },
       model: step.agentModel,
       maxTurns: 50,

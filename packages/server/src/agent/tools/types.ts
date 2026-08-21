@@ -30,6 +30,21 @@ import type { AgentOutputWriter } from "./agent-output";
 
 export type SelectableUser = Selectable<UsersTable>;
 
+export interface SendTargetMessageParams {
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "group";
+  targetId: string;
+  message: string;
+  threadTs?: string;
+}
+
+/**
+ * Posts into a shared destination (Slack channel or WhatsApp group) rather than
+ * a person's DM. Kept separate from sendDm because there is no recipient user,
+ * no inbox bookkeeping, and Slack threads are addressable.
+ */
+export type SendTargetMessage = (params: SendTargetMessageParams) => Promise<{ messageRef: string }>;
+
 export interface SearchableUserRepo {
   list: () => Promise<SelectableUser[]>;
   findById: (id: string) => Promise<SelectableUser | undefined>;
@@ -150,6 +165,7 @@ export interface SketchMcpDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
+  getWhatsApp?: () => { isConnected: boolean } | null;
   currentUserEmail?: string | null;
   currentUserName?: string | null;
   slackEntitySyncEnabled?: boolean;
@@ -177,6 +193,7 @@ export interface SketchMcpDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: SendTargetMessage;
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   transcriptionEnabled?: boolean;

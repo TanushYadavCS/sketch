@@ -13,7 +13,8 @@ import {
   handleGetTeamDirectory,
   handleResolveInboxWorkflow,
   handleSearchUsers,
-  handleSendMessageToUser,
+  handleSendMessage,
+  handleSendMessageToTarget,
   handleSendMessageToUsers,
   handleSetUserTimezone,
   handleUpdateInboxWorkflow,
@@ -687,13 +688,13 @@ describe("handleSetUserTimezone", () => {
   });
 });
 
-describe("handleSendMessageToUser", () => {
+describe("handleSendMessage", () => {
   it("sends a visible DM and stores the same message in inbox", async () => {
     const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: "S999" });
     const sendDm = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
     const createInboxMessage = vi.fn().mockResolvedValue({ id: "inbox-1" });
 
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-bob", message: "Need your latest update." },
       {
         inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage },
@@ -729,7 +730,7 @@ describe("handleSendMessageToUser", () => {
     const sendDm = vi.fn().mockResolvedValue({ channelId: "1234567890@s.whatsapp.net", messageRef: "" });
     const createInboxMessage = vi.fn().mockResolvedValue({ id: "inbox-1" });
 
-    await handleSendMessageToUser(
+    await handleSendMessage(
       { recipientUserId: "user-bob", message: "Need your latest update." },
       {
         inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage },
@@ -760,7 +761,7 @@ describe("handleSendMessageToUser", () => {
   });
 
   it("rejects sending to self", async () => {
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-alice", message: "hi" },
       {
         inboxMessagesRepo: makeInboxMessagesRepoMock(),
@@ -774,7 +775,7 @@ describe("handleSendMessageToUser", () => {
   });
 
   it("rejects unknown recipients", async () => {
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-ghost", message: "hi" },
       {
         inboxMessagesRepo: makeInboxMessagesRepoMock(),
@@ -796,7 +797,7 @@ describe("handleSendMessageToUser", () => {
     });
     const createInboxMessage = vi.fn().mockResolvedValue({ id: "inbox-1" });
 
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-bob", message: "Need your latest update." },
       {
         inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage },
@@ -811,7 +812,7 @@ describe("handleSendMessageToUser", () => {
   });
   it("rejects recipients with no connected channel", async () => {
     const charlie = makeUser({ id: "user-charlie", name: "Charlie", slack_user_id: null, whatsapp_number: null });
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-charlie", message: "hi" },
       {
         inboxMessagesRepo: makeInboxMessagesRepoMock(),
@@ -825,7 +826,7 @@ describe("handleSendMessageToUser", () => {
   });
 
   it("returns an error when messaging deps are missing", async () => {
-    const result = await handleSendMessageToUser(
+    const result = await handleSendMessage(
       { recipientUserId: "user-bob", message: "hi" },
       {
         inboxMessagesRepo: undefined,
@@ -836,6 +837,300 @@ describe("handleSendMessageToUser", () => {
     );
 
     expect(result.content[0].text).toBe("Error: messaging is not available in this context.");
+  });
+});
+
+describe("handleSendMessage to a channel or group", () => {
+  const slackTarget = { platform: "slack" as const, targetType: "channel" as const, targetId: "C123" };
+  const whatsappTarget = { platform: "whatsapp" as const, targetType: "group" as const, targetId: "12345@g.us" };
+
+  function accessAllowing(...keys: string[]) {
+    return { authorizedProviderTargets: async () => new Set(keys) };
+  }
+
+  function targetDeps(overrides: Partial<Parameters<typeof handleSendMessage>[1]> = {}) {
+    return {
+      db: {} as unknown as NonNullable<Parameters<typeof handleSendMessage>[1]["db"]>,
+      currentUserId: "user-alice",
+      sendTargetMessage: vi.fn().mockResolvedValue({ messageRef: "1700000000.0001" }),
+      ...overrides,
+    };
+  }
+
+  it("rejects setting both recipientUserId and target", async () => {
+    const result = await handleSendMessage(
+      { recipientUserId: "user-bob", target: slackTarget, message: "hi" },
+      targetDeps(),
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: set only one of recipientUserId or target, not both.");
+  });
+
+  it("rejects setting neither recipientUserId nor target", async () => {
+    const result = await handleSendMessage({ message: "hi" }, targetDeps(), accessAllowing());
+
+    expect(result.content[0].text).toContain("set exactly one of recipientUserId");
+  });
+
+  it("rejects a blank message on both addressing modes", async () => {
+    const deps = targetDeps();
+    const dm = await handleSendMessage({ recipientUserId: "user-bob", message: "   " }, deps, accessAllowing());
+    const channel = await handleSendMessage({ target: slackTarget, message: "" }, deps, accessAllowing("slack:C123"));
+
+    expect(dm.content[0].text).toBe("Error: message must not be empty.");
+    expect(channel.content[0].text).toBe("Error: message must not be empty.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a blank message for bulk DMs", async () => {
+    const sendDm = vi.fn();
+    const result = await handleSendMessageToUsers(
+      { recipientUserIds: ["user-bob"], message: " " },
+      {
+        inboxMessagesRepo: makeInboxMessagesRepoMock(),
+        userRepo: makeUserRepoMock(),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(result.content[0].text).toBe("Error: message must not be empty.");
+    expect(sendDm).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty recipientUserId alongside a target as both being set", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { recipientUserId: "", target: slackTarget, message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: set only one of recipientUserId or target, not both.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty recipientUserId", async () => {
+    const result = await handleSendMessage({ recipientUserId: "  ", message: "hi" }, targetDeps(), accessAllowing());
+
+    expect(result.content[0].text).toContain("recipientUserId must not be empty");
+  });
+
+  it("rejects an empty threadTs on a Slack channel target", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: slackTarget, threadTs: "", message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toContain("threadTs must not be empty");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not let the current conversation context bypass a membership denial", async () => {
+    const deps = targetDeps({
+      conversationContext: { conversationId: 42, providerThreadId: null, isThreadReply: false },
+    });
+    const result = await handleSendMessage({ target: slackTarget, message: "hi" }, deps, accessAllowing());
+
+    expect(result.content[0].text).toContain("not a known member of that channel or group");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Slack target that is not a channel", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: { platform: "slack", targetType: "group", targetId: "C123" }, message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: A Slack target must use targetType 'channel'.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a WhatsApp target that is not a group", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: { platform: "whatsapp", targetType: "channel", targetId: "12345@g.us" }, message: "hi" },
+      deps,
+      accessAllowing("whatsapp:12345@g.us"),
+    );
+
+    expect(result.content[0].text).toBe("Error: A WhatsApp target must use targetType 'group'.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects threadTs on a WhatsApp target", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: whatsappTarget, threadTs: "1700000000.0001", message: "hi" },
+      deps,
+      accessAllowing("whatsapp:12345@g.us"),
+    );
+
+    expect(result.content[0].text).toBe("Error: threadTs can only be used with a Slack channel target.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects threadTs on a DM", async () => {
+    const result = await handleSendMessage(
+      { recipientUserId: "user-bob", threadTs: "1700000000.0001", message: "hi" },
+      {
+        ...targetDeps(),
+        inboxMessagesRepo: makeInboxMessagesRepoMock(),
+        userRepo: makeUserRepoMock(),
+        sendDm: vi.fn(),
+      },
+      accessAllowing(),
+    );
+
+    expect(result.content[0].text).toBe("Error: threadTs can only be used with a Slack channel target.");
+  });
+
+  it("does not send when the requester is not a member of the target", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage({ target: slackTarget, message: "hi" }, deps, accessAllowing());
+
+    expect(result.content[0].text).toContain("not a known member of that channel or group");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("posts to an authorized Slack channel", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: slackTarget, message: "deploy is green" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(deps.sendTargetMessage).toHaveBeenCalledWith({
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C123",
+      message: "deploy is green",
+    });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      status: "sent",
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C123",
+      messageRef: "1700000000.0001",
+    });
+  });
+
+  it("passes threadTs through for a Slack thread reply", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: slackTarget, threadTs: "1699999999.0002", message: "in thread" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(deps.sendTargetMessage).toHaveBeenCalledWith({
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C123",
+      message: "in thread",
+      threadTs: "1699999999.0002",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ threadTs: "1699999999.0002" });
+  });
+
+  it("posts to an authorized WhatsApp group", async () => {
+    const deps = targetDeps();
+    await handleSendMessage(
+      { target: whatsappTarget, message: "standup in 5" },
+      deps,
+      accessAllowing("whatsapp:12345@g.us"),
+    );
+
+    expect(deps.sendTargetMessage).toHaveBeenCalledWith({
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "12345@g.us",
+      message: "standup in 5",
+    });
+  });
+
+  it("never stores an inbox item for a channel send", async () => {
+    const createInboxMessage = vi.fn();
+    await handleSendMessage(
+      { target: slackTarget, message: "hi" },
+      { ...targetDeps(), inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage } },
+      accessAllowing("slack:C123"),
+    );
+
+    expect(createInboxMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns a clear error when channel delivery is not wired up", async () => {
+    const result = await handleSendMessage(
+      { target: slackTarget, message: "hi" },
+      { ...targetDeps(), sendTargetMessage: undefined },
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: Sending to a channel or group is not available in this context.");
+  });
+
+  it("reports a delivery failure instead of throwing", async () => {
+    const result = await handleSendMessage(
+      { target: slackTarget, message: "hi" },
+      { ...targetDeps(), sendTargetMessage: vi.fn().mockRejectedValue(new Error("Slack bot is not connected")) },
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: Slack bot is not connected");
+  });
+
+  it("denies a target send when there is no authenticated requester", async () => {
+    const deps = targetDeps({ currentUserId: undefined });
+    const result = await handleSendMessage({ target: slackTarget, message: "hi" }, deps, accessAllowing("slack:C123"));
+
+    expect(result.content[0].text).toContain("requires an authenticated requesting user");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("registered messaging tools", () => {
+  it("keeps the DM tool from posting to a shared destination at runtime", async () => {
+    const { createMessagingTools } = await import("./tools/messaging");
+    const tools = createMessagingTools({
+      currentUserId: "user-alice",
+      workspaceDir: "/tmp/workspace",
+      uploadCollector: new UploadCollector(),
+      sendTargetMessage: vi.fn(),
+    });
+    const dmTool = tools.find((entry) => entry.name === "SendMessage");
+
+    const result = await dmTool?.handler(
+      {
+        message: "post this",
+        target: { platform: "slack", targetType: "channel", targetId: "C123" },
+      } as never,
+      {} as never,
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Error: channel and group posting requires SendMessageToTarget." }],
+    });
+  });
+
+  it("keeps channel and group posting available through the separate tool", async () => {
+    const slackTarget = { platform: "slack" as const, targetType: "channel" as const, targetId: "C123" };
+    const deps = {
+      db: {} as unknown as NonNullable<Parameters<typeof handleSendMessageToTarget>[1]["db"]>,
+      currentUserId: "user-alice",
+      sendTargetMessage: vi.fn().mockResolvedValue({ messageRef: "1700000000.0001" }),
+    };
+    const result = await handleSendMessageToTarget({ target: slackTarget, message: "post this" }, deps, {
+      authorizedProviderTargets: async () => new Set(["slack:C123"]),
+    });
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "sent", targetId: "C123" });
   });
 });
 

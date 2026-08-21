@@ -122,6 +122,7 @@ interface WebChatRouteDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
 }
 
 function badRequest(code: string, message: string) {
@@ -3040,6 +3041,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             userRepo: deps.users,
             currentUserId: currentUser.id,
             sendDm: deps.sendDm,
+            sendTargetMessage: deps.sendTargetMessage,
             ...(attachments.length > 0 ? { attachments } : {}),
             ...(taskContext ? { taskContext } : {}),
             ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),

@@ -3,6 +3,7 @@ import { automationExecutionModeSchema, workflowStepUsesIntegrationActions } fro
 import { type Context, Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
+import { deliveryAuthorizationError } from "../access/delivery";
 import {
   AutomationValidationError,
   addWebhookEndpointMetadata,
@@ -1357,6 +1358,15 @@ export function scheduledTaskRoutes(
       ? await hasBrokerCapableProvider()
       : true;
     const userId = await resolveUserId(c.get("sub"));
+    const deliveryError = await deliveryAuthorizationError({
+      db,
+      userRepo: users,
+      userId,
+      delivery: request.delivery,
+    });
+    if (deliveryError) {
+      return c.json({ error: { code: "DELIVERY_TARGET_UNAUTHORIZED", message: deliveryError } }, 403);
+    }
     if (options.validateAgentSkills && result.row.created_by) {
       const requestedSkills = request.steps.flatMap((step) => (step.type === "agent" ? (step.agentSkills ?? []) : []));
       const unavailableSkills = await options.validateAgentSkills(result.row.created_by, requestedSkills, {

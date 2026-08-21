@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
+import { createUserRepository } from "../../db/repositories/users";
 import { createTestDb } from "../../test-utils";
 import { handleManageScheduledTasks } from "./scheduled-tasks";
 
@@ -73,7 +74,10 @@ describe("manage_scheduled_tasks Slack channel trigger", () => {
   });
 
   it("infers the external Slack trigger schedule when adding a channel-message workflow", async () => {
-    const deps = makeDeps({ db });
+    await db.insertInto("settings").values({ id: "default", slack_team_id: "T1" }).execute();
+    await createUserRepository(db).create({ id: "u1", name: "User", email: "u1@example.com", slackUserId: "U1" });
+    await db.insertInto("slack_channel_participants").values({ channel_id: "C1", slack_user_id: "U1" }).execute();
+    const deps = makeDeps({ db, userRepo: createUserRepository(db) });
 
     await handleManageScheduledTasks(
       { action: "add", title: "Slack bug report", steps: [trigger("C1"), agent], output_mode: "silent" },

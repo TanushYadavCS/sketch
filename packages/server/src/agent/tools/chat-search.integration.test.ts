@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { AccessPrincipalInput } from "../../connectors/types";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-emission";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
@@ -16,7 +15,8 @@ import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { createReadChatHistoryTool } from "./chat-history";
-import { ChatHistoryAccessResolver, handleAllChatsRead } from "./chat-search";
+import { ChatHistoryAccessResolver, type ProviderTargetRef, handleAllChatsRead } from "./chat-search";
+import { handleSendMessage } from "./messaging";
 import type { SketchMcpDeps } from "./types";
 
 async function readAllChats(
@@ -83,6 +83,10 @@ async function seedUser(db: Kysely<DB>, options: { emailVerified?: boolean } = {
     slackUserId: USER_SLACK_ID,
     whatsappNumber: USER_WHATSAPP_NUMBER,
   });
+  await db
+    .insertInto("slack_user_sync_state")
+    .values({ team_id: "T1", slack_user_id: USER_SLACK_ID, email: USER_EMAIL })
+    .execute();
 }
 
 async function seedConnectorConfig(db: Kysely<DB>, connectorType: "slack" | "whatsapp"): Promise<string> {
@@ -106,7 +110,7 @@ async function linkSliceScopeFile(
     source: "slack" | "whatsapp";
     scopeType: "slack_channel" | "whatsapp_group";
     providerScopeId: string;
-    members: AccessPrincipalInput[];
+    members: string[];
     firstMessageId: number;
     lastMessageId: number;
     rosterSnapshot?: string | null;
@@ -152,36 +156,6 @@ async function linkSliceScopeFile(
     .execute();
   await db.updateTable("conversation_slices").set({ indexed_file_id: fileId }).where("id", "=", slice.row.id).execute();
   return { scopeId, fileId, sliceId: slice.row.id };
-}
-
-/**
- * Slack chat-history access is granted by access_scope_members, the same group-membership
- * model file access uses. Dropping the member row is what a roster reconciliation does when
- * someone leaves the channel.
- */
-/**
- * Mirrors what a Slack roster reconciliation writes: the channel's access scope plus its
- * member principals. Slack chat-history access is granted from access_scope_members.
- */
-async function grantSlackScopeMembership(db: Kysely<DB>, channelId: string, connectorConfigId: string): Promise<void> {
-  await createConnectorRepository(db).upsertAccessScope(connectorConfigId, {
-    scopeType: "slack_channel",
-    providerScopeId: channelId,
-    label: `#${channelId}`,
-    members: [USER_EMAIL, { type: "slack_user" as const, value: USER_SLACK_ID }],
-  });
-}
-
-async function revokeSlackScopeMembership(db: Kysely<DB>, channelId: string): Promise<void> {
-  const scopes = await db
-    .selectFrom("access_scopes")
-    .select("id")
-    .where("scope_type", "=", "slack_channel")
-    .where("provider_scope_id", "=", channelId)
-    .execute();
-  for (const scope of scopes) {
-    await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scope.id).execute();
-  }
 }
 
 async function seedSlackChannel(
@@ -235,9 +209,7 @@ async function seedSlackChannel(
     source: "slack",
     scopeType: "slack_channel",
     providerScopeId: options.channelId,
-    members: options.members.includes(USER_EMAIL)
-      ? [...options.members, { type: "slack_user" as const, value: USER_SLACK_ID }]
-      : options.members,
+    members: options.members,
     firstMessageId: message.row.id,
     lastMessageId: message.row.id,
     rosterSnapshot: options.rosterSnapshot,
@@ -392,6 +364,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       } else {
         db = await getDb();
       }
+      await db.insertInto("settings").values({ id: "default", slack_team_id: "T1" }).execute();
       await seedUser(db);
       slackConfigId = await seedConnectorConfig(db, "slack");
       whatsappConfigId = await seedConnectorConfig(db, "whatsapp");
@@ -512,27 +485,31 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const before = await readAllChats({}, deps, access);
       expect(before.ok && before.body.messages).toHaveLength(1);
 
-      await revokeSlackScopeMembership(db, "C-LEAVE-CACHE");
+      await createSlackChannelParticipantsRepository(db).remove("C-LEAVE-CACHE", USER_SLACK_ID);
 
       const after = await readAllChats({}, deps, access);
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("fails closed when the channel access scope no longer lists the member", async () => {
+    it("retains Slack membership when the roster row is old", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",
         text: "provider failure secret",
         members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      await revokeSlackScopeMembership(db, "C2-ERROR");
+      await db
+        .updateTable("slack_channel_participants")
+        .set({ last_seen_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString() })
+        .where("channel_id", "=", "C2-ERROR")
+        .execute();
       const outcome = await readAllChats({}, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
+      expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("revokes Slack history access when disconnect clears the channel roster", async () => {
+    it("revokes passive Slack history access when disconnect clears the roster", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-DISCONNECT",
         text: "disconnect revocation marker",
@@ -542,7 +519,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const before = await readAllChats({}, depsFor(db));
       expect(before.ok && before.body.messages).toHaveLength(1);
 
-      await revokeSlackScopeMembership(db, "C2-DISCONNECT");
+      await createSlackChannelParticipantsRepository(db).clearAll();
 
       const after = await readAllChats({}, depsFor(db));
       expect(after.ok && after.body.messages).toHaveLength(0);
@@ -1045,7 +1022,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-THREADS",
       });
-      await grantSlackScopeMembership(db, "C-THREADS", slackConfigId);
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-THREADS",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
       const firstRoot = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "1000.000",
@@ -1135,6 +1119,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-SAME-CONVERSATION",
       });
+      await db
+        .insertInto("slack_channel_participants")
+        .values({ channel_id: "C-SAME-CONVERSATION", slack_user_id: USER_SLACK_ID })
+        .execute();
       const otherRoot = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "other-root",
@@ -1204,7 +1192,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-LONG-THREAD",
       });
-      await grantSlackScopeMembership(db, "C-LONG-THREAD", slackConfigId);
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-LONG-THREAD",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
       const target: number[] = [];
       let anchorMessageId = 0;
       for (let index = 0; index < 121; index += 1) {
@@ -1308,7 +1303,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-LEGACY",
       });
-      await grantSlackScopeMembership(db, "C-LEGACY", slackConfigId);
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-LEGACY",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
       const before = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "legacy-1",
@@ -1842,7 +1844,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(secondBody.messages.map((message) => message.id)).toEqual([aEarlier.row.id, bEarlier.row.id]);
     });
 
-    it("denies anonymous requesters but matches scope membership on any identifier", async () => {
+    it("denies without an authenticated requester or any usable provider identity", async () => {
       await seedSlackChannel(db, {
         channelId: "C8",
         text: "gated content",
@@ -1854,16 +1856,11 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(anonymous.ok).toBe(false);
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
+      await db.updateTable("users").set({ email: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ slack_user_id: null }).where("id", "=", USER_ID).execute();
-      const emailOnly = await readAllChats({}, depsFor(db));
-      expect(emailOnly.ok).toBe(true);
-      if (!emailOnly.ok) return;
-      expect(emailOnly.body.messages).toHaveLength(1);
-
-      await db.updateTable("users").set({ email: "someone-else@example.com" }).where("id", "=", USER_ID).execute();
-      const noMatch = await readAllChats({}, depsFor(db));
-      if (noMatch.ok) expect(noMatch.body.messages).toHaveLength(0);
+      const unverified = await readAllChats({}, depsFor(db));
+      expect(unverified.ok).toBe(false);
     });
 
     it("works from a shared group context and includes the current conversation without an access scope", async () => {
@@ -1874,6 +1871,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: slackConfigId,
       });
       const conversations = createConversationRepository(db);
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: "888800001111222233@g.us",
+        name: "WhatsApp group",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
       const currentGroup = await conversations.getOrCreate({
         platform: "whatsapp",
         kind: "group",
@@ -1887,6 +1890,16 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         text: "shared context marker in this group",
         receivedAt: "2026-07-17T09:00:00.000Z",
       });
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: "888800001111222233@g.us",
+          participant_jid: "15550001234@s.whatsapp.net",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: null,
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
       const trigger = await conversations.insertMessage({
         conversationId: currentGroup.id,
         providerMessageId: "grp-current-2",
@@ -1911,6 +1924,42 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages.some((message) => message.id === groupMessage.row.id)).toBe(true);
       const groupHit = outcome.body.messages.find((message) => message.id === groupMessage.row.id);
       expect((groupHit?.conversation as { name: string }).name).toBe("WhatsApp group");
+    });
+
+    it("denies the current Slack conversation and shared-target write after membership removal", async () => {
+      const seeded = await seedSlackChannel(db, {
+        channelId: "C-REMOVED-CURRENT",
+        text: "removed current channel secret",
+        members: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const trigger = await createConversationRepository(db).insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "removed-current-trigger",
+        senderJid: USER_SLACK_ID,
+        senderName: "Roopak",
+        text: "search this",
+        receivedAt: "2026-07-17T09:11:00.000Z",
+      });
+      await db
+        .deleteFrom("slack_channel_participants")
+        .where("channel_id", "=", "C-REMOVED-CURRENT")
+        .where("slack_user_id", "=", USER_SLACK_ID)
+        .execute();
+
+      const deps = depsFor(db, {
+        conversationContext: { conversationId: seeded.conversationId, currentMessageId: trigger.row.id },
+      });
+      const outcome = await handleAllChatsRead({}, deps);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(JSON.stringify(outcome.body.messages)).not.toContain("removed current channel secret");
+      await expect(
+        new ChatHistoryAccessResolver(deps).authorizedProviderTargets([
+          { platform: "slack", targetId: "C-REMOVED-CURRENT" },
+        ]),
+      ).resolves.toEqual(new Set());
     });
 
     it("resolves Slack mentions and uses hashed fallbacks for unknown WhatsApp senders", async () => {
@@ -1978,6 +2027,222 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages).toHaveLength(1);
       expect((outcome.body.messages[0]?.conversation as { name: string }).name).toBe("Deal Room");
       expect(JSON.stringify(outcome.body.messages)).not.toContain(seeded.groupJid);
+    });
+
+    describe("authorizedProviderTargets", () => {
+      const upsertGroup = (groupJid: string) =>
+        createWhatsAppGroupRepository(db).upsert({
+          jid: groupJid,
+          name: "Send Target",
+          description: null,
+          updated_at: "2026-07-17T09:00:00.000Z",
+        });
+
+      const insertSlackMember = (channelId: string, lastSeenAt: string) =>
+        db
+          .insertInto("slack_channel_participants")
+          .values({ channel_id: channelId, slack_user_id: USER_SLACK_ID, last_seen_at: lastSeenAt })
+          .execute();
+
+      const authorize = (targets: ProviderTargetRef[], deps = depsFor(db)) =>
+        new ChatHistoryAccessResolver(deps).authorizedProviderTargets(targets);
+
+      it("authorizes a Slack channel with fresh membership and no conversations row", async () => {
+        await insertSlackMember("C-SEND-FRESH", new Date().toISOString());
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-FRESH" }]);
+
+        expect([...granted]).toEqual(["slack:C-SEND-FRESH"]);
+      });
+
+      it("authorizes a Slack channel whose membership is older than the former freshness window", async () => {
+        await insertSlackMember("C-SEND-STALE", new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString());
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-STALE" }]);
+
+        expect(granted.size).toBe(1);
+      });
+
+      it("denies a Slack channel the requester is not in", async () => {
+        await db
+          .insertInto("slack_channel_participants")
+          .values({
+            channel_id: "C-SEND-OTHER",
+            slack_user_id: "U-SOMEONE-ELSE",
+            last_seen_at: new Date().toISOString(),
+          })
+          .execute();
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-OTHER" }]);
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("authorizes a WhatsApp group on a direct phone match and no conversations row", async () => {
+        const groupJid = `${randomUUID()}@g.us`;
+        await upsertGroup(groupJid);
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: groupJid,
+            participant_jid: "15550001234@s.whatsapp.net",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: null,
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: groupJid }]);
+
+        expect([...granted]).toEqual([`whatsapp:${groupJid}`]);
+      });
+
+      it("authorizes a WhatsApp group through a linked LID alias", async () => {
+        const targetGroup = `${randomUUID()}@g.us`;
+        await upsertGroup(targetGroup);
+        await db
+          .insertInto("user_whatsapp_lids")
+          .values({
+            user_id: USER_ID,
+            lid: "86702773280883@lid",
+            first_seen_at: "2026-07-17T09:00:00.000Z",
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
+          .execute();
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: targetGroup,
+            participant_jid: "86702773280883@lid",
+            phone_e164: null,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
+
+        expect([...granted]).toEqual([`whatsapp:${targetGroup}`]);
+      });
+
+      it("denies a WhatsApp group reached only through a LID that is not linked to the requester", async () => {
+        const targetGroup = `${randomUUID()}@g.us`;
+        await upsertGroup(targetGroup);
+        const otherUserId = `user-other-lid-${randomUUID()}`;
+        await createUserRepository(db).create({
+          id: otherUserId,
+          name: "Other",
+          email: `${otherUserId}@example.com`,
+        });
+        await db
+          .insertInto("user_whatsapp_lids")
+          .values({
+            user_id: otherUserId,
+            lid: "lid-one@lid",
+            first_seen_at: "2026-07-17T09:00:00.000Z",
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
+          .execute();
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: targetGroup,
+            participant_jid: "lid-one@lid",
+            phone_e164: null,
+            lid: "lid-one@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("denies every target when the requester has no linked Slack or WhatsApp identity", async () => {
+        const groupJid = `${randomUUID()}@g.us`;
+        await upsertGroup(groupJid);
+        await insertSlackMember("C-SEND-NO-IDENTITY", new Date().toISOString());
+        await insertWhatsAppParticipantFixtures(db, [
+          {
+            group_jid: groupJid,
+            participant_jid: "15550001234@s.whatsapp.net",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: null,
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ]);
+        const unlinkedId = `user-unlinked-${randomUUID()}`;
+        await createUserRepository(db).create({
+          id: unlinkedId,
+          name: "Unlinked",
+          email: `${unlinkedId}@example.com`,
+        });
+
+        const granted = await authorize(
+          [
+            { platform: "slack", targetId: "C-SEND-NO-IDENTITY" },
+            { platform: "whatsapp", targetId: groupJid },
+          ],
+          depsFor(db, { currentUserId: unlinkedId }),
+        );
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("denies every target when there is no requesting user", async () => {
+        await insertSlackMember("C-SEND-ANON", new Date().toISOString());
+
+        const granted = await authorize(
+          [{ platform: "slack", targetId: "C-SEND-ANON" }],
+          depsFor(db, { currentUserId: undefined }),
+        );
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("lets handleSendMessage post through the real resolver for a fresh member", async () => {
+        await insertSlackMember("C-SEND-E2E", new Date().toISOString());
+        const sendTargetMessage = vi.fn().mockResolvedValue({ messageRef: "1700000000.0100" });
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-E2E" }, message: "hello channel" },
+          depsFor(db, { sendTargetMessage }),
+        );
+
+        expect(sendTargetMessage).toHaveBeenCalledOnce();
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "sent", targetId: "C-SEND-E2E" });
+      });
+
+      it("lets handleSendMessage deny through the real resolver for a non-member", async () => {
+        const sendTargetMessage = vi.fn();
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-E2E-DENY" }, message: "hello" },
+          depsFor(db, { sendTargetMessage }),
+        );
+
+        expect(sendTargetMessage).not.toHaveBeenCalled();
+        expect(result.content[0].text).toContain("not a known member of that channel or group");
+      });
+
+      it("denies a non-member send through the real resolver even from inside that conversation", async () => {
+        const conversation = await createConversationRepository(db).getOrCreate({
+          platform: "slack",
+          kind: "channel",
+          providerConversationId: "C-SEND-CTX",
+        });
+        const sendTargetMessage = vi.fn();
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-CTX" }, message: "hello" },
+          depsFor(db, { sendTargetMessage, conversationContext: { conversationId: conversation.id } }),
+        );
+
+        expect(sendTargetMessage).not.toHaveBeenCalled();
+        expect(result.content[0].text).toContain("not a known member of that channel or group");
+      });
     });
   });
 }
