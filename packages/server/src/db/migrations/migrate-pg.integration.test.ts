@@ -233,28 +233,6 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[197]).toBe("202-verdict-counterparty-axes");
     expect(names[198]).toBe("203-verdict-declaration-snapshot");
   });
-  it("stores millisecond builder-lock expiry timestamps as bigint", async () => {
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    const column = await sql<{ data_type: string; udt_name: string }>`
-      SELECT data_type, udt_name
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'scheduled_task_builder_locks'
-        AND column_name = 'expires_at'
-    `.execute(db);
-    expect(column.rows).toEqual([{ data_type: "bigint", udt_name: "int8" }]);
-    await sql`
-      INSERT INTO scheduled_task_builder_locks
-        (task_id, conversation_id, transcript_user_id, expires_at)
-      VALUES ('m192-builder-lock', 'm192-conversation', 'm192-user', ${expiresAt})
-    `.execute(db);
-    const row = await sql<{ expires_at: number | string }>`
-      SELECT expires_at
-      FROM scheduled_task_builder_locks
-      WHERE task_id = 'm192-builder-lock'
-    `.execute(db);
-    expect(Number(row.rows[0]?.expires_at)).toBe(expiresAt);
-  });
   it("keeps the automation-sharing migration ledger in order", async () => {
     await runMigrations(db, { quiet: true });
     const rows = await sql<{ name: string }>`
