@@ -939,7 +939,8 @@ describe("executeAutomation action steps", () => {
   });
 
   it("strips managed CLI credentials from actions that do not declare them", async () => {
-    const loadIntegrationProvider = vi.fn().mockResolvedValue(makeBrokerProvider());
+    const executeAction = vi.fn().mockResolvedValue({ ok: true });
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(makeBrokerProvider({ executeAction }));
     const listAgentEnvForRuntime = vi.fn().mockResolvedValue({ GH_TOKEN: "managed-token" });
     const params = makeParams({
       task: makeActionTask(
@@ -955,7 +956,15 @@ describe("executeAutomation action steps", () => {
         ],
         { output_mode: "silent" },
       ),
-      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return Boolean(ctx.env.GH_TOKEN);" }]),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            await ctx.integrations.executeAction({ componentKey: "clickup-find-tasks", configuredProps: {} });
+            return Boolean(ctx.env.GH_TOKEN);
+          `,
+        },
+      ]),
       loadIntegrationProvider,
       listAgentEnvForRuntime,
     });
@@ -965,6 +974,7 @@ describe("executeAutomation action steps", () => {
     expect(result.status).toBe("completed");
     expect(result.finalOutput).toBe(false);
     expect(loadIntegrationProvider).toHaveBeenCalledTimes(1);
+    expect(executeAction).toHaveBeenCalledTimes(1);
   });
 
   it("fails a CLI action clearly when its managed connection is unavailable", async () => {
@@ -1268,6 +1278,37 @@ describe("executeAutomation action steps", () => {
       },
       expect.any(AbortSignal),
     );
+  });
+
+  it("stops runaway integration-action loops before they can fan out indefinitely", async () => {
+    const executeAction = vi.fn().mockResolvedValue({ ok: true });
+    const params = makeParams({
+      task: makeActionTask(
+        [{ id: "act1", type: "action", label: "Append rows", icon: "code", position: { x: 0, y: 100 } }],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            for (let index = 0; index < 30; index += 1) {
+              await ctx.integrations.executeAction({
+                componentKey: "google-sheets-add-row",
+                configuredProps: { row: index }
+              });
+            }
+            return { ok: true };
+          `,
+        },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider({ executeAction })),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("at most 25 integration actions");
+    expect(executeAction).toHaveBeenCalledTimes(25);
   });
 
   it("rejects integration action files outside the automation workspace", async () => {
