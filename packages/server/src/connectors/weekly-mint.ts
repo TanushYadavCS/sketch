@@ -19,6 +19,7 @@ import {
   channelMatchesCompany,
   clusterClientFiles,
   fragmentNameTokens,
+  normalizeTitleFamily,
   readClusterVerdict,
 } from "./project-minting";
 import { type TokenRecurrence, scanTokenRecurrence } from "./token-recurrence-scan";
@@ -67,6 +68,7 @@ export interface WeeklyMintResult {
   verdictsRequested: number;
   verdictsStored: number;
   agedOut: number;
+  skippedGroups: number;
 }
 
 export interface WeeklyMintService {
@@ -144,9 +146,34 @@ type DeterministicDisposition =
 
 type ModelDisposition = {
   groupKey: string;
-  action: "new" | "alias_of" | "child_of";
+  action: "new" | "alias_of" | "child_of" | "skip";
   projectName: string | null;
   targetEntityId: string | null;
+  parentGroupKey: string | null;
+};
+
+type WeeklyPromptGroupContext = {
+  coMentionedProjects: string[];
+  sharedEvidenceWith: string[];
+  snippets: string[];
+  onlySharedEvidence: boolean;
+};
+
+type SharedEvidenceFile = {
+  fileName: string;
+  citedBy: string[];
+  preview: string;
+};
+
+type WeeklyPromptContext = {
+  groups: Map<string, WeeklyPromptGroupContext>;
+  sharedFiles: SharedEvidenceFile[];
+};
+
+type EvidenceContent = {
+  id: string;
+  fileName: string;
+  content: string;
 };
 
 function timestamp(now?: () => Date): string {
@@ -182,6 +209,7 @@ function resultFromRun(run: RunRow): WeeklyMintResult {
     verdictsRequested: run.verdicts_requested,
     verdictsStored: run.verdicts_stored,
     agedOut: run.aged_out,
+    skippedGroups: 0,
   };
 }
 
@@ -410,6 +438,8 @@ const GENERIC_PROJECT_TOKENS = new Set([
   "pilot",
   "poc",
   "internal",
+  "backend",
+  "frontend",
   "dev",
   "development",
   "engagement",
@@ -513,12 +543,53 @@ function groupClaimedCandidates(candidates: ClaimedCandidate[], companyName: str
   return groups.sort((a, b) => a.key.localeCompare(b.key));
 }
 
-async function loadExistingProjects(db: Kysely<DB>, clusterFileIds: string[]): Promise<ExistingProject[]> {
+/**
+ * Existing projects offered as alias/nesting targets are scoped to the container's
+ * company via engagement_for edges plus their transitive part_of descendants.
+ * Unscoped loading put every workspace project in the prompt (567 for one real
+ * container), and cross-company entities with broad aliases ("the dashboard",
+ * "Canvas") out-competed the correct same-company parent. The internal container
+ * has no company to scope by and keeps the full list.
+ */
+async function loadExistingProjects(
+  db: Kysely<DB>,
+  clusterFileIds: string[],
+  companyEntityId: string | null,
+): Promise<ExistingProject[]> {
+  let scopedIds: Set<string> | null = null;
+  if (companyEntityId !== null) {
+    const engaged = await db
+      .selectFrom("entity_relationships")
+      .select(["source_entity_id"])
+      .where("relationship_type", "=", "engagement_for")
+      .where("target_entity_id", "=", companyEntityId)
+      .execute();
+    scopedIds = new Set(engaged.map((row) => row.source_entity_id));
+    if (scopedIds.size > 0) {
+      const partOf = await db
+        .selectFrom("entity_relationships")
+        .select(["source_entity_id", "target_entity_id"])
+        .where("relationship_type", "=", "part_of")
+        .execute();
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const row of partOf) {
+          if (scopedIds.has(row.target_entity_id) && !scopedIds.has(row.source_entity_id)) {
+            scopedIds.add(row.source_entity_id);
+            grew = true;
+          }
+        }
+      }
+    }
+    if (scopedIds.size === 0) return [];
+  }
   const rows = await db
     .selectFrom("entities")
     .select(["id", "name", "aliases"])
     .where("source_type", "=", "project")
     .where(whereLiveEntity())
+    .$if(scopedIds !== null, (qb) => qb.where("id", "in", [...(scopedIds as Set<string>)]))
     .execute();
   const fileSets = new Map<string, Set<string>>();
   if (rows.length > 0) {
@@ -568,6 +639,49 @@ function matchingStandingProduct(group: CandidateGroup, products: StandingProduc
   const vocabulary = [...group.names, group.tokens.join(" ")].join(" ");
   for (const product of products) {
     if (channelMatchesCompany(vocabulary, [product.name, ...product.aliases])) return product;
+  }
+  return null;
+}
+
+/**
+ * Unlike standing products (declared/human_confirmed only), the company guard
+ * accepts inferred companies: the entities it must catch (Goosebumps, Beetu,
+ * Craft Idea) were all created by extraction, never declared by a human.
+ */
+async function loadCompanyGuards(db: Kysely<DB>): Promise<StandingProduct[]> {
+  const rows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("source_type", "=", "company")
+    .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
+    .execute();
+  return rows
+    .map((row) => ({ entityId: row.id, name: row.name, aliases: parseAliases(row.aliases) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function squashName(value: string): string {
+  return normalizeName(value).replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * An internal-pot group named after a known company is client work whose
+ * discussions happened without a client attendee — not an internal project.
+ * The match requires the complete company name (squashed, so "craftidea"
+ * equals the "Craft Idea" entity) — token containment over-fires: it killed
+ * "AWS-accelerator", a real internal initiative, because the AWS company
+ * entity exists. Groups that merely mention a company go to the model, whose
+ * guidance already skips demos and engagement overhead. The squash floor of 4
+ * keeps short acronyms from swallowing unrelated candidates.
+ */
+function matchingCompany(group: CandidateGroup, companies: StandingProduct[]): StandingProduct | null {
+  const squashedGroupNames = new Set(group.names.map(squashName));
+  for (const company of companies) {
+    for (const name of [company.name, ...company.aliases]) {
+      const squashed = squashName(name);
+      if (squashed.length >= 4 && squashedGroupNames.has(squashed)) return company;
+    }
   }
   return null;
 }
@@ -831,29 +945,293 @@ async function coveredByPendingWeeklyVerdict(db: Kysely<DB>, companyEntityId: st
     .executeTakeFirst();
   if (!row) return new Set();
   const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: true });
-  return new Set(verdict.projects.flatMap((project) => project.evidenceFragments));
+  return new Set(verdict.projects.flatMap((project) => project.coveredReviewIds ?? project.evidenceFragments));
 }
 
-function buildWeeklyPrompt(
+function formatCountedList(items: Array<{ name: string; count: number }>): string[] {
+  return items
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, 5)
+    .map((item) => `${item.name} (${item.count} files)`);
+}
+
+function evidenceCitationCounts(groups: CandidateGroup[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const group of groups) {
+    for (const fileId of new Set(group.evidenceFileIds)) counts.set(fileId, (counts.get(fileId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function selectEvidenceFileIdsForContent(groups: CandidateGroup[], citationCounts: Map<string, number>): string[] {
+  return [...new Set(groups.flatMap((group) => group.evidenceFileIds))]
+    .sort((a, b) => (citationCounts.get(b) ?? 0) - (citationCounts.get(a) ?? 0) || a.localeCompare(b))
+    .slice(0, 200);
+}
+
+async function loadEvidenceContent(db: Kysely<DB>, fileIds: string[]): Promise<Map<string, EvidenceContent>> {
+  const rows: EvidenceContent[] = [];
+  for (const fileChunk of chunk(fileIds, 500)) {
+    const fileRows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "file_name", "content"])
+      .where("id", "in", fileChunk)
+      .execute();
+    for (const row of fileRows) {
+      rows.push({
+        id: row.id,
+        fileName: row.file_name,
+        content: (row.content ?? "").slice(0, 6000),
+      });
+    }
+  }
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+function lowerIncludes(haystack: string, needle: string): number {
+  return haystack.toLowerCase().indexOf(needle.toLowerCase());
+}
+
+function snippetAroundMatch(content: string, matchIndex: number, termLength: number): string {
+  const start = Math.max(0, matchIndex - 120);
+  const end = Math.min(content.length, matchIndex + termLength + 120);
+  return content.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+function snippetsForGroup(
+  group: CandidateGroup,
+  evidenceById: Map<string, EvidenceContent>,
+  enumerationFiles: Set<string>,
+): string[] {
+  const names = group.names.map((name) => name.trim()).filter((name) => name.length >= 4);
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+  for (const fileId of group.evidenceFileIds) {
+    if (enumerationFiles.has(fileId)) continue;
+    const file = evidenceById.get(fileId);
+    if (!file?.content) continue;
+    for (const name of names) {
+      const matchIndex = lowerIncludes(file.content, name);
+      if (matchIndex < 0) continue;
+      const snippet = snippetAroundMatch(file.content, matchIndex, name.length);
+      if (snippet && !seen.has(snippet)) {
+        seen.add(snippet);
+        snippets.push(snippet);
+      }
+      break;
+    }
+    if (snippets.length >= 3) break;
+  }
+  return snippets.slice(0, 3);
+}
+
+function isBareGenericProjectTerm(term: string): boolean {
+  const tokens = fragmentNameTokens(term);
+  return tokens.length === 1 && GENERIC_PROJECT_TOKENS.has(tokens[0]);
+}
+
+function existingProjectMatchTerms(project: ExistingProject): string[] {
+  return [...new Set([project.name, ...project.aliases].map((term) => term.trim().toLowerCase()))].filter(
+    (term) => term.length >= 5 && !isBareGenericProjectTerm(term),
+  );
+}
+
+/**
+ * Content signals count every evidence file, shared ones included. A recurring
+ * standup transcript is shared by every workstream discussed in it, and it is
+ * exactly where the parent project's name appears — excluding shared files here
+ * silenced the dominant nesting signal. Indiscriminate files still lose on
+ * relative counts, and snippets keep the shared-file exclusion.
+ */
+function contentSignalCountsForGroup(
+  group: CandidateGroup,
+  projects: ExistingProject[],
+  evidenceById: Map<string, EvidenceContent>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const projectTerms = projects.map((project) => ({ project, terms: existingProjectMatchTerms(project) }));
+  for (const fileId of group.evidenceFileIds) {
+    const file = evidenceById.get(fileId);
+    if (!file) continue;
+    const haystack = `${file.fileName}\n${file.content}`.toLowerCase();
+    for (const { project, terms } of projectTerms) {
+      if (terms.length === 0) continue;
+      if (terms.some((term) => haystack.includes(term))) {
+        counts.set(project.entityId, (counts.get(project.entityId) ?? 0) + 1);
+      }
+    }
+  }
+  return counts;
+}
+
+/**
+ * Files cited by many groups (a recurring standup, an inventory message) are shown
+ * to the model as a shared-files section with a content preview instead of being
+ * judged by a heuristic. On real data both a parent project's standup and a repo
+ * inventory listing look identical by citation count and evidence shape — only
+ * the file's own content tells a workstream roster apart from a repo table, so
+ * the model reads the preview and decides.
+ */
+async function buildWeeklyPromptContext(
+  db: Kysely<DB>,
+  groups: CandidateGroup[],
+  projects: ExistingProject[],
+): Promise<WeeklyPromptContext> {
+  const context = new Map<string, WeeklyPromptGroupContext>(
+    groups.map((group) => [
+      group.key,
+      { coMentionedProjects: [], sharedEvidenceWith: [], snippets: [], onlySharedEvidence: false },
+    ]),
+  );
+  const citationCounts = evidenceCitationCounts(groups);
+  const enumerationFiles = new Set(
+    [...citationCounts.entries()].filter(([, count]) => count >= 4).map(([fileId]) => fileId),
+  );
+  const evidenceFileIds = selectEvidenceFileIdsForContent(groups, citationCounts);
+  const nonEnumerationEvidenceFileIds = evidenceFileIds.filter((fileId) => !enumerationFiles.has(fileId));
+  const evidenceById = await loadEvidenceContent(db, evidenceFileIds);
+  const groupEvidence = new Map(groups.map((group) => [group.key, new Set(group.evidenceFileIds)]));
+  const groupLabel = (group: CandidateGroup) => `${group.names[0] ?? group.key} [${group.key}]`;
+  const sharedCounts = new Map<string, Array<{ name: string; count: number }>>();
+  for (let a = 0; a < groups.length; a++) {
+    for (let b = a + 1; b < groups.length; b++) {
+      const left = groups[a];
+      const right = groups[b];
+      const rightFiles = groupEvidence.get(right.key) ?? new Set<string>();
+      let shared = 0;
+      for (const fileId of groupEvidence.get(left.key) ?? []) {
+        if (rightFiles.has(fileId)) shared++;
+      }
+      if (shared === 0) continue;
+      sharedCounts.set(left.key, [...(sharedCounts.get(left.key) ?? []), { name: groupLabel(right), count: shared }]);
+      sharedCounts.set(right.key, [...(sharedCounts.get(right.key) ?? []), { name: groupLabel(left), count: shared }]);
+    }
+  }
+  for (const [groupKey, items] of sharedCounts) {
+    const groupContext = context.get(groupKey);
+    if (groupContext) groupContext.sharedEvidenceWith = formatCountedList(items);
+  }
+
+  for (const group of groups) {
+    const groupContext = context.get(group.key);
+    if (!groupContext) continue;
+    groupContext.onlySharedEvidence =
+      group.evidenceFileIds.length > 0 && group.evidenceFileIds.every((fileId) => enumerationFiles.has(fileId));
+    groupContext.snippets = snippetsForGroup(group, evidenceById, enumerationFiles);
+  }
+
+  const sharedFiles: SharedEvidenceFile[] = [...enumerationFiles]
+    .sort((a, b) => (citationCounts.get(b) ?? 0) - (citationCounts.get(a) ?? 0) || a.localeCompare(b))
+    .slice(0, 10)
+    .flatMap((fileId) => {
+      const file = evidenceById.get(fileId);
+      if (!file) return [];
+      const citedBy = groups
+        .filter((group) => group.evidenceFileIds.includes(fileId))
+        .map((group) => group.names[0] ?? group.key);
+      return [
+        {
+          fileName: file.fileName,
+          citedBy,
+          preview: file.content.slice(0, 300).replace(/\s+/g, " ").trim(),
+        },
+      ];
+    });
+
+  if (nonEnumerationEvidenceFileIds.length > 0 && projects.length > 0) {
+    const coMentionRows = await db
+      .selectFrom("entity_mentions")
+      .select(["entity_id", "indexed_file_id"])
+      .where(
+        "entity_id",
+        "in",
+        projects.map((project) => project.entityId),
+      )
+      .where("indexed_file_id", "in", nonEnumerationEvidenceFileIds)
+      .execute();
+    const filesByProject = new Map<string, Set<string>>();
+    for (const row of coMentionRows) {
+      const files = filesByProject.get(row.entity_id) ?? new Set<string>();
+      files.add(row.indexed_file_id);
+      filesByProject.set(row.entity_id, files);
+    }
+    for (const group of groups) {
+      const files = groupEvidence.get(group.key) ?? new Set<string>();
+      const counted = projects
+        .map((project) => ({
+          name: project.name,
+          count: [...(filesByProject.get(project.entityId) ?? new Set<string>())].filter((fileId) => files.has(fileId))
+            .length,
+        }))
+        .filter((item) => item.count > 0);
+      const groupContext = context.get(group.key);
+      if (groupContext) groupContext.coMentionedProjects = formatCountedList(counted);
+    }
+  }
+
+  if (projects.length > 0) {
+    for (const group of groups) {
+      const contentCounts = contentSignalCountsForGroup(group, projects, evidenceById);
+      if (contentCounts.size === 0) continue;
+      const existing = new Map(
+        (context.get(group.key)?.coMentionedProjects ?? []).map((item) => {
+          const match = item.match(/^(.*) \((\d+) files\)$/);
+          return match ? [match[1], Number(match[2])] : [item, 0];
+        }),
+      );
+      for (const project of projects) {
+        const contentCount = contentCounts.get(project.entityId) ?? 0;
+        if (contentCount === 0) continue;
+        existing.set(project.name, (existing.get(project.name) ?? 0) + contentCount);
+      }
+      const groupContext = context.get(group.key);
+      if (groupContext) {
+        groupContext.coMentionedProjects = formatCountedList(
+          [...existing.entries()].map(([name, count]) => ({ name, count })).filter((item) => item.count > 0),
+        );
+      }
+    }
+  }
+  return { groups: context, sharedFiles };
+}
+
+async function buildWeeklyPrompt(
+  db: Kysely<DB>,
   container: WeeklyMintContainer,
   groups: CandidateGroup[],
   projects: ExistingProject[],
   products: StandingProduct[],
-): string {
+): Promise<string> {
+  const promptContext = await buildWeeklyPromptContext(db, groups, projects);
+  const contexts = promptContext.groups;
   const groupLines = groups
     .map((group) => {
       const deterministic =
         group.deterministic.action === "new"
           ? "new"
           : `${group.deterministic.action}:${group.deterministic.entityId}:${group.deterministic.entityName}`;
-      return [
+      const groupContext = contexts.get(group.key);
+      const lines = [
         `- groupKey: ${group.key}`,
         `  names: ${group.names.join(", ")}`,
         `  tokens: ${group.tokens.join(", ")}`,
         `  scanDays: ${group.scan?.distinctDays ?? 0}`,
         `  scanFiles: ${(group.scan?.files ?? []).join(", ")}`,
         `  deterministicProposal: ${deterministic}`,
-      ].join("\n");
+      ];
+      if (groupContext?.coMentionedProjects.length) {
+        lines.push(`  coMentionedProjects: ${groupContext.coMentionedProjects.join(", ")}`);
+      }
+      if (groupContext?.sharedEvidenceWith.length) {
+        lines.push(`  sharedEvidenceWith: ${groupContext.sharedEvidenceWith.join(", ")}`);
+      }
+      if (groupContext?.onlySharedEvidence) {
+        lines.push("  onlySharedEvidence: true");
+      }
+      if (groupContext?.snippets.length) {
+        lines.push(`  snippets: ${groupContext.snippets.map((snippet) => JSON.stringify(snippet)).join("; ")}`);
+      }
+      return lines.join("\n");
     })
     .join("\n");
   const projectLines = projects
@@ -870,14 +1248,34 @@ function buildWeeklyPrompt(
     .join("\n");
   return `You are reviewing weekly project minting candidates for ${container.companyName}.
 
-For every group, return exactly one action: new, alias_of, or child_of. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of. Use projectName for new and child_of.
+For every group, return exactly one action: new, alias_of, child_of, or skip. Prefer the deterministicProposal unless the evidence clearly says otherwise. Use targetEntityId for alias_of and child_of when the parent or alias is an existing accepted project. Use parentGroupKey for child_of when the parent is another group in this same response. Use projectName for new and child_of.
 
 Groups that are the same real-world project under different spellings, transliterations, or names (for example "Inaj" and "INJAZ", a codename and its formal name, a repo and the project it implements) must return the SAME projectName — that is how they merge into one project. Only merge when you are confident they are one piece of work; when unsure, keep them separate.
+
+Choose between child_of and skip carefully — they are not interchangeable:
+- child_of is for real delivery work that belongs to a bigger project: a feature track, a data workstream, a recurring sub-topic of a project's standups or reviews. Use targetEntityId when coMentionedProjects or snippets tie the group to an existing accepted project; use parentGroupKey when the parent is another group in this response. A workstream stays child_of even when its own evidence is thin — do NOT skip it.
+- skip is only for things that are not delivery work at all: scheduling and logistics chatter, budget or staffing admin, internal trackers for running the engagement itself (budget tracking, RFP pipelines), a demo or presentation and any recording of one, or a name that exists only as a line in an inventory listing.
+- A recurring operational stream is also skip: bug reports, form submissions, support tickets, or templated automated artifacts that arrive on a cadence (for example a support channel's "bug report from a form" messages). The stream recurs because operations recur, not because anyone is delivering it. Only the work of BUILDING that pipeline is a project, and its evidence talks about building, not about individual tickets.
+- When torn between skip and child_of, choose child_of. A specifically named piece of client work with thin evidence is still a project — thin evidence alone is never a reason to skip.
+
+Never propose a generic placeholder name (e.g. "Different Project", "A Major Project", "New Initiative"). If the evidence does not give the work a specific name, return skip.
+
+If a group is the same thing as an existing accepted project (its name or a close variant appears in that project's name or aliases), return alias_of with that targetEntityId — never mint a duplicate sibling.
+
+A conversation about presenting, demoing, or selling OUR OWN product or open-source work to the client is a sales opportunity, not a delivery project — return skip even if the call series recurs. But a demo, prototype, or tool WE BUILT for the client's own proposal, bid, or deliverable is real delivery work and a real project — a group like "Acme Proposal Demo" with its own build activity (repo, deployment, working sessions) must be new, not skip.
+
+Shared evidence files below are cited by several groups at once. First classify each file from its preview: a MEETING (recurring standup, sync, or review whose summary walks through named workstreams) or a LISTING (a message enumerating repos, URLs, or project names). Then apply: groups whose only evidence is a MEETING are workstreams of the project that meeting serves — child_of that project (find it via the groups' coMentionedProjects or the meeting content; use targetEntityId for an existing accepted project). Groups whose only evidence is LISTINGS are names on a list, not projects — skip.
+
+Do not nest a group under an existing project on a single passing co-mention: nest only when the parent tie covers the group's core evidence (its evidence IS the parent's meeting, or most of its files mention the parent). A group with weeks of its own activity and a one-file co-mention stays top-level.
+
+When one group's name is a qualified extension of another group's name in this response (for example "X CAPEX tool" alongside "X Dashboard"), the qualified one is usually that group's child — return child_of with the broader group's parentGroupKey.
+
+Groups that repeatedly share evidence files and stakeholders (see sharedEvidenceWith, which names the other group and its groupKey) are ONE engagement even when each thread names its own deliverable (a portal here, a support thread there) — return the SAME projectName for all of them rather than one project per thread subject. Pick the most specific engagement-level name among them.
 
 Return only JSON:
 {
   "groups": [
-    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of", "projectName": "project name or null", "targetEntityId": "existing project entity id or null" }
+    { "groupKey": "exact groupKey", "action": "new | alias_of | child_of | skip", "projectName": "project name or null", "targetEntityId": "existing project entity id or null", "parentGroupKey": "same-verdict parent groupKey or null" }
   ]
 }
 
@@ -886,6 +1284,13 @@ ${projectLines || "none"}
 
 Standing products:
 ${productLines || "none"}
+
+Shared evidence files:
+${
+  promptContext.sharedFiles
+    .map((file) => `- ${file.fileName} citedBy=${file.citedBy.join(", ")}\n  preview: ${JSON.stringify(file.preview)}`)
+    .join("\n") || "none"
+}
 
 Crossing groups:
 ${groupLines}`;
@@ -902,16 +1307,28 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
     const groupKey = typeof rawItem.groupKey === "string" ? rawItem.groupKey : "";
     if (!byKey.has(groupKey)) continue;
     const action = rawItem.action;
-    if (action !== "new" && action !== "alias_of" && action !== "child_of") continue;
+    if (action !== "new" && action !== "alias_of" && action !== "child_of" && action !== "skip") continue;
+    const targetEntityId =
+      action !== "skip" && typeof rawItem.targetEntityId === "string" && rawItem.targetEntityId.trim()
+        ? rawItem.targetEntityId.trim()
+        : null;
+    const rawParentGroupKey =
+      typeof rawItem.parentGroupKey === "string" && rawItem.parentGroupKey.trim()
+        ? rawItem.parentGroupKey.trim()
+        : null;
+    const parentGroupKey =
+      action === "child_of" && !targetEntityId && rawParentGroupKey && rawParentGroupKey !== groupKey
+        ? rawParentGroupKey
+        : null;
     dispositions.set(groupKey, {
       groupKey,
       action,
       projectName:
-        typeof rawItem.projectName === "string" && rawItem.projectName.trim() ? rawItem.projectName.trim() : null,
-      targetEntityId:
-        typeof rawItem.targetEntityId === "string" && rawItem.targetEntityId.trim()
-          ? rawItem.targetEntityId.trim()
+        action !== "skip" && typeof rawItem.projectName === "string" && rawItem.projectName.trim()
+          ? rawItem.projectName.trim()
           : null,
+      targetEntityId,
+      parentGroupKey: action !== "skip" && parentGroupKey && byKey.has(parentGroupKey) ? parentGroupKey : null,
     });
   }
   for (const group of groups) {
@@ -921,6 +1338,7 @@ function readModelDispositions(raw: unknown, groups: CandidateGroup[]): Map<stri
       action: group.deterministic.action,
       projectName: null,
       targetEntityId: group.deterministic.action === "new" ? null : group.deterministic.entityId,
+      parentGroupKey: null,
     });
   }
   return dispositions;
@@ -930,10 +1348,20 @@ function defaultProjectName(group: CandidateGroup): string {
   return group.names[0] ?? group.tokens.join(" ");
 }
 
+function evidenceTitleFamiliesForGroup(container: WeeklyMintContainer, group: CandidateGroup): string[] {
+  const fileNames = new Map(container.files.map((file) => [file.fileId, file.fileName]));
+  const families = group.evidenceFileIds
+    .map((fileId) => fileNames.get(fileId))
+    .filter((fileName): fileName is string => fileName != null)
+    .map((fileName) => normalizeTitleFamily(fileName).display);
+  return [...new Set(families)].sort((a, b) => a.localeCompare(b));
+}
+
 function projectForGroup(
   group: CandidateGroup,
   name: string,
   parentName: string | null,
+  evidenceTitleFamilies: string[],
   parentEntityId?: string,
 ): VerdictProject {
   return {
@@ -942,9 +1370,10 @@ function projectForGroup(
     confidence: "medium",
     parentName,
     ...(parentEntityId ? { parentEntityId } : {}),
-    evidenceTitleFamilies: group.names,
+    evidenceTitleFamilies,
     evidenceRepos: [],
-    evidenceFragments: group.reviewIds,
+    evidenceFragments: [],
+    coveredReviewIds: group.reviewIds,
     evidencePeople: [],
     reasoning: `Weekly recurrence crossed ${group.scan?.distinctDays ?? 0} distinct days.`,
   };
@@ -964,6 +1393,7 @@ function mergeVerdictProjects(a: VerdictProject, b: VerdictProject): VerdictProj
     evidenceTitleFamilies: [...new Set([...a.evidenceTitleFamilies, ...b.evidenceTitleFamilies])],
     evidenceRepos: [...new Set([...a.evidenceRepos, ...b.evidenceRepos])],
     evidenceFragments: [...new Set([...a.evidenceFragments, ...b.evidenceFragments])],
+    coveredReviewIds: [...new Set([...(a.coveredReviewIds ?? []), ...(b.coveredReviewIds ?? [])])],
     evidencePeople: [...new Set([...a.evidencePeople, ...b.evidencePeople])],
   };
 }
@@ -971,6 +1401,43 @@ function mergeVerdictProjects(a: VerdictProject, b: VerdictProject): VerdictProj
 function setOrMergeVerdictProject(map: Map<string, VerdictProject>, project: VerdictProject): void {
   const existing = map.get(project.name.toLowerCase());
   map.set(project.name.toLowerCase(), existing ? mergeVerdictProjects(existing, project) : project);
+}
+
+function parentGroupReference(disposition: ModelDisposition): string | null {
+  if (disposition.action !== "child_of" || disposition.targetEntityId) return null;
+  return disposition.parentGroupKey;
+}
+
+function parentGroupChainWouldCycle(groupKey: string, dispositions: Map<string, ModelDisposition>): boolean {
+  const seen = new Set<string>([groupKey]);
+  let current = groupKey;
+  while (true) {
+    const disposition = dispositions.get(current);
+    if (!disposition) return false;
+    const parentGroupKey = parentGroupReference(disposition);
+    if (!parentGroupKey) return false;
+    if (seen.has(parentGroupKey)) return true;
+    seen.add(parentGroupKey);
+    current = parentGroupKey;
+  }
+}
+
+function sameVerdictProjectNameForParent(
+  parentGroupKey: string,
+  groupsByKey: Map<string, CandidateGroup>,
+  dispositions: Map<string, ModelDisposition>,
+): string | null {
+  const parentGroup = groupsByKey.get(parentGroupKey);
+  const parentDisposition = dispositions.get(parentGroupKey);
+  if (
+    !parentGroup ||
+    !parentDisposition ||
+    parentDisposition.action === "alias_of" ||
+    parentDisposition.action === "skip"
+  ) {
+    return null;
+  }
+  return parentDisposition.projectName ?? defaultProjectName(parentGroup);
 }
 
 function buildStoredVerdict(
@@ -983,16 +1450,43 @@ function buildStoredVerdict(
   verdict: ClusterVerdict;
   storedGroups: CandidateGroup[];
   aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }>;
+  skippedGroups: number;
 } {
   const projectsById = new Map(projects.map((project) => [project.entityId, project]));
+  const groupsByKey = new Map(groups.map((group) => [group.key, group]));
+  for (const disposition of dispositions.values()) {
+    if (disposition.targetEntityId !== null && !projectsById.has(disposition.targetEntityId)) {
+      /**
+       * Group keys and entity ids are both bare UUIDs in the prompt, and the
+       * model sometimes returns a groupKey as targetEntityId. Writing that id
+       * to entity_review_queue violates its FK and killed the whole container
+       * verdict, so an id that is not a known existing project is dropped: a
+       * groupKey meant as a parent still works via parentGroupKey, and an
+       * alias with no target leaves the group pooled for next week.
+       */
+      if (
+        disposition.action === "child_of" &&
+        disposition.parentGroupKey === null &&
+        groupsByKey.has(disposition.targetEntityId)
+      ) {
+        disposition.parentGroupKey = disposition.targetEntityId;
+      }
+      disposition.targetEntityId = null;
+    }
+  }
   const verdictProjects = new Map<string, VerdictProject>();
   const existingEntities: ClusterVerdict["existingEntities"] = [];
   const storedGroups: CandidateGroup[] = [];
   const aliasGroups: Array<{ group: CandidateGroup; targetEntityId: string }> = [];
+  let skippedGroups = 0;
 
   for (const group of groups) {
     const disposition = dispositions.get(group.key);
     if (!disposition) continue;
+    if (disposition.action === "skip") {
+      skippedGroups += 1;
+      continue;
+    }
     if (disposition.action === "alias_of") {
       const targetEntityId =
         disposition.targetEntityId ?? (group.deterministic.action === "alias_of" ? group.deterministic.entityId : null);
@@ -1003,17 +1497,40 @@ function buildStoredVerdict(
       const parentEntityId =
         disposition.targetEntityId ?? (group.deterministic.action === "child_of" ? group.deterministic.entityId : null);
       const parent = parentEntityId ? projectsById.get(parentEntityId) : null;
-      const parentName =
-        parent?.name ?? (group.deterministic.action === "child_of" ? group.deterministic.entityName : null);
-      if (!parentName) continue;
-      const childName = disposition.projectName ?? defaultProjectName(group);
-      if (childName.toLowerCase() === parentName.toLowerCase()) {
-        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
+      const sameVerdictParentName =
+        !parentEntityId && disposition.parentGroupKey && !parentGroupChainWouldCycle(group.key, dispositions)
+          ? sameVerdictProjectNameForParent(disposition.parentGroupKey, groupsByKey, dispositions)
+          : null;
+      const fallbackParentName =
+        group.deterministic.action === "child_of" && !disposition.parentGroupKey
+          ? group.deterministic.entityName
+          : null;
+      const resolvedParentName = parent?.name ?? sameVerdictParentName ?? fallbackParentName;
+      if (!resolvedParentName) {
+        const name = disposition.projectName ?? defaultProjectName(group);
+        const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
+        setOrMergeVerdictProject(
+          verdictProjects,
+          projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
+        );
+        storedGroups.push(group);
         continue;
       }
-      if (!verdictProjects.has(parentName.toLowerCase())) {
-        verdictProjects.set(parentName.toLowerCase(), {
-          name: parentName,
+      const childName = disposition.projectName ?? defaultProjectName(group);
+      if (childName.toLowerCase() === resolvedParentName.toLowerCase()) {
+        if (parentEntityId) aliasGroups.push({ group, targetEntityId: parentEntityId });
+        else {
+          setOrMergeVerdictProject(
+            verdictProjects,
+            projectForGroup(group, childName, null, evidenceTitleFamiliesForGroup(container, group)),
+          );
+          storedGroups.push(group);
+        }
+        continue;
+      }
+      if (parentEntityId && !verdictProjects.has(resolvedParentName.toLowerCase())) {
+        verdictProjects.set(resolvedParentName.toLowerCase(), {
+          name: resolvedParentName,
           status: "active",
           confidence: "high",
           parentName: null,
@@ -1032,13 +1549,19 @@ function buildStoredVerdict(
           reasoning: "Existing accepted project is the weekly candidate parent.",
         });
       }
-      setOrMergeVerdictProject(verdictProjects, projectForGroup(group, childName, parentName));
+      setOrMergeVerdictProject(
+        verdictProjects,
+        projectForGroup(group, childName, resolvedParentName, evidenceTitleFamiliesForGroup(container, group)),
+      );
       storedGroups.push(group);
       continue;
     }
     const name = disposition.projectName ?? defaultProjectName(group);
     const product = container.companyEntityId === null ? matchingStandingProduct(group, products) : null;
-    setOrMergeVerdictProject(verdictProjects, projectForGroup(group, name, null, product?.entityId));
+    setOrMergeVerdictProject(
+      verdictProjects,
+      projectForGroup(group, name, null, evidenceTitleFamiliesForGroup(container, group), product?.entityId),
+    );
     storedGroups.push(group);
   }
 
@@ -1052,7 +1575,7 @@ function buildStoredVerdict(
     notes: [`Weekly mint pass for ${container.companyName}.`],
   };
   readClusterVerdict(verdict, { strict: true });
-  return { verdict, storedGroups, aliasGroups };
+  return { verdict, storedGroups, aliasGroups, skippedGroups };
 }
 
 function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGroup[]): string {
@@ -1145,6 +1668,9 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       verdictsRequested: ownedRun.verdicts_requested,
       verdictsStored: ownedRun.verdicts_stored,
       agedOut: ownedRun.aged_out,
+      vendorsSkipped: 0,
+      skippedGroups: 0,
+      companyMatchedSkips: 0,
     };
     const dbCounters = () => ({
       candidates_grouped: counters.candidatesGrouped,
@@ -1163,16 +1689,47 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         ]),
       );
       const standingProducts = await loadStandingProducts(deps.db);
+      const companyGuards = await loadCompanyGuards(deps.db);
       for (const container of containers) {
         if (companyCursor && container.key <= companyCursor) continue;
+        const declaration = container.cluster
+          ? resolveDeclaration(
+              container.cluster.groupMembers
+                .map((member) => declaredById.get(member.entityId))
+                .filter((row) => row != null),
+            )
+          : null;
         const batchNow = timestamp(deps.now);
         const claimed = await claimCandidatesForCompany(deps.db, container, container.key, clock, batchNow);
         counters.candidatesGrouped += claimed;
         if (deps.mode === "live") {
           counters.agedOut += await ageOutStaleCandidates(deps.db, container.key, clock, batchNow);
         }
+        if (declaration?.counterparty_kind === "vendor") {
+          counters.vendorsSkipped += 1;
+          deps.logger.info(
+            {
+              companyEntityId: container.companyEntityId,
+              containerKey: container.key,
+              companyName: container.companyName,
+              vendorsSkipped: counters.vendorsSkipped,
+            },
+            "Weekly mint skipped vendor-declared container",
+          );
+          companyCursor = container.key;
+          await updateOwnedRun({
+            stage: COMPANIES_STAGE,
+            company_cursor: companyCursor,
+            heartbeat_at: timestamp(deps.now),
+            ...dbCounters(),
+            updated_at: timestamp(deps.now),
+          });
+          await deps.afterCompanyBatch?.(container.key);
+          if (batchSize <= 1) await new Promise((resolve) => setTimeout(resolve, 0));
+          continue;
+        }
         const candidates = await readClaimedCandidates(deps.db, container.key, container, clock);
-        const existingProjects = await loadExistingProjects(deps.db, container.fileIds);
+        const existingProjects = await loadExistingProjects(deps.db, container.fileIds, container.companyEntityId);
         const { aliases: exactAliases, rest } = splitAliasCandidates(candidates, existingProjects);
         if (deps.mode === "live" && exactAliases.length > 0) {
           await markAliasCandidates(deps.db, exactAliases, batchNow);
@@ -1190,6 +1747,22 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
         const crossing = container.companyEntityId === null ? [] : recurrenceCrossing;
         if (container.companyEntityId === null) {
           for (const group of recurrenceCrossing) {
+            const guardCompany =
+              matchingStandingProduct(group, standingProducts) === null ? matchingCompany(group, companyGuards) : null;
+            if (guardCompany) {
+              counters.companyMatchedSkips += 1;
+              deps.logger.info(
+                {
+                  groupKey: group.key,
+                  companyEntityId: guardCompany.entityId,
+                  companyName: guardCompany.name,
+                  companyMatchedSkips: counters.companyMatchedSkips,
+                },
+                "Weekly mint skipped internal group matching a company entity",
+              );
+              await incrementDryStreak(deps.db, container.key, [group], batchNow);
+              continue;
+            }
             if (await groupHasInternalStructuralCoSignal(deps.db, group)) crossing.push(group);
             else await incrementDryStreak(deps.db, container.key, [group], batchNow);
           }
@@ -1217,7 +1790,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
              */
             try {
               const raw = await deps.generator.generateJSON<unknown>(
-                buildWeeklyPrompt(container, pendingCrossing, existingProjects, standingProducts),
+                await buildWeeklyPrompt(deps.db, container, pendingCrossing, existingProjects, standingProducts),
                 {
                   maxTokens: 12_000,
                   label: `weeklyMint:${container.companyName.replace(/\s+/g, "-")}`,
@@ -1227,13 +1800,25 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 },
               );
               const dispositions = readModelDispositions(raw, pendingCrossing);
-              const { verdict, storedGroups, aliasGroups } = buildStoredVerdict(
+              const { verdict, storedGroups, aliasGroups, skippedGroups } = buildStoredVerdict(
                 container,
                 pendingCrossing,
                 dispositions,
                 existingProjects,
                 standingProducts,
               );
+              counters.skippedGroups += skippedGroups;
+              if (skippedGroups > 0) {
+                deps.logger.info(
+                  {
+                    containerKey: container.key,
+                    companyName: container.companyName,
+                    skippedGroups,
+                    skippedGroupsTotal: counters.skippedGroups,
+                  },
+                  "Weekly mint skipped model-disposed groups",
+                );
+              }
               if (aliasGroups.length > 0) {
                 await markAliasCandidates(
                   deps.db,
@@ -1242,13 +1827,6 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                 );
               }
               if (verdict.projects.length > 0) {
-                const declaration = container.cluster
-                  ? resolveDeclaration(
-                      container.cluster.groupMembers
-                        .map((member) => declaredById.get(member.entityId))
-                        .filter((row) => row != null),
-                    )
-                  : null;
                 await createProjectMintingVerdictRepository(deps.db).storePending({
                   companyEntityId: container.companyEntityId,
                   companyName: container.companyName,
@@ -1268,6 +1846,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
                     containerKey: container.key,
                     companyName: container.companyName,
                     projects: verdict.projects.length,
+                    skippedGroups: counters.skippedGroups,
                   },
                   "Weekly mint stored verdict",
                 );
@@ -1303,7 +1882,7 @@ export function createWeeklyMintService(deps: WeeklyMintDeps): WeeklyMintService
       });
       ownedRunId = null;
       ownedLeaseToken = null;
-      return resultFromRun(completed);
+      return { ...resultFromRun(completed), skippedGroups: counters.skippedGroups };
     } catch (error) {
       ownedRunId = null;
       ownedLeaseToken = null;

@@ -46,6 +46,7 @@ export interface AcceptProjectMintingVerdictInput {
   confirmedClientStage: ClientStage | null;
   struckProjectNames?: string[];
   renameMap?: Record<string, string>;
+  reparentMap?: Record<string, string | null>;
   overrideTripwireFlags?: boolean;
   /** Plan without writing: full validation and gate math, zero graph writes, no CAS, no declaration. */
   dryRun?: boolean;
@@ -57,7 +58,11 @@ export interface AcceptedEntitySummary {
   kind: "engagement" | "project";
   /** Entity id of the parent project (v2 verdicts); null for top-level and every v1 entity. */
   parentId: string | null;
+  /** Original-name parent selected by the acceptance overlay; null for top-level and non-project parents. */
+  parentOriginalName: string | null;
   fileIds: string[];
+  /** Dry runs only: display fields for each claimed file so the sheet can list them without a second endpoint. */
+  files?: { id: string; name: string; source: string; date: string | null }[];
   /** v2 accepts only: files claimed by the content scan and tasks re-parented because of them. */
   retroClaim?: { filesClaimed: number; tasksReparented: number };
   /**
@@ -129,6 +134,7 @@ export class ProjectMintingAcceptanceError extends Error {
       | "STALE_VERDICT"
       | "TRIPWIRE_BLOCKED"
       | "ANCHOR_NOT_FOUND"
+      | "REPARENT_TARGET_INVALID"
       | "STRIKE_CASCADE"
       | "WOULD_CYCLE"
       | "CLUSTER_NOT_FOUND"
@@ -177,6 +183,58 @@ function normalizeProjectName(name: string): string {
 function renameFor(name: string, renameMap: Record<string, string>): string {
   const renamed = renameMap[name]?.trim();
   return renamed || name;
+}
+
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key);
+}
+
+function buildEffectiveParentMap(
+  projects: ClusterVerdict["projects"],
+  reparentMap: Record<string, string | null>,
+): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const project of projects) {
+    out.set(project.name, hasOwnRecordKey(reparentMap, project.name) ? reparentMap[project.name] : project.parentName);
+  }
+  return out;
+}
+
+function assertEffectiveParentOverlay(
+  projects: ClusterVerdict["projects"],
+  reparentMap: Record<string, string | null>,
+  effectiveParentByName: Map<string, string | null>,
+  struck: Set<string>,
+): void {
+  const projectNames = new Set(projects.map((project) => project.name));
+  for (const [childName, parentName] of Object.entries(reparentMap)) {
+    if (!projectNames.has(childName)) {
+      throw new ProjectMintingAcceptanceError("REPARENT_TARGET_INVALID", "Reparent source is not in the verdict", {
+        projectName: childName,
+      });
+    }
+    if (parentName === null) continue;
+    if (!projectNames.has(parentName) || struck.has(parentName)) {
+      throw new ProjectMintingAcceptanceError("REPARENT_TARGET_INVALID", "Reparent target is not available", {
+        projectName: childName,
+        parentName,
+      });
+    }
+  }
+  for (const project of projects) {
+    const seen = new Set<string>([project.name]);
+    let parentName = effectiveParentByName.get(project.name) ?? null;
+    while (parentName) {
+      if (seen.has(parentName)) {
+        throw new ProjectMintingAcceptanceError("WOULD_CYCLE", "Accepted projects do not form a forest", {
+          projectName: project.name,
+          parentName,
+        });
+      }
+      seen.add(parentName);
+      parentName = effectiveParentByName.get(parentName) ?? null;
+    }
+  }
 }
 
 function shouldWriteNoEntities(kind: CounterpartyKind, stage: ClientStage | null): boolean {
@@ -288,12 +346,13 @@ function acceptedProjectsForConfirmedAxes(
     };
   }
   if (isV2) {
-    if (!projectsAfterStrike.some((project) => project.parentName === null)) {
-      throw new ProjectMintingAcceptanceError(
-        "INVALID_ACCEPTANCE_SHAPE",
-        "active acceptance requires the top-level account project",
-      );
-    }
+    /**
+     * No in-verdict root is required: weekly verdicts routinely add sub-work
+     * under entities that already exist in the graph, so demanding a
+     * top-level project here would make those unacceptable. Without a root,
+     * residualTarget stays null and the dry run warns that unmatched files
+     * attach to nothing — the reviewer sees the consequence and decides.
+     */
     return {
       acceptedProjects: projectsAfterStrike,
       shouldWriteNothing: false,
@@ -446,6 +505,37 @@ async function buildAnchorMaps(db: Kysely<DB>, cluster: AcceptanceContainer, cit
   return { titleFamilies, repos, people, fragmentMentions };
 }
 
+async function loadCoveredReviewFileClaims(
+  db: Kysely<DB>,
+  cluster: AcceptanceContainer,
+  projects: ClusterVerdict["projects"],
+): Promise<Map<string, Set<string>>> {
+  const clusterFileIds = new Set(cluster.files.map((file) => file.fileId));
+  const reviewIds = [...new Set(projects.flatMap((project) => project.coveredReviewIds ?? []))];
+  if (reviewIds.length === 0 || clusterFileIds.size === 0) return new Map();
+  const rows = await db
+    .selectFrom("entity_review_evidence")
+    .select(["review_id", "indexed_file_id"])
+    .where("review_id", "in", reviewIds)
+    .execute();
+  const filesByReview = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!clusterFileIds.has(row.indexed_file_id)) continue;
+    const set = filesByReview.get(row.review_id) ?? new Set<string>();
+    set.add(row.indexed_file_id);
+    filesByReview.set(row.review_id, set);
+  }
+  const filesByProject = new Map<string, Set<string>>();
+  for (const project of projects) {
+    const files = new Set<string>();
+    for (const reviewId of project.coveredReviewIds ?? []) {
+      for (const fileId of filesByReview.get(reviewId) ?? []) files.add(fileId);
+    }
+    if (files.size > 0) filesByProject.set(project.name, files);
+  }
+  return filesByProject;
+}
+
 /**
  * A missing anchor is a warning, not a refusal. The model paraphrases — it will
  * write "Mobile App Redesign" for the family "Mobile App Redesign <> Amitesh" —
@@ -463,12 +553,19 @@ function resolveProjectAnchors(
   verdict: ClusterVerdict,
   acceptedOriginalNames: Set<string>,
   maps: Awaited<ReturnType<typeof buildAnchorMaps>>,
+  coveredReviewFileClaims: Map<string, Set<string>>,
 ): { projectFiles: Map<string, Set<string>>; unresolvedAnchors: string[]; groundlessProjects: string[] } {
   const projectFiles = new Map<string, Set<string>>();
   const unresolvedAnchors: string[] = [];
   const groundlessProjects: string[] = [];
   for (const project of verdict.projects) {
     if (!acceptedOriginalNames.has(project.name)) continue;
+    const coveredReviewIds = project.coveredReviewIds ?? [];
+    const coveredReviewFiles = coveredReviewIds.length > 0 ? coveredReviewFileClaims.get(project.name) : undefined;
+    if (coveredReviewFiles && coveredReviewFiles.size > 0) {
+      projectFiles.set(project.name, new Set(coveredReviewFiles));
+      continue;
+    }
     const files = new Set<string>();
     let declaredAnchors = 0;
     for (const family of project.evidenceTitleFamilies) {
@@ -691,6 +788,7 @@ interface AcceptancePlan {
   /** Residual files land here; null when nothing should catch them. */
   residualTarget: { kind: "engagement" } | { kind: "project"; originalName: string } | null;
   plannedMerges: { entityId: string; intoOriginalName: string }[];
+  effectiveParentName: (name: string) => string | null;
 }
 
 type AcceptanceContainer = {
@@ -713,6 +811,15 @@ async function planAcceptance(
 ): Promise<AcceptancePlan> {
   const isV2 = isV2MintingVerdict(row.prompt_version);
   const verdict = readClusterVerdict(JSON.parse(row.verdict), { strict: isV2 });
+  const struckProjects = [...new Set(input.struckProjectNames ?? [])]
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .sort();
+  const struck = new Set(struckProjects);
+  const reparentMap = input.reparentMap ?? {};
+  const effectiveParentByName = buildEffectiveParentMap(verdict.projects, reparentMap);
+  const effectiveParentName = (name: string) => effectiveParentByName.get(name) ?? null;
+  assertEffectiveParentOverlay(verdict.projects, reparentMap, effectiveParentByName, struck);
   const flags = parseJsonArray(row.flags);
   if (flags.length > 0 && !input.overrideTripwireFlags) {
     throw new ProjectMintingAcceptanceError("TRIPWIRE_BLOCKED", "Tripwire flags require explicit override", { flags });
@@ -722,11 +829,6 @@ async function planAcceptance(
   const currentDeclared = await currentDeclarationForCluster(db, container);
   assertCurrentDeclarationMatchesSnapshot(row, currentDeclared);
 
-  const struckProjects = [...new Set(input.struckProjectNames ?? [])]
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .sort();
-  const struck = new Set(struckProjects);
   for (const disposition of verdict.existingEntities) {
     if (disposition.disposition === "merge_into" && disposition.mergeInto && struck.has(disposition.mergeInto)) {
       throw new ProjectMintingAcceptanceError(
@@ -737,10 +839,9 @@ async function planAcceptance(
     }
   }
   if (isV2) {
-    const projectByName = new Map(verdict.projects.map((project) => [project.name, project]));
     for (const project of verdict.projects) {
       if (struck.has(project.name)) continue;
-      let ancestor = project.parentName;
+      let ancestor = effectiveParentName(project.name);
       while (ancestor) {
         if (struck.has(ancestor)) {
           throw new ProjectMintingAcceptanceError(
@@ -749,7 +850,7 @@ async function planAcceptance(
             { struckParent: ancestor, survivingChild: project.name },
           );
         }
-        ancestor = projectByName.get(ancestor)?.parentName ?? null;
+        ancestor = effectiveParentName(ancestor);
       }
     }
   }
@@ -760,10 +861,12 @@ async function planAcceptance(
   const acceptedOriginalNames = new Set(acceptedProjects.map((project) => project.name));
   const citedFragmentIds = [...new Set(acceptedProjects.flatMap((project) => project.evidenceFragments))];
   const anchorMaps = await buildAnchorMaps(db, container, citedFragmentIds);
+  const coveredReviewFileClaims = await loadCoveredReviewFileClaims(db, container, acceptedProjects);
   const { projectFiles, unresolvedAnchors, groundlessProjects } = resolveProjectAnchors(
     verdict,
     acceptedOriginalNames,
     anchorMaps,
+    coveredReviewFileClaims,
   );
   if (groundlessProjects.length > 0) {
     throw new ProjectMintingAcceptanceError(
@@ -783,10 +886,10 @@ async function planAcceptance(
     const placed = new Set<string>();
     let remaining = [...acceptedProjects];
     while (remaining.length > 0) {
-      const next = remaining.filter(
-        (project) =>
-          !project.parentName || placed.has(project.parentName) || !acceptedOriginalNames.has(project.parentName),
-      );
+      const next = remaining.filter((project) => {
+        const parentName = effectiveParentName(project.name);
+        return !parentName || placed.has(parentName) || !acceptedOriginalNames.has(parentName);
+      });
       if (next.length === 0) {
         throw new ProjectMintingAcceptanceError("WOULD_CYCLE", "Accepted projects do not form a forest");
       }
@@ -802,9 +905,10 @@ async function planAcceptance(
 
   let residualTarget: AcceptancePlan["residualTarget"] = null;
   if (isV2) {
-    const topLevel = acceptedProjects.filter(
-      (project) => !project.parentName || !acceptedOriginalNames.has(project.parentName),
-    );
+    const topLevel = acceptedProjects.filter((project) => {
+      const parentName = effectiveParentName(project.name);
+      return !parentName || !acceptedOriginalNames.has(parentName);
+    });
     if (topLevel.length === 1) residualTarget = { kind: "project", originalName: topLevel[0].name };
   } else if (shouldWriteEngagement && verdict.engagement) {
     residualTarget = { kind: "engagement" };
@@ -850,6 +954,7 @@ async function planAcceptance(
     orderedProjects,
     residualTarget,
     plannedMerges,
+    effectiveParentName,
   };
 }
 
@@ -885,6 +990,13 @@ function planResult(
  * Adopted entities show their canonical id; to-be-created ones show null.
  */
 function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
+  const fileById = new Map(plan.container.files.map((file) => [file.fileId, file]));
+  const claimedFiles = (fileIds: string[]) =>
+    fileIds
+      .map((fileId) => fileById.get(fileId))
+      .filter((file): file is ClusterFile => file !== undefined)
+      .map((file) => ({ id: file.fileId, name: file.fileName, source: file.source, date: file.date }))
+      .sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "") || a.name.localeCompare(b.name));
   const entities: AcceptedEntitySummary[] = [];
   if (plan.shouldWriteEngagement && plan.verdict.engagement) {
     const originalName = plan.verdict.engagement.name;
@@ -893,6 +1005,7 @@ function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
       name: renameFor(originalName, plan.renameMap),
       kind: "engagement",
       parentId: null,
+      parentOriginalName: null,
       fileIds: [],
     });
   }
@@ -903,7 +1016,9 @@ function dryRunResult(plan: AcceptancePlan): ProjectMintingAcceptResult {
         name: renameFor(project.name, plan.renameMap),
         kind: "project",
         parentId: null,
+        parentOriginalName: plan.isV2 ? plan.effectiveParentName(project.name) : null,
         fileIds: [...(plan.projectFiles.get(project.name) ?? [])].sort(),
+        files: claimedFiles([...(plan.projectFiles.get(project.name) ?? [])]),
       });
     }
   }
@@ -1084,6 +1199,7 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
   const { verdict, container, renameMap, canonicalByName } = plan;
   const projectIdsByOriginalName = new Map<string, string>();
   const parentIdByEntityId = new Map<string, string | null>();
+  const parentOriginalNameByEntityId = new Map<string, string | null>();
   const projectIds: string[] = [];
   let engagementId: string | null = null;
   const entities: AcceptedEntitySummary[] = [];
@@ -1101,6 +1217,7 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
       lifecycleStatus: null,
     });
     parentIdByEntityId.set(engagementId, null);
+    parentOriginalNameByEntityId.set(engagementId, null);
     if (container.companyEntityId)
       await ensureRelationship(db, engagementId, container.companyEntityId, "engagement_for");
   }
@@ -1119,8 +1236,9 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
       });
       projectIdsByOriginalName.set(project.name, entityId);
       projectIds.push(entityId);
-      const parentEntityId =
-        plan.isV2 && project.parentName ? (projectIdsByOriginalName.get(project.parentName) ?? null) : null;
+      const effectiveParentName = plan.isV2 ? plan.effectiveParentName(project.name) : null;
+      const parentEntityId = effectiveParentName ? (projectIdsByOriginalName.get(effectiveParentName) ?? null) : null;
+      const parentOriginalName = parentEntityId ? effectiveParentName : null;
       const productParentEntityId =
         !parentEntityId && container.companyEntityId === null && project.parentEntityId
           ? await resolveStandingProductParent(db, project.parentEntityId)
@@ -1131,29 +1249,36 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
         } catch {
           throw new ProjectMintingAcceptanceError(
             "WOULD_CYCLE",
-            `Parenting "${project.name}" under "${project.parentName}" would create a cycle`,
+            `Parenting "${project.name}" under "${effectiveParentName}" would create a cycle`,
             { childId: entityId, parentId: parentEntityId },
           );
         }
         await ensureRelationship(db, entityId, parentEntityId, "part_of");
         parentIdByEntityId.set(entityId, parentEntityId);
+        parentOriginalNameByEntityId.set(entityId, parentOriginalName);
       } else if (productParentEntityId) {
         await ensureRelationship(db, entityId, productParentEntityId, "part_of");
         parentIdByEntityId.set(entityId, productParentEntityId);
+        parentOriginalNameByEntityId.set(entityId, null);
       } else if (project.parentEntityId && container.companyEntityId === null) {
         plan.unresolvedAnchors.push(`standing product "${project.parentEntityId}" on project "${project.name}"`);
         parentIdByEntityId.set(entityId, null);
+        parentOriginalNameByEntityId.set(entityId, null);
       } else if (plan.isV2 && container.companyEntityId) {
         await ensureRelationship(db, entityId, container.companyEntityId, "engagement_for");
         parentIdByEntityId.set(entityId, null);
+        parentOriginalNameByEntityId.set(entityId, null);
       } else if (engagementId) {
         await ensureRelationship(db, entityId, engagementId, "part_of");
         parentIdByEntityId.set(entityId, engagementId);
+        parentOriginalNameByEntityId.set(entityId, null);
       } else if (container.companyEntityId) {
         await ensureRelationship(db, entityId, container.companyEntityId, "engagement_for");
         parentIdByEntityId.set(entityId, null);
+        parentOriginalNameByEntityId.set(entityId, null);
       } else {
         parentIdByEntityId.set(entityId, null);
+        parentOriginalNameByEntityId.set(entityId, null);
       }
     }
   }
@@ -1224,6 +1349,7 @@ async function applyAcceptancePlan(db: Kysely<DB>, plan: AcceptancePlan): Promis
       name: entity.name,
       kind,
       parentId: parentIdByEntityId.get(entityId) ?? null,
+      parentOriginalName: parentOriginalNameByEntityId.get(entityId) ?? null,
       fileIds: orderedFileIds,
       ...(plan.isV2
         ? {

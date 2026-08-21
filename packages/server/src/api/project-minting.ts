@@ -143,6 +143,24 @@ function readRenameMap(value: unknown): Record<string, string> {
   return out;
 }
 
+function readReparentMap(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string | null> = {};
+  for (const [from, to] of Object.entries(value)) {
+    if (!from.trim()) {
+      throw new ProjectMintingAcceptanceError("INVALID_ACCEPTANCE", "reparentMap keys must be project names");
+    }
+    if (to === null) {
+      out[from.trim()] = null;
+    } else if (typeof to === "string") {
+      out[from.trim()] = to.trim();
+    } else {
+      throw new ProjectMintingAcceptanceError("INVALID_ACCEPTANCE", "reparentMap values must be project names or null");
+    }
+  }
+  return out;
+}
+
 function readConfirmedAxes(body: Record<string, unknown>) {
   const kind = body.confirmedCounterpartyKind;
   if (typeof kind !== "string" || !isCounterpartyKind(kind)) {
@@ -356,6 +374,7 @@ export function projectMintingRoutes(
         ...confirmedAxes,
         struckProjectNames: readStringArray(body.struckProjectNames),
         renameMap: readRenameMap(body.renameMap),
+        reparentMap: readReparentMap(body.reparentMap),
         overrideTripwireFlags: body.overrideTripwireFlags === true,
         dryRun: body.dryRun === true,
       });

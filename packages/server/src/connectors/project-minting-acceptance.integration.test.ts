@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCompanyRelationshipDeclarationRepository } from "../db/repositories/company-relationship-declarations";
+import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestLogger, createTestPgDb } from "../test-utils";
@@ -18,6 +20,7 @@ import {
   seedProjectFragment,
   seedTaskWithFileEvidence,
 } from "./project-minting-fixtures";
+import { WEEKLY_MINT_PROMPT_VERSION } from "./weekly-mint";
 
 /**
  * These suites pin the engagement-era verdict contract: rows stored before
@@ -936,6 +939,137 @@ describe("project minting verdict acceptance", () => {
     ]);
   });
 
+  it("uses covered review evidence instead of expanding a shared title family", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Reviewclaims", "reviewclaims.example");
+    const fileIds: string[] = [];
+    for (const day of ["01", "02", "03", "04", "05"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "OW <> Canvas Standup",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Shared standup with dashboard and search terms updates.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@reviewclaims.example");
+      fileIds.push(fileId);
+    }
+    const dashboardReviewId = await seedProjectReview(db, "Dashboard Shell", fileIds.slice(0, 2));
+    const searchReviewId = await seedProjectReview(db, "Search Terms Display", fileIds.slice(2, 4));
+    const verdictId = await storeWeeklyVerdict(db, {
+      companyEntityId: companyId,
+      companyName: "Reviewclaims",
+      fileCount: fileIds.length,
+      verdict: readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: null,
+        projects: [
+          {
+            name: "Dashboard Shell",
+            status: "active",
+            confidence: "medium",
+            parentName: null,
+            evidenceTitleFamilies: ["OW <> Canvas Standup"],
+            evidenceRepos: [],
+            evidenceFragments: [],
+            coveredReviewIds: [dashboardReviewId],
+            evidencePeople: [],
+          },
+          {
+            name: "Search Terms Display",
+            status: "active",
+            confidence: "medium",
+            parentName: "Dashboard Shell",
+            evidenceTitleFamilies: ["OW <> Canvas Standup"],
+            evidenceRepos: [],
+            evidenceFragments: [],
+            coveredReviewIds: [searchReviewId],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    });
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...acceptanceBody("client", "active"), dryRun: true }),
+    });
+    const body = (await res.json()) as {
+      acceptance: {
+        entities: { name: string; fileIds: string[] }[];
+        unresolvedAnchors: string[];
+        residualTarget: string;
+      };
+    };
+    const filesByName = new Map(body.acceptance.entities.map((entity) => [entity.name, entity.fileIds.sort()]));
+    expect(res.status).toBe(200);
+    expect(filesByName.get("Dashboard Shell")).toEqual(fileIds.slice(0, 2).sort());
+    expect(filesByName.get("Search Terms Display")).toEqual(fileIds.slice(2, 4).sort());
+    expect(body.acceptance.unresolvedAnchors).toEqual([]);
+    expect(body.acceptance.residualTarget).toBe("Dashboard Shell");
+  });
+
+  it("falls back to title-family anchors when covered review rows are gone", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Reviewfallback", "reviewfallback.example");
+    const fileIds: string[] = [];
+    for (const day of ["01", "02", "03"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Fallback Standup",
+        source: "fireflies",
+        date: `2026-09-${day}T09:00:00Z`,
+        content: "Fallback workstream update.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@reviewfallback.example");
+      fileIds.push(fileId);
+    }
+    const verdictId = await storeWeeklyVerdict(db, {
+      companyEntityId: companyId,
+      companyName: "Reviewfallback",
+      fileCount: fileIds.length,
+      verdict: readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "active",
+        engagement: null,
+        projects: [
+          {
+            name: "Fallback Workstream",
+            status: "active",
+            confidence: "medium",
+            parentName: null,
+            evidenceTitleFamilies: ["Fallback Standup"],
+            evidenceRepos: [],
+            evidenceFragments: [],
+            coveredReviewIds: ["deleted-review-row"],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    });
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...acceptanceBody("client", "active"), dryRun: true }),
+    });
+    const body = (await res.json()) as {
+      acceptance: { entities: { name: string; fileIds: string[] }[]; unresolvedAnchors: string[] };
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.acceptance.entities.find((entity) => entity.name === "Fallback Workstream")?.fileIds.sort()).toEqual(
+      fileIds.sort(),
+    );
+    expect(body.acceptance.unresolvedAnchors).toEqual([]);
+  });
+
   /**
    * The one case still worth refusing. Nothing ties the project to the corpus,
    * so minting it would create an entity on no evidence at all.
@@ -1009,6 +1143,60 @@ async function storeVerdictFor(
   const rows = await db.selectFrom("project_minting_verdicts").selectAll().where("status", "=", "pending").execute();
   if (rows.length !== 1) throw new Error(`expected exactly one pending verdict, got ${rows.length}`);
   return rows[0].id;
+}
+
+async function storeWeeklyVerdict(
+  db: Kysely<DB>,
+  input: { companyEntityId: string; companyName: string; fileCount: number; verdict: ClusterVerdict },
+): Promise<string> {
+  const stored = await createProjectMintingVerdictRepository(db).storePending({
+    companyEntityId: input.companyEntityId,
+    companyName: input.companyName,
+    fileCount: input.fileCount,
+    dossier: "weekly test dossier",
+    verdict: JSON.stringify(input.verdict),
+    model: "test/reasoning-model",
+    promptVersion: WEEKLY_MINT_PROMPT_VERSION,
+    counterpartyKind: input.verdict.counterpartyKind,
+    clientStage: input.verdict.clientStage,
+  });
+  return stored.id;
+}
+
+async function seedProjectReview(db: Kysely<DB>, name: string, fileIds: string[]): Promise<string> {
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  await db
+    .insertInto("entity_review_queue")
+    .values({
+      id,
+      proposed_name: name,
+      normalized_name: name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim(),
+      entity_type: "project",
+      source: "llm_extraction",
+      source_id: `llm_extraction:${id}`,
+      proposed_email: null,
+      candidate_entity_id: null,
+      candidate_score: null,
+      candidate_reason: null,
+      candidate_generated_at: now,
+      first_seen_at: now,
+      last_seen_at: now,
+      occurrence_count: fileIds.length,
+      status: "pending",
+      triggered_by_user_id: "system",
+    })
+    .execute();
+  for (const fileId of fileIds) {
+    await db
+      .insertInto("entity_review_evidence")
+      .values({ id: randomUUID(), review_id: id, indexed_file_id: fileId, source: "llm_extraction", note: null })
+      .execute();
+  }
+  return id;
 }
 
 async function countProjectMintingSourceRefs(db: Kysely<DB>) {

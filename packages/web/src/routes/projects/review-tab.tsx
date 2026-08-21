@@ -14,6 +14,7 @@ import {
   WhatsAppIdentityRow,
   useWhatsAppIdentityReview,
 } from "@/components/entity-review/whatsapp-identity-review";
+import { ProjectSuggestionsSection } from "@/components/project-suggestions";
 import { api } from "@/lib/api";
 import { MagnifyingGlassIcon } from "@phosphor-icons/react";
 import { Input } from "@sketch/ui/components/input";
@@ -23,7 +24,7 @@ import { useEffect, useRef, useState } from "react";
 import { ReviewEmpty, ReviewRowCompact, useReviewRowSheets } from "./org-review";
 import { reviewBandLabel } from "./review-band-label";
 
-export function ReviewTab() {
+export function ReviewTab({ isAdmin = false }: { isAdmin?: boolean } = {}) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
@@ -59,6 +60,7 @@ export function ReviewTab() {
 
   return (
     <div>
+      {isAdmin ? <ProjectSuggestionsSection /> : null}
       <div className="relative mt-1">
         <MagnifyingGlassIcon size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <Input

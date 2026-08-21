@@ -19,7 +19,7 @@ import { TabContentContainer } from "@sketch/ui/components/tab-content-container
 import { useQuery } from "@tanstack/react-query";
 import { createRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
-import { dashboardRoute } from "../dashboard";
+import { dashboardRoute, useDashboardAuth } from "../dashboard";
 import { OrgEntityTab, ProductsTab, TeamsEmpty } from "./entity-tab";
 import { PeopleTab } from "./people-tab";
 import { ReviewTab } from "./review-tab";
@@ -48,9 +48,11 @@ export const projectsRoute = createRoute({
 function RoutedProjectsPage() {
   const { tab } = useSearch({ from: projectsRoute.id });
   const navigate = useNavigate();
+  const auth = useDashboardAuth();
   return (
     <ProjectsPage
       activeTab={tab}
+      role={auth.role}
       onActiveTabChange={(nextTab) => {
         void navigate({ to: "/projects", search: { tab: nextTab }, replace: true });
       }}
@@ -70,10 +72,13 @@ function useEntityCount(type: string) {
 export function ProjectsPage({
   activeTab,
   onActiveTabChange,
+  role,
 }: {
   activeTab?: OrgTab;
   onActiveTabChange?: (tab: OrgTab) => void;
+  role?: "admin" | "member";
 } = {}) {
+  const isAdmin = role === "admin";
   const [localTab, setLocalTab] = useState<OrgTab>("people");
   const [addOpen, setAddOpen] = useState(false);
   const [addType, setAddType] = useState("person");
@@ -95,7 +100,15 @@ export function ProjectsPage({
     queryFn: () => api.entityReview.list({ limit: 0, types: ["team"] }),
     refetchInterval: 30000,
   });
-  const reviewCount = reviewCountQuery.data?.total ?? null;
+  const verdictCountQuery = useQuery({
+    queryKey: ["project-minting", "verdicts"],
+    queryFn: () => api.projectMinting.listVerdicts(),
+    enabled: isAdmin,
+    retry: false,
+    refetchInterval: 30000,
+  });
+  const verdictCount = isAdmin ? (verdictCountQuery.data?.verdicts.length ?? 0) : 0;
+  const reviewCount = reviewCountQuery.data ? reviewCountQuery.data.total + verdictCount : null;
 
   const openAdd = (type: string) => {
     setAddType(type);
@@ -163,7 +176,7 @@ export function ProjectsPage({
         ) : tab === "products" ? (
           <ProductsTab onSeeAllReview={goReview} onDeclare={() => openAdd("product")} />
         ) : (
-          <ReviewTab />
+          <ReviewTab isAdmin={isAdmin} />
         )}
       </TabContentContainer>
 

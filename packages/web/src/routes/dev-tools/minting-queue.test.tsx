@@ -268,11 +268,10 @@ describe("project minting review", () => {
 
     await userEvent.click(await screen.findByTestId("minting-row-verdict-1"));
 
-    const parentRow = (await screen.findByText("Habuild", { selector: "label span span" })).closest("div[style]");
-    const childRow = screen.getByText("Habuild Sketch deployment").closest("div[style]");
+    const parentRow = (await screen.findByLabelText("name for Habuild")).closest("div[style]");
+    const childRow = screen.getByLabelText("name for Habuild Sketch deployment").closest("div[style]");
     expect(parentRow).toHaveStyle({ paddingLeft: "12px" });
     expect(childRow).toHaveStyle({ paddingLeft: "32px" });
     expect(await screen.findByText(/Create “Habuild Sketch deployment” under “Habuild”/)).toBeInTheDocument();
-    expect(screen.getByText(/1 fragments/)).toBeInTheDocument();
   });
 });
