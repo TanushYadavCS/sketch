@@ -1922,8 +1922,16 @@ function BuilderChatSidecar({
   const visibleConversations = useMemo(() => {
     const conversations = conversationsQuery.data?.conversations ?? [];
     const builderConversations = conversations.filter((conversation) => conversation.kinds.includes("builder"));
-    return builderConversations.length > 0 ? builderConversations : conversations;
-  }, [conversationsQuery.data?.conversations]);
+    if (builderConversations.length === 0 || !requestedConversationId) {
+      return builderConversations.length > 0 ? builderConversations : conversations;
+    }
+
+    const requestedConversation = conversations.find(
+      (conversation) => conversation.conversationId === requestedConversationId,
+    );
+    if (!requestedConversation || requestedConversation.kinds.includes("builder")) return builderConversations;
+    return [...builderConversations, requestedConversation];
+  }, [conversationsQuery.data?.conversations, requestedConversationId]);
   const selectedConversation = visibleConversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
