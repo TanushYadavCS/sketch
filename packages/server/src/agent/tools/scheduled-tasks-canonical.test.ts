@@ -1051,7 +1051,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     });
   });
 
-  it("automatically verifies the full automation after a structured update", async () => {
+  it("does not automatically execute a structured automation after an update", async () => {
     await createAutomationDefinition({
       db,
       request: definition(),
@@ -1070,12 +1070,8 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       { db, scheduler, taskContext: taskContextFor("automatic-structured-update") },
     );
 
-    expect((scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById).toHaveBeenCalledWith(
-      "automatic-structured-update",
-      { preserveTaskState: true, runMode: "test" },
-    );
-    expect(result.content[0].text).toContain("Automatic test run completed for automation automatic-structured-update");
-    expect(result.content[0].text).toContain('"runId": "automatic-automatic-structured-update"');
+    expect((scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById).not.toHaveBeenCalled();
+    expect(result.content[0].text).not.toContain("Automatic test run");
   });
 
   it("reconciles inherited schedule metadata on a title-only edit while preserving a custom trigger label", async () => {
