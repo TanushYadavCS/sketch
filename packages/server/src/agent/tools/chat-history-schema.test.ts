@@ -29,8 +29,21 @@ describe("ReadChatHistory advertised schema", () => {
         "scope",
       ].sort(),
     );
-    expect(properties.scope.enum).toEqual(["conversation", "current_thread", "all_chats"]);
-    expect(properties.platform.enum).toEqual(["slack", "whatsapp"]);
+    const enumOf = (property: Record<string, unknown>) => {
+      if (property.enum) return property.enum;
+      const variants = (property.anyOf ?? []) as Array<Record<string, unknown>>;
+      return variants.find((variant) => variant.enum)?.enum;
+    };
+    expect(enumOf(properties.scope)).toEqual(["conversation", "current_thread", "all_chats"]);
+    expect(enumOf(properties.platform)).toEqual(["slack", "whatsapp"]);
+  });
+
+  it("advertises every optional parameter as nullable so models can send null instead of a placeholder", () => {
+    const shape = createReadChatHistoryTool(deps).inputSchema as Record<string, z.ZodType>;
+    for (const [name, field] of Object.entries(shape)) {
+      expect(field.safeParse(null).success, `${name} should accept null`).toBe(true);
+      expect(field.safeParse(undefined).success, `${name} should accept undefined`).toBe(true);
+    }
   });
 
   it("does not advertise obsolete search or row-id range parameters", () => {

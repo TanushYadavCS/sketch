@@ -328,22 +328,6 @@ async function renderCrossConversationRead(
   return renderAllChatsSearchResults(deps.db, enriched);
 }
 
-/**
- * Authorization for the conversation is already settled before the anchor is resolved, so an
- * anchor that is simply not in this conversation must not be reported as an access failure.
- * The model needs to know the id is wrong, not that it lost permission.
- */
-function anchorNotInConversationResult(anchorMessageId: number): ToolResult {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: `anchorMessageId ${anchorMessageId} is not a message in this conversation. Omit anchorMessageId to read the conversation chronologically, or pass a message id returned by an earlier read of this same conversation.`,
-      },
-    ],
-  };
-}
-
 async function loadCrossConversationAnchorStream(
   deps: SketchMcpDeps,
   conversationId: number,
@@ -389,50 +373,60 @@ async function boundaryBelongsToCrossReadStream(
 export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
-    "Read persisted messages chronologically from the current chat, an authorized conversation, or every Slack channel and WhatsApp group the requester belongs to. Use all_chats for broad chronological history and continue it with nextPageToken as pageToken. Use conversationRef with anchorMessageId for a specific authorized chat.",
+    "Read persisted messages chronologically from the current chat, an authorized conversation, or every Slack channel and WhatsApp group the requester belongs to. Use all_chats for broad chronological history and continue it with nextPageToken as pageToken. Use conversationRef on its own to read one specific authorized chat. Every other parameter is optional: send null for anything you do not explicitly need rather than inventing a placeholder value.",
     {
       conversationRef: z
         .string()
-        .optional()
-        .describe("Opaque conversation ref such as conversation:42. Omit to read the current chat."),
+        .nullish()
+        .describe("Opaque conversation ref such as conversation:42. Send null to read the current chat."),
       anchorMessageId: z
         .number()
         .int()
         .positive()
         .max(INT4_MAX)
-        .optional()
-        .describe("Center a specific-chat read around this message row id."),
-      pageToken: z.string().optional().describe("Opaque continuation token returned by a prior read."),
+        .nullish()
+        .describe(
+          "Send null to read the conversation chronologically -- that is the normal case. Set a number only to centre the read on a message row id that an earlier read of this same conversation returned.",
+        ),
+      pageToken: z.string().nullish().describe("Opaque continuation token returned by a prior read."),
       scope: z
         .enum(["conversation", "current_thread", "all_chats"])
-        .optional()
+        .nullish()
         .describe(
           "Read the current conversation, only the active Slack thread, or all authorized chats. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
         ),
-      afterTime: z.string().optional().describe("Inclusive ISO-8601 lower bound on the message effective time."),
-      beforeTime: z.string().optional().describe("Inclusive ISO-8601 upper bound on the message effective time."),
+      afterTime: z.string().nullish().describe("Inclusive ISO-8601 lower bound on the message effective time."),
+      beforeTime: z.string().nullish().describe("Inclusive ISO-8601 upper bound on the message effective time."),
       platform: z
         .enum(["slack", "whatsapp"])
-        .optional()
+        .nullish()
         .describe("With scope all_chats only, restrict results to one platform."),
-      limit: z.number().int().positive().max(100).optional().describe("Max messages to return. Default 50, max 100."),
-      order: z.enum(["asc", "desc"]).optional().describe("Message effective-time order. Default asc."),
-      includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
+      limit: z.number().int().positive().max(100).nullish().describe("Max messages to return. Default 50, max 100."),
+      order: z.enum(["asc", "desc"]).nullish().describe("Message effective-time order. Default asc."),
+      includeBotMessages: z.boolean().nullish().describe("Include Sketch's persisted visible replies. Default false."),
     },
     async ({
-      conversationRef: requestedConversationRef,
-      anchorMessageId,
-      pageToken: requestedPageToken,
-      scope,
-      afterTime: requestedAfterTime,
-      beforeTime: requestedBeforeTime,
-      platform: requestedPlatform,
-      limit,
-      order,
-      includeBotMessages,
+      conversationRef: rawConversationRef,
+      anchorMessageId: rawAnchorMessageId,
+      pageToken: rawPageToken,
+      scope: rawScope,
+      afterTime: rawAfterTime,
+      beforeTime: rawBeforeTime,
+      platform: rawPlatform,
+      limit: rawLimit,
+      order: rawOrder,
+      includeBotMessages: rawIncludeBotMessages,
     }) => {
-      const conversationRef = blankToUndefined(requestedConversationRef);
-      const pageToken = blankToUndefined(requestedPageToken);
+      const anchorMessageId = rawAnchorMessageId ?? undefined;
+      const scope = rawScope ?? undefined;
+      const requestedAfterTime = rawAfterTime ?? undefined;
+      const requestedBeforeTime = rawBeforeTime ?? undefined;
+      const requestedPlatform = rawPlatform ?? undefined;
+      const limit = rawLimit ?? undefined;
+      const order = rawOrder ?? undefined;
+      const includeBotMessages = rawIncludeBotMessages ?? undefined;
+      const conversationRef = blankToUndefined(rawConversationRef ?? undefined);
+      const pageToken = blankToUndefined(rawPageToken ?? undefined);
       const allChatsPageToken = pageToken ? parseAllChatsPageToken(pageToken) : null;
       const crossReadPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
       if (pageToken && !allChatsPageToken && !crossReadPageToken) return unavailableCrossConversationResult();
@@ -599,8 +593,11 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         };
       }
 
-      if (effectiveAnchorMessageId && currentMessageId && effectiveAnchorMessageId >= currentMessageId) {
-        return unavailableCrossConversationResult();
+      let anchorForRead = effectiveAnchorMessageId;
+      let ignoredAnchorMessageId: number | undefined;
+      if (anchorForRead && currentMessageId && anchorForRead >= currentMessageId) {
+        ignoredAnchorMessageId = anchorForRead;
+        anchorForRead = undefined;
       }
       let stream: CrossReadStream =
         !isReferencedConversation && resolvedScope === "current_thread"
@@ -612,19 +609,20 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       if (isReferencedConversation && referencedAnchorMessageId) {
         const anchor = await loadCrossConversationAnchorStream(deps, conversationId, referencedAnchorMessageId);
         if (!anchor.ok) {
-          return anchor.reason === "anchor-not-found"
-            ? anchorNotInConversationResult(referencedAnchorMessageId)
-            : unavailableCrossConversationResult();
+          if (anchor.reason !== "anchor-not-found" || parsedPageToken) return unavailableCrossConversationResult();
+          ignoredAnchorMessageId = referencedAnchorMessageId;
+          anchorForRead = undefined;
+        } else {
+          stream = anchor.stream;
         }
-        stream = anchor.stream;
       }
       if (parsedPageToken && !(await boundaryBelongsToCrossReadStream(deps, parsedPageToken, stream))) {
         return unavailableCrossConversationResult();
       }
       const result = parsedPageToken
         ? await readCrossConversationPage(repo, parsedPageToken, stream, limit)
-        : effectiveAnchorMessageId
-          ? await readAroundMessage(repo, conversationId, effectiveAnchorMessageId, {
+        : anchorForRead
+          ? await readAroundMessage(repo, conversationId, anchorForRead, {
               limit,
               includeBotMessages,
               beforeMessageId: currentMessageId,
@@ -632,14 +630,14 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             })
           : await repo.listMessages(conversationId, {
               beforeMessageId: currentMessageId,
-              afterEffectiveAt: effectiveAfterTime ?? undefined,
-              beforeEffectiveAt: effectiveBeforeTime ?? undefined,
+              afterEffectiveAt: (ignoredAnchorMessageId ? normalizedAfterTime : effectiveAfterTime) ?? undefined,
+              beforeEffectiveAt: (ignoredAnchorMessageId ? normalizedBeforeTime : effectiveBeforeTime) ?? undefined,
               limit,
-              order: effectiveOrder,
+              order: ignoredAnchorMessageId ? order : effectiveOrder,
               includeBotMessages,
               ...stream,
             });
-      if ((effectiveAnchorMessageId || parsedPageToken) && result.messages.length === 0) {
+      if ((anchorForRead || parsedPageToken) && result.messages.length === 0) {
         return unavailableCrossConversationResult();
       }
 
@@ -654,9 +652,15 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             type: "text" as const,
             text: JSON.stringify(
               {
+                ...(ignoredAnchorMessageId
+                  ? {
+                      ignoredAnchorMessageId,
+                      note: `anchorMessageId ${ignoredAnchorMessageId} is not a message in this conversation, so it was ignored and the conversation was read chronologically. Send anchorMessageId: null unless you are centring the read on a message id a previous read of this same conversation returned.`,
+                    }
+                  : {}),
                 messages,
                 hasMore: result.hasMore,
-                ...(isReferencedConversation && (effectiveAnchorMessageId || parsedPageToken)
+                ...(isReferencedConversation && (anchorForRead || parsedPageToken)
                   ? {
                       ...("olderPageToken" in result && result.olderPageToken
                         ? { olderPageToken: result.olderPageToken }

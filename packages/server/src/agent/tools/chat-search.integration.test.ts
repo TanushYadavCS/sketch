@@ -992,7 +992,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       );
     });
 
-    it("reports a wrong anchor id as a bad anchor, not as an access denial", async () => {
+    it("ignores an anchor id from another conversation and still returns the messages", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "anchor mismatch marker",
         members: [USER_EMAIL],
@@ -1017,8 +1017,72 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       });
 
       const text = result.content[0]?.text ?? "";
-      expect(text).toContain(`anchorMessageId ${other.messageId} is not a message in this conversation`);
       expect(text).not.toContain("no longer have access");
+      const body = JSON.parse(text);
+      expect(body.ignoredAnchorMessageId).toBe(other.messageId);
+      expect(body.note).toContain("was ignored");
+      expect(body.messages.length).toBeGreaterThan(0);
+      expect(text).toContain("anchor mismatch marker");
+      expect(text).not.toContain("message that lives elsewhere");
+    });
+
+    it("treats null optional params as omitted and reads chronologically", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "null params marker",
+        members: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: null,
+        pageToken: null,
+        scope: null,
+        afterTime: null,
+        beforeTime: null,
+        platform: null,
+        limit: null,
+        order: null,
+        includeBotMessages: null,
+      });
+
+      const text = result.content[0]?.text ?? "";
+      expect(text).not.toContain("no longer have access");
+      const body = JSON.parse(text);
+      expect(body.ignoredAnchorMessageId).toBeUndefined();
+      expect(body.messages.length).toBeGreaterThan(0);
+      expect(text).toContain("null params marker");
+    });
+
+    it("ignores an out-of-range anchor id instead of failing the read", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "out of range anchor marker",
+        members: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: 2_147_483_646,
+      });
+
+      const text = result.content[0]?.text ?? "";
+      expect(text).not.toContain("no longer have access");
+      const body = JSON.parse(text);
+      expect(body.ignoredAnchorMessageId).toBe(2_147_483_646);
+      expect(text).toContain("out of range anchor marker");
     });
 
     it("reads a referenced conversation chronologically when no anchor is given", async () => {
