@@ -209,6 +209,7 @@ import * as m206 from "./migrations/206-weekly-mint";
 import * as m207 from "./migrations/207-nullable-verdict-company";
 import * as m208 from "./migrations/208-weekly-mint-observability";
 import * as m209 from "./migrations/209-weekly-mint-retirement";
+import * as m210 from "./migrations/210-graph-verdicts";
 import type { DB } from "./schema";
 
 /**
@@ -427,6 +428,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "207-nullable-verdict-company": m207,
           "208-weekly-mint-observability": m208,
           "209-weekly-mint-retirement": m209,
+          "210-graph-verdicts": m210,
         };
       },
     },

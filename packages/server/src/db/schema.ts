@@ -960,6 +960,42 @@ export interface GraphPassRunsTable {
   input_snapshot_json: string;
 }
 
+export interface GraphVerdictRunsTable {
+  id: string;
+  source: string;
+  proposed_by_user_id: string;
+  token_id: string | null;
+  note: string | null;
+  verdicts_proposed: number;
+  verdicts_stored: number;
+  verdicts_bounced: number;
+  created_at: Generated<string>;
+}
+
+export interface GraphVerdictsTable {
+  id: string;
+  run_id: string;
+  action: string;
+  subject_entity_id: string;
+  subject_name: string | null;
+  subject_entity_type: string | null;
+  target_entity_id: string | null;
+  target_name: string | null;
+  reason: string;
+  evidence_json: string;
+  evidence_fingerprint: string;
+  validation_status: string;
+  validation_reason: string | null;
+  would_change_json: string | null;
+  status: string;
+  superseded_at: string | null;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  applied_ledger_ref: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ProjectMintingVerdictsTable {
   id: string;
   company_entity_id: string | null;
@@ -1986,6 +2022,8 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   graph_pass_runs: GraphPassRunsTable;
+  graph_verdict_runs: GraphVerdictRunsTable;
+  graph_verdicts: GraphVerdictsTable;
   project_minting_verdicts: ProjectMintingVerdictsTable;
   company_relationship_declarations: CompanyRelationshipDeclarationsTable;
   agent_outputs: AgentOutputsTable;
