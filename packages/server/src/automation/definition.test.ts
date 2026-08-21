@@ -210,6 +210,36 @@ describe("automation action capability validation", () => {
     );
   });
 
+  it("rejects raw Canvas CLI calls in integration action scripts", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: true });
+    request.stepContent.action.content = `return await execFile(ctx.env.CANVAS_CLI, ["direct-execute-action"]);`;
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "CANVAS_CLI_IN_ACTION_SCRIPT" })]),
+      }),
+    );
+  });
+
+  it("requires explicit integration action capabilities to use the runtime wrapper", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: true });
+    request.stepContent.action.content = "return input;";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "INTEGRATION_ACTION_CALL_REQUIRED" })]),
+      }),
+    );
+  });
+
+  it("allows Canvas integration actions through the runtime wrapper", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: true });
+    request.stepContent.action.content =
+      'return ctx.integrations.executeAction({ componentKey: "clickup-find-tasks", configuredProps: {} });';
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).not.toThrow();
+  });
+
   it("deduplicates identical validation issues from repeated persisted step ids", () => {
     const request = requestForAction({ sketchTools: [], usesIntegrationActions: false });
     request.steps.push({ ...request.steps[1] });
