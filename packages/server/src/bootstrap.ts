@@ -231,6 +231,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.error({ err }, "Failed to close out interrupted queue graph passes");
   }
 
+  try {
+    const abandoned = await createGraphPassRunRepository(db).failUnfinishedProjectMintingRuns();
+    if (abandoned > 0) logger.warn({ abandoned }, "Marked interrupted project minting graph passes as failed");
+  } catch (err) {
+    logger.error({ err }, "Failed to close out interrupted project minting graph passes");
+  }
+
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
   // If no users exist yet, the row stays owned by 'admin' and never becomes editable
   // through the per-user UI — surface a warning so an operator can clean up later.

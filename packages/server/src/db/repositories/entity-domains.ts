@@ -4,6 +4,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { compactEntityNameKey } from "../../entities/match-normalize";
 import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
+import { ProjectBindingError, assertNoPartOfCycle } from "../../entities/project-bindings";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { whereLiveEntity } from "./entities";
@@ -22,6 +23,8 @@ export type EntityRelationshipType =
   | "partner_of"
   | "deal_for"
   | "primary_contact";
+
+type LoggerWarn = (obj: Record<string, unknown>, msg: string) => void;
 
 export interface UpsertDomainInput {
   entityId: string | null;
@@ -223,9 +226,33 @@ function domainMatchesName(domain: string, name: string): boolean {
   return false;
 }
 
-export function createEntityDomainsRepository(db: Kysely<DB>) {
-  async function upsertRelationship(input: UpsertRelationshipInput): Promise<string> {
+export function createEntityDomainsRepository(db: Kysely<DB>, opts?: { logger?: { warn: LoggerWarn } }) {
+  /**
+   * `part_of` sweep writers skip cycle-forming edges by returning null, while
+   * interactive acceptance throws before reaching this repository so callers can
+   * surface a typed user-facing conflict.
+   */
+  async function upsertRelationship(input: UpsertRelationshipInput): Promise<string | null> {
     const validFrom = input.validFrom ?? "";
+    if (input.relationshipType === "part_of") {
+      try {
+        await assertNoPartOfCycle(db, input.sourceEntityId, input.targetEntityId);
+      } catch (err) {
+        if (err instanceof ProjectBindingError && err.code === "WOULD_CYCLE") {
+          opts?.logger?.warn(
+            {
+              sourceEntityId: input.sourceEntityId,
+              targetEntityId: input.targetEntityId,
+              relationshipType: input.relationshipType,
+              source: input.source,
+            },
+            "Skipped part_of relationship that would create a cycle",
+          );
+          return null;
+        }
+        throw err;
+      }
+    }
     const id = randomUUID();
     const incomingRank = relationshipSourceRank(input.source);
     const existingRank = sql<number>`CASE entity_relationships.source
@@ -419,7 +446,7 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
     upsertRelationship,
 
     async upsertWorksAt(input: UpsertWorksAtInput): Promise<string> {
-      return upsertRelationship({
+      const relationshipId = await upsertRelationship({
         sourceEntityId: input.personEntityId,
         targetEntityId: input.companyEntityId,
         relationshipType: "works_at",
@@ -428,6 +455,8 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         source: input.source,
         validFrom: input.validFrom,
       });
+      if (!relationshipId) throw new Error("works_at relationship unexpectedly skipped");
+      return relationshipId;
     },
 
     async addEvidence(input: AddRelationshipEvidenceInput): Promise<void> {

@@ -13,6 +13,8 @@ import type {
   EntityRelationshipsTable,
   EntityReviewQueueTable,
   EntityShareEmailsTable,
+  TaskEvidenceTable,
+  TasksTable,
 } from "../db/schema";
 import { parseAliasesString } from "./materialize-json";
 import { normalizeStrict } from "./name-dedup";
@@ -29,6 +31,8 @@ type ShareEmail = Selectable<EntityShareEmailsTable>;
 type Domain = Selectable<EntityDomainsTable>;
 type ProjectBinding = Selectable<EntityProjectBindingsTable>;
 type MemberOverride = Selectable<EntityProjectMemberOverridesTable>;
+type TaskRow = Selectable<TasksTable>;
+type TaskEvidence = Selectable<TaskEvidenceTable>;
 
 export type EntityMergeMove =
   | {
@@ -106,6 +110,8 @@ export interface MergePreview {
     shareEmails: number;
     aliasRejections: number;
     domains: number;
+    tasks: number;
+    taskEvidence: number;
     candidates: number;
     reviewQueue: number;
   };
@@ -115,6 +121,7 @@ export interface MergePreview {
     shareEmails: number;
     aliasRejections: number;
     domains: number;
+    taskEvidence: number;
     relationships: number;
   };
   selfLoopsDropped: number;
@@ -265,6 +272,29 @@ async function findRelationshipCollision(
     .executeTakeFirst();
 }
 
+async function findTaskEvidenceCollision(
+  db: Kysely<DB>,
+  row: TaskEvidence,
+  survivorId: string,
+): Promise<{ task_id: string } | undefined> {
+  return db
+    .selectFrom("task_evidence")
+    .select("task_id")
+    .where("task_id", "=", row.task_id)
+    .where("kind", "=", "entity")
+    .where("ref_id", "=", survivorId)
+    .executeTakeFirst();
+}
+
+function taskEvidenceMoveId(row: TaskEvidence): string {
+  return `${row.task_id}\u0000${row.kind}\u0000${row.ref_id}`;
+}
+
+function parseTaskEvidenceMoveId(rowId: string): { taskId: string; kind: string; refId: string } {
+  const [taskId, kind, refId] = rowId.split("\u0000");
+  return { taskId: taskId ?? "", kind: kind ?? "", refId: refId ?? "" };
+}
+
 async function repointSourceRefs(
   db: Kysely<DB>,
   loserId: string,
@@ -278,6 +308,76 @@ async function repointSourceRefs(
       table: "entity_source_refs",
       rowId: row.id,
       repoint: { entity_id: { from: loserId, to: survivorId } },
+    });
+  }
+}
+
+async function repointTasks(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("tasks")
+    .selectAll()
+    .where((eb) => eb.or([eb("parent_entity_id", "=", loserId), eb("assignee_entity_id", "=", loserId)]))
+    .execute();
+  for (const row of rows) {
+    const repoint: Record<string, { from: string | null; to: string | null }> = {};
+    const updates: Partial<TaskRow> = {};
+    if (row.parent_entity_id === loserId) {
+      repoint.parent_entity_id = { from: loserId, to: survivorId };
+      updates.parent_entity_id = survivorId;
+    }
+    if (row.assignee_entity_id === loserId) {
+      repoint.assignee_entity_id = { from: loserId, to: survivorId };
+      updates.assignee_entity_id = survivorId;
+    }
+    await db
+      .updateTable("tasks")
+      .set({ ...updates, updated_at: new Date().toISOString() })
+      .where("id", "=", row.id)
+      .execute();
+    moves.push({ table: "tasks", rowId: row.id, repoint });
+  }
+}
+
+async function repointTaskEvidence(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("task_evidence")
+    .selectAll()
+    .where("kind", "=", "entity")
+    .where("ref_id", "=", loserId)
+    .execute();
+  for (const row of rows) {
+    const collision = await findTaskEvidenceCollision(db, row, survivorId);
+    if (collision) {
+      moves.push({ table: "task_evidence", collided: true, payload: rowPayload(row) });
+      await db
+        .deleteFrom("task_evidence")
+        .where("task_id", "=", row.task_id)
+        .where("kind", "=", row.kind)
+        .where("ref_id", "=", row.ref_id)
+        .execute();
+      continue;
+    }
+    await db
+      .updateTable("task_evidence")
+      .set({ ref_id: survivorId })
+      .where("task_id", "=", row.task_id)
+      .where("kind", "=", row.kind)
+      .where("ref_id", "=", loserId)
+      .execute();
+    moves.push({
+      table: "task_evidence",
+      rowId: taskEvidenceMoveId(row),
+      repoint: { ref_id: { from: loserId, to: survivorId } },
     });
   }
 }
@@ -723,6 +823,8 @@ async function applyMergeMoves(
   await repointDomains(db, loserId, survivorId, moves);
   await repointProjectBindings(db, loserId, survivorId, moves);
   await repointMemberOverrides(db, loserId, survivorId, moves);
+  await repointTasks(db, loserId, survivorId, moves);
+  await repointTaskEvidence(db, loserId, survivorId, moves);
   await repointCandidates(db, loserId, survivorId, moves);
   await repointReviewQueue(db, loserId, survivorId, moves);
 }
@@ -847,6 +949,8 @@ function emptyMergePreview(
       shareEmails: 0,
       aliasRejections: 0,
       domains: 0,
+      tasks: 0,
+      taskEvidence: 0,
       candidates: 0,
       reviewQueue: 0,
     },
@@ -856,6 +960,7 @@ function emptyMergePreview(
       shareEmails: 0,
       aliasRejections: 0,
       domains: 0,
+      taskEvidence: 0,
       relationships: 0,
     },
     selfLoopsDropped: 0,
@@ -910,6 +1015,17 @@ export async function previewMerge(
     .where("entity_id", "=", input.loserId)
     .execute();
   const domains = await db.selectFrom("entity_domains").selectAll().where("entity_id", "=", input.loserId).execute();
+  const tasks = await db
+    .selectFrom("tasks")
+    .select("id")
+    .where((eb) => eb.or([eb("parent_entity_id", "=", input.loserId), eb("assignee_entity_id", "=", input.loserId)]))
+    .execute();
+  const taskEvidence = await db
+    .selectFrom("task_evidence")
+    .selectAll()
+    .where("kind", "=", "entity")
+    .where("ref_id", "=", input.loserId)
+    .execute();
   const candidates = await db.selectFrom("entity_candidates").selectAll().execute();
   const reviewQueue = await db
     .selectFrom("entity_review_queue")
@@ -924,6 +1040,8 @@ export async function previewMerge(
   preview.counts.shareEmails = shareEmails.length;
   preview.counts.aliasRejections = aliasRejections.length;
   preview.counts.domains = domains.length;
+  preview.counts.tasks = tasks.length;
+  preview.counts.taskEvidence = taskEvidence.length;
   preview.counts.candidates = candidates.filter((row) => {
     if (row.promoted_entity_id === input.loserId) return true;
     return (
@@ -946,6 +1064,9 @@ export async function previewMerge(
     findAliasRejectionCollision(db, input.survivorId, row),
   );
   preview.collisions.domains = await countCollisions(domains, (row) => findDomainCollision(db, input.survivorId, row));
+  preview.collisions.taskEvidence = await countCollisions(taskEvidence, (row) =>
+    findTaskEvidenceCollision(db, row, input.survivorId),
+  );
 
   for (const row of relationships) {
     const { source, target } = repointedRelationship(row, input.loserId, input.survivorId);
@@ -1066,6 +1187,24 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
       .updateTable("entity_domains")
       .set({ entity_id: updates.entity_id ?? null })
       .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "tasks") {
+    const taskUpdates: Partial<TaskRow> = { updated_at: new Date().toISOString() };
+    if ("parent_entity_id" in move.repoint) taskUpdates.parent_entity_id = updates.parent_entity_id ?? null;
+    if ("assignee_entity_id" in move.repoint) taskUpdates.assignee_entity_id = updates.assignee_entity_id ?? null;
+    await db.updateTable("tasks").set(taskUpdates).where("id", "=", move.rowId).execute();
+    return;
+  }
+  if (move.table === "task_evidence" && updates.ref_id) {
+    const parsed = parseTaskEvidenceMoveId(move.rowId);
+    await db
+      .updateTable("task_evidence")
+      .set({ ref_id: updates.ref_id })
+      .where("task_id", "=", parsed.taskId)
+      .where("kind", "=", parsed.kind)
+      .where("ref_id", "=", move.repoint.ref_id.to)
       .execute();
     return;
   }

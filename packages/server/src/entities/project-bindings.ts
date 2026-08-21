@@ -58,7 +58,7 @@ async function groupingParentOf(db: Kysely<DB>, childId: string): Promise<string
   return row?.target_entity_id ?? null;
 }
 
-async function subtreeIds(db: Kysely<DB>, rootId: string): Promise<string[]> {
+export async function subtreeIds(db: Kysely<DB>, rootId: string): Promise<string[]> {
   const seen = new Set<string>([rootId]);
   let frontier = [rootId];
   let depth = 0;
@@ -76,6 +76,11 @@ async function subtreeIds(db: Kysely<DB>, rootId: string): Promise<string[]> {
     depth += 1;
   }
   return [...seen];
+}
+
+export async function assertNoPartOfCycle(db: Kysely<DB>, childId: string, parentId: string): Promise<void> {
+  if (childId === parentId) throw new ProjectBindingError("WOULD_CYCLE");
+  if ((await subtreeIds(db, childId)).includes(parentId)) throw new ProjectBindingError("WOULD_CYCLE");
 }
 
 export function createProjectBindingsService(db: Kysely<DB>) {
@@ -165,12 +170,11 @@ export function createProjectBindingsService(db: Kysely<DB>) {
     },
 
     async groupProject(parentId: string, childId: string): Promise<void> {
-      if (parentId === childId) throw new ProjectBindingError("WOULD_CYCLE");
       if (!(await isLiveProject(db, parentId)) || !(await isLiveProject(db, childId))) {
         throw new ProjectBindingError("NOT_A_PROJECT");
       }
       if ((await groupingParentOf(db, childId)) !== null) throw new ProjectBindingError("ALREADY_GROUPED");
-      if ((await subtreeIds(db, childId)).includes(parentId)) throw new ProjectBindingError("WOULD_CYCLE");
+      await assertNoPartOfCycle(db, childId, parentId);
       await sql`
         INSERT INTO entity_relationships
           (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)

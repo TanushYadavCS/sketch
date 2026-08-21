@@ -38,7 +38,25 @@ export type DuplicateDrainRunSnapshot = {
   aliasOnlyDropped: number;
 };
 
-export type GraphPassRunSnapshot = PostSyncRunSnapshot | QueueRunSnapshot | DuplicateDrainRunSnapshot;
+/**
+ * One project-minting pass, scoped to a single company cluster. Stage 3 calls a
+ * reasoning model per cluster, so the run is tracked rather than fired blind:
+ * the caller needs to know it is still going, and what it produced.
+ */
+export type ProjectMintingRunSnapshot = {
+  kind: "project_minting";
+  companyEntityId: string;
+  companyName: string;
+  model: string;
+  clustersConsidered: number;
+  verdictsStored: number;
+};
+
+export type GraphPassRunSnapshot =
+  | PostSyncRunSnapshot
+  | QueueRunSnapshot
+  | DuplicateDrainRunSnapshot
+  | ProjectMintingRunSnapshot;
 
 export interface GraphPassRun {
   id: string;
@@ -99,6 +117,16 @@ function parseSnapshot(value: unknown): GraphPassRunSnapshot {
       m5EmailVetoes: readNumber(parsed.m5EmailVetoes),
       aliasOnlyQueued: readNumber(parsed.aliasOnlyQueued),
       aliasOnlyDropped: readNumber(parsed.aliasOnlyDropped),
+    };
+  }
+  if (parsed?.kind === "project_minting") {
+    return {
+      kind: "project_minting",
+      companyEntityId: typeof parsed.companyEntityId === "string" ? parsed.companyEntityId : "",
+      companyName: typeof parsed.companyName === "string" ? parsed.companyName : "",
+      model: typeof parsed.model === "string" ? parsed.model : "",
+      clustersConsidered: readNumber(parsed.clustersConsidered),
+      verdictsStored: readNumber(parsed.verdictsStored),
     };
   }
   return {
@@ -239,6 +267,25 @@ export function createGraphPassRunRepository(db: Kysely<DB>) {
           status: "failed",
           finished_at: new Date().toISOString(),
           error_message: "interrupted by restart",
+        })
+        .where("id", "in", ids)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
+    async failUnfinishedProjectMintingRuns(): Promise<number> {
+      const unfinished = await db.selectFrom("graph_pass_runs").selectAll().where("status", "=", "running").execute();
+      const ownedKinds = new Set<GraphPassRunSnapshot["kind"]>(["project_minting"]);
+      const ids = unfinished
+        .filter((row) => ownedKinds.has(parseSnapshot(row.input_snapshot_json).kind))
+        .map((r) => r.id);
+      if (ids.length === 0) return 0;
+      const result = await db
+        .updateTable("graph_pass_runs")
+        .set({
+          status: "failed",
+          finished_at: new Date().toISOString(),
+          error_message: "project minting pass interrupted by restart",
         })
         .where("id", "in", ids)
         .executeTakeFirst();

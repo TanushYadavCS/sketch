@@ -209,7 +209,7 @@ export async function sweepCoMentionContributesTo(
         return { personEntityId, targetEntityId };
       });
   const directKeys = await directRelationshipKeys(db, pairValues);
-  const domainsRepo = createEntityDomainsRepository(db);
+  const domainsRepo = createEntityDomainsRepository(db, { logger });
   const keepEvidenceKeys = new Set<string>();
   const touchedManagedRelationshipIds = new Set<string>([...managed.values()].map((rel) => rel.id));
   let upsertedRelationships = 0;
@@ -228,6 +228,7 @@ export async function sweepCoMentionContributesTo(
       confidenceScore: confidenceScore(files.size),
       source: CO_MENTION_SOURCE,
     });
+    if (!relationshipId) continue;
     upsertedRelationships++;
     touchedManagedRelationshipIds.add(relationshipId);
     const note = noteForPair(pair);

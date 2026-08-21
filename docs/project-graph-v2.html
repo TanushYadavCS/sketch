@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project Graph v2 — entities are born from recurrence, not from one sighting</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  /* DESIGN TOKENS — change these, not the rules below. */
+  :root {
+    --ink:#14130e; --body:#33322a; --muted:#6f6e64; --faint:#8a8880;
+    --line:#e4e2da; --card:#faf9f6; --code:#f4f3ee; --page:#fff;
+    --bad:#8c2f1d; --ok:#2f5d3a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:"Inter",system-ui,sans-serif; background:var(--page); color:var(--body);
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+    max-width:880px; margin:0 auto; padding:56px 28px 120px;
+  }
+
+  h1 { font-size:30px; font-weight:700; color:var(--ink); letter-spacing:-.02em; line-height:1.2; }
+  .sub { color:var(--muted); font-size:16px; margin-top:10px; }
+  .meta { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); margin-top:14px; }
+
+  h2 { font-size:20px; font-weight:700; color:var(--ink); margin:52px 0 6px; letter-spacing:-.01em; }
+  h2 .n { font-family:"JetBrains Mono",monospace; font-size:14px; color:var(--faint); margin-right:10px; }
+  h3 { font-size:14px; font-weight:600; color:var(--ink); margin:22px 0 8px; }
+  p { margin:10px 0; font-size:15.5px; }
+  hr { border:0; border-top:1px solid var(--line); margin:0; }
+
+  .where { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--muted);
+           background:var(--code); border-radius:5px; padding:3px 8px; display:inline-block; margin-top:4px; }
+
+  .diagram { margin:36px 0 8px; border:1px solid var(--line); border-radius:12px; padding:26px 22px; background:var(--card); }
+  .blk { border:1px solid var(--line); background:var(--page); border-radius:9px; padding:13px 16px; display:flex; gap:14px; align-items:baseline; }
+  .blk .bn { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); flex:0 0 18px; }
+  .blk .bt { font-weight:600; color:var(--ink); font-size:15px; flex:0 0 190px; }
+  .blk .bd { font-size:13.5px; color:var(--muted); }
+  .blk.dead { opacity:.55; border-style:dashed; }
+  .arrow { text-align:center; color:var(--faint); font-size:15px; line-height:1; margin:5px 0; }
+  .arrow small { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.06em; margin-left:8px; color:var(--faint); }
+  .gap { height:14px; }
+  .lane { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.11em;
+          text-transform:uppercase; color:var(--faint); margin:16px 0 8px; }
+
+  pre { background:var(--code); border:1px solid var(--line); border-radius:8px; padding:15px 17px;
+        overflow-x:auto; font-family:"JetBrains Mono",monospace; font-size:12.5px; line-height:1.65;
+        color:var(--ink); margin:12px 0; white-space:pre; }
+  pre .c { color:var(--faint); }
+  pre .x { color:var(--bad); font-weight:500; }
+  code { font-family:"JetBrains Mono",monospace; font-size:13px; background:var(--code);
+         padding:1px 5px; border-radius:4px; color:var(--ink); }
+
+  .note { border-left:3px solid var(--ink); background:var(--card); padding:12px 16px;
+          border-radius:0 8px 8px 0; margin:16px 0; font-size:14.5px; }
+  .note b { color:var(--ink); }
+  .note.bad { border-left-color:var(--bad); }
+  .note.ok  { border-left-color:var(--ok); }
+
+  ul { margin:10px 0 10px 20px; } li { margin:5px 0; font-size:15px; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
+  td.k { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--ink); white-space:nowrap; }
+  td.z { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--bad); font-weight:500; }
+
+  .pr { border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; background:var(--card); }
+  .pr .t { font-weight:700; color:var(--ink); font-size:15.5px; }
+  .pr .s { font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--faint);
+           text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
+</style>
+</head>
+<body>
+
+<h1>Nothing becomes an entity from one sighting</h1>
+<p class="sub">Today a project is minted from a name that appeared in one file. 45 of the 78 live projects touch exactly one file. Project Graph v2 replaces that with one noun, two ways to be born, and a floor made of repeated evidence.</p>
+<p class="meta">sketch · packages/server/src/connectors · feat/project-minting-reconcile @ 2ca0c809</p>
+
+<div class="diagram">
+  <div class="lane">The loop — per container, weekly</div>
+  <div class="blk"><span class="bn">1</span><span class="bt">Partition</span><span class="bd">External containers claim files: attendee domain → dedicated channel → vocabulary match. What is left over is the internal pot.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">2</span><span class="bt">Extract, per file</span><span class="bd">One cheap call, primed with <em>accepted</em> vocabulary only. Known term → mention, alias or task update. Unknown term → an observation.</span></div>
+  <div class="arrow">↓ <small>unknown terms never create anything</small></div>
+  <div class="blk"><span class="bn">3</span><span class="bt">Pool</span><span class="bd">Observations land in <code>entity_review_queue</code> + evidence rows. That table already exists; no new one is added.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">4</span><span class="bt">Weekly pass</span><span class="bd">All SQL and rules: group pool rows by name token, apply the ≥3 distinct-day floor, test containment against existing project file sets, look for structural co-signals.</span></div>
+  <div class="arrow">↓ <small>below the floor stays pooled · ages out at 8 weeks</small></div>
+  <div class="blk"><span class="bn">5</span><span class="bt">One verdict call</span><span class="bd">Only what crossed the floor. The model answers one question per candidate: new, alias_of, or child_of. Votes for robustness.</span></div>
+  <div class="arrow">↓ <small>nothing is written yet</small></div>
+  <div class="blk"><span class="bn">6</span><span class="bt">Human accepts</span><span class="bd">The only gate in the system. Accepting writes the entities and the <code>part_of</code> edges.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">7</span><span class="bt">Retro-claim</span><span class="bd">Scan the accepted name and its aliases across all history: claim mentions and files, re-parent orphan tasks. Every claim writes an evidence row.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">8</span><span class="bt">Vocabulary grows</span><span class="bd">Accepted names and aliases prime the next extraction. Back to step 2. The pool is never used to prime.</span></div>
+
+  <div class="gap"></div>
+  <div class="lane">Two birth tiers, one gate</div>
+  <div class="blk"><span class="bn">9</span><span class="bt">Structural — fast</span><span class="bd">Repos, dedicated channels, recurring calendar series. Still gated on time: ≥2 distinct active months of sustained creation, which kills registers and bulk imports.</span></div>
+  <div class="arrow">↓ <small>both tiers land in the same accept queue</small></div>
+  <div class="blk"><span class="bn">10</span><span class="bt">Recurrence — slow</span><span class="bd">The pool and the floor above. Model calls scale with births, not with weeks.</span></div>
+
+  <div class="gap"></div>
+  <div class="lane">Paths that exist in the code and are deliberately off</div>
+  <div class="blk dead"><span class="bn">11</span><span class="bt">Teams from content</span><span class="bd">20 of 22 team entities came from this path and are phrase junk. The discovery tier is removed. Teams are declared or structural only.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk dead"><span class="bn">12</span><span class="bt">Container → project</span><span class="bd">333 ClickUp containers hold ~25 real projects. A container becomes a project only after per-container classification says so.</span></div>
+</div>
+<p style="font-size:14px;color:var(--muted)">There are no agents in this loop. Three single LLM calls in the steady state: per-file extraction, the weekly verdict, and one container classification per connection. Everything else is SQL and rules.</p>
+
+<hr style="margin-top:40px" />
+
+<h2><span class="n">01</span>What is in the graph today, and why it is wrong</h2>
+<p>Entities are minted per file, from a name. A model reads one file, sees a phrase that looks like a project, and a project entity exists. Nothing checks whether that phrase ever appeared again.</p>
+<p>The result is a graph of sightings wearing entity clothes.</p>
+<table>
+  <tr><th>Measure</th><th>Count</th><th>What it means</th></tr>
+  <tr><td>Projects touching exactly one file</td><td class="z">45 of 78</td><td>More than half the project list is a single observation.</td></tr>
+  <tr><td>Tasks with no parent</td><td class="z">1,127 of 1,373</td><td>The task graph is mostly flat.</td></tr>
+  <tr><td>Candidates that named a project</td><td class="z">0 of 1,123</td><td>The parent slot is wired end to end and has never carried a value.</td></tr>
+  <tr><td>Minted tasks left parentless</td><td class="z">714 of 714</td><td>Every model-minted task in this workspace.</td></tr>
+  <tr><td>Team entities inferred from phrases</td><td class="z">20 of 22</td><td>18 of them have zero members.</td></tr>
+</table>
+<p><span class="where">packages/server/src/connectors/task-minting.ts · mintTasksFromFile</span></p>
+
+<p>Three specific failures show the shape of the problem better than the totals do.</p>
+<ul>
+  <li><b>Habuild: the streams were right, the substructure was destroyed.</b> The stored verdict flattened <b>15 of 16 fragments into one project</b>. The two real streams were found; everything underneath them was lost.</li>
+  <li><b>Nutrition Analysis is one sub-project spread across four entities.</b> Four fragments, one file each, and nothing in the system joins them. They differ only by name tokens.</li>
+  <li><b>GCC Dashboard leaked in from another client.</b> It holds <b>2 of its 21 mentioning files</b> here — 10% — and was still offered as a Habuild fragment.</li>
+</ul>
+
+<div class="note bad"><b>Per-file birth is the root cause, not the model.</b> The same call that produced junk fragments also correctly identified both real Habuild streams. Asking it to be more careful will not fix a design where one sighting is sufficient evidence. The fix is to demote per-file extraction output to <em>observations</em> and make recurrence the birth condition.</div>
+
+<h2><span class="n">02</span>Two engagement shapes, and one number that tells them apart</h2>
+<p>Real client engagements come in two shapes, and they need different machinery.</p>
+<p><b>Habuild-shaped: the structure is in the calendar.</b> Different workstreams have different meeting titles. Grouping files by title family found the two real streams on its own. No content reading was needed to see the shape.</p>
+<p><b>Redseer-shaped: the structure is inside the transcripts.</b> One standup family holds <b>138 of 142 files</b>. The calendar says there is one thing happening. There are at least six.</p>
+<p>The detector is a single number: what share of the container's files sit in the top title family.</p>
+<table>
+  <tr><th>Container</th><th>Top family share</th><th>Where the structure lives</th></tr>
+  <tr><td>Habuild</td><td class="k">26%</td><td>Title families. Read the calendar.</td></tr>
+  <tr><td>Redseer</td><td class="k">97%</td><td>Transcript content. The calendar is one recurring standup.</td></tr>
+</table>
+<p>A high share means the calendar has stopped carrying information. That is the signal to go looking inside the text.</p>
+
+<h2><span class="n">03</span>The instrument: token recurrence, validated on Redseer</h2>
+<p>Lead with the result. <b>A word-boundary token scan over file content, counting distinct days, separated six real workstreams from five junk fragments on the first attempt, with no tuning.</b></p>
+<p>For each candidate name, take its distinctive tokens, run a word-boundary regex over the content of every file in the container, and count how many <em>distinct days</em> the token appears on. Not how many files — days.</p>
+<table>
+  <tr><th>Candidate</th><th>Distinct days</th><th>Verdict</th></tr>
+  <tr><td>CDD</td><td class="k">34</td><td>Real workstream.</td></tr>
+  <tr><td>Benchmarks</td><td class="k">36 <span style="color:var(--faint)">(39 files)</span></td><td>Real — and missed by every other signal.</td></tr>
+  <tr><td>multimetric</td><td class="k">11</td><td>Real.</td></tr>
+  <tr><td>Investor Health Report</td><td class="k">6</td><td>Real.</td></tr>
+  <tr><td>Pulumi</td><td class="k">3</td><td>Real, right at the floor.</td></tr>
+  <tr><td>model replacement</td><td class="k">3</td><td>Real, right at the floor.</td></tr>
+  <tr><td>Five junk fragments</td><td class="z">1</td><td>All five sit on exactly one day.</td></tr>
+  <tr><td>Negative control term</td><td class="z">0</td><td>Never appears. The scan is not matching noise.</td></tr>
+</table>
+<p><b>The floor is ≥3 distinct days.</b> That threshold was not tuned. It is where the gap in the data already was: real candidates at 3 and above, junk at 1.</p>
+
+<div class="note ok"><b>Benchmarks is the result that validates the instrument.</b> 39 files across 36 days, and it was missed by the user's own ground-truth list, by the extraction pipeline, and by title families. The scan surfaced it, and the user then confirmed it is real work. An instrument that only reproduces what you already knew is not worth building.</div>
+
+<p>This is also why candidates must be ranked on scan counts rather than on stored <code>entity_mentions</code>. <b>Stored mentions undercount by 5–6×</b> against what the scan finds in the same corpus. Ranking on mentions puts real workstreams below junk.</p>
+<p><span class="where">packages/server/src/connectors/project-minting.ts · buildClusterDossier</span></p>
+
+<div class="note bad"><b>The scan is blind to date-named milestones.</b> "September 9th Release" is a real thing that recurs in conversation, and the scan gives it 1 distinct day — because the phrase names a date rather than a topic, so it stops being said once the date passes. Lexical recurrence cannot see it. This is documented and unsolved, not quietly assumed away. It is explicitly out of scope for these seven PRs.</div>
+
+<h2><span class="n">04</span>The tracker is not the project list</h2>
+<p>Habuild's ClickUp was synced mid-cycle: <b>10,639 tickets in 333 containers</b>. The tempting move is to treat containers as projects. That would mint <b>13× too many</b> — there are roughly 25 real projects in there.</p>
+<table>
+  <tr><th>Finding</th><th>Count</th><th>Consequence</th></tr>
+  <tr><td>Containers</td><td class="k">333</td><td>Against ~25 real projects.</td></tr>
+  <tr><td>Folders carrying project density</td><td class="k">44%</td><td>Only folders. Spaces are departments, not projects.</td></tr>
+  <tr><td>Sprint lists</td><td class="k">62</td><td>Cycles, not projects.</td></tr>
+  <tr><td>Backlogs</td><td class="k">47</td><td>Status buckets.</td></tr>
+  <tr><td>Person queues</td><td class="k">48</td><td>One list per human.</td></tr>
+  <tr><td>CRM registers</td><td class="k">20</td><td>1,266 tickets whose titles are people and company names.</td></tr>
+  <tr><td>Timesheet diary rows</td><td class="k">~1,600</td><td>Diary entries, not tasks.</td></tr>
+  <tr><td>Container names echoed in conversation</td><td class="z">7 of 195</td><td>And all seven are team names, not project names.</td></tr>
+</table>
+<p>That last row is the important one. <b>Tracker vocabulary and conversation vocabulary are two separate universes.</b> People do not say the names of their ClickUp folders out loud. So the tracker contributes tickets, assignees and cycles — it does not contribute project identity.</p>
+<p>It also means <b>not every ticket is a task</b>. The 1,266 register rows are entities wearing ticket titles. The ~1,600 timesheet rows are what someone did on a Tuesday. Importing them as tasks pollutes the task graph with 2,800+ rows that nobody will ever complete.</p>
+
+<div class="note"><b>"21 Day Challenge" is a program with monthly cohorts, not a project per month.</b> One standing program project, plus cycle rows for the instances. The classification call is what tells these apart: names and sampled titles carry the class, and first/last ticket dates settle whether something is a project or a repeating pod. The user confirmed the cadence read, which is what validates the program/cycle distinction.</div>
+<p><span class="where">packages/server/src/connectors/clickup.ts · hierarchy mapping · scope_config</span></p>
+
+<h2><span class="n">05</span>The design, stated as rules</h2>
+<p>Every rule below exists because of a number above.</p>
+
+<h3>One noun</h3>
+<p><b>There is one entity concept: <code>project</code>.</b> It nests into itself through <code>part_of</code>, to any depth. Depth is not capped in the schema — it is whatever the evidence supports. The <code>engagement</code> concept is gone: an account container is just a top-level project. Internal versus external is an attribute on the project, not a different mechanism.</p>
+<p>Orphan tasks stay a legitimate category. Not everything has a parent, and forcing one is how you get wrong parents.</p>
+
+<h3>Two birth tiers, one accept gate</h3>
+<p><b>Structural births are fast but still time-gated.</b> A repo, a dedicated channel, a recurring calendar series can birth a project quickly — but only with ≥2 distinct active months of sustained creation. That gate is what stops a bulk import from minting a hundred projects on one day.</p>
+<p><b>Tracker containers are not structural births.</b> They only birth after per-container classification, for the reasons in section 04.</p>
+<p><b>Recurrence births are slow.</b> The pool, the ≥3-distinct-day floor, then one verdict call. Both tiers end at the same place: a human accepting.</p>
+
+<h3>Parent is a lookup, not a model output</h3>
+<p>The model was asked to name a project parent 1,123 times and did it zero times. So stop asking. <b>The parent is resolved by a ladder:</b> vocabulary-tagged project first, then the owning project of the source file, then orphan. No forced parenting at the bottom of the ladder.</p>
+
+<h3>Task updates carry evidence</h3>
+<p>Today a re-mention of an existing task can only become a second task, because collation requires byte-identical titles. In v2 a candidate may come back as <code>updateOf: &lt;taskId&gt;</code>. That appends a <code>task_evidence</code> row and writes a <code>task_activity_events</code> row — never a second task.</p>
+<p>Tracker-owned tasks accept evidence but not status overwrites. <code>status_authority='external'</code> means the tracker wins on status, and Sketch only adds what it saw.</p>
+
+<h3>Teams are declared, products stand, internal is the residual</h3>
+<ul>
+  <li><b>Teams:</b> declared or structural only. Content-birth removed entirely — it produced 20 of 22 junk entities.</li>
+  <li><b>Products:</b> the 4 live products become standing top-level internal projects. Internal structural births attach underneath them.</li>
+  <li><b>Internal pot:</b> defined as the residual after external containers finish claiming. There is no org entity to own it. The internal weekly pass runs the same code with a stricter gate — the ≥3-day floor <em>plus</em> a structural co-signal — because the internal corpus is the noisiest measured (1,325 own-org files for a single person).</li>
+</ul>
+
+<h3>Existing clients are live, so everything is additive</h3>
+<table>
+  <tr><th>Contract</th><th>What it guarantees</th></tr>
+  <tr><td>Additive schema only</td><td>No column drops, no relation renames. <code>engagement_for</code> keeps its name; only the entity subtype <code>engagement</code> stops being written. The migration nulls existing subtype rows — the field has zero readers, verified.</td></tr>
+  <tr><td>Stored verdicts stay reviewable</td><td><code>readClusterVerdict</code> treats absent <code>parentName</code> / <code>evidenceFragments</code> as null and empty. The 4 live pending rows parse unchanged.</td></tr>
+  <tr><td>Declarations untouched</td><td><code>company_relationship_declarations</code> and <code>resolveDeclaration</code> precedence are unchanged.</td></tr>
+  <tr><td>No forced re-mint</td><td>Re-running a company is per-container and human-triggered. Retro-claim heals history one accept at a time.</td></tr>
+  <tr><td>Backfill is replay, opt-in</td><td>Same weekly-pass code with the clock set to file-time weeks. Never runs implicitly against a live tenant.</td></tr>
+</table>
+<p><span class="where">packages/server/src/connectors/project-minting-acceptance.ts · readClusterVerdict</span></p>
+<p>This is also the cleanup path. The 1,127 orphan tasks and the 45 one-file projects are not purged — they enter the candidate pool as fragments and get grouped or merged through review.</p>
+
+<h2><span class="n">06</span>Four live bugs that get fixed first</h2>
+<p>These are not hypothetical. All four were found while planning, in code that runs today. They ship as PR-1 because the later work makes each of them worse.</p>
+
+<h3>1. Merging an entity leaves its tasks pointing at a tombstone</h3>
+<p><span class="where">packages/server/src/entities/merge.ts:710 · applyMergeMoves</span></p>
+<pre>await repointSourceRefs(db, loserId, survivorId, moves);
+await repointMentions(db, loserId, survivorId, moves);
+await repointRelationships(db, loserId, survivorId, moves);
+<span class="c">/* … eight more repoint calls … */</span>
+await repointReviewQueue(db, loserId, survivorId, moves);
+<span class="x">// nothing repoints tasks.parent_entity_id, tasks.assignee_entity_id, or task_evidence</span></pre>
+<p>Eleven tables get repointed to the survivor. The task tables are not among them. <b>The accept path merges fragments, so this fires in normal use: accepted merges leave tasks pointing at dead entities today.</b> Recursive parents would multiply it.</p>
+
+<h3>2. Cycle guards only cover one writer</h3>
+<p><span class="where">packages/server/src/entities/project-bindings.ts:168 · groupProject</span></p>
+<p>The subtree and self-parent checks exist, and they are good — but only on the <code>source='user_grouping'</code> path. Acceptance writes <code>part_of</code> edges without them. That is tolerable while nesting is one level deep. It is not tolerable once parents are recursive, which is the whole point of PR-2. The check gets extracted and applied to every <code>part_of</code> writer.</p>
+
+<h3>3. Minting runs deserialize as something else</h3>
+<p><span class="where">packages/server/src/db/repositories/graph-pass-runs.ts:89 · parseSnapshot</span></p>
+<p>There is no <code>project_minting</code> branch. Rows written before queue runs existed carry no <code>kind</code>, so the parser treats an unrecognised discriminant as <code>post_sync</code>. Minting runs therefore leak into <code>getRunning</code> and <code>restoreUnfinished</code>, and <b>a crashed minting run never closes</b>. PR-4 adds a <code>weekly_mint</code> kind, so this must be fixed before it.</p>
+
+<h3>4. The 100-ticket cap is ours, not ClickUp's</h3>
+<p><span class="where">packages/server/src/connectors/clickup.ts:934 · list task fetch</span></p>
+<pre>let url = `/list/${listId}/task?include_subtasks=true&amp;subtasks=true&amp;include_closed=true`;
+if (sinceMs) url += `&amp;date_updated_gt=${sinceMs}`;
+const tasksRes = (await clickupRequest(url, token, logger)) as { tasks: ClickUpTask[] };
+<span class="x">// one page, ever — no page param, last_page never read</span></pre>
+<p>One request per list, first page only. Any list with more than 100 tickets is silently truncated. The same PR also records <code>space_id</code> / <code>folder_id</code> / <code>list_id</code> as structured fields, because today a folder and a folderless list are indistinguishable at segment 3 of <code>source_path</code> — and container classification needs to tell them apart.</p>
+
+<div class="note bad"><b>Say this part plainly: the tombstone bug is corrupting data right now.</b> It is not a latent risk in the new design. Every fragment merge accepted so far has left task rows pointing at a merged-away entity.</div>
+
+<h2><span class="n">07</span>Seven PRs, in order</h2>
+<p>PR-1 → PR-2 → PR-3 → PR-4, then PR-5, PR-6 and PR-7 in any order. Each ships independently.</p>
+
+<div class="pr">
+  <div class="s">PR-1 · ships first</div>
+  <div class="t">Fix the four defects above before anything amplifies them.</div>
+  <p style="margin:6px 0 0">Repoint tasks on merge, extract the cycle guard, add the <code>project_minting</code> snapshot branch, paginate ClickUp.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-2 · gated on an experiment</div>
+  <div class="t">One-noun verdict: recursive parents and fragment evidence.</div>
+  <p style="margin:6px 0 0">Dossier gets a global ownership filter (a fragment appears only in the cluster holding ≥0.5 of its mentioning files — this is what removes GCC Dashboard), name-token grouping, and a "candidate workstreams" section with a floor of ≥2 fragments or ≥3 distinct files. The verdict schema gains <code>parentName</code> and <code>evidenceFragments</code>. <b>No code until the experiment passes:</b> hand-edit the stored Habuild dossier, run the existing call 3–5×, and require Nutrition to come back as one child with 4 merges, Langgraph to survive, GCC to be absent, and the two streams to be unchanged. Then repeat on Oliver Wyman to check the candidate count does not explode.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-3</div>
+  <div class="t">The recurrence scan, plus retro-claim at accept.</div>
+  <p style="margin:6px 0 0">Ships the instrument from section 03 and uses it to rank candidates. On accept, the scan claims history: mentions, files, and orphan tasks re-parented with evidence. Window starts are recorded as "active since at least" — connector history usually begins mid-assignment. Redseer's Fireflies data starts 4 months in, so a first-file date is not a start date.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-4</div>
+  <div class="t">The weekly pass and the staging pool.</div>
+  <p style="margin:6px 0 0">Pool is the existing review queue. Service cloned from the <code>user-entity-link-sweep</code> pattern: 7-day interval, 30-minute lease with heartbeat, durable run rows. Gated by <code>WEEKLY_MINT_MODE</code> (off / shadow / live, default off) — shadow runs every deterministic stage and logs the calls it would have made, before any spend. Unmatched candidates age out after 8 weeks.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-5</div>
+  <div class="t">Container classification, and a gate on which tickets become tasks.</div>
+  <p style="margin:6px 0 0">One classification call per connection over the whole tree. Targets grow from <code>team|project|sprint|ignore</code> to nine classes including <code>program</code>, <code>cycle</code>, <code>register</code> and <code>person_queue</code>. Registers and person queues produce indexed files and <b>zero tasks</b>. Low confidence means <code>ignore</code> plus a flag, never a guess. Shape outranks name; a conflict is flagged, not resolved silently.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-6</div>
+  <div class="t">Task minting that knows what it already minted.</div>
+  <p style="margin:6px 0 0">The existing-tasks block gains id, parent and source, so a Linear task and an LLM task stop looking identical to the model. <code>updateOf</code> appends evidence and an event instead of a duplicate row. A mechanical dedup rung runs before the model can call something new. Task creation finally writes a <code>created</code> event — minted tasks have no provenance trail today.</p>
+</div>
+<div class="pr">
+  <div class="s">PR-7</div>
+  <div class="t">The internal pot and standing products.</div>
+  <p style="margin:6px 0 0">Partition order codified. Products seeded as standing top-level internal projects. The internal pass needs the floor <em>and</em> a structural co-signal. Includes the sales-leak regression test: a call about our own product with prospect attendees is claimed by the prospect's container and writes nothing — the "an opportunity is not a project" scar, now enforced by a test.</p>
+</div>
+
+<h2><span class="n">08</span>Where this stands</h2>
+<ul>
+  <li><b>This is a plan, not shipped code.</b> Nothing in sections 05 to 07 exists yet. Sections 01 to 04 are measurements on the dev corpus: 3,801 files plus 10,639 ClickUp tickets synced mid-cycle.</li>
+  <li><b>PR-2 has a hard gate in front of it.</b> The hand-edited dossier experiment runs first, with no code written. If Nutrition does not collapse into one child, the design assumption is wrong and the plan changes.</li>
+  <li><b>The floor is the tuning knob, not the prompt.</b> The main risk is over-minting children from a pre-chewed candidate list that a reviewer rubber-stamps. If that happens, move the floor.</li>
+  <li><b>Cost is bounded by construction.</b> Calls scale with births, not with weeks, and shadow mode measures the spend before it happens.</li>
+</ul>
+<h3>Out of scope, deliberately</h3>
+<ul>
+  <li>Re-minting the existing 78 projects wholesale — retro-claim and review absorb them incrementally.</li>
+  <li>Date-named milestone detection — the documented blind spot from section 03.</li>
+  <li><code>work_cycles</code> read surfaces. The write path lands in PR-5; nothing reads it yet.</li>
+  <li>Purging the junk teams. That is manual review-UI work, not code.</li>
+  <li>Embedding-based fragment joining. Lexical grouping first; embeddings only if real corpora show non-lexical variants.</li>
+</ul>
+
+<p class="meta" style="margin-top:38px">Full detail: .planning/projects/to-be-developed/PROJECT_GRAPH_V2.md · Related: docs/minting-pipelines.html (the pipelines this replaces)</p>
+
+</body>
+</html>

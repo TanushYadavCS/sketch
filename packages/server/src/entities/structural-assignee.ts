@@ -262,7 +262,7 @@ export async function reconcileStructuralAssigneeContributesTo(
         const [personEntityId, targetEntityId] = key.split("\u0000");
         return { personEntityId, targetEntityId };
       });
-  const domainsRepo = createEntityDomainsRepository(db);
+  const domainsRepo = createEntityDomainsRepository(db, { logger });
   const keepEvidenceKeys = new Set<string>();
   const touchedManagedRelationshipIds = new Set<string>([...managed.values()].map((rel) => rel.id));
   const upsertedRelationshipIds = new Set<string>();
@@ -281,6 +281,7 @@ export async function reconcileStructuralAssigneeContributesTo(
       source: STRUCTURAL_ASSIGNEE_SOURCE,
       validFrom: "",
     });
+    if (!relationshipId) continue;
     upsertedRelationships++;
     touchedManagedRelationshipIds.add(relationshipId);
     upsertedRelationshipIds.add(relationshipId);

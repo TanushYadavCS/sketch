@@ -152,6 +152,7 @@ export interface IndexedFilesTable {
   summary: string | null;
   source: string;
   source_path: string | null;
+  source_meta: string | null;
   rollup_group_id: string | null;
   content_hash: string | null;
   is_archived: Generated<number>;

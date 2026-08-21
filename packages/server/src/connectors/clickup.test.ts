@@ -12,6 +12,7 @@ import {
   detectSprintCycle,
   resolveListCycle,
 } from "./clickup";
+import type { SyncedItem } from "./types";
 
 const sprintsEnabledSpace: ClickUpSpace = {
   id: "space-design",
@@ -264,5 +265,77 @@ describe("ClickUp refreshTokens expiry check", () => {
     expect(result).not.toBeNull();
     expect(result?.access_token).toBe("new-token");
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+});
+
+function clickupTask(id: string) {
+  return {
+    id,
+    name: `Task ${id}`,
+    description: "",
+    status: { status: "Open", type: "open" },
+    priority: null,
+    assignees: [],
+    tags: [],
+    date_created: "1785603600000",
+    date_updated: "1785603600000",
+    due_date: null,
+    url: `https://app.clickup.com/t/${id}`,
+    list: { id: "list-folderless", name: "Delivery" },
+    space: { id: "space-alpha" },
+  };
+}
+
+describe("ClickUp task pagination", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("emits all task pages with container source metadata for folderless lists", async () => {
+    const page0 = Array.from({ length: 100 }, (_, index) => clickupTask(`task-${index}`));
+    const page1 = Array.from({ length: 5 }, (_, index) => clickupTask(`task-extra-${index}`));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/team")) {
+        return new Response(JSON.stringify({ teams: [{ id: "workspace-alpha", name: "Workspace", members: [] }] }));
+      }
+      if (url.endsWith("/team/workspace-alpha/space")) {
+        return new Response(JSON.stringify({ spaces: [{ id: "space-alpha", name: "Space", private: false }] }));
+      }
+      if (url.endsWith("/space/space-alpha/folder")) {
+        return new Response(JSON.stringify({ folders: [] }));
+      }
+      if (url.endsWith("/space/space-alpha/list")) {
+        return new Response(JSON.stringify({ lists: [{ id: "list-folderless", name: "Delivery" }] }));
+      }
+      if (url.includes("/list/list-folderless/task") && url.includes("page=0")) {
+        return new Response(JSON.stringify({ tasks: page0, last_page: false }));
+      }
+      if (url.includes("/list/list-folderless/task") && url.includes("page=1")) {
+        return new Response(JSON.stringify({ tasks: page1, last_page: true }));
+      }
+      if (url.endsWith("/workspaces/workspace-alpha/docs")) {
+        return new Response(JSON.stringify({ docs: [] }));
+      }
+      return new Response("unexpected", { status: 404 });
+    });
+
+    const connector = createClickUpConnector();
+    const items: SyncedItem[] = [];
+    for await (const item of connector.sync({
+      credentials: { type: "api_key", api_key: "token" },
+      scopeConfig: { spaces: ["space-alpha"] },
+      cursor: null,
+      logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+    })) {
+      items.push(item);
+    }
+
+    expect(items).toHaveLength(105);
+    expect(items.every((item) => item.sourceMeta?.spaceId === "space-alpha")).toBe(true);
+    expect(items.every((item) => item.sourceMeta?.listId === "list-folderless")).toBe(true);
+    expect(items.every((item) => !Object.hasOwn(item.sourceMeta ?? {}, "folderId"))).toBe(true);
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("page=0"))).toBe(true);
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("page=1"))).toBe(true);
   });
 });

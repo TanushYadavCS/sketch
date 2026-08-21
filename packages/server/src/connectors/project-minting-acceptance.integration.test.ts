@@ -704,7 +704,249 @@ describe("project minting verdict acceptance", () => {
     expect(pilotFilesByName.get("Alpha rollout")).toHaveLength(4);
     expect(pilotFilesByName.get("Beta migration")).toHaveLength(2);
   });
+
+  /**
+   * The dossier prints a person as `Name <email>`, so that is the only string
+   * the model can echo back. Accept-time resolution used to key on the bare
+   * `subject_name`, which made every person anchor miss and refused the whole
+   * verdict — the failure seen on the real Getepik cluster, where 11 of 12
+   * anchor errors were person anchors.
+   */
+  it("resolves a person anchor written the way the dossier printed it", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchorname", "anchorname.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Platform rebuild sync",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Platform rebuild progress.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Gotama", "gotama@anchorname.example");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Platform rebuild",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: [],
+            evidenceRepos: [],
+            evidencePeople: ["Gotama <gotama@anchorname.example>"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as { acceptance: { entities: { name: string; fileIds: string[] }[] } };
+    expect(res.status).toBe(200);
+    expect(body.acceptance.entities.find((entity) => entity.name === "Platform rebuild")?.fileIds).toHaveLength(4);
+  });
+
+  /**
+   * The dossier gathers people from PERSON_PARTICIPANT_FACT_TYPES — attendee
+   * and correspondent. Accept-time resolution used a different, hand-written
+   * list that omitted `correspondent`, so anyone known only from email was
+   * absent from the anchor map entirely, in whatever form the model wrote them.
+   */
+  it("resolves a person anchor for someone known only from email correspondence", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchormail", "anchormail.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Invoice thread",
+        source: "gmail",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Billing thread.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Harsh T", "harsh.t@anchormail.example", "correspondent");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Billing cleanup",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: [],
+            evidenceRepos: [],
+            evidencePeople: ["Harsh T <harsh.t@anchormail.example>"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as { acceptance: { entities: { name: string; fileIds: string[] }[] } };
+    expect(res.status).toBe(200);
+    expect(body.acceptance.entities.find((entity) => entity.name === "Billing cleanup")?.fileIds).toHaveLength(4);
+  });
+  /**
+   * The Getepik failure: one paraphrased title family among eight good ones
+   * refused the whole verdict, and the only way out was reject and re-run.
+   * A miss is now a warning — the anchors that resolved still mint.
+   */
+  it("mints on the anchors that resolved and reports the ones that did not", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchorpartial", "anchorpartial.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Platform rebuild sync",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Platform rebuild progress.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@anchorpartial.example");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Platform rebuild",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Platform rebuild sync", "Platform rebuild"],
+            evidenceRepos: [],
+            evidencePeople: [],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as {
+      acceptance: { entities: { name: string; fileIds: string[] }[]; unresolvedAnchors: string[] };
+    };
+    expect(res.status).toBe(200);
+    expect(body.acceptance.entities.find((entity) => entity.name === "Platform rebuild")?.fileIds).toHaveLength(4);
+    expect(body.acceptance.unresolvedAnchors).toEqual([
+      'title family "Platform rebuild" on project "Platform rebuild"',
+    ]);
+  });
+
+  /**
+   * The one case still worth refusing. Nothing ties the project to the corpus,
+   * so minting it would create an entity on no evidence at all.
+   */
+  it("still refuses a project whose every anchor missed", async () => {
+    const connectorId = await seedConnector(db);
+    const companyId = await seedCompany(db, "Anchorgroundless", "anchorgroundless.example");
+    for (const day of ["01", "02", "03", "04"]) {
+      const fileId = await seedFile(db, connectorId, {
+        fileName: "Platform rebuild sync",
+        source: "fireflies",
+        date: `2026-08-${day}T09:00:00Z`,
+        content: "Platform rebuild progress.",
+      });
+      await seedAttendee(db, connectorId, fileId, "Dana Lead", "dana@anchorgroundless.example");
+    }
+    await createCompanyRelationshipDeclarationRepository(db).declare({
+      subjectEntityId: companyId,
+      counterpartyKind: "client",
+      clientStage: "pilot",
+    });
+
+    const verdictId = await storeVerdictFor(db, logger, () =>
+      readClusterVerdict({
+        counterpartyKind: "client",
+        clientStage: "pilot",
+        engagement: null,
+        projects: [
+          {
+            name: "Invented workstream",
+            status: "active",
+            confidence: "high",
+            evidenceTitleFamilies: ["Nothing like this exists"],
+            evidenceRepos: [],
+            evidencePeople: ["Nobody <nobody@elsewhere.example>"],
+          },
+        ],
+        existingEntities: [],
+        trackerFit: "no_containers",
+        notes: [],
+      }),
+    );
+
+    const res = await app.request(`/api/project-minting/verdicts/${verdictId}/acceptance`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(acceptanceBody("client", "pilot")),
+    });
+    const body = (await res.json()) as { error: { code: string; details: { projects: string[] } } };
+    expect(res.status).toBe(400);
+    expect(body.error.code).toBe("ANCHOR_NOT_FOUND");
+    expect(body.error.details.projects).toEqual(["Invented workstream"]);
+    const written = await db.selectFrom("entities").select("id").where("name", "=", "Invented workstream").execute();
+    expect(written).toHaveLength(0);
+  });
 });
+
+/** Runs the pass with a canned verdict and returns the id of the single row it stored. */
+async function storeVerdictFor(
+  db: Kysely<DB>,
+  passLogger: typeof logger,
+  resolve: () => ClusterVerdict,
+): Promise<string> {
+  await runProjectMintingPass({
+    db,
+    logger: passLogger,
+    generator: generatorFor(resolve),
+    model: "test/reasoning-model",
+  });
+  const rows = await db.selectFrom("project_minting_verdicts").selectAll().where("status", "=", "pending").execute();
+  if (rows.length !== 1) throw new Error(`expected exactly one pending verdict, got ${rows.length}`);
+  return rows[0].id;
+}
 
 function acceptanceBody(
   kind: "client" | "partner" | "vendor" | "investor" | "other",
@@ -879,7 +1121,14 @@ async function seedFile(
   return id;
 }
 
-async function seedAttendee(db: Kysely<DB>, connectorId: string, fileId: string, name: string, email: string) {
+async function seedAttendee(
+  db: Kysely<DB>,
+  connectorId: string,
+  fileId: string,
+  name: string,
+  email: string,
+  factType: "attendee" | "correspondent" = "attendee",
+) {
   await db
     .insertInto("indexed_file_facts")
     .values({
@@ -888,15 +1137,15 @@ async function seedAttendee(db: Kysely<DB>, connectorId: string, fileId: string,
       connector_config_id: connectorId,
       created_by_user_id: null,
       source: "test",
-      fact_type: "attendee",
-      relation: "attended",
+      fact_type: factType,
+      relation: factType === "attendee" ? "attended" : "corresponded",
       subject_name: name,
       subject_email: email,
       subject_source: null,
       subject_source_id: null,
       context_snippet: null,
       raw: null,
-      fact_key: `${fileId}:attendee:${email}`,
+      fact_key: `${fileId}:${factType}:${email}`,
       last_seen_sync_run_id: null,
       deleted_at: null,
       content_hash: null,

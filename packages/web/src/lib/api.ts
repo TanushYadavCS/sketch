@@ -428,6 +428,108 @@ export interface SetupStatus {
   managedUrl?: string;
 }
 
+export type CounterpartyKind = "client" | "vendor" | "investor" | "partner" | "other";
+export type ClientStage = "prospect" | "pilot" | "active" | "dormant" | "ended";
+
+export interface ProjectMintingProject {
+  name: string;
+  status: "proposed" | "active" | "delivered" | "lost";
+  confidence: "high" | "medium" | "low";
+  evidenceTitleFamilies: string[];
+  evidenceRepos: string[];
+  evidencePeople: string[];
+  reasoning?: string;
+}
+
+export interface ProjectMintingDisposition {
+  entityId: string;
+  name: string;
+  disposition: "canonical" | "merge_into";
+  mergeInto?: string;
+  reasoning?: string;
+}
+
+/**
+ * One cluster's pending verdict. `counterpartyKind`/`clientStage` are the
+ * model's *nomination*; `declaredCounterpartyKind`/`declaredClientStage` are
+ * what the registry said when the verdict was generated. The reviewer's own
+ * answer is neither — it is sent as the confirmed axes on accept.
+ */
+export interface ProjectMintingVerdict {
+  id: string;
+  companyEntityId: string;
+  companyName: string;
+  fileCount: number;
+  counterpartyKind: CounterpartyKind | null;
+  clientStage: ClientStage | null;
+  declaredCounterpartyKind: CounterpartyKind | null;
+  declaredClientStage: ClientStage | null;
+  flags: string[];
+  voteStats: unknown;
+  verdict: {
+    counterpartyKind: CounterpartyKind;
+    clientStage: ClientStage | null;
+    engagement: { name: string; summary?: string } | null;
+    projects: ProjectMintingProject[];
+    existingEntities: ProjectMintingDisposition[];
+    trackerFit: string;
+    notes: string[];
+  };
+  dossier?: string;
+  status: string;
+  supersededAt: string | null;
+  decidedAt: string | null;
+  struckProjects: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectMintingCluster {
+  companyEntityId: string;
+  companyName: string;
+  fileCount: number;
+  triggered: boolean;
+  shardNames: string[];
+  channels: string[];
+  signals: string[];
+  /** Set when this cluster already has a verdict waiting, so the UI does not invite a second paid run. */
+  pendingVerdictId: string | null;
+}
+
+export interface ProjectMintingPassRun {
+  id: string;
+  status: "running" | "complete" | "failed";
+  startedAt: string;
+  finishedAt: string | null;
+  errorMessage: string | null;
+  snapshot: { kind: string; companyName?: string; verdictsStored?: number } | null;
+}
+
+export interface ProjectMintingAcceptBody {
+  confirmedCounterpartyKind: CounterpartyKind;
+  confirmedClientStage?: ClientStage;
+  struckProjectNames?: string[];
+  renameMap?: Record<string, string>;
+  overrideTripwireFlags?: boolean;
+}
+
+export interface ProjectMintingAcceptance {
+  verdictId: string;
+  entityIds: { engagementId: string | null; projectIds: string[] };
+  entities: { id: string; name: string; kind: "engagement" | "project"; fileIds: string[] }[];
+  mergeIds: string[];
+  struckProjects: string[];
+  droppedByGate: {
+    engagement: string | null;
+    projects: string[];
+    unmergedFragments: { entityId: string; intoName: string }[];
+  };
+  /** Anchors that matched nothing. The accept still went through on the ones that did. Absent on older stored results. */
+  unresolvedAnchors?: string[];
+  declaration: { subjectEntityId: string; counterpartyKind: CounterpartyKind; clientStage: ClientStage | null };
+  taskParentUpdates: number;
+}
+
 export interface EntityReviewQueueRow {
   id: string;
   proposed_name: string;
@@ -3540,6 +3642,37 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       });
+    },
+  },
+  projectMinting: {
+    listVerdicts() {
+      return request<{ verdicts: ProjectMintingVerdict[] }>("/api/project-minting/verdicts");
+    },
+    getVerdict(id: string) {
+      return request<{ verdict: ProjectMintingVerdict }>(`/api/project-minting/verdicts/${id}`);
+    },
+    accept(id: string, body: ProjectMintingAcceptBody) {
+      return request<{ acceptance: ProjectMintingAcceptance }>(`/api/project-minting/verdicts/${id}/acceptance`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    reject(id: string) {
+      return request<{ verdict: ProjectMintingVerdict }>(`/api/project-minting/verdicts/${id}/rejection`, {
+        method: "POST",
+      });
+    },
+    listClusters() {
+      return request<{ clusters: ProjectMintingCluster[]; passesEnabled: boolean }>("/api/project-minting/clusters");
+    },
+    startPass(companyEntityId: string) {
+      return request<{ run: { id: string; status: string; companyName: string; model: string } }>(
+        "/api/project-minting/passes",
+        { method: "POST", body: JSON.stringify({ companyEntityId }) },
+      );
+    },
+    getPass(id: string) {
+      return request<{ run: ProjectMintingPassRun }>(`/api/project-minting/passes/${id}`);
     },
   },
   entityReview: {
