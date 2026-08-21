@@ -27,7 +27,12 @@ import type { ScheduledTasksTable } from "../db/schema";
 import { parseOnceSchedule } from "../scheduler/parse-once";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import { resolveWorkflowDelivery } from "../workflows/delivery";
-import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "./action-script";
+import {
+  hasInvalidAutomationSketchToolNamespace,
+  referencesAutomationIntegrationAction,
+  referencesRawCanvasCli,
+  undeclaredAutomationSketchTools,
+} from "./action-script";
 import { buildNativeWebhookUrl } from "./webhook-endpoints";
 
 export type BuilderValidationIssue = { code: string; message: string; path?: string };
@@ -629,6 +634,24 @@ export function validateAutomationBuilderSaveRequest(params: {
         );
       }
       if (content?.contentType === "script") {
+        if (step.actionCapabilities?.usesIntegrationActions === true && referencesRawCanvasCli(content.content)) {
+          addIssue(
+            issues,
+            "CANVAS_CLI_IN_ACTION_SCRIPT",
+            `Action step "${step.label}" must call Canvas integrations through ctx.integrations.executeAction, not CANVAS_CLI or INTEGRATION_CLI`,
+            `stepContent.${step.id}`,
+          );
+        } else if (
+          step.actionCapabilities?.usesIntegrationActions === true &&
+          !referencesAutomationIntegrationAction(content.content)
+        ) {
+          addIssue(
+            issues,
+            "INTEGRATION_ACTION_CALL_REQUIRED",
+            `Action step "${step.label}" declares integration actions but does not call ctx.integrations.executeAction`,
+            `stepContent.${step.id}`,
+          );
+        }
         if (hasInvalidAutomationSketchToolNamespace(content.content)) {
           addIssue(
             issues,
@@ -732,14 +755,14 @@ export function validateAutomationExecutionMode(
       addIssue(
         issues,
         "DETERMINISTIC_MODE_AGENT_STEP",
-        `Fixed recipe mode cannot include agent step "${step.label}"`,
+        `Deterministic mode cannot include agent step "${step.label}"`,
         `steps.${step.id}`,
       );
     } else if (mode === "agent-led" && step.type === "action") {
       addIssue(
         issues,
         "AGENT_LED_MODE_ACTION_STEP",
-        `Agent-led mode cannot include code or action step "${step.label}"`,
+        `Agent mode cannot include code or action step "${step.label}"`,
         `steps.${step.id}`,
       );
     }
