@@ -140,12 +140,15 @@ export class CanvasProviderRequestError extends Error {
 
 export class CanvasProvider implements IntegrationProvider {
   readonly type = "canvas";
+  readonly providerId: string;
 
   constructor(
     private apiUrl: string,
     private apiKey: string,
-    private providerId: string,
-  ) {}
+    providerId: string,
+  ) {
+    this.providerId = providerId;
+  }
 
   isBrokerCapable(): boolean {
     return true;

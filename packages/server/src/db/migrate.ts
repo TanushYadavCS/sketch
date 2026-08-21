@@ -197,6 +197,8 @@ import * as m194 from "./migrations/194-remove-scheduled-task-builder-locks";
 import * as m195 from "./migrations/195-dev-search-traces";
 import * as m196 from "./migrations/196-search-vector-summary-weights";
 import * as m197 from "./migrations/197-file-field-embeddings";
+import * as m198 from "./migrations/198-dev-search-trace-results";
+import * as m199 from "./migrations/199-dev-search-trace-ms-bigint";
 import type { DB } from "./schema";
 
 /**
@@ -403,6 +405,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "195-dev-search-traces": m195,
           "196-search-vector-summary-weights": m196,
           "197-file-field-embeddings": m197,
+          "198-dev-search-trace-results": m198,
+          "199-dev-search-trace-ms-bigint": m199,
         };
       },
     },

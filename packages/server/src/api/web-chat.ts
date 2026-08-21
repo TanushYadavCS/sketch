@@ -1553,23 +1553,40 @@ function sanitizeWebProgressItem(value: unknown): WebProgressItem | null {
 
 function sanitizeIntegrationConnectionData(value: unknown): WebChatIntegrationConnectionData | null {
   if (!isRecord(value)) return null;
-  const { requestId, appId, appName, executionMode, state, icon, reason, accountName, connectionId } = value;
+  const {
+    requestId,
+    appId,
+    appName,
+    providerId,
+    executionMode,
+    state,
+    icon,
+    reason,
+    connectUrl,
+    accountName,
+    connectionId,
+  } = value;
   if (typeof requestId !== "string" || !requestId.trim()) return null;
   if (typeof appId !== "string" || !appId.trim()) return null;
   if (typeof appName !== "string" || !appName.trim()) return null;
+  if (providerId !== undefined && (typeof providerId !== "string" || !providerId.trim())) return null;
   if (state !== undefined && state !== "connect" && state !== "connected") return null;
   if (icon !== undefined && typeof icon !== "string") return null;
   if (reason !== undefined && typeof reason !== "string") return null;
+  if (connectUrl !== undefined && typeof connectUrl !== "string") return null;
   if (accountName !== undefined && typeof accountName !== "string") return null;
   if (connectionId !== undefined && connectionId !== null && typeof connectionId !== "string") return null;
+  const safeConnectUrl = firstPartyIntegrationConnectUrl(appId.trim(), connectUrl, state);
   return {
     requestId: requestId.trim(),
     appId: appId.trim(),
     appName: appName.trim(),
+    ...(typeof providerId === "string" && providerId.trim() ? { providerId: providerId.trim() } : {}),
     ...(state === "connect" || state === "connected" ? { state } : {}),
     ...(typeof icon === "string" && icon.trim() ? { icon: icon.trim() } : {}),
-    ...(executionMode === "cli" || executionMode === "api" ? { executionMode } : {}),
+    ...(executionMode === "canvas" || executionMode === "cli" || executionMode === "api" ? { executionMode } : {}),
     ...(typeof reason === "string" && reason.trim() ? { reason: reason.trim() } : {}),
+    ...(safeConnectUrl ? { connectUrl: safeConnectUrl } : {}),
     ...(typeof accountName === "string" && accountName.trim() ? { accountName: accountName.trim() } : {}),
     ...(typeof connectionId === "string" && connectionId.trim()
       ? { connectionId: connectionId.trim() }
@@ -1577,6 +1594,35 @@ function sanitizeIntegrationConnectionData(value: unknown): WebChatIntegrationCo
         ? { connectionId: null }
         : {}),
   };
+}
+
+function sanitizeIntegrationConnectionCards(values: unknown[]): WebChatIntegrationConnectionData[] {
+  return values
+    .map((value) => sanitizeIntegrationConnectionData(value))
+    .filter((value): value is WebChatIntegrationConnectionData => value !== null);
+}
+
+function firstPartyIntegrationConnectUrl(appId: string, connectUrl: unknown, state: unknown): string | null {
+  const appIdPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+  if (!appIdPattern.test(appId)) return null;
+
+  if (typeof connectUrl === "string" && connectUrl.trim()) {
+    try {
+      const parsed = new URL(connectUrl, "http://sketch.local");
+      if (
+        parsed.origin === "http://sketch.local" &&
+        parsed.pathname === "/integrations" &&
+        !parsed.hash &&
+        parsed.searchParams.get("connect") === appId
+      ) {
+        return `/integrations?connect=${encodeURIComponent(appId)}`;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return state === "connected" ? null : `/integrations?connect=${encodeURIComponent(appId)}`;
 }
 
 function sanitizeTranscriptMessage(message: unknown): WebChatTranscriptMessage | null {
@@ -3053,10 +3099,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           userName: currentUser.name,
           logger: deps.logger,
         });
-        const integrationCards = dedupeIntegrationCards([
-          ...(result.pendingIntegrationConnections ?? []),
-          ...deterministicIntegrationCards,
-        ]);
+        const integrationCards = dedupeIntegrationCards(
+          sanitizeIntegrationConnectionCards([
+            ...(result.pendingIntegrationConnections ?? []),
+            ...deterministicIntegrationCards,
+          ]),
+        );
         const automationArtifacts = result.trace.automationArtifacts ?? [];
         const pendingInteraction = result.pendingInteraction ?? result.pendingQuestion;
         const rawFinalText = result.trace.finalText?.trim()

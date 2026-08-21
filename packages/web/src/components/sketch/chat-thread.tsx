@@ -72,10 +72,12 @@ export interface ChatThreadIntegrationConnection {
   requestId: string;
   appId: string;
   appName: string;
+  providerId?: string;
   executionMode?: "canvas" | "cli" | "api";
   state?: "connect" | "connected";
   icon?: string;
   reason?: string;
+  connectUrl?: string;
   accountName?: string;
   connectionId?: string | null;
 }
@@ -1114,6 +1116,16 @@ function IntegrationConnectionCard({
             </span>
           </div>
           <p className="mt-[3px] text-[12px] leading-[1.5] text-muted-foreground">{description}</p>
+          {connection.connectUrl && !connectedState ? (
+            <a
+              className="mt-[5px] inline-flex text-[12px] font-medium text-primary underline-offset-2 hover:underline"
+              href={connection.connectUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open integration settings
+            </a>
+          ) : null}
         </div>
         <button
           type="button"

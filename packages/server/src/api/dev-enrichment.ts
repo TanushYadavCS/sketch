@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { generateText } from "ai";
 /**
  * Dev-only enrichment trace routes.
  *
@@ -14,6 +15,7 @@ import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
+import { createAgentRuntimeProvider, resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import { handleSearch } from "../agent/tools/search";
 import type { SketchMcpDeps } from "../agent/tools/types";
 import { runEnrichment } from "../connectors/enrichment";
@@ -284,6 +286,89 @@ export function devEnrichmentRoutes(
     const forbidden = requireAdmin(c);
     if (forbidden) return c.json(forbidden, 403);
     return c.json({ traces: await createDevSearchTraceRepository(db).list() });
+  });
+
+  routes.get("/search-traces/:id/syntheses", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    return c.json({ syntheses: await createDevSearchTraceRepository(db).listSyntheses(c.req.param("id")) });
+  });
+
+  routes.get("/syntheses/:id", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+    const synthesis = await createDevSearchTraceRepository(db).getSynthesis(c.req.param("id"));
+    if (!synthesis) return c.json({ error: { code: "NOT_FOUND", message: "Synthesis not found" } }, 404);
+    return c.json({ synthesis });
+  });
+
+  /**
+   * Runs one synthesis over a stored trace. POST only, and nothing else on this router
+   * calls the model — opening or listing a trace must never spend an LLM call.
+   */
+  routes.post("/search-traces/:id/syntheses", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const repo = createDevSearchTraceRepository(db);
+    const trace = await repo.get(c.req.param("id"));
+    if (!trace) return c.json({ error: { code: "NOT_FOUND", message: "Trace not found" } }, 404);
+    if (trace.results.length === 0) {
+      return c.json({ error: { code: "NO_RESULTS", message: "This trace returned nothing to synthesise from" } }, 400);
+    }
+    if (!trace.query.trim()) {
+      return c.json({ error: { code: "NO_QUERY", message: "Filter-only trace has no question to answer" } }, 400);
+    }
+
+    /**
+     * The encryption key is required, not optional: provider keys set through the settings
+     * UI are stored `enc:`-prefixed, and reading them without it throws before the
+     * `generateText` try/catch below — losing the run instead of recording it as failed.
+     */
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const providerConfig = resolveAgentRuntimeProviderConfigFromSettings(settings);
+    if (!providerConfig) {
+      return c.json({ error: { code: "NO_PROVIDER", message: "No LLM provider is configured" } }, 400);
+    }
+    const provider = createAgentRuntimeProvider(providerConfig);
+
+    /**
+     * `agentText`, not the raw rows: the tool cuts each result to 200 characters before
+     * the agent sees it, so synthesising from the untruncated text would answer from
+     * material the agent never had and flatter the retrieval.
+     */
+    const prompt = [
+      `Question: ${trace.query}`,
+      "",
+      "Search returned these results, exactly as the agent received them:",
+      "",
+      ...trace.results.map((row) => row.agentText),
+      "",
+      "Answer the question using only the text above.",
+      "If it does not contain the answer, say so plainly and name what is missing.",
+    ].join("\n");
+
+    const startedAt = Date.now();
+    let answer: string | null = null;
+    let error: string | null = null;
+    try {
+      const result = await generateText({ model: provider.model, prompt });
+      answer = result.text;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+
+    const id = await repo.recordSynthesis({
+      traceId: trace.id,
+      provider: provider.provider,
+      model: provider.modelId,
+      prompt,
+      answer,
+      status: error ? "failed" : "done",
+      error,
+      durationMs: Date.now() - startedAt,
+    });
+    return c.json({ synthesis: await repo.getSynthesis(id) }, error ? 502 : 201);
   });
 
   routes.get("/search-traces/:id", async (c) => {

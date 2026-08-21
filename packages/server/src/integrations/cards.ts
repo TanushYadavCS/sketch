@@ -96,6 +96,7 @@ export function connectedCardFromConnection(connection: IntegrationConnection): 
     requestId: cardId("integration-connected", connection.appId),
     appId: connection.appId,
     appName: connection.appName,
+    providerId: connection.providerId,
     ...(connection.executionMode ? { executionMode: connection.executionMode } : {}),
     state: "connected",
     ...(connection.icon ? { icon: connection.icon } : {}),
@@ -108,13 +109,16 @@ export function cardFromApp(
   app: IntegrationApp,
   connection: IntegrationConnection | null,
   reason?: string,
+  providerId?: string,
 ): WebChatIntegrationConnectionData {
+  const executionMode = app.executionMode ?? connection?.executionMode;
   if (connection) {
     return {
       requestId: cardId("integration-connected", app.id),
       appId: app.id,
       appName: app.name,
-      ...(app.executionMode ? { executionMode: app.executionMode } : {}),
+      providerId: connection.providerId ?? providerId,
+      ...(executionMode ? { executionMode } : {}),
       state: "connected",
       ...(app.icon ? { icon: app.icon } : {}),
       ...(connection.accountName ? { accountName: connection.accountName } : {}),
@@ -126,10 +130,11 @@ export function cardFromApp(
     requestId: cardId("integration-connect", app.id),
     appId: app.id,
     appName: app.name,
-    ...(app.executionMode ? { executionMode: app.executionMode } : {}),
+    ...(providerId ? { providerId } : {}),
+    ...(executionMode ? { executionMode } : {}),
     state: "connect",
     ...(app.icon ? { icon: app.icon } : {}),
-    ...(app.executionMode === "cli" || app.executionMode === "api"
+    ...(executionMode === "canvas" || executionMode === "cli" || executionMode === "api"
       ? { connectUrl: `/integrations?connect=${encodeURIComponent(app.id)}` }
       : {}),
     ...(reason?.trim() ? { reason: reason.trim() } : {}),
@@ -141,7 +146,7 @@ export function dedupeIntegrationCards(cards: WebChatIntegrationConnectionData[]
   const deduped: WebChatIntegrationConnectionData[] = [];
   for (const card of cards) {
     const appKey = normalizeExactIntegrationSlug(card.appId) ?? normalizeIntegrationLookup(card.appId);
-    const key = `${card.state ?? "connect"}:${appKey}`;
+    const key = `${card.state ?? "connect"}:${card.providerId ?? ""}:${appKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(card);
@@ -189,7 +194,7 @@ export async function resolveIntegrationLookup(
     };
   });
   const cards = bestRenderableApps(safeApps, lookup.query).map((app) =>
-    cardFromApp(app, connectionForApp(connections, app), lookup.reason),
+    cardFromApp(app, connectionForApp(connections, app), lookup.reason, provider.providerId),
   );
   return { apps, cards };
 }
@@ -358,6 +363,13 @@ function extractMcpIntegrationLookups(
   input: Record<string, unknown> | undefined,
 ): ExtractedIntegrationLookups {
   const match = toolName?.match(/^mcp__(.+?)__(.+)$/);
+  const server = match?.[1]
+    ?.replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/_/g, "-")
+    .toLowerCase();
+  if (match && server !== "canvas" && server !== "sketch") {
+    return { queries: [], componentKeys: [], listConnected: false };
+  }
   const normalizedToolName = (match?.[2] ?? toolName ?? "")
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
     .replace(/_/g, "-")
@@ -502,16 +514,12 @@ function genericFailureLookups(
 ): Pick<ExtractedIntegrationLookups, "queries" | "componentKeys"> {
   const queries: string[] = [];
   const componentKeys: string[] = [];
-  const directApp = firstStringValue(input, ["app", "appSlug", "appId", "nameSlug", "triggerAppSlug"]);
-  if (directApp) queries.push(directApp);
-  const componentKey = firstStringValue(input, ["componentKey", "key", "triggerComponentKey"]);
-  componentKeys.push(...componentKeysFromValue(componentKey));
-
   const { server, operation } = normalizedMcpToolParts(toolName);
-  if (server && !["canvas", "sketch", "plugin-pipedream", "pipedream"].includes(server)) {
-    queries.push(server);
-  }
   if (server?.includes("pipedream")) {
+    const directApp = firstStringValue(input, ["app", "appSlug", "appId", "nameSlug", "triggerAppSlug"]);
+    if (directApp) queries.push(directApp);
+    const componentKey = firstStringValue(input, ["componentKey", "key", "triggerComponentKey"]);
+    componentKeys.push(...componentKeysFromValue(componentKey));
     componentKeys.push(...componentKeysFromValue(operation));
   }
 
@@ -533,9 +541,8 @@ export function extractIntegrationLookupsFromProgressEvent(
 
   let lookup: ExtractedIntegrationLookups;
   if (event.toolName === "Skill") {
-    const skillId = firstStringValue(event.input, ["skill"]);
     lookup = {
-      queries: event.kind === "tool_result" && skillId ? [skillId] : [],
+      queries: [],
       componentKeys: [],
       listConnected: false,
     };
@@ -582,6 +589,7 @@ function appFromConnection(connection: IntegrationConnection): IntegrationApp {
     id: connection.appId,
     name: connection.appName || connection.app?.name || connection.appId,
     description: "",
+    ...(connection.executionMode ? { executionMode: connection.executionMode } : {}),
     ...(connection.icon || connection.app?.imgSrc ? { icon: connection.icon ?? connection.app?.imgSrc } : {}),
   };
 }
@@ -599,7 +607,9 @@ async function resolveComponentKeyCard(
     const exactConnections = connections.filter((connection) => connectionMatchesCandidateSlug(connection, candidate));
     if (exactConnections.length > 0) {
       const healthyConnection = exactConnections.find(isActiveIntegrationConnection);
-      return healthyConnection ? null : cardFromApp(appFromConnection(exactConnections[0]), null);
+      return healthyConnection
+        ? null
+        : cardFromApp(appFromConnection(exactConnections[0]), null, undefined, provider.providerId);
     }
 
     const candidateKey = normalizeExactIntegrationSlug(candidate);
@@ -620,7 +630,7 @@ async function resolveComponentKeyCard(
     const healthyConnection = connections.find(
       (connection) => connectionMatchesCandidateSlug(connection, app.id) && isActiveIntegrationConnection(connection),
     );
-    return healthyConnection ? null : cardFromApp(app, null);
+    return healthyConnection ? null : cardFromApp(app, null, undefined, provider.providerId);
   }
 
   return null;
@@ -655,7 +665,7 @@ function cliAppForQuery(resolver: CliIntegrationCardResolver, query: string): Cl
   return (
     resolver.listCatalog().find((candidate) => {
       const candidateKeys = [candidate.id, candidate.name].map(normalizeIntegrationLookup);
-      return candidateKeys.some((candidateKey) => candidateKey === queryKey || queryKey.includes(candidateKey));
+      return candidateKeys.some((candidateKey) => candidateKey === queryKey);
     }) ?? null
   );
 }
@@ -665,9 +675,11 @@ function cliCardForComponentKey(
   connections: CliIntegrationConnection[],
   componentKey: string,
 ): WebChatIntegrationConnectionData | null {
+  const componentKeyValue = normalizeIntegrationLookup(componentKey);
   const app = resolver
     .listCatalog()
-    .find((item) => normalizeIntegrationLookup(componentKey).startsWith(normalizeIntegrationLookup(item.id)));
+    .filter((item) => componentKeyValue.startsWith(normalizeIntegrationLookup(item.id)))
+    .sort((left, right) => normalizeIntegrationLookup(right.id).length - normalizeIntegrationLookup(left.id).length)[0];
   return app ? cliCardForApp(app, connections) : null;
 }
 

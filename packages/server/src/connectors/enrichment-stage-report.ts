@@ -34,7 +34,8 @@ export type SearchStageKey =
   | "filter"
   | "rbac"
   | "finalize"
-  | "rerank";
+  | "rerank"
+  | "finalOutput";
 
 export type StageKey = EnrichmentStageKey | MintStageKey | SearchStageKey;
 

@@ -31,6 +31,8 @@ export interface IntegrationActionRequest {
 export interface IntegrationProvider {
   /** Stable provider type identifier (e.g. "canvas"). */
   readonly type: string;
+  /** Stable configured provider record ID used by the web connection APIs. */
+  readonly providerId?: string;
   listApps(query?: string, limit?: number, after?: string): Promise<{ apps: IntegrationApp[]; pageInfo: PageInfo }>;
   initiateConnection(
     userEmail: string,

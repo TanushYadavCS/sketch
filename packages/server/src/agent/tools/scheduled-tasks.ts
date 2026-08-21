@@ -33,6 +33,7 @@ import {
   updateAutomationDefinition,
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
+import { INT4_MAX } from "../../db/limits";
 import { createAutomationLocksRepository } from "../../db/repositories/automation-locks";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import { createAutomationSharesRepository } from "../../db/repositories/automation-shares";
@@ -233,12 +234,14 @@ For external: use 'webhook' or 'slack_channel_message' as described above.`,
     .number()
     .int()
     .nonnegative()
+    .max(INT4_MAX)
     .optional()
     .describe("Expected persisted revision for compare-and-swap writes. Stale revisions are rejected."),
   expectedRevision: z
     .number()
     .int()
     .nonnegative()
+    .max(INT4_MAX)
     .optional()
     .describe("Alias for expected_revision when the caller uses the canonical camelCase field."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),

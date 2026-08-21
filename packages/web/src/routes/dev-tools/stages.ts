@@ -39,7 +39,7 @@ export const MINT_STAGES: StageDefinition[] = [
 ];
 
 /**
- * Search's ten stages. All `code`: the one model call a search makes is the query
+ * Search's eleven stages. All `code`: the one model call a search makes is the query
  * embedding, which has no prompt or response worth a tab, so it reports as a summary.
  */
 export const SEARCH_STAGES: StageDefinition[] = [
@@ -53,6 +53,7 @@ export const SEARCH_STAGES: StageDefinition[] = [
   { stage: "rbac", label: "Access filter", kind: "code" },
   { stage: "finalize", label: "Collapse and slice", kind: "code" },
   { stage: "rerank", label: "Entity re-sort", kind: "code" },
+  { stage: "finalOutput", label: "Final output", kind: "code" },
 ];
 
 export function stagesFor(kind: DevTraceRunKind): StageDefinition[] {

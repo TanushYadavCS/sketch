@@ -1,5 +1,5 @@
 import type { AutomationExecutionMode } from "@sketch/shared";
-import type { Generated } from "kysely";
+import type { ColumnType, Generated } from "kysely";
 
 export interface UsersTable {
   id: string;
@@ -1759,6 +1759,42 @@ export interface WebhookDeliveriesTable {
 /**
  * A captured trace of one real `Search` tool call. Written only while dev tools are on.
  */
+/**
+ * Epoch millis stored as `bigint` on Postgres, whose driver returns int8 as a string to
+ * avoid precision loss. Reads must coerce with `Number(...)`; writes stay numbers.
+ */
+type EpochMs = ColumnType<string | number, number, number>;
+
+export interface DevSearchTraceResultsTable {
+  trace_id: string;
+  position: number;
+  hit_file_id: string;
+  result_kind: string;
+  file_name: string;
+  source: string;
+  provider_url: string | null;
+  agent_text: string;
+  snippet: string | null;
+  summary: string | null;
+  score: number;
+  similarity: number | null;
+  /** Epoch millis. `bigint` on Postgres, which the driver hands back as a string. */
+  created_at_ms: EpochMs;
+}
+
+export interface DevSearchSynthesesTable {
+  id: string;
+  trace_id: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  answer: string | null;
+  status: string;
+  error: string | null;
+  duration_ms: number;
+  created_at_ms: EpochMs;
+}
+
 export interface DevSearchTracesTable {
   id: string;
   /** Which caller reached `handleSearch`: agent | automation | public_mcp. */
@@ -1788,6 +1824,8 @@ export interface FileFieldEmbeddingsTable {
 export interface DB {
   file_field_embeddings: FileFieldEmbeddingsTable;
   dev_search_traces: DevSearchTracesTable;
+  dev_search_trace_results: DevSearchTraceResultsTable;
+  dev_search_syntheses: DevSearchSynthesesTable;
   question_interactions: QuestionInteractionsTable;
   question_interaction_items: QuestionInteractionItemsTable;
   question_interaction_events: QuestionInteractionEventsTable;

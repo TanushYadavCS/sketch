@@ -297,6 +297,7 @@ export async function handleSearch(
   }
   trace?.rerank(results, rerankApplied, entityFileIds?.size ?? 0);
 
+  const agentBlocks: string[] = [];
   if (results.length === 0 && entityMatches.length === 0) {
     const label = trimmedQuery ? `"${trimmedQuery}"` : "the given filters";
     return done("empty", `No results found for ${label}.`, 0, null);
@@ -306,18 +307,26 @@ export async function handleSearch(
     const sourceLabel = r.source.charAt(0).toUpperCase() + r.source.slice(1).replace(/_/g, " ");
     const date = r.sourceUpdatedAt ? new Date(r.sourceUpdatedAt).toISOString().split("T")[0] : "";
 
-    lines.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""})`);
-    lines.push(`  sketchId: ${r.id}`);
-    lines.push(`  providerId: ${r.providerFileId} (source=${r.source})`);
-    if (r.providerUrl) lines.push(`  url: ${r.providerUrl}`);
+    /**
+     * Sliced here, so the trace records the text the agent actually received rather than
+     * the untruncated row behind it. A synthesis run on the full text would answer from
+     * material the agent never had, and would outperform it for the wrong reason.
+     */
+    const rendered: string[] = [];
+    rendered.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""})`);
+    rendered.push(`  sketchId: ${r.id}`);
+    rendered.push(`  providerId: ${r.providerFileId} (source=${r.source})`);
+    if (r.providerUrl) rendered.push(`  url: ${r.providerUrl}`);
     if (r.summary) {
-      lines.push(`> ${r.summary.slice(0, 200)}${r.summary.length > 200 ? "..." : ""}`);
+      rendered.push(`> ${r.summary.slice(0, 200)}${r.summary.length > 200 ? "..." : ""}`);
     } else if (r.snippet) {
-      lines.push(`> ${r.snippet.slice(0, 200)}${r.snippet.length > 200 ? "..." : ""}`);
+      rendered.push(`> ${r.snippet.slice(0, 200)}${r.snippet.length > 200 ? "..." : ""}`);
     }
-    lines.push("");
+    lines.push(...rendered, "");
+    agentBlocks.push(rendered.join("\n"));
   }
 
+  trace?.finalOutput(results, agentBlocks);
   return done("done", lines.join("\n"), results.length);
 }
 
