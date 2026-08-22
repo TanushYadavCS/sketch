@@ -1,3 +1,4 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Context, Hono } from "hono";
 import type { Kysely } from "kysely";
@@ -6,16 +7,20 @@ import { createApiTokenRepository } from "../../db/repositories/api-tokens";
 import { createExternalMcpToolCallRepository } from "../../db/repositories/external-mcp-tool-calls";
 import type { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
-import { createMcpAuthMiddleware } from "./auth";
+import { type McpAuthContext, createMcpAuthMiddleware } from "./auth";
 import { createPublicSketchMcpServer } from "./public-server";
 
-export function mountPublicMcpServer(params: {
+type AuditRepo = ReturnType<typeof createExternalMcpToolCallRepository>;
+
+export function mountMcpServer(params: {
   app: Hono;
   db: Kysely<DB>;
   userRepo: ReturnType<typeof createUserRepository>;
-  workspaceDir: string;
   logger: Logger;
+  path: string;
   baseUrl?: string;
+  requireAdmin?: boolean;
+  createServer: (params: { authContext: McpAuthContext; auditRepo: AuditRepo }) => Promise<McpServer>;
 }) {
   const apiTokens = createApiTokenRepository(params.db);
   const auditRepo = createExternalMcpToolCallRepository(params.db);
@@ -24,22 +29,16 @@ export function mountPublicMcpServer(params: {
     users: params.userRepo,
     logger: params.logger,
     baseUrl: params.baseUrl,
+    requireAdmin: params.requireAdmin,
   });
 
-  params.app.use("/mcp", auth);
-  params.app.on(["GET", "DELETE"], "/mcp", (c) =>
+  params.app.use(params.path, auth);
+  params.app.on(["GET", "DELETE"], params.path, (c) =>
     c.json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported for stateless MCP v1" } }, 405),
   );
-  params.app.post("/mcp", async (c: Context) => {
+  params.app.post(params.path, async (c: Context) => {
     const authContext = c.get("mcpAuth");
-    const server = await createPublicSketchMcpServer({
-      db: params.db,
-      userRepo: params.userRepo,
-      userId: authContext.userId,
-      tokenId: authContext.tokenId,
-      workspaceDir: params.workspaceDir,
-      auditRepo,
-    });
+    const server = await params.createServer({ authContext, auditRepo });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -51,5 +50,32 @@ export function mountPublicMcpServer(params: {
     } finally {
       await server.close();
     }
+  });
+}
+
+export function mountPublicMcpServer(params: {
+  app: Hono;
+  db: Kysely<DB>;
+  userRepo: ReturnType<typeof createUserRepository>;
+  workspaceDir: string;
+  logger: Logger;
+  baseUrl?: string;
+}) {
+  mountMcpServer({
+    app: params.app,
+    db: params.db,
+    userRepo: params.userRepo,
+    logger: params.logger,
+    path: "/mcp",
+    baseUrl: params.baseUrl,
+    createServer: ({ authContext, auditRepo }) =>
+      createPublicSketchMcpServer({
+        db: params.db,
+        userRepo: params.userRepo,
+        userId: authContext.userId,
+        tokenId: authContext.tokenId,
+        workspaceDir: params.workspaceDir,
+        auditRepo,
+      }),
   });
 }

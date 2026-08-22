@@ -95,8 +95,9 @@ import {
   withManagedMemberSyncLocks,
 } from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
+import { createCurationMcpServer } from "./mcp/curation/server";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
-import { mountPublicMcpServer } from "./mcp/server/transport";
+import { mountMcpServer, mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
@@ -715,6 +716,24 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     logger,
     baseUrl: config.BASE_URL,
   });
+  if (config.GRAPH_CURATION_TOOLS_ENABLED) {
+    mountMcpServer({
+      app,
+      db,
+      userRepo: users,
+      logger,
+      path: "/mcp/curation",
+      baseUrl: config.BASE_URL,
+      requireAdmin: true,
+      createServer: ({ authContext, auditRepo }) =>
+        createCurationMcpServer({
+          db,
+          userId: authContext.userId,
+          tokenId: authContext.tokenId,
+          auditRepo,
+        }),
+    });
+  }
 
   if (deps?.logger) {
     app.route(
