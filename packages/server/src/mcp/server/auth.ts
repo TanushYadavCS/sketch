@@ -12,6 +12,7 @@ export interface McpAuthContext {
   tokenId: string;
   userId: string;
   userEmail: string | null;
+  authRole: "admin" | "member";
   tokenPrefix: string;
 }
 
@@ -41,6 +42,7 @@ export function createMcpAuthMiddleware(params: {
   users: UserRepo;
   logger: Logger;
   baseUrl?: string;
+  requireAdmin?: boolean;
 }) {
   return async (c: Context, next: Next) => {
     const authHeader = c.req.header("Authorization");
@@ -68,6 +70,10 @@ export function createMcpAuthMiddleware(params: {
     if (!user) {
       return unauthorized(c, "Invalid token", params.baseUrl);
     }
+    const authRole = user.auth_role === "admin" ? "admin" : "member";
+    if (params.requireAdmin && authRole !== "admin") {
+      return c.json({ error: { code: "FORBIDDEN", message: "Admin access required" } }, 403);
+    }
 
     if (!limiter.consume(row.id)) {
       return c.json({ error: { code: "RATE_LIMITED", message: "Too many MCP requests" } }, 429);
@@ -77,6 +83,7 @@ export function createMcpAuthMiddleware(params: {
       tokenId: row.id,
       userId: row.user_id,
       userEmail: user.email,
+      authRole,
       tokenPrefix: row.prefix,
     });
 

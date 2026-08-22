@@ -1842,7 +1842,7 @@ function renderWeeklyDossier(container: WeeklyMintContainer, groups: CandidateGr
 
 const LOOKUP_RESULT_CAP = 10;
 
-type JudgeLookupResult = {
+export type JudgeLookupResult = {
   projects: Array<{ entityId: string; name: string; aliases: string[]; accepted: true }>;
   poolRows: Array<{
     reviewId: string;
@@ -1861,7 +1861,7 @@ type JudgeLookupResult = {
  * name is also pooling under container X" — the cross-container signal the
  * per-company prompt cannot contain. Read-only by construction.
  */
-async function lookupNameForJudge(
+export async function lookupNameForJudge(
   db: Kysely<DB>,
   embeddingProvider: EmbeddingProvider | null | undefined,
   name: string,

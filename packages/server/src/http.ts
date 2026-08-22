@@ -24,6 +24,7 @@ import { connectorRoutes } from "./api/connectors";
 import { devEnrichmentRoutes } from "./api/dev-enrichment";
 import { entityRoutes } from "./api/entities";
 import { graphPassRoutes } from "./api/graph-passes";
+import { graphVerdictRoutes } from "./api/graph-verdicts";
 import { healthRoutes } from "./api/health";
 import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
@@ -95,8 +96,9 @@ import {
   withManagedMemberSyncLocks,
 } from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
+import { createCurationMcpServer } from "./mcp/curation/server";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
-import { mountPublicMcpServer } from "./mcp/server/transport";
+import { mountMcpServer, mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
@@ -503,6 +505,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/graph-passes", graphPassRoutes(db, logger));
+  app.route("/api/graph-verdicts", graphVerdictRoutes(db, logger, { enabled: config.DEV_TOOLS_ENABLED }));
   app.route(
     "/api/project-minting",
     projectMintingRoutes(db, logger, {
@@ -715,6 +718,24 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     logger,
     baseUrl: config.BASE_URL,
   });
+  if (config.GRAPH_CURATION_TOOLS_ENABLED) {
+    mountMcpServer({
+      app,
+      db,
+      userRepo: users,
+      logger,
+      path: "/mcp/curation",
+      baseUrl: config.BASE_URL,
+      requireAdmin: true,
+      createServer: ({ authContext, auditRepo }) =>
+        createCurationMcpServer({
+          db,
+          userId: authContext.userId,
+          tokenId: authContext.tokenId,
+          auditRepo,
+        }),
+    });
+  }
 
   if (deps?.logger) {
     app.route(

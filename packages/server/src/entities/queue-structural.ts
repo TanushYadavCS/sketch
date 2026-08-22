@@ -11,7 +11,7 @@ type EntityFacts = { id: string; name: string; source_type: string; metadata: st
 
 export type StructuralResult = { hits: ReasonHit[] };
 
-function cleanEmail(value: string | null | undefined): string | null {
+export function cleanEmail(value: string | null | undefined): string | null {
   const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : null;
 }
