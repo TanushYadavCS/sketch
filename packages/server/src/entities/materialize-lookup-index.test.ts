@@ -1,6 +1,8 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
@@ -10,6 +12,7 @@ import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializeStructuralSeed } from "./materialize-structural";
 import type { IndexEntityRow } from "./materialize-types";
 import { normalizeEntityMatchName } from "./name-keys";
+import { proposeEntity } from "./propose";
 
 async function seedEntity(
   db: Kysely<DB>,
@@ -359,5 +362,97 @@ describe("lookup index row sharing", () => {
     expect(
       deps.lookup.findNameDedupCandidates?.("product", "ZephyrModule").map((candidate) => candidate.entity.id),
     ).toEqual(["orion"]);
+  });
+
+  it("resolves product digit-boundary exact names and keeps same-run collision names fresh", async () => {
+    const entityRepo = createEntityRepository(db);
+    const product = await entityRepo.upsertEntity({
+      name: "GPT 4",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+      aliases: ["Vision 9"],
+      provenanceTier: "human_confirmed",
+    });
+    const deps = await buildMaterializeDeps(db);
+    const lookup = {
+      ...deps.lookup,
+      listByType: () => {
+        throw new Error("exact product lookup must not rescan by type");
+      },
+    };
+
+    const nameLinked = await proposeEntity(
+      {
+        entityRepo: deps.entityRepo,
+        reviewRepo: deps.reviewRepo,
+        domainsRepo: deps.domainsRepo,
+        lookup,
+        readEmail: deps.readEmail,
+        onEntityResolved: deps.onEntityResolved,
+      },
+      {
+        name: "GPT4",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:gpt4-exact",
+        evidence: [],
+        triggeredByUserId: "owner-1",
+      },
+    );
+    const aliasLinked = await proposeEntity(
+      {
+        entityRepo: deps.entityRepo,
+        reviewRepo: deps.reviewRepo,
+        domainsRepo: deps.domainsRepo,
+        lookup,
+        readEmail: deps.readEmail,
+        onEntityResolved: deps.onEntityResolved,
+      },
+      {
+        name: "Vision9",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:vision9-exact",
+        evidence: [],
+        triggeredByUserId: "owner-1",
+      },
+    );
+
+    expect(nameLinked.kind).toBe("linked");
+    expect(aliasLinked.kind).toBe("linked");
+    if (nameLinked.kind !== "linked" || aliasLinked.kind !== "linked") throw new Error("expected linked products");
+    expect(nameLinked.entity.id).toBe(product.id);
+    expect(aliasLinked.entity.id).toBe(product.id);
+
+    const company = await entityRepo.upsertEntity({
+      name: "Fresh Vendor",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    registerEntity(deps.index, company);
+    const freshCollision = await proposeEntity(
+      {
+        entityRepo: deps.entityRepo,
+        reviewRepo: createEntityReviewRepo(db),
+        domainsRepo: deps.domainsRepo,
+        lookup,
+        readEmail: deps.readEmail,
+      },
+      {
+        name: "Fresh Vendor",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:fresh-vendor",
+        evidence: [],
+        triggeredByUserId: "owner-1",
+      },
+    );
+
+    expect(freshCollision).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
   });
 });

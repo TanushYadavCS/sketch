@@ -97,7 +97,7 @@ export type ProposeResult =
 const CONTENT_EXTRACTION_TEAM_SOURCES: ReadonlySet<string> = new Set(["llm_extraction"]);
 
 /**
- * Ambiguity-aware lookup over existing entities, keyed by `normalizeName(entity.name)`.
+ * Ambiguity-aware lookup over existing entities, keyed by `normalizeEntityMatchName(entityType, entity.name)`.
  * The Fireflies hot-path supplies a pre-built `Map<string, Entity[]>` to
  * avoid per-attendee queries. Cold callers should pass a fresh resolver
  * (per call) backed by a query.
@@ -132,6 +132,18 @@ export type EntityLookup = {
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
   getPersonScopeKeys?(entityId: string): string[];
+  /**
+   * Returns whether the lookup can prove that a live row of this type has the
+   * name key, or null when the lookup's scope cannot answer and the caller must
+   * fall back to the repository.
+   */
+  hasLiveTypeName?(entityType: Extract<ProposeEntityType, "company" | "tool">, normalizedName: string): boolean | null;
+  /**
+   * Returns whether any corporate domain matches the proposed name, or null
+   * when the lookup's scope cannot answer and the caller must fall back to the
+   * repository.
+   */
+  matchesCorporateDomain?(name: string): boolean | null;
   findLlmExtractedThirdPartyMention?(
     name: string,
   ): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null>;
@@ -169,16 +181,6 @@ function tokenize(name: string): string[] {
     .filter((t) => t.length > 0);
 }
 
-function parseAliases(aliases: string | null): string[] {
-  if (!aliases) return [];
-  try {
-    const parsed = JSON.parse(aliases);
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 function isTokenSupersetOrSubset(a: string[], b: string[]): boolean {
   if (a.length === 0 || b.length === 0) return false;
   if (a.length === b.length) return false;
@@ -193,22 +195,6 @@ function hasTokenOverlap(a: string[], b: string[]): boolean {
   return a.some((token) => bSet.has(token));
 }
 
-function lookupHasEntityTypeName(
-  lookup: EntityLookup,
-  entityType: Extract<ProposeEntityType, "company" | "tool">,
-  normalized: string,
-): boolean {
-  const directMatches = lookup
-    .getByNormalizedName(normalized)
-    .some(
-      (entity) => entity.source_type === entityType && normalizeEntityMatchName(entityType, entity.name) === normalized,
-    );
-  if (directMatches) return true;
-  return lookup
-    .listByType(entityType)
-    .some((entity) => normalizeEntityMatchName(entityType, entity.name) === normalized);
-}
-
 async function repoHasEntityTypeName(
   deps: ProposeDeps,
   entityType: Extract<ProposeEntityType, "company" | "tool">,
@@ -216,6 +202,22 @@ async function repoHasEntityTypeName(
 ): Promise<boolean> {
   const entities = await deps.entityRepo.getEntitiesBySourceType(entityType);
   return entities.some((entity) => normalizeEntityMatchName(entityType, entity.name) === normalized);
+}
+
+/**
+ * `null` from the optional lookup methods means the current index was scoped
+ * too narrowly to answer. In that case the old repository scan remains the
+ * source of truth; boolean false means the index had the full relevant bucket
+ * and found no collision.
+ */
+async function hasLiveEntityTypeName(
+  deps: ProposeDeps,
+  entityType: Extract<ProposeEntityType, "company" | "tool">,
+  normalized: string,
+): Promise<boolean> {
+  const indexed = deps.lookup.hasLiveTypeName?.(entityType, normalized);
+  if (indexed !== undefined && indexed !== null) return indexed;
+  return repoHasEntityTypeName(deps, entityType, normalized);
 }
 
 function hasTrailingApiSdkToken(name: string): boolean {
@@ -227,23 +229,21 @@ async function productCollidesWithThirdParty(
   name: string,
 ): Promise<{ hit: boolean; signal?: string }> {
   const companyNormalized = normalizeEntityMatchName("company", name);
-  if (
-    lookupHasEntityTypeName(deps.lookup, "company", companyNormalized) ||
-    (await repoHasEntityTypeName(deps, "company", companyNormalized))
-  ) {
+  if (await hasLiveEntityTypeName(deps, "company", companyNormalized)) {
     return { hit: true, signal: "existing_company_entity" };
   }
 
   const toolNormalized = normalizeEntityMatchName("tool", name);
-  if (
-    lookupHasEntityTypeName(deps.lookup, "tool", toolNormalized) ||
-    (await repoHasEntityTypeName(deps, "tool", toolNormalized))
-  ) {
+  if (await hasLiveEntityTypeName(deps, "tool", toolNormalized)) {
     return { hit: true, signal: "existing_tool_entity" };
   }
 
-  const matchingDomain = await deps.domainsRepo?.findCorporateDomainMatchingName(name);
-  if (matchingDomain) return { hit: true, signal: "corporate_domain" };
+  const indexedDomainMatch = deps.lookup.matchesCorporateDomain?.(name);
+  if (indexedDomainMatch === true) return { hit: true, signal: "corporate_domain" };
+  if (indexedDomainMatch === undefined || indexedDomainMatch === null) {
+    const matchingDomain = await deps.domainsRepo?.findCorporateDomainMatchingName(name);
+    if (matchingDomain) return { hit: true, signal: "corporate_domain" };
+  }
 
   if (TOOL_NAME_DENYLIST.has(name.trim().toLowerCase())) return { hit: true, signal: "tool_name_denylist" };
   if (hasTrailingApiSdkToken(name)) return { hit: true, signal: "api_sdk_suffix" };
@@ -258,6 +258,21 @@ function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCan
   if (candidate.reason === "token-set") return false;
   if (input.entityType === "person" && candidate.reason === "strict-normalized" && !input.email) return false;
   return true;
+}
+
+function createRejectedCandidateFilter(
+  deps: ProposeDeps,
+  rejectionKey: string,
+): (ranked: RankedCandidate[]) => Promise<RankedCandidate[]> {
+  const rejectedByEntityId = new Map<string, boolean>();
+  return async (ranked) => {
+    const missingIds = [...new Set(ranked.map((candidate) => candidate.entity.id))].filter(
+      (entityId) => !rejectedByEntityId.has(entityId),
+    );
+    const rejected = await deps.reviewRepo.listRejectedNamesForEntities(missingIds);
+    for (const entityId of missingIds) rejectedByEntityId.set(entityId, rejected.has(`${entityId}:${rejectionKey}`));
+    return ranked.filter((candidate) => !rejectedByEntityId.get(candidate.entity.id));
+  };
 }
 
 function isEligibleMatchTarget(input: Pick<ProposeInput, "entityType">, entity: IndexEntityRow): boolean {
@@ -543,18 +558,15 @@ async function embeddingCandidatesThenCreate(
   deps: ProposeDeps,
   input: ProposeInput,
   normalized: string,
-  rejectionKey: string,
+  filterRejectedCandidates: (ranked: RankedCandidate[]) => Promise<RankedCandidate[]>,
   createReason: "skipFuzzy" | "ranked_empty",
 ): Promise<ProposeResult> {
   if ((input.entityType === "person" || input.entityType === "company") && deps.lookup.retrieveEmbeddingCandidates) {
     try {
       const retrieved = await deps.lookup.retrieveEmbeddingCandidates(input.entityType, input.name);
-      const ranked: RankedCandidate[] = [];
-      for (const candidate of retrieved) {
-        if (!isEligibleMatchTarget(input, candidate.entity)) continue;
-        if (await deps.reviewRepo.isRejected(candidate.entity.id, rejectionKey)) continue;
-        ranked.push(candidate);
-      }
+      const ranked = await filterRejectedCandidates(
+        retrieved.filter((candidate) => isEligibleMatchTarget(input, candidate.entity)),
+      );
       if (ranked.length > 0) return queueProposal(deps, input, normalized, ranked, "embedding");
     } catch (err) {
       deps.logger?.warn({ err, entityType: input.entityType }, "embedding candidate retrieval failed open");
@@ -656,6 +668,7 @@ async function decideNameCandidates(
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
   const normalized = normalizeEntityMatchName(input.entityType, input.name);
   const rejectionKey = normalizeName(input.name);
+  const filterRejectedCandidates = createRejectedCandidateFilter(deps, rejectionKey);
 
   if (input.entityType === "product") {
     const collision = await productCollidesWithThirdParty(deps, input.name);
@@ -733,12 +746,6 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   const exactById = new Map<string, IndexEntityRow>();
   for (const e of nameMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
   for (const e of aliasMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
-  for (const e of deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity))) {
-    if (normalizeEntityMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
-    for (const alias of parseAliases(e.aliases)) {
-      if (normalizeEntityMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
-    }
-  }
   if (exactById.size === 1) {
     const matched = exactById.values().next().value as IndexEntityRow;
     return decideNameCandidates(deps, input, normalized, [{ entity: matched, score: 1, reason: "exact-ambiguous" }]);
@@ -794,12 +801,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
       score: candidate.score,
       reason: candidate.reason,
     }));
-    const filtered: RankedCandidate[] = [];
-    for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
-      if (!rejected) filtered.push(r);
-    }
-    ranked = filtered;
+    ranked = await filterRejectedCandidates(ranked);
     if (ranked.length > 0) return decideNameCandidates(deps, input, normalized, ranked);
   }
 
@@ -811,19 +813,14 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         score: c.score,
         reason: c.reason ?? ("llm-ambiguous" as const),
       }));
-    const filtered: RankedCandidate[] = [];
-    for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
-      if (!rejected) filtered.push(r);
-    }
-    ranked = filtered;
+    ranked = await filterRejectedCandidates(ranked);
     if (ranked.length > 0) {
       return queueProposal(deps, input, normalized, ranked, "llm-ambiguous");
     }
   }
 
   if (input.skipFuzzy) {
-    return embeddingCandidatesThenCreate(deps, input, normalized, rejectionKey, "skipFuzzy");
+    return embeddingCandidatesThenCreate(deps, input, normalized, filterRejectedCandidates, "skipFuzzy");
   }
 
   // 4) Fuzzy-rank against same-type entities.
@@ -832,17 +829,12 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 5) Drop candidates that have a sticky rejection for this normalized name.
   if (ranked.length > 0) {
-    const filtered: RankedCandidate[] = [];
-    for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, rejectionKey);
-      if (!rejected) filtered.push(r);
-    }
-    ranked = filtered;
+    ranked = await filterRejectedCandidates(ranked);
   }
 
   // 6) Decide.
   if (ranked.length === 0) {
-    return embeddingCandidatesThenCreate(deps, input, normalized, rejectionKey, "ranked_empty");
+    return embeddingCandidatesThenCreate(deps, input, normalized, filterRejectedCandidates, "ranked_empty");
   }
   if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);

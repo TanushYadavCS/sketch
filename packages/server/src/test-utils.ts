@@ -5,7 +5,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import Database from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import pino from "pino";
-import { inject } from "vitest";
+import { inject, vi } from "vitest";
 import type { Config } from "./config";
 import type { DB } from "./db/schema";
 import { PG_TEMPLATE_PATH } from "./test-global-setup-pg";
@@ -63,6 +63,22 @@ export async function createTestDb(): Promise<Kysely<DB>> {
   // (Kysely's RuntimeDriver.destroy() is a no-op if init() was never called).
   await db.selectFrom("users").select("id").limit(0).execute();
   return db;
+}
+
+export function spyOnExecutedSql(db: Kysely<DB>): { readonly count: number; sqls: string[] } {
+  const sqls: string[] = [];
+  const executor = db.getExecutor();
+  const executeQuery = executor.executeQuery.bind(executor);
+  vi.spyOn(executor, "executeQuery").mockImplementation((query) => {
+    sqls.push(query.sql);
+    return executeQuery(query);
+  });
+  return {
+    get count() {
+      return sqls.length;
+    },
+    sqls,
+  };
 }
 
 /**

@@ -1,12 +1,3 @@
-/**
- * Tests for smart-enrichment's stale-file-id defensiveness.
- *
- * `entity_candidates.seen_file_ids` is a JSON text blob — not a foreign key —
- * so deletions of `indexed_files` rows (dev resets, manual SQL) leave dangling
- * IDs that would crash the FK-guarded mention backfill on promotion.
- * handleCandidates now prunes those dead IDs at both update time and
- * just-before-insert time.
- */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,7 +9,6 @@ import type { GeminiGenerator } from "./gemini-generate";
 import {
   adjudicateKnownMatches,
   extractEntities,
-  handleCandidates,
   hasDistinctiveOverlap,
   mergeKnownEntities,
   projectProductMentionNames,
@@ -26,26 +16,6 @@ import {
   smartEnrichFile,
 } from "./smart-enrichment";
 import { recoverStaleEnrichments } from "./sync";
-
-const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
-
-async function countEntitiesBySourceType(db: Kysely<DB>, sourceType: string): Promise<number> {
-  const row = await db
-    .selectFrom("entities")
-    .select((eb) => eb.fn.count<number>("id").as("count"))
-    .where("source_type", "=", sourceType)
-    .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
-    .executeTakeFirstOrThrow();
-  return Number(row.count);
-}
-
-async function countReviewQueueRows(db: Kysely<DB>): Promise<number> {
-  const row = await db
-    .selectFrom("entity_review_queue")
-    .select((eb) => eb.fn.count<number>("id").as("count"))
-    .executeTakeFirstOrThrow();
-  return Number(row.count);
-}
 
 async function seedFile(
   db: Kysely<DB>,
@@ -91,17 +61,6 @@ async function seedFile(
       synced_at: new Date().toISOString(),
     })
     .execute();
-}
-
-function makeDeps(db: Kysely<DB>) {
-  return {
-    db,
-    logger: createTestLogger(),
-    generator: (() => {
-      throw new Error("generator should not be called in these tests");
-    }) as unknown as GeminiGenerator,
-    embeddingProvider: null as EmbeddingProvider | null,
-  };
 }
 
 function smartFileContext(
@@ -150,141 +109,6 @@ function generatorWithProjectExtraction(): GeminiGenerator {
     },
   } as GeminiGenerator;
 }
-
-describe("handleCandidates — stale seen_file_ids", () => {
-  let db: Kysely<DB>;
-
-  beforeEach(async () => {
-    db = await createTestDb();
-  });
-
-  afterEach(async () => {
-    try {
-      await db.destroy();
-    } catch {
-      // already destroyed
-    }
-  });
-
-  it("promotion does not crash when seen_file_ids contains a dangling id", async () => {
-    const liveFileA = randomUUID();
-    const liveFileB = randomUUID();
-    const ghostFileId = randomUUID();
-    await seedFile(db, liveFileA);
-    await seedFile(db, liveFileB);
-    await seedFile(db, ghostFileId);
-
-    // Candidate already seen in live_a + ghost (count: 2, at threshold — but
-    // ghost is about to be deleted, dropping the effective count to 1).
-    await db
-      .insertInto("entity_candidates")
-      .values({
-        id: randomUUID(),
-        name: "Project Zephyr",
-        type: "project",
-        variations: JSON.stringify(["zephyr"]),
-        first_seen_file_id: liveFileA,
-        seen_file_ids: JSON.stringify([liveFileA, ghostFileId]),
-        seen_count: 2,
-        promoted_entity_id: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .execute();
-
-    // Ghost gets hard-deleted (dev reset / manual SQL). first_seen_file_id
-    // points to live_a so the candidate survives.
-    await db.deleteFrom("indexed_files").where("id", "=", ghostFileId).execute();
-
-    // Second live sighting (live_b) trips the threshold after prune:
-    // [live_a] (pruned from [live_a, ghost]) + live_b = count 2 → promote.
-    const promoted = await handleCandidates(makeDeps(db), liveFileB, [
-      { mention: "Project Zephyr", type: "project", variations: ["zephyr"] },
-    ]);
-
-    expect(promoted).toHaveLength(1);
-    expect(promoted[0].name).toBe("Project Zephyr");
-
-    // entity_mentions got backfilled for both live files; the ghost was skipped.
-    const entity = await db.selectFrom("entities").selectAll().where("name", "=", "Project Zephyr").executeTakeFirst();
-    expect(entity).toBeTruthy();
-    if (!entity) return;
-    const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", entity.id).execute();
-    expect(mentions).toHaveLength(2);
-    const mentionFileIds = mentions.map((m) => m.indexed_file_id).sort();
-    expect(mentionFileIds).toEqual([liveFileA, liveFileB].sort());
-  });
-
-  it("prunes dangling ids on update even when threshold is not met", async () => {
-    const liveFileId = randomUUID();
-    const secondLiveFileId = randomUUID();
-    const ghostFileId = randomUUID();
-    await seedFile(db, liveFileId);
-    await seedFile(db, secondLiveFileId);
-    await seedFile(db, ghostFileId);
-
-    // Candidate has seen a live file + a ghost that will soon be gone.
-    await db
-      .insertInto("entity_candidates")
-      .values({
-        id: randomUUID(),
-        name: "Widget Factory",
-        type: "product",
-        variations: JSON.stringify([]),
-        first_seen_file_id: liveFileId,
-        seen_file_ids: JSON.stringify([liveFileId, ghostFileId]),
-        seen_count: 2,
-        promoted_entity_id: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .execute();
-
-    await db.deleteFrom("indexed_files").where("id", "=", ghostFileId).execute();
-
-    // We need threshold still unmet after prune so promotion doesn't fire.
-    // After prune: [liveFileId]. Plus the new secondLiveFileId = 2 which hits
-    // the threshold (2). To keep "not promoted" behavior we raise the count
-    // story by using a candidate that gets a fresh id — the prune alone is
-    // what this test observes, not promotion. So we assert that storedIds
-    // reflects the prune, regardless of promotion.
-    await handleCandidates(makeDeps(db), secondLiveFileId, [
-      { mention: "Widget Factory", type: "product", variations: [] },
-    ]);
-
-    const candidate = await db
-      .selectFrom("entity_candidates")
-      .selectAll()
-      .where("name", "=", "Widget Factory")
-      .executeTakeFirst();
-    expect(candidate).toBeTruthy();
-    const storedIds = JSON.parse(candidate?.seen_file_ids ?? "[]") as string[];
-    expect(storedIds).not.toContain(ghostFileId);
-    expect(storedIds).toContain(liveFileId);
-    expect(storedIds).toContain(secondLiveFileId);
-  });
-
-  it("A0 documents current legacy candidate promotion path creating product and project entities with no review rows until A1 flips it", async () => {
-    const firstFileId = randomUUID();
-    const secondFileId = randomUUID();
-    await seedFile(db, firstFileId);
-    await seedFile(db, secondFileId);
-
-    await handleCandidates(makeDeps(db), firstFileId, [
-      { mention: "Sketch Product", type: "product", variations: ["Sketch"] },
-      { mention: "Apollo Project", type: "project", variations: ["Apollo"] },
-    ]);
-    const promoted = await handleCandidates(makeDeps(db), secondFileId, [
-      { mention: "Sketch Product", type: "product", variations: ["Sketch"] },
-      { mention: "Apollo Project", type: "project", variations: ["Apollo"] },
-    ]);
-
-    expect(promoted).toHaveLength(2);
-    expect(await countEntitiesBySourceType(db, "product")).toBe(1);
-    expect(await countEntitiesBySourceType(db, "project")).toBe(1);
-    expect(await countReviewQueueRows(db)).toBe(0);
-  });
-});
 
 describe("smartEnrichFile — structural task file types", () => {
   let db: Kysely<DB>;

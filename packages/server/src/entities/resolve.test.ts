@@ -17,7 +17,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
 import type { IndexEntityRow } from "./materialize-types";
-import { normalizeName } from "./name-keys";
+import { normalizeEntityMatchName, normalizeName } from "./name-keys";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { ResolveError, confirmReview, dismissReview, rejectReview } from "./resolve";
 
@@ -35,11 +35,11 @@ function readEmail(e: IndexEntityRow): string | null {
 
 function makeLookup(getList: () => Entity[]): EntityLookup {
   return {
-    getByNormalizedName: (n) => getList().filter((e) => normalizeName(e.name) === n),
+    getByNormalizedName: (n) => getList().filter((e) => normalizeEntityMatchName(e.source_type, e.name) === n),
     getByAlias: (n) =>
       getList().filter((e) => {
         const aliases: string[] = e.aliases ? JSON.parse(e.aliases) : [];
-        return aliases.some((a) => normalizeName(a) === n);
+        return aliases.some((a) => normalizeEntityMatchName(e.source_type, a) === n);
       }),
     listByType: (t) => getList().filter((e) => e.source_type === t),
   };
