@@ -18,10 +18,10 @@ import { config as loadEnv } from "dotenv";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { isGenericEngagementName } from "../src/connectors/engagement-name-filter";
-import { normalizeName } from "../src/connectors/name-normalize";
 import { whereLiveEntity } from "../src/db/repositories/entities";
 import type { DB } from "../src/db/schema";
 import { buildCompanyDedupGroups, loadCompanyDedupMembers } from "../src/entities/company-dedup-groups";
+import { normalizeName } from "../src/entities/name-keys";
 import { relationshipSourceOrder } from "../src/entities/relationship-provenance";
 
 loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env") });

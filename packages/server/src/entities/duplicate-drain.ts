@@ -1,6 +1,5 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DuplicateDrainRunSnapshot } from "../db/repositories/graph-pass-runs";
 import type { DB, EntitiesTable, EntityReviewQueueTable } from "../db/schema";
@@ -11,11 +10,11 @@ import {
   chooseCanonicalCompany,
   loadCompanyDedupMembers,
 } from "./company-dedup-groups";
-import { compactEntityNameKey } from "./match-normalize";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import { withMaterializeReplayQueue } from "./materialize-replay";
 import { mergeEntities } from "./merge";
 import { normalizeStrict, normalizeTokenSet } from "./name-dedup";
+import { compactEntityNameKey, normalizeName } from "./name-keys";
 
 const PASS_ID = "duplicate-drain";
 const PASS_VERSION = 2;

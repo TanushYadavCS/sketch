@@ -1,8 +1,9 @@
 import { deriveQualifiedSeedName } from "../connectors/container-name";
-import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
+import { registerEntity } from "./materialize-deps";
 import { createMentionFromFact } from "./materialize-mentions";
 import { buildSeedProvenanceNote, isProjectCandidateSeed } from "./materialize-structural-gate";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { normalizeEntityMatchName } from "./name-keys";
 import type { ProposeEntityType } from "./propose";
 
 export function canonicalSpineTypeForStructuralSource(sourceType: string): ProposeEntityType | null {

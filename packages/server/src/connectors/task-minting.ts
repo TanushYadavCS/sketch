@@ -18,10 +18,11 @@ import type { TaskAccessOptions } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { buildMaterializeDeps, shouldMarkMaterialized } from "../entities/materialize";
 import { materializeLlmTask } from "../entities/materialize-llm-task";
+import { normalizeName } from "../entities/name-keys";
+import { createAmbiguityAwareMap } from "./ambiguity-map";
 import type { StageOutcome, StageReporter } from "./enrichment-stage-report";
 import type { GeminiGenerator } from "./gemini-generate";
 import { LLM_TASK_CONTENT_LIMIT, LLM_TASK_PROMPT_VERSION, extractLlmTaskCandidates } from "./llm-task-extraction";
-import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 
 export const TASK_MINTING_PROJECT_CAP = 100;
 export const TASK_MINTING_EXISTING_TASK_CAP = 60;

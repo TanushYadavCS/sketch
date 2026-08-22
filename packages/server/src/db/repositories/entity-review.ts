@@ -9,8 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
-import { normalizeName } from "../../connectors/name-normalize";
-import { normalizeMatchName } from "../../entities/match-normalize";
+import { normalizeEntityMatchName, normalizeName } from "../../entities/name-keys";
 import { isPg } from "../dialect";
 import type { DB, EntityAliasRejectionsTable, EntityReviewEvidenceTable, EntityReviewQueueTable } from "../schema";
 
@@ -153,9 +152,9 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
       .execute();
     const candidate = entities.find((entity) => {
-      if (normalizeMatchName(row.entity_type, entity.name) === row.normalized_name) return true;
+      if (normalizeEntityMatchName(row.entity_type, entity.name) === row.normalized_name) return true;
       const aliases: string[] = entity.aliases ? JSON.parse(entity.aliases) : [];
-      return aliases.some((alias) => normalizeMatchName(row.entity_type, alias) === row.normalized_name);
+      return aliases.some((alias) => normalizeEntityMatchName(row.entity_type, alias) === row.normalized_name);
     });
     await db
       .updateTable("entity_review_queue")
@@ -814,10 +813,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         return { kind: "updated" as const, row, mergedFromReviewId: null };
       }
 
-      const sourceDerivedNormalizedName = normalizeMatchName(sourceRow.entity_type, sourceRow.proposed_name);
+      const sourceDerivedNormalizedName = normalizeEntityMatchName(sourceRow.entity_type, sourceRow.proposed_name);
       const targetNormalizedName =
         sourceRow.normalized_name === sourceDerivedNormalizedName
-          ? normalizeMatchName(newEntityType, sourceRow.proposed_name)
+          ? normalizeEntityMatchName(newEntityType, sourceRow.proposed_name)
           : sourceRow.normalized_name;
 
       const targetRow = await db

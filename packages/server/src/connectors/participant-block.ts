@@ -27,6 +27,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
+import { normalizeParticipantNameKey } from "../entities/name-keys";
 import { buildWhatsAppRosterSnapshot, stableWhatsAppParticipantJidRef } from "../whatsapp/identity-resolution";
 import { WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "./types";
 
@@ -74,22 +75,6 @@ export function parseActionItemOwners(content: string): string[] {
   return Array.from(owners);
 }
 
-/**
- * Normalize a name to a comparable key. Lowercase, collapse whitespace,
- * strip middle initials (one-letter tokens followed by an optional period).
- * Used to match attendee names to action-item owner names across minor
- * formatting variation ("Vedant Parikh" vs "Vedant K. Parikh" vs "vedant
- * parikh").
- */
-function normalizeNameKey(name: string): string {
-  return name
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((tok) => tok.length > 0)
-    .filter((tok) => !/^[a-z]\.?$/.test(tok))
-    .join(" ");
-}
-
 export interface BuildParticipantBlockOptions {
   fileId: string;
   fileContent: string;
@@ -117,7 +102,7 @@ export async function buildParticipantBlock(
   if (attendees.length === 0) return "";
 
   const ownerNames = parseActionItemOwners(opts.fileContent);
-  const ownerKeys = new Set(ownerNames.map(normalizeNameKey));
+  const ownerKeys = new Set(ownerNames.map(normalizeParticipantNameKey));
 
   type Rendered = { line: string; sortKey: string };
   const seen = new Set<string>();
@@ -142,7 +127,7 @@ export async function buildParticipantBlock(
       }
     }
 
-    const ownerTag = ownerKeys.has(normalizeNameKey(name)) ? " [action-item owner]" : "";
+    const ownerTag = ownerKeys.has(normalizeParticipantNameKey(name)) ? " [action-item owner]" : "";
     const emailPart = email ? ` (${email})` : "";
     rendered.push({
       line: `- ${name} — ${companyLabel}${emailPart}${ownerTag}`,

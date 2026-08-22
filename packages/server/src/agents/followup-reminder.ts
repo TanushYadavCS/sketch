@@ -1,5 +1,5 @@
-import { normalizeName } from "../connectors/name-normalize";
 import type { AgentOutputItemInput } from "../db/repositories/agent-outputs";
+import { normalizeName } from "../entities/name-keys";
 
 export interface FollowupReminderTask {
   taskId: string;

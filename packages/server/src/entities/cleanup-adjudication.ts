@@ -1,4 +1,4 @@
-import { normalizeName } from "../connectors/name-normalize";
+import { normalizeName } from "./name-keys";
 
 /**
  * Phase 1 of PROJECT_ENTITY_CLEANUP.md: the pure core of the adjudication

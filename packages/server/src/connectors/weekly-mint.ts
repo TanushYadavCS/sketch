@@ -8,12 +8,12 @@ import {
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createProjectMintingVerdictRepository } from "../db/repositories/project-minting-verdicts";
 import type { DB, WeeklyMintRunsTable } from "../db/schema";
+import { normalizeName } from "../entities/name-keys";
 import { relationshipSourceOrder } from "../entities/relationship-provenance";
 import { WEEKLY_PASS_PROJECT_SOURCES, confirmReview } from "../entities/resolve";
 import { retrieveNameDedupCandidates } from "./embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator, GenerateMeta } from "./gemini-generate";
-import { normalizeName } from "./name-normalize";
 import type { AgenticOptions, AgenticOutcome, AgenticToolStep } from "./openrouter-generate";
 import {
   CADENCE_TOKENS,

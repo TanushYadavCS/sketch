@@ -24,7 +24,7 @@ import {
   declareRelationship,
   removeDeclaredRelationship,
 } from "../../entities/declare-relationship";
-import { normalizeEntityMatchName } from "../../entities/materialize-deps";
+import { normalizeEntityMatchName } from "../../entities/name-keys";
 import {
   type EntityProfileFacts,
   HIDDEN_ENTITY_SOURCE_TYPES,

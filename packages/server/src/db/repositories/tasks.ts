@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
 import { fileAccessFilterSql } from "../../connectors/search";
 import type { AccessPrincipalInput } from "../../connectors/types";
+import { normalizeName } from "../../entities/name-keys";
 import { whatsappNumberLookupValues } from "../../identity-normalization";
 import type { DB, EntitiesTable, TasksTable } from "../schema";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";

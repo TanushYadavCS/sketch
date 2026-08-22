@@ -5,10 +5,11 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
-import { buildLookupIndex, buildMaterializeDeps, normalizeEntityMatchName, registerEntity } from "./materialize-deps";
+import { buildLookupIndex, buildMaterializeDeps, registerEntity } from "./materialize-deps";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializeStructuralSeed } from "./materialize-structural";
 import type { IndexEntityRow } from "./materialize-types";
+import { normalizeEntityMatchName } from "./name-keys";
 
 async function seedEntity(
   db: Kysely<DB>,

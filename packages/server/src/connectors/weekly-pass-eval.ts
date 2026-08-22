@@ -1,4 +1,4 @@
-import { normalizeName } from "./name-normalize";
+import { normalizeName } from "../entities/name-keys";
 import type { GroupDisposition } from "./weekly-mint";
 
 /**

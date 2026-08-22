@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Kysely } from "kysely";
-import { normalizeName } from "../connectors/name-normalize";
 import { forEachChunk } from "../connectors/sync-utils";
 import type { DB } from "../db/schema";
 import { readPersonEmailFromMetadata } from "./materialize-json";
+import { normalizeName } from "./name-keys";
 import type { PassReason, ReasonHit } from "./queue-projection";
 import { type LiveEntity, type QueueRowForPasses, nameKey } from "./queue-reconcile";
 

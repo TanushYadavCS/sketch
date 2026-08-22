@@ -1,4 +1,4 @@
-import { normalizeName } from "./name-normalize";
+import { normalizeName } from "../entities/name-keys";
 
 export const GENERIC_ENGAGEMENT_NAME_DENYLIST = new Set(
   [

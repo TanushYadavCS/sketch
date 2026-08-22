@@ -41,6 +41,7 @@ import {
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "../entities/materialize";
+import { normalizeName } from "../entities/name-keys";
 import { tokenizeName } from "../entities/name-tokenize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
@@ -71,7 +72,6 @@ import {
   renderFactsForPrompt,
   selectRelevantFacts,
 } from "./learned-fact-selector";
-import { normalizeName } from "./name-normalize";
 import { SLACK_CONVERSATION_SLICE_FILE_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "./types";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */

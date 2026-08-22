@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 import type { DB, TasksTable } from "../schema";
 import type { AgentOutputItemInput } from "./agent-outputs";
 import { type TaskActivitySurface, createTaskActivityRepository } from "./task-activity";

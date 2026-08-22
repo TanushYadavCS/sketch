@@ -21,7 +21,6 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
 import {
   type EntityContactPointKind,
   type EntityMentionConfidence,
@@ -36,7 +35,6 @@ import { confirmUserEntityLink } from "../db/repositories/user-entity-linking";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { finalizeLinkedDomainCandidates } from "./domain-promotion";
-import { normalizeEntityMatchName } from "./match-normalize";
 import {
   type MaterializeResult,
   buildMaterializeDeps,
@@ -44,6 +42,7 @@ import {
   shouldMarkMaterialized,
 } from "./materialize";
 import { mergeEntitiesInTransaction } from "./merge";
+import { normalizeEntityMatchName, normalizeName } from "./name-keys";
 
 type Entity = Selectable<EntitiesTable>;
 

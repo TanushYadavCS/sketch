@@ -1,6 +1,6 @@
 import { type Kysely, sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createEntityRepository } from "./entities";

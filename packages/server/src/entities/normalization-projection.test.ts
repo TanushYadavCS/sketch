@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { coerceMentionType, normalizeMentionType } from "./graph";
-import { normalizeEntityMatchName } from "./match-normalize";
+import { normalizeEntityMatchName } from "./name-keys";
 import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 /**

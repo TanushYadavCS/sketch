@@ -1,9 +1,9 @@
-import { normalizeName } from "../connectors/name-normalize";
 import { createTaskActivityRepository } from "../db/repositories/task-activity";
 import { TEST_ACCOUNT_ENTITY_ID, type TaskStatus, createTaskRepository } from "../db/repositories/tasks";
 import { assignMembership, closeOpenMembershipForTask, upsertWorkCycle } from "../db/repositories/work-cycles";
 import { readJsonObject } from "./materialize-json";
 import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { normalizeName } from "./name-keys";
 
 const STATUS_TYPE_MAP: Record<string, Record<string, TaskStatus>> = {
   linear: {

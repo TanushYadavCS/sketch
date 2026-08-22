@@ -1,20 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
-
-describe("normalizeName", () => {
-  it("lowercases, trims, and collapses internal whitespace", () => {
-    expect(normalizeName("  Bob   Chen  ")).toBe("bob chen");
-  });
-
-  it("strips trailing punctuation", () => {
-    expect(normalizeName("Bob Chen Jr.")).toBe("bob chen jr");
-    expect(normalizeName("Alice,")).toBe("alice");
-  });
-
-  it("leaves internal punctuation alone", () => {
-    expect(normalizeName("J.R. Smith")).toBe("j.r. smith");
-  });
-});
+import { createAmbiguityAwareMap } from "./ambiguity-map";
 
 describe("createAmbiguityAwareMap", () => {
   it("returns a set value for a fresh key", () => {
@@ -58,7 +43,6 @@ describe("createAmbiguityAwareMap", () => {
     const v2 = { email: "x@y" };
     m.add("k", v1);
     m.add("k", v2);
-    // Different object identities → treated as conflicting
     expect(m.isAmbiguous("k")).toBe(true);
   });
 });

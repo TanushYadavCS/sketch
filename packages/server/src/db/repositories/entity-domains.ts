@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
-import { compactEntityNameKey } from "../../entities/match-normalize";
+import { compactEntityNameKey } from "../../entities/name-keys";
 import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
 import { ProjectBindingError, assertNoPartOfCycle } from "../../entities/project-bindings";
 import {
@@ -210,12 +210,8 @@ function parseJsonArray(raw: string | null): string[] {
   return [];
 }
 
-function compactNameKey(value: string): string {
-  return compactEntityNameKey("company", value);
-}
-
 function domainMatchesName(domain: string, name: string): boolean {
-  const nameKey = compactNameKey(name);
+  const nameKey = compactEntityNameKey("company", name);
   if (!nameKey) return false;
   const normalizedDomain = normalizeWebsiteDomain(domain) ?? domain.trim().toLowerCase();
   const labels = normalizedDomain.split(".").filter(Boolean);
@@ -226,7 +222,7 @@ function domainMatchesName(domain: string, name: string): boolean {
     candidates.add(labels[labels.length - 2]);
   }
   for (const candidate of candidates) {
-    if (compactNameKey(candidate) === nameKey) return true;
+    if (compactEntityNameKey("company", candidate) === nameKey) return true;
   }
   return false;
 }

@@ -25,7 +25,6 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { Kysely, PostgresDialect } from "kysely";
 import pg from "pg";
-import { normalizeName } from "../src/connectors/name-normalize";
 import type { GroupDisposition } from "../src/connectors/weekly-mint";
 import {
   type ContainerEvidence,
@@ -37,6 +36,7 @@ import {
 } from "../src/connectors/weekly-pass-eval";
 import { whereLiveEntity } from "../src/db/repositories/entities";
 import type { DB } from "../src/db/schema";
+import { normalizeName } from "../src/entities/name-keys";
 
 loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env") });
 

@@ -15,7 +15,8 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
-import { type AmbiguityAwareMap, createAmbiguityAwareMap, normalizeName } from "./name-normalize";
+import { normalizeName } from "../entities/name-keys";
+import { type AmbiguityAwareMap, createAmbiguityAwareMap } from "./ambiguity-map";
 import {
   type Connector,
   type ConnectorCredentials,

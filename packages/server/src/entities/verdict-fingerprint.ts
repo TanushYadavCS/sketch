@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { normalizeName } from "../connectors/name-normalize";
+import { normalizeName } from "./name-keys";
 
 export type VerdictFingerprintEntity = {
   id: string;

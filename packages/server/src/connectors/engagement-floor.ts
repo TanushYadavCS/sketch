@@ -46,6 +46,7 @@ import { isRoleAccountEmail } from "../entities/affiliations";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { indexedFileIdsForMaterializeScope } from "../entities/materialize-types";
+import { normalizeParticipantNameKey } from "../entities/name-keys";
 import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { parseActionItemOwners } from "./participant-block";
@@ -80,15 +81,6 @@ interface ResolvedAttendee {
   name: string;
   companyName: string;
   companyId: string;
-}
-
-function normalizeNameKey(name: string): string {
-  return name
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((tok) => tok.length > 0)
-    .filter((tok) => !/^[a-z]\.?$/.test(tok))
-    .join(" ");
 }
 
 async function reconcileAttendeeActionFacts(
@@ -165,9 +157,9 @@ export async function applyEngagementFloor(
 
   const ownerNames = parseActionItemOwners(opts.fileContent);
   if (ownerNames.length === 0) return finish(0);
-  const ownerKeys = new Set(ownerNames.map(normalizeNameKey));
+  const ownerKeys = new Set(ownerNames.map(normalizeParticipantNameKey));
 
-  const owners = resolved.filter((r) => ownerKeys.has(normalizeNameKey(r.name)));
+  const owners = resolved.filter((r) => ownerKeys.has(normalizeParticipantNameKey(r.name)));
   if (owners.length === 0) return finish(0);
 
   const uniqueCompanies = Array.from(

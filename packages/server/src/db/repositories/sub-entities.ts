@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
-import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeName } from "../../entities/name-keys";
 import { defaultValueSignature, seriesKeyFor } from "../../entities/sub-entity-signatures";
 import type { DB, SubEntitiesTable } from "../schema";
 
