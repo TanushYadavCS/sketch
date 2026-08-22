@@ -9,7 +9,7 @@ import {
 import type { DB, EntitiesTable } from "../../db/schema";
 import type { CleanupAction, CleanupVerdict } from "../../entities/cleanup-adjudication";
 import { planProjectCleanup } from "../../entities/cleanup-apply";
-import { graphVerdictFingerprint } from "../../entities/verdict-fingerprint";
+import { fingerprintFor } from "../../entities/verdict-fingerprint";
 import { jsonResult } from "./queries";
 
 const actions = ["keep", "merge_into", "nest_under", "archive"] as const;
@@ -77,23 +77,11 @@ function normalizeEvidence(proposal: Proposal): NormalizedEvidence {
   };
 }
 
-function fingerprintEntity(row: EntityRow | null) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    name: row.name,
-    sourceType: row.source_type,
-    status: row.status,
-    deletedAt: row.deleted_at,
-    mergedIntoEntityId: row.merged_into_entity_id,
-  };
-}
-
-function fingerprintFor(prepared: PreparedProposal): string {
-  return graphVerdictFingerprint({
+function preparedFingerprint(prepared: PreparedProposal): string {
+  return fingerprintFor({
     action: prepared.proposal.action,
-    subject: fingerprintEntity(prepared.subject),
-    target: fingerprintEntity(prepared.target),
+    subject: prepared.subject,
+    target: prepared.target,
     evidence: prepared.evidence,
   });
 }
@@ -109,7 +97,7 @@ function bouncedVerdict(prepared: PreparedProposal, validationReason: string): S
     targetName: prepared.target?.name ?? null,
     reason: prepared.proposal.reason,
     evidenceJson: JSON.stringify(prepared.evidence),
-    evidenceFingerprint: fingerprintFor(prepared),
+    evidenceFingerprint: preparedFingerprint(prepared),
     validationStatus: "failed",
     validationReason,
     wouldChangeJson: null,
@@ -122,6 +110,7 @@ function plannedVerdict(
   validationStatus: GraphVerdictValidationStatus,
   validationReason: string | null,
   wouldChange: Record<string, number> | null,
+  resolvedTargetEntityId: string | null,
 ): StoreGraphVerdictInput {
   return {
     runId: "",
@@ -130,10 +119,11 @@ function plannedVerdict(
     subjectName: prepared.subject?.name ?? null,
     subjectEntityType: prepared.subject?.source_type ?? null,
     targetEntityId: prepared.proposal.targetEntityId ?? null,
+    resolvedTargetEntityId,
     targetName: prepared.target?.name ?? null,
     reason: prepared.proposal.reason,
     evidenceJson: JSON.stringify(prepared.evidence),
-    evidenceFingerprint: fingerprintFor(prepared),
+    evidenceFingerprint: preparedFingerprint(prepared),
     validationStatus,
     validationReason,
     wouldChangeJson: wouldChange ? JSON.stringify(wouldChange) : null,
@@ -230,8 +220,14 @@ export async function handleProposeGraphVerdicts(
           if (!prepared) continue;
           rows[prepared.index] =
             planRow.state === "applied"
-              ? plannedVerdict(prepared, "ok", null, planRow.wouldChange)
-              : plannedVerdict(prepared, "failed", planRow.reason ?? "invalid_action", null);
+              ? plannedVerdict(prepared, "ok", null, planRow.wouldChange, planRow.resolvedTargetEntityId)
+              : plannedVerdict(
+                  prepared,
+                  "failed",
+                  planRow.reason ?? "invalid_action",
+                  null,
+                  planRow.resolvedTargetEntityId,
+                );
         }
 
         const repo = createGraphVerdictRepository(trx);
@@ -247,7 +243,7 @@ export async function handleProposeGraphVerdicts(
           return { ...row, runId: run.id };
         });
         const stored = await repo.storeVerdicts(verdictRows);
-        const results: ProposalResult[] = verdictRows.map((row, index) => ({
+        const results: ProposalResult[] = stored.rows.map((row, index) => ({
           verdictId: stored.ids[index] ?? "",
           action: row.action as CleanupAction,
           subjectEntityId: row.subjectEntityId,
@@ -257,8 +253,8 @@ export async function handleProposeGraphVerdicts(
         }));
         return {
           runId: run.id,
-          stored: verdictRows.filter((row) => row.status === "awaiting_human").length,
-          bounced: verdictRows.filter((row) => row.status === "bounced").length,
+          stored: stored.rows.filter((row) => row.status === "awaiting_human").length,
+          bounced: stored.rows.filter((row) => row.status === "bounced").length,
           results,
         };
       }),

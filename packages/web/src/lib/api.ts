@@ -573,6 +573,70 @@ export interface ProjectMintingAcceptance {
   taskParentUpdates: number;
 }
 
+export type GraphVerdictStatus = "awaiting_human" | "bounced" | "approved" | "rejected" | "applied" | "reverted";
+
+export interface GraphVerdictRun {
+  id: string;
+  source: string;
+  proposedByUserId: string;
+  tokenId: string | null;
+  note: string | null;
+  verdictsProposed: number;
+  verdictsStored: number;
+  verdictsBounced: number;
+  createdAt: string;
+  rollups: Record<GraphVerdictStatus, number>;
+}
+
+export interface GraphVerdict {
+  id: string;
+  runId: string;
+  action: string;
+  subjectEntityId: string;
+  subjectName: string | null;
+  subjectEntityType: string | null;
+  targetEntityId: string | null;
+  resolvedTargetEntityId: string | null;
+  targetName: string | null;
+  reason: string;
+  evidence: unknown;
+  evidenceFingerprint: string;
+  validationStatus: string;
+  validationReason: string | null;
+  wouldChange: unknown;
+  status: GraphVerdictStatus;
+  supersededAt: string | null;
+  decidedAt: string | null;
+  decidedByUserId: string | null;
+  appliedLedgerRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GraphVerdictApplication {
+  verdictId: string;
+  dryRun: boolean;
+  status: "approved" | "awaiting_human" | "applied";
+  ledgerRef: string | null;
+  wouldChange: Record<string, number>;
+  plan: {
+    entityId: string;
+    name: string;
+    action: string;
+    state: string;
+    targetEntityId: string | null;
+    resolvedTargetEntityId: string | null;
+    reason: string | null;
+    wouldChange: Record<string, number>;
+  };
+}
+
+export interface GraphVerdictReversion {
+  verdictId: string;
+  status: "reverted";
+  ledgerRef: string;
+}
+
 export interface EntityReviewQueueRow {
   id: string;
   proposed_name: string;
@@ -3789,6 +3853,31 @@ export const api = {
       return request<{ steps: WeeklyMintTraceStep[] }>(
         `/api/project-minting/runs/${runId}/traces/${encodeURIComponent(containerKey)}`,
       );
+    },
+  },
+  graphVerdicts: {
+    listRuns() {
+      return request<{ runs: GraphVerdictRun[] }>("/api/graph-verdicts/runs");
+    },
+    listRunVerdicts(runId: string) {
+      return request<{ verdicts: GraphVerdict[] }>(`/api/graph-verdicts/runs/${runId}/verdicts`);
+    },
+    approve(id: string) {
+      return request<{ verdict: GraphVerdict }>(`/api/graph-verdicts/${id}/approval`, { method: "POST" });
+    },
+    reject(id: string) {
+      return request<{ verdict: GraphVerdict }>(`/api/graph-verdicts/${id}/rejection`, { method: "POST" });
+    },
+    apply(id: string, body: { dryRun?: boolean } = {}) {
+      return request<{ application: GraphVerdictApplication }>(`/api/graph-verdicts/${id}/application`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    revert(id: string) {
+      return request<{ reversion: GraphVerdictReversion }>(`/api/graph-verdicts/${id}/reversion`, {
+        method: "POST",
+      });
     },
   },
   entityReview: {

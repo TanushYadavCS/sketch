@@ -28,6 +28,7 @@ export type CleanupReportProject = {
   lastActivity: string | null;
   companyShares: Array<{ company: string; files: number }>;
   taskCount: number;
+  /** Future builders must exclude non-vouching relationship sources the same way archiveReferenceCounts does. */
   relationshipCount: number;
   genericName: boolean;
   family: string | null;

@@ -88,6 +88,7 @@ async function seedRelationship(
   source: string,
   target: string,
   type = "related_to",
+  rowSource = "cleanup-test",
 ): Promise<void> {
   await db
     .insertInto("entity_relationships")
@@ -98,7 +99,34 @@ async function seedRelationship(
       relationship_type: type,
       confidence: "high",
       confidence_score: 1,
+      source: rowSource,
+    })
+    .execute();
+}
+
+async function seedTask(db: Kysely<DB>, id: string, parentEntityId: string): Promise<void> {
+  await db
+    .insertInto("tasks")
+    .values({
+      id,
+      parent_entity_id: parentEntityId,
+      parent_source_ref: null,
+      parent_name: null,
       source: "cleanup-test",
+      external_ref: null,
+      title: "Referenced cleanup task",
+      normalized_title: "referenced cleanup task",
+      status: "open",
+      status_authority: "source",
+      assignee_entity_id: null,
+      priority: null,
+      due_at: null,
+      provenance: "source",
+      source_task_id: id,
+      status_changed_at: null,
+      completed_at: null,
+      valid_from: null,
+      valid_to: null,
     })
     .execute();
 }
@@ -265,6 +293,42 @@ describe("project cleanup apply", () => {
         .where("source_entity_id", "=", "child")
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ source_entity_id: "child", target_entity_id: "parent", relationship_type: "part_of" });
+  });
+
+  it("fails archive when at least one mixed relationship source vouches for the entity", async () => {
+    await seedEntity(db, "mixed-archive", "Mixed Archive");
+    await seedEntity(db, "mixed-anchor", "Mixed Anchor");
+    await seedRelationship(db, "rel-machine", "mixed-archive", "mixed-anchor", "related_to", "llm_extraction");
+    await seedRelationship(db, "rel-declared", "mixed-anchor", "mixed-archive", "related_to", "declared");
+
+    const result = await applyProjectCleanup(
+      db,
+      [verdict({ entityId: "mixed-archive", name: "Mixed Archive", action: "archive" })],
+      { execute: true, verdictPath: "test-verdicts.json" },
+    );
+
+    expect(result.counts.archive.failed).toBe(1);
+    expect(result.rows[0]?.reason).toBe("archive_referenced: tasks=0, relationships=1");
+    await expect(
+      db.selectFrom("entities").select("deleted_at").where("id", "=", "mixed-archive").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ deleted_at: null });
+  });
+
+  it("fails archive when the entity has a referencing task and no relationships", async () => {
+    await seedEntity(db, "task-archive", "Task Archive");
+    await seedTask(db, "task-archive-reference", "task-archive");
+
+    const result = await applyProjectCleanup(
+      db,
+      [verdict({ entityId: "task-archive", name: "Task Archive", action: "archive" })],
+      { execute: true, verdictPath: "test-verdicts.json" },
+    );
+
+    expect(result.counts.archive.failed).toBe(1);
+    expect(result.rows[0]?.reason).toBe("archive_referenced: tasks=1, relationships=0");
+    await expect(
+      db.selectFrom("entities").select("deleted_at").where("id", "=", "task-archive").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ deleted_at: null });
   });
 
   it("skips unapproved and validation-flagged rows and records before-values that restore a merge", async () => {

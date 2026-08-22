@@ -1756,59 +1756,61 @@ export async function mergeEntities(db: Kysely<DB>, input: MergeEntitiesInput): 
   return db.transaction().execute((trx) => mergeEntitiesInTransaction(trx, input));
 }
 
+export async function unmergeEntitiesInTransaction(db: Kysely<DB>, input: UnmergeEntitiesInput): Promise<void> {
+  const merge = await db
+    .selectFrom("entity_merges")
+    .selectAll()
+    .where("id", "=", input.mergeId)
+    .where("unmerged_at", "is", null)
+    .executeTakeFirst();
+  if (!merge) throw new EntityMergeError("MERGE_NOT_FOUND", "active merge not found", { mergeId: input.mergeId });
+
+  const survivor = await fetchRawEntity(db, merge.survivor_entity_id);
+  if (!survivor || survivor.deleted_at || survivor.merged_into_entity_id) {
+    throw new EntityMergeError("MERGE_SUPERSEDED", "merge survivor is no longer live", {
+      survivorId: merge.survivor_entity_id,
+    });
+  }
+
+  const later = await db
+    .selectFrom("entity_merges")
+    .select("id")
+    .where("merged_entity_id", "=", merge.survivor_entity_id)
+    .where("unmerged_at", "is", null)
+    .executeTakeFirst();
+  if (later) {
+    throw new EntityMergeError("MERGE_SUPERSEDED", "a later active merge supersedes this merge", {
+      mergeId: input.mergeId,
+      laterMergeId: later.id,
+    });
+  }
+
+  const revived = await db
+    .updateTable("entities")
+    .set({ deleted_at: null, merged_into_entity_id: null, updated_at: new Date().toISOString() })
+    .where("id", "=", merge.merged_entity_id)
+    .where("merged_into_entity_id", "=", merge.survivor_entity_id)
+    .executeTakeFirst();
+  if (updatedCount(revived) !== 1) {
+    throw new EntityMergeError("MERGE_CONFLICT", "merged entity could not be revived", {
+      mergedEntityId: merge.merged_entity_id,
+    });
+  }
+
+  const moves = JSON.parse(merge.moves) as EntityMergeMove[];
+  await reverseAliasAdditions(db, merge.survivor_entity_id, moves);
+  for (const move of [...moves].reverse()) {
+    await reverseMove(db, move);
+  }
+
+  await db
+    .updateTable("entity_merges")
+    .set({ unmerged_at: new Date().toISOString(), unmerged_by_user_id: input.userId })
+    .where("id", "=", input.mergeId)
+    .where("unmerged_at", "is", null)
+    .execute();
+}
+
 export async function unmergeEntities(db: Kysely<DB>, input: UnmergeEntitiesInput): Promise<void> {
-  await db.transaction().execute(async (trx) => {
-    const merge = await trx
-      .selectFrom("entity_merges")
-      .selectAll()
-      .where("id", "=", input.mergeId)
-      .where("unmerged_at", "is", null)
-      .executeTakeFirst();
-    if (!merge) throw new EntityMergeError("MERGE_NOT_FOUND", "active merge not found", { mergeId: input.mergeId });
-
-    const survivor = await fetchRawEntity(trx, merge.survivor_entity_id);
-    if (!survivor || survivor.deleted_at || survivor.merged_into_entity_id) {
-      throw new EntityMergeError("MERGE_SUPERSEDED", "merge survivor is no longer live", {
-        survivorId: merge.survivor_entity_id,
-      });
-    }
-
-    const later = await trx
-      .selectFrom("entity_merges")
-      .select("id")
-      .where("merged_entity_id", "=", merge.survivor_entity_id)
-      .where("unmerged_at", "is", null)
-      .executeTakeFirst();
-    if (later) {
-      throw new EntityMergeError("MERGE_SUPERSEDED", "a later active merge supersedes this merge", {
-        mergeId: input.mergeId,
-        laterMergeId: later.id,
-      });
-    }
-
-    const revived = await trx
-      .updateTable("entities")
-      .set({ deleted_at: null, merged_into_entity_id: null, updated_at: new Date().toISOString() })
-      .where("id", "=", merge.merged_entity_id)
-      .where("merged_into_entity_id", "=", merge.survivor_entity_id)
-      .executeTakeFirst();
-    if (updatedCount(revived) !== 1) {
-      throw new EntityMergeError("MERGE_CONFLICT", "merged entity could not be revived", {
-        mergedEntityId: merge.merged_entity_id,
-      });
-    }
-
-    const moves = JSON.parse(merge.moves) as EntityMergeMove[];
-    await reverseAliasAdditions(trx, merge.survivor_entity_id, moves);
-    for (const move of [...moves].reverse()) {
-      await reverseMove(trx, move);
-    }
-
-    await trx
-      .updateTable("entity_merges")
-      .set({ unmerged_at: new Date().toISOString(), unmerged_by_user_id: input.userId })
-      .where("id", "=", input.mergeId)
-      .where("unmerged_at", "is", null)
-      .execute();
-  });
+  await db.transaction().execute((trx) => unmergeEntitiesInTransaction(trx, input));
 }

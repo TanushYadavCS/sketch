@@ -4,6 +4,7 @@ import { isPg } from "../db/dialect";
 import type { DB } from "../db/schema";
 import type { CleanupAction, CleanupVerdict } from "./cleanup-adjudication";
 import { mergeEntitiesInTransaction } from "./merge";
+import { NON_VOUCHING_RELATIONSHIP_SOURCES } from "./relationship-provenance";
 
 type RowState = "applied" | "skipped" | "failed";
 
@@ -43,10 +44,21 @@ type LiveProject = {
   name: string;
 };
 
-type ValidPlannedRow = CleanupApplyPlanRow & {
+export type ValidPlannedRow = CleanupApplyPlanRow & {
   state: "applied";
   action: CleanupAction;
 };
+
+export type CleanupApplyExecutionContext = {
+  mergeGroupId?: string;
+  userId?: string;
+};
+
+export type CleanupApplyEffect =
+  | { action: "merge_into"; mergeGroupId: string | null; mergeId: string }
+  | { action: "nest_under"; relationshipId: string }
+  | { action: "nest_under"; existing: true }
+  | { action: "archive"; archivedAt: string };
 
 const ACTIONS: CleanupAction[] = ["keep", "merge_into", "nest_under", "archive"];
 
@@ -67,6 +79,10 @@ function recordCount(
 ): void {
   const bucket = ACTIONS.includes(action as CleanupAction) ? (action as CleanupAction) : "needs_human_fix";
   counts[bucket][state] += 1;
+}
+
+function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
+  return Number(result?.numUpdatedRows ?? 0);
 }
 
 function skippedRow(verdict: CleanupVerdict, reason: string): CleanupApplyPlanRow {
@@ -152,6 +168,11 @@ async function liveProjects(db: Kysely<DB>, ids: string[]): Promise<Map<string, 
   return new Map(rows.map((row) => [row.id, row]));
 }
 
+/**
+ * Archive guards count tasks plus only relationship edges whose source vouches
+ * for an endpoint entity. Non-vouching extraction/co-mention edges are left in
+ * place for undo but do not keep junk entities live.
+ */
 async function archiveReferenceCounts(
   db: Kysely<DB>,
   entityId: string,
@@ -171,6 +192,7 @@ async function archiveReferenceCounts(
     .selectFrom("entity_relationships")
     .select("id")
     .where((eb) => eb.or([eb("source_entity_id", "=", entityId), eb("target_entity_id", "=", entityId)]))
+    .where("source", "not in", [...NON_VOUCHING_RELATIONSHIP_SOURCES])
     .execute();
   return { tasks: tasks.length, relationships: relationships.length };
 }
@@ -325,7 +347,11 @@ function addManifestEntry(
   mutations.push({ table, primaryKey: primaryKeyFor(table, rowId, before), before });
 }
 
-async function applyNest(db: Kysely<DB>, row: ValidPlannedRow, mutations: RollbackManifestEntry[]): Promise<void> {
+export async function applyNest(
+  db: Kysely<DB>,
+  row: ValidPlannedRow,
+  mutations: RollbackManifestEntry[],
+): Promise<Extract<CleanupApplyEffect, { action: "nest_under" }>> {
   if (!row.resolvedTargetEntityId) throw new Error(`nest target missing for ${row.entityId}`);
   const existing = await db
     .selectFrom("entity_relationships")
@@ -334,7 +360,7 @@ async function applyNest(db: Kysely<DB>, row: ValidPlannedRow, mutations: Rollba
     .where("target_entity_id", "=", row.resolvedTargetEntityId)
     .where("relationship_type", "=", "part_of")
     .executeTakeFirst();
-  if (existing) return;
+  if (existing) return { action: "nest_under", existing: true };
   const id = randomUUID();
   addManifestEntry(mutations, "entity_relationships", id, null);
   await db
@@ -349,21 +375,34 @@ async function applyNest(db: Kysely<DB>, row: ValidPlannedRow, mutations: Rollba
       source: "project_cleanup_apply",
     })
     .execute();
+  return { action: "nest_under", relationshipId: id };
 }
 
-async function applyArchive(db: Kysely<DB>, row: ValidPlannedRow, mutations: RollbackManifestEntry[]): Promise<void> {
+export async function applyArchive(
+  db: Kysely<DB>,
+  row: ValidPlannedRow,
+  mutations: RollbackManifestEntry[],
+): Promise<Extract<CleanupApplyEffect, { action: "archive" }>> {
   const before = await db.selectFrom("entities").selectAll().where("id", "=", row.entityId).executeTakeFirstOrThrow();
   addManifestEntry(mutations, "entities", row.entityId, before);
-  await db
+  const archivedAt = new Date().toISOString();
+  const result = await db
     .updateTable("entities")
-    .set({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .set({ deleted_at: archivedAt, updated_at: archivedAt })
     .where("id", "=", row.entityId)
     .where("deleted_at", "is", null)
     .where("merged_into_entity_id", "is", null)
-    .execute();
+    .executeTakeFirst();
+  if (updatedCount(result) !== 1) throw new Error(`archive target no longer live for ${row.entityId}`);
+  return { action: "archive", archivedAt };
 }
 
-async function applyMerge(db: Kysely<DB>, row: ValidPlannedRow, mutations: RollbackManifestEntry[]): Promise<void> {
+export async function applyMerge(
+  db: Kysely<DB>,
+  row: ValidPlannedRow,
+  mutations: RollbackManifestEntry[],
+  context: CleanupApplyExecutionContext = {},
+): Promise<Extract<CleanupApplyEffect, { action: "merge_into" }>> {
   if (!row.resolvedTargetEntityId) throw new Error(`merge target missing for ${row.entityId}`);
   const sourceBefore = await db
     .selectFrom("entities")
@@ -380,6 +419,8 @@ async function applyMerge(db: Kysely<DB>, row: ValidPlannedRow, mutations: Rollb
   const result = await mergeEntitiesInTransaction(db, {
     survivorId: row.resolvedTargetEntityId,
     loserId: row.entityId,
+    userId: context.userId,
+    groupId: context.mergeGroupId,
     mergedBy: "project_cleanup_apply",
   });
   for (const move of result.moves) {
@@ -405,6 +446,7 @@ async function applyMerge(db: Kysely<DB>, row: ValidPlannedRow, mutations: Rollb
     );
   }
   addManifestEntry(mutations, "entity_merges", result.mergeId, null);
+  return { action: "merge_into", mergeGroupId: context.mergeGroupId ?? null, mergeId: result.mergeId };
 }
 
 export async function planProjectCleanup(db: Kysely<DB>, verdicts: CleanupVerdict[]): Promise<CleanupApplyPlanRow[]> {
@@ -506,7 +548,7 @@ export async function planProjectCleanup(db: Kysely<DB>, verdicts: CleanupVerdic
 export async function applyProjectCleanup(
   db: Kysely<DB>,
   verdicts: CleanupVerdict[],
-  opts: { execute: boolean; verdictPath: string },
+  opts: { execute: boolean; verdictPath: string; mergeGroupId?: string; userId?: string },
 ): Promise<CleanupApplyResult> {
   const runId = randomUUID();
   const rows = await planProjectCleanup(db, verdicts);
@@ -518,7 +560,8 @@ export async function applyProjectCleanup(
   const mutations: RollbackManifestEntry[] = [];
   await db.transaction().execute(async (trx) => {
     for (const row of rows.filter((row): row is ValidPlannedRow => row.state === "applied" && row.action !== "keep")) {
-      if (row.action === "merge_into") await applyMerge(trx, row, mutations);
+      if (row.action === "merge_into")
+        await applyMerge(trx, row, mutations, { mergeGroupId: opts.mergeGroupId, userId: opts.userId });
     }
     for (const row of rows.filter(
       (row): row is ValidPlannedRow => row.state === "applied" && row.action === "nest_under",
