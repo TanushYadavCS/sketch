@@ -411,8 +411,38 @@ export async function listAffiliations(db: Kysely<DB>, personId: string) {
   };
 }
 
+async function pairwiseSharedFileCounts(db: Kysely<DB>, entityIds: string[]) {
+  const pairs: Array<{ entityIds: [string, string]; sharedFileCount: number }> = [];
+  for (let i = 0; i < entityIds.length; i += 1) {
+    for (let j = i + 1; j < entityIds.length; j += 1) {
+      const left = entityIds[i];
+      const right = entityIds[j];
+      if (left === undefined || right === undefined) continue;
+      const pair: [string, string] = [left, right];
+      const sharedRows = await db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select("indexed_files.id")
+        .where("entity_mentions.entity_id", "in", pair)
+        .groupBy("indexed_files.id")
+        .having(sql<number>`COUNT(DISTINCT entity_mentions.entity_id)`, "=", 2)
+        .execute();
+      pairs.push({ entityIds: pair, sharedFileCount: sharedRows.length });
+    }
+  }
+  return pairs;
+}
+
 export async function sharedEvidence(db: Kysely<DB>, entityIds: string[]) {
   const uniqueIds = [...new Set(entityIds)];
+  const entityRows = await db
+    .selectFrom("entities")
+    .select(["id", "source_type"])
+    .where("id", "in", uniqueIds)
+    .execute();
+  const everyInputEntityLoaded = entityRows.length === uniqueIds.length;
+  const allPersons = everyInputEntityLoaded && entityRows.every((row) => row.source_type === "person");
+  const allCompanies = everyInputEntityLoaded && entityRows.every((row) => row.source_type === "company");
   const sharedFiles = await db
     .selectFrom("entity_mentions")
     .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
@@ -422,34 +452,52 @@ export async function sharedEvidence(db: Kysely<DB>, entityIds: string[]) {
     .having(sql<number>`COUNT(DISTINCT entity_mentions.entity_id)`, "=", uniqueIds.length)
     .orderBy("indexed_files.file_name", "asc")
     .execute();
-  const coAttendeeFiles = await coParticipantFileCount(db, uniqueIds, "attendee");
-  const coCorrespondentFiles = await coParticipantFileCount(db, uniqueIds, "correspondent");
-  const contactRows = await db
-    .selectFrom("entity_contact_points")
-    .select(["kind", "value", db.fn.countAll<number>().as("count")])
-    .where("entity_id", "in", uniqueIds)
-    .groupBy(["kind", "value"])
-    .having(sql<number>`COUNT(DISTINCT entity_id)`, "=", uniqueIds.length)
-    .execute();
-  const domainRows = await db
-    .selectFrom("entity_domains")
-    .select(["domain", "kind", db.fn.countAll<number>().as("count")])
-    .where("entity_id", "in", uniqueIds)
-    .groupBy(["domain", "kind"])
-    .having(sql<number>`COUNT(DISTINCT entity_id)`, "=", uniqueIds.length)
-    .execute();
+  const pairwiseSharedFiles = await pairwiseSharedFileCounts(db, uniqueIds);
+  const coAttendeeFiles = allPersons ? await coParticipantFileCount(db, uniqueIds, "attendee") : undefined;
+  const coCorrespondentFiles = allPersons ? await coParticipantFileCount(db, uniqueIds, "correspondent") : undefined;
+  const contactRows = allPersons
+    ? await db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value", db.fn.countAll<number>().as("count")])
+        .where("entity_id", "in", uniqueIds)
+        .groupBy(["kind", "value"])
+        .having(sql<number>`COUNT(DISTINCT entity_id)`, "=", uniqueIds.length)
+        .execute()
+    : [];
+  const domainRows = allCompanies
+    ? await db
+        .selectFrom("entity_domains")
+        .select(["domain", "kind", db.fn.countAll<number>().as("count")])
+        .where("entity_id", "in", uniqueIds)
+        .groupBy(["domain", "kind"])
+        .having(sql<number>`COUNT(DISTINCT entity_id)`, "=", uniqueIds.length)
+        .execute()
+    : [];
   return {
     entityIds: uniqueIds,
     sharedFiles: {
       count: sharedFiles.length,
       files: sharedFiles.slice(0, 10).map((row) => ({ id: row.id, name: row.file_name })),
     },
-    coAttendeeFiles,
-    coCorrespondentFiles,
-    sharedContactPoints: contactRows.map((row) => ({ kind: row.kind, value: row.value, count: Number(row.count) })),
-    sharedCorporateDomains: domainRows
-      .filter((row) => row.kind === "corporate")
-      .map((row) => ({ domain: row.domain, kind: row.kind, count: Number(row.count) })),
+    pairwiseSharedFiles,
+    ...(allPersons
+      ? {
+          coAttendeeFiles,
+          coCorrespondentFiles,
+          sharedContactPoints: contactRows.map((row) => ({
+            kind: row.kind,
+            value: row.value,
+            count: Number(row.count),
+          })),
+        }
+      : {}),
+    ...(allCompanies
+      ? {
+          sharedCorporateDomains: domainRows
+            .filter((row) => row.kind === "corporate")
+            .map((row) => ({ domain: row.domain, kind: row.kind, count: Number(row.count) })),
+        }
+      : {}),
   };
 }
 

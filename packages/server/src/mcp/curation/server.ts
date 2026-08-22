@@ -37,6 +37,13 @@ type ToolResult = { content: { type: "text"; text: string }[] };
 
 const toolSemaphore = new Semaphore(4);
 const emptySchema = {};
+const sharedEvidenceDescription = [
+  "Return shared evidence.",
+  "sharedFiles is the intersection across ALL provided entities; a trio can return 0 while " +
+    "a pair inside it shares many.",
+  "pairwiseSharedFiles gives each pair.",
+  "Person fields appear only for all-person input, and sharedCorporateDomains appears only for all-company input.",
+].join(" ");
 
 export async function createCurationMcpServer(params: {
   db: Kysely<DB>;
@@ -106,7 +113,7 @@ export async function createCurationMcpServer(params: {
   );
   register<CurationSharedEvidenceArgs>(
     "curation_shared_evidence",
-    "Return shared evidence, co-attendee/co-correspondent counts, and shared contact/domain signals.",
+    sharedEvidenceDescription,
     curationSharedEvidenceSchema,
     (args) => handleCurationSharedEvidence(args, params.db),
   );

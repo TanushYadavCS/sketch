@@ -168,6 +168,15 @@ async function seedWorksAt(input: {
     .execute();
 }
 
+type SharedEvidenceResponse = {
+  sharedFiles: { count: number; files: Array<{ id: string; name: string }> };
+  pairwiseSharedFiles: Array<{ entityIds: [string, string]; sharedFileCount: number }>;
+  coAttendeeFiles?: number;
+  coCorrespondentFiles?: number;
+  sharedContactPoints?: Array<{ kind: string; value: string; count: number }>;
+  sharedCorporateDomains?: Array<{ domain: string; kind: string; count: number }>;
+};
+
 describe("curation MCP server", () => {
   it("keeps the curation mount absent when disabled and admin-only when enabled", async () => {
     const disabledApp = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: false }), {
@@ -270,6 +279,91 @@ describe("curation MCP server", () => {
       id: "person-duplicate",
       tombstone: { mergedInto: { id: "person-live", name: "Ada" } },
     });
+  });
+
+  it("keeps sharedFiles as the all-entity intersection while pairwiseSharedFiles reports pair overlap", async () => {
+    const admin = await createPat("admin", "shared-overlap@example.com");
+    await seedConnector("shared-overlap-connector", admin.user.id);
+    await seedEntity({ id: "shared-a", name: "Shared A", sourceType: "project" });
+    await seedEntity({ id: "shared-b", name: "Shared B", sourceType: "project" });
+    await seedEntity({ id: "shared-c", name: "Shared C", sourceType: "project" });
+    await seedFile({ id: "shared-ab-1", connectorId: "shared-overlap-connector", name: "Shared AB 1" });
+    await seedFile({ id: "shared-ab-2", connectorId: "shared-overlap-connector", name: "Shared AB 2" });
+    await seedFile({ id: "shared-c-only", connectorId: "shared-overlap-connector", name: "Shared C Only" });
+    await seedMention("shared-a", "shared-ab-1");
+    await seedMention("shared-b", "shared-ab-1");
+    await seedMention("shared-a", "shared-ab-2");
+    await seedMention("shared-b", "shared-ab-2");
+    await seedMention("shared-c", "shared-c-only");
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const result = (await callTool(app, admin.token, "curation_shared_evidence", {
+      entityIds: ["shared-a", "shared-b", "shared-c"],
+    })) as SharedEvidenceResponse;
+    const abPair = result.pairwiseSharedFiles.find((pair) => pair.entityIds.join("|") === "shared-a|shared-b");
+
+    expect(result.sharedFiles).toEqual({ count: 0, files: [] });
+    expect(abPair).toMatchObject({ entityIds: ["shared-a", "shared-b"], sharedFileCount: 2 });
+  });
+
+  it("returns exactly one pairwiseSharedFiles entry per unordered pair", async () => {
+    const admin = await createPat("admin", "pairwise-coverage@example.com");
+    await seedEntity({ id: "pairwise-a", name: "Pairwise A", sourceType: "project" });
+    await seedEntity({ id: "pairwise-b", name: "Pairwise B", sourceType: "project" });
+    await seedEntity({ id: "pairwise-c", name: "Pairwise C", sourceType: "project" });
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const result = (await callTool(app, admin.token, "curation_shared_evidence", {
+      entityIds: ["pairwise-a", "pairwise-b", "pairwise-c"],
+    })) as SharedEvidenceResponse;
+    const pairKeys = result.pairwiseSharedFiles.map((pair) => pair.entityIds.join("|")).sort();
+
+    expect(result.pairwiseSharedFiles).toHaveLength(3);
+    expect(new Set(pairKeys).size).toBe(3);
+    expect(pairKeys).toEqual(["pairwise-a|pairwise-b", "pairwise-a|pairwise-c", "pairwise-b|pairwise-c"]);
+  });
+
+  it("gates shared evidence person and domain fields by homogeneous input types", async () => {
+    const admin = await createPat("admin", "shared-gating@example.com");
+    await seedEntity({ id: "gate-person-a", name: "Gate Person A", sourceType: "person" });
+    await seedEntity({ id: "gate-person-b", name: "Gate Person B", sourceType: "person" });
+    await seedEntity({ id: "gate-project-a", name: "Gate Project A", sourceType: "project" });
+    await seedEntity({ id: "gate-project-b", name: "Gate Project B", sourceType: "project" });
+    await seedContactPoint("gate-person-a", "shared-gate@example.com");
+    await seedContactPoint("gate-person-b", "shared-gate@example.com");
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const allPerson = (await callTool(app, admin.token, "curation_shared_evidence", {
+      entityIds: ["gate-person-a", "gate-person-b"],
+    })) as SharedEvidenceResponse;
+    const mixed = (await callTool(app, admin.token, "curation_shared_evidence", {
+      entityIds: ["gate-person-a", "gate-project-a"],
+    })) as SharedEvidenceResponse;
+    const projectOnly = (await callTool(app, admin.token, "curation_shared_evidence", {
+      entityIds: ["gate-project-a", "gate-project-b"],
+    })) as SharedEvidenceResponse;
+
+    expect(allPerson).toEqual(
+      expect.objectContaining({
+        coAttendeeFiles: expect.any(Number),
+        coCorrespondentFiles: expect.any(Number),
+        sharedContactPoints: [{ kind: "email", value: "shared-gate@example.com", count: 2 }],
+      }),
+    );
+    expect(mixed).not.toHaveProperty("coAttendeeFiles");
+    expect(mixed).not.toHaveProperty("coCorrespondentFiles");
+    expect(mixed).not.toHaveProperty("sharedContactPoints");
+    expect(mixed).not.toHaveProperty("sharedCorporateDomains");
+    expect(projectOnly).not.toHaveProperty("coAttendeeFiles");
+    expect(projectOnly).not.toHaveProperty("coCorrespondentFiles");
+    expect(projectOnly).not.toHaveProperty("sharedContactPoints");
+    expect(projectOnly).not.toHaveProperty("sharedCorporateDomains");
   });
 
   it("computes company dominance from exact mention and participant-affiliation file counts", async () => {
