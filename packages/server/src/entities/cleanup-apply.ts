@@ -4,6 +4,7 @@ import { isPg } from "../db/dialect";
 import type { DB } from "../db/schema";
 import type { CleanupAction, CleanupVerdict } from "./cleanup-adjudication";
 import { mergeEntitiesInTransaction } from "./merge";
+import { NON_VOUCHING_RELATIONSHIP_SOURCES } from "./relationship-provenance";
 
 type RowState = "applied" | "skipped" | "failed";
 
@@ -167,6 +168,11 @@ async function liveProjects(db: Kysely<DB>, ids: string[]): Promise<Map<string, 
   return new Map(rows.map((row) => [row.id, row]));
 }
 
+/**
+ * Archive guards count tasks plus only relationship edges whose source vouches
+ * for an endpoint entity. Non-vouching extraction/co-mention edges are left in
+ * place for undo but do not keep junk entities live.
+ */
 async function archiveReferenceCounts(
   db: Kysely<DB>,
   entityId: string,
@@ -186,6 +192,7 @@ async function archiveReferenceCounts(
     .selectFrom("entity_relationships")
     .select("id")
     .where((eb) => eb.or([eb("source_entity_id", "=", entityId), eb("target_entity_id", "=", entityId)]))
+    .where("source", "not in", [...NON_VOUCHING_RELATIONSHIP_SOURCES])
     .execute();
   return { tasks: tasks.length, relationships: relationships.length };
 }
