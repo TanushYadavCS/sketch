@@ -57,6 +57,14 @@ describe("buildCompanyDedupGroups", () => {
     expect(groupNames(members, "ow")).toEqual(["Oliver Wyman", "ow"]);
   });
 
+  it("joins a company whose compact name is another company's committed alias", () => {
+    const members = [
+      member({ entityId: "a", name: "Canvasx" }),
+      member({ entityId: "b", name: "Canvas Labs", aliases: ["Canvas X"] }),
+    ];
+    expect(groupNames(members, "Canvasx")).toEqual(["Canvas Labs", "Canvasx"]);
+  });
+
   it("chains shards transitively across different edge types", () => {
     const members = [
       member({ entityId: "a", name: "Canvasx", corporateDomains: ["canvasx.ai"] }),

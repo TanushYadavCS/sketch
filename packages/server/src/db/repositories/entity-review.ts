@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
 import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeMatchName } from "../../entities/match-normalize";
 import { isPg } from "../dialect";
 import type { DB, EntityAliasRejectionsTable, EntityReviewEvidenceTable, EntityReviewQueueTable } from "../schema";
 
@@ -138,23 +139,23 @@ function maxIso(left: string, right: string): string {
 }
 
 export function createEntityReviewRepo(db: Kysely<DB>) {
-  async function recomputeCandidate(reviewId: string, entityType: string, now: string): Promise<void> {
+  async function recomputeCandidate(reviewId: string, now: string): Promise<void> {
     const row = await db
       .selectFrom("entity_review_queue")
-      .select(["id", "normalized_name", "candidate_reason"])
+      .select(["id", "normalized_name", "candidate_reason", "entity_type"])
       .where("id", "=", reviewId)
       .executeTakeFirstOrThrow();
     const entities = await db
       .selectFrom("entities")
       .select(["id", "name", "aliases"])
-      .where("source_type", "=", entityType)
+      .where("source_type", "=", row.entity_type)
       .where("deleted_at", "is", null)
       .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
       .execute();
     const candidate = entities.find((entity) => {
-      if (normalizeName(entity.name) === row.normalized_name) return true;
+      if (normalizeMatchName(row.entity_type, entity.name) === row.normalized_name) return true;
       const aliases: string[] = entity.aliases ? JSON.parse(entity.aliases) : [];
-      return aliases.some((alias) => normalizeName(alias) === row.normalized_name);
+      return aliases.some((alias) => normalizeMatchName(row.entity_type, alias) === row.normalized_name);
     });
     await db
       .updateTable("entity_review_queue")
@@ -804,7 +805,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         return { kind: "drift" as const, row: sourceRow };
       }
       if (sourceRow.entity_type === newEntityType) {
-        await recomputeCandidate(sourceRow.id, newEntityType, now);
+        await recomputeCandidate(sourceRow.id, now);
         const row = await db
           .selectFrom("entity_review_queue")
           .selectAll()
@@ -813,10 +814,16 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         return { kind: "updated" as const, row, mergedFromReviewId: null };
       }
 
+      const sourceDerivedNormalizedName = normalizeMatchName(sourceRow.entity_type, sourceRow.proposed_name);
+      const targetNormalizedName =
+        sourceRow.normalized_name === sourceDerivedNormalizedName
+          ? normalizeMatchName(newEntityType, sourceRow.proposed_name)
+          : sourceRow.normalized_name;
+
       const targetRow = await db
         .selectFrom("entity_review_queue")
         .selectAll()
-        .where("normalized_name", "=", sourceRow.normalized_name)
+        .where("normalized_name", "=", targetNormalizedName)
         .where("entity_type", "=", newEntityType)
         .where("id", "!=", sourceRow.id)
         .executeTakeFirst();
@@ -878,7 +885,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           patch.seed_source_id = captured.seed_source_id;
         }
         await db.updateTable("entity_review_queue").set(patch).where("id", "=", targetRow.id).execute();
-        await recomputeCandidate(targetRow.id, newEntityType, now);
+        await recomputeCandidate(targetRow.id, now);
         const row = await db
           .selectFrom("entity_review_queue")
           .selectAll()
@@ -890,6 +897,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       await db
         .updateTable("entity_review_queue")
         .set({
+          normalized_name: targetNormalizedName,
           entity_type: newEntityType,
           candidate_entity_id: null,
           candidate_score: null,
@@ -899,7 +907,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .where("status", "=", "pending")
         .where("candidate_generated_at", "=", candidateGeneratedAt)
         .execute();
-      await recomputeCandidate(sourceRow.id, newEntityType, now);
+      await recomputeCandidate(sourceRow.id, now);
       const row = await db
         .selectFrom("entity_review_queue")
         .selectAll()

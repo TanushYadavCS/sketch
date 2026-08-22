@@ -4,7 +4,7 @@
  * Three edge types, all deterministic — no LLM, no fuzzy scoring:
  *   - `domain`     two companies hold the same corporate domain in `entity_domains`
  *   - `name`       their compact name keys are equal (`One Stop` == `Onestop`)
- *   - `name_alias` one company's name equals another's committed alias, exactly
+ *   - `name_alias` one company's name equals another's committed alias, by exact or compact key
  *
  * Union-find over those edges yields groups. The groups are the unit that
  * downstream consumers should reason about: a company shard that carries no
@@ -75,7 +75,9 @@ function collectEdges(members: CompanyDedupMember[]): CompanyDedupEdge[] {
   const byDomain = new Map<string, Set<string>>();
   const byCompactName = new Map<string, Set<string>>();
   const nameKeyByEntity = new Map<string, string>();
+  const compactNameKeyByEntity = new Map<string, string>();
   const entitiesByAliasKey = new Map<string, Set<string>>();
+  const entitiesByCompactAliasKey = new Map<string, Set<string>>();
 
   for (const member of members) {
     for (const domain of member.corporateDomains) {
@@ -95,12 +97,19 @@ function collectEdges(members: CompanyDedupMember[]): CompanyDedupEdge[] {
 
     const nameKey = normalizeName(member.name);
     if (nameKey) nameKeyByEntity.set(member.entityId, nameKey);
+    if (compact.length >= MIN_COMPACT_NAME_KEY_LENGTH) compactNameKeyByEntity.set(member.entityId, compact);
     for (const alias of member.aliases) {
       const aliasKey = normalizeName(alias);
-      if (!aliasKey) continue;
-      const bucket = entitiesByAliasKey.get(aliasKey);
-      if (bucket) bucket.add(member.entityId);
-      else entitiesByAliasKey.set(aliasKey, new Set([member.entityId]));
+      if (aliasKey) {
+        const bucket = entitiesByAliasKey.get(aliasKey);
+        if (bucket) bucket.add(member.entityId);
+        else entitiesByAliasKey.set(aliasKey, new Set([member.entityId]));
+      }
+      const compactAliasKey = compactEntityNameKey("company", alias);
+      if (compactAliasKey.length < MIN_COMPACT_NAME_KEY_LENGTH) continue;
+      const compactBucket = entitiesByCompactAliasKey.get(compactAliasKey);
+      if (compactBucket) compactBucket.add(member.entityId);
+      else entitiesByCompactAliasKey.set(compactAliasKey, new Set([member.entityId]));
     }
   }
 
@@ -113,6 +122,13 @@ function collectEdges(members: CompanyDedupMember[]): CompanyDedupEdge[] {
   }
   for (const [entityId, nameKey] of nameKeyByEntity) {
     const holders = entitiesByAliasKey.get(nameKey);
+    if (!holders) continue;
+    const others = [...holders].filter((id) => id !== entityId);
+    if (others.length === 0) continue;
+    edges.push({ kind: "name_alias", value: nameKey, entityIds: [entityId, ...others].sort() });
+  }
+  for (const [entityId, nameKey] of compactNameKeyByEntity) {
+    const holders = entitiesByCompactAliasKey.get(nameKey);
     if (!holders) continue;
     const others = [...holders].filter((id) => id !== entityId);
     if (others.length === 0) continue;

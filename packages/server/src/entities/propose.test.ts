@@ -943,6 +943,50 @@ describe("proposeEntity", () => {
     expect(products.map((p) => p.name).sort()).toEqual(["Claude 3", "Claude 3.5"]);
   });
 
+  it("suppresses a key-divergent product candidate rejected through the real writer", async () => {
+    const entityRepo = createEntityRepository(db);
+    const existing = await entityRepo.upsertEntity({
+      name: "GPT 4 Pro",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+      provenanceTier: "human_confirmed",
+    });
+    const reviewRepo = createEntityReviewRepo(db);
+    await reviewRepo.addRejection({ entityId: existing.id, rejectedName: "GPT4", rejectedBy: "user-1" });
+    const materializeDeps = await buildMaterializeDeps(db, {
+      birthGateTypes: new Set<ProposeEntityType>(["product"]),
+      birthGateLiveTypes: new Set<ProposeEntityType>(["product"]),
+    });
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        birthGateTypes: materializeDeps.birthGateTypes,
+        birthGateLiveTypes: materializeDeps.birthGateLiveTypes,
+      },
+      {
+        name: "GPT4",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:gpt4",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
+    expect(result.candidateEntityId).toBeNull();
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBeNull();
+    expect(queue.candidate_reason).toBe("birth-gated");
+  });
+
   it("17. inferred product source-ref and exact-name matches are not eligible match targets", async () => {
     const entityRepo = createEntityRepository(db);
     const legacy = await entityRepo.upsertEntity({
