@@ -27,6 +27,11 @@ import {
   handleCurationListCandidates,
 } from "./list-candidates";
 import {
+  type ProposeGraphVerdictsArgs,
+  handleProposeGraphVerdicts,
+  proposeGraphVerdictsSchema,
+} from "./propose-graph-verdicts";
+import {
   type CurationSharedEvidenceArgs,
   curationSharedEvidenceSchema,
   handleCurationSharedEvidence,
@@ -122,6 +127,12 @@ export async function createCurationMcpServer(params: {
     "List read-only curation candidate rows for supported candidate families.",
     curationListCandidatesSchema,
     (args) => handleCurationListCandidates(args, params.db),
+  );
+  register<ProposeGraphVerdictsArgs>(
+    "propose_graph_verdicts",
+    "Store project graph cleanup proposals after dry-run validation without applying them.",
+    proposeGraphVerdictsSchema,
+    (args) => handleProposeGraphVerdicts(args, params.db, { userId: params.userId, tokenId: params.tokenId }),
   );
 
   return server;

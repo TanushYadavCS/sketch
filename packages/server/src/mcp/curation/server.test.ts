@@ -210,6 +210,7 @@ describe("curation MCP server", () => {
       "curation_list_affiliations",
       "curation_list_candidates",
       "curation_shared_evidence",
+      "propose_graph_verdicts",
     ]);
   });
 
@@ -423,5 +424,187 @@ describe("curation MCP server", () => {
         expect.objectContaining({ companyId: "company-b", mentionFiles: 2, affiliationFiles: 0, totalFiles: 10 }),
       ]),
     );
+  });
+
+  it("stores a valid proposal as validated without applying graph changes", async () => {
+    const admin = await createPat("admin", "proposal-valid@example.com");
+    await seedEntity({ id: "project-source", name: "Project Source", sourceType: "project" });
+    await seedEntity({ id: "project-target", name: "Project Target", sourceType: "project" });
+    const before = await db.selectFrom("entities").selectAll().where("id", "=", "project-source").executeTakeFirst();
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const result = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      note: "merge duplicate project",
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "project-source",
+          targetEntityId: "project-target",
+          reason: "The source duplicates the target project.",
+          evidence: { fileIds: ["file-b", "file-a"], reviewIds: ["review-a"], notes: ["same project"] },
+        },
+      ],
+    })) as {
+      runId: string;
+      stored: number;
+      bounced: number;
+      results: Array<{ verdictId: string; validationStatus: string; validationReason: string | null }>;
+    };
+
+    expect(result).toMatchObject({ stored: 1, bounced: 0 });
+    expect(result.results[0]).toMatchObject({ validationStatus: "ok", validationReason: null });
+    const row = await db
+      .selectFrom("graph_verdicts")
+      .selectAll()
+      .where("id", "=", result.results[0]?.verdictId ?? "")
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      run_id: result.runId,
+      action: "merge_into",
+      subject_entity_id: "project-source",
+      target_entity_id: "project-target",
+      validation_status: "ok",
+      validation_reason: null,
+      status: "awaiting_human",
+    });
+    expect(row.evidence_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.would_change_json ? JSON.parse(row.would_change_json) : null).toMatchObject({
+      entities: 2,
+      entity_merges: 1,
+    });
+    const after = await db.selectFrom("entities").selectAll().where("id", "=", "project-source").executeTakeFirst();
+    expect(after).toEqual(before);
+  });
+
+  it("stores bad subject proposals as bounced fail-closed rows", async () => {
+    const admin = await createPat("admin", "proposal-bounce@example.com");
+    await seedEntity({ id: "merged-target", name: "Merged Target", sourceType: "project" });
+    await seedEntity({
+      id: "merged-source",
+      name: "Merged Source",
+      sourceType: "project",
+      mergedIntoEntityId: "merged-target",
+    });
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const result = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "archive",
+          subjectEntityId: "merged-source",
+          reason: "Merged projects should not be archived from this proposal.",
+        },
+        {
+          action: "archive",
+          subjectEntityId: "missing-project",
+          reason: "This project does not exist.",
+        },
+      ],
+    })) as {
+      stored: number;
+      bounced: number;
+      results: Array<{ verdictId: string; validationStatus: string; validationReason: string | null }>;
+    };
+
+    expect(result).toMatchObject({ stored: 0, bounced: 2 });
+    expect(result.results.map((row) => row.validationReason)).toEqual(["source_not_live_project", "subject_not_found"]);
+    const rows = await db
+      .selectFrom("graph_verdicts")
+      .selectAll()
+      .where(
+        "id",
+        "in",
+        result.results.map((row) => row.verdictId),
+      )
+      .orderBy("subject_entity_id", "asc")
+      .execute();
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          subject_entity_id: "merged-source",
+          validation_status: "failed",
+          validation_reason: "source_not_live_project",
+          status: "bounced",
+        }),
+        expect.objectContaining({
+          subject_entity_id: "missing-project",
+          subject_name: null,
+          subject_entity_type: null,
+          validation_status: "failed",
+          validation_reason: "subject_not_found",
+          status: "bounced",
+        }),
+      ]),
+    );
+  });
+
+  it("supersedes awaiting verdicts only for the same subject and action pair", async () => {
+    const admin = await createPat("admin", "proposal-supersede@example.com");
+    await seedEntity({ id: "scope-source", name: "Scope Source", sourceType: "project" });
+    await seedEntity({ id: "scope-target", name: "Scope Target", sourceType: "project" });
+
+    const app = createApp(db, createTestConfig({ GRAPH_CURATION_TOOLS_ENABLED: true }), {
+      logger: createTestLogger(),
+    });
+    const first = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "scope-source",
+          targetEntityId: "scope-target",
+          reason: "First merge proposal.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const second = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "merge_into",
+          subjectEntityId: "scope-source",
+          targetEntityId: "scope-target",
+          reason: "Second merge proposal.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+    const third = (await callTool(app, admin.token, "propose_graph_verdicts", {
+      verdicts: [
+        {
+          action: "archive",
+          subjectEntityId: "scope-source",
+          reason: "Archive is a separate action proposal.",
+        },
+      ],
+    })) as { results: Array<{ verdictId: string }> };
+
+    const rows = await db
+      .selectFrom("graph_verdicts")
+      .select(["id", "action", "status", "superseded_at"])
+      .where(
+        "id",
+        "in",
+        [first, second, third].map((response) => response.results[0]?.verdictId ?? ""),
+      )
+      .execute();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(first.results[0]?.verdictId ?? "")).toMatchObject({
+      action: "merge_into",
+      status: "awaiting_human",
+    });
+    expect(byId.get(first.results[0]?.verdictId ?? "")?.superseded_at).toEqual(expect.any(String));
+    expect(byId.get(second.results[0]?.verdictId ?? "")).toMatchObject({
+      action: "merge_into",
+      status: "awaiting_human",
+      superseded_at: null,
+    });
+    expect(byId.get(third.results[0]?.verdictId ?? "")).toMatchObject({
+      action: "archive",
+      status: "awaiting_human",
+      superseded_at: null,
+    });
   });
 });
