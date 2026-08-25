@@ -62,6 +62,29 @@ function requestForAction(
 }
 
 describe("automation trigger validation", () => {
+  it("rejects past one-time schedules during authoring", () => {
+    const scheduleValue = new Date(Date.now() - 1_000).toISOString();
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.status = "active";
+    request.scheduleType = "once";
+    request.scheduleValue = scheduleValue;
+    request.steps[0] = {
+      ...request.steps[0],
+      triggerConfig: {
+        type: "schedule",
+        scheduleType: "once",
+        scheduleValue,
+        timezone: "UTC",
+      },
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "INVALID_ONCE" })]),
+      }),
+    );
+  });
+
   it("rejects Canvas-managed webhook triggers", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.status = "active";

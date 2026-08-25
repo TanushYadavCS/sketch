@@ -554,7 +554,11 @@ export function validatePersistedAutomationDefinition(params: {
     }
   } else {
     try {
-      validateAutomationBuilderSaveRequest({ request: parsedRequest.data, brokerCapable: true });
+      validateAutomationBuilderSaveRequest({
+        request: parsedRequest.data,
+        brokerCapable: true,
+        validateScheduleFuture: false,
+      });
     } catch (error) {
       if (error instanceof AutomationValidationError) {
         for (const issue of error.issues) addIssue(issues, issue.code, issue.message, issue.path);
@@ -583,6 +587,7 @@ export function validateAutomationBuilderSaveRequest(params: {
   request: AutomationBuilderSaveRequest;
   brokerCapable: boolean;
   supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
+  validateScheduleFuture?: boolean;
 }): void {
   const { request } = params;
   const issues = validateWorkflowGraph(request.steps, request.edges);
@@ -739,7 +744,7 @@ export function validateAutomationBuilderSaveRequest(params: {
     request.steps.find((step) => step.type === "trigger"),
     issues,
   );
-  validateScheduleValue(request, issues);
+  validateScheduleValue(request, issues, params.validateScheduleFuture ?? true);
 
   if (issues.length > 0) throw new AutomationValidationError(issues);
 }
@@ -948,7 +953,11 @@ function validateTriggerSchedule(
   }
 }
 
-function validateScheduleValue(request: AutomationBuilderSaveRequest, issues: BuilderValidationIssue[]): void {
+function validateScheduleValue(
+  request: AutomationBuilderSaveRequest,
+  issues: BuilderValidationIssue[],
+  validateScheduleFuture: boolean,
+): void {
   if (request.scheduleType === "external") return;
   if (request.scheduleType === "interval") {
     const seconds = Number(request.scheduleValue);
@@ -976,7 +985,7 @@ function validateScheduleValue(request: AutomationBuilderSaveRequest, issues: Bu
     const runAt = parseOnceSchedule(request.scheduleValue, request.timezone);
     if (Number.isNaN(runAt.getTime())) {
       addIssue(issues, "INVALID_ONCE", "Once schedule value must be a valid ISO 8601 datetime", "scheduleValue");
-    } else if (runAt.getTime() <= Date.now()) {
+    } else if (validateScheduleFuture && runAt.getTime() <= Date.now()) {
       addIssue(issues, "INVALID_ONCE", "Once schedule value must be in the future", "scheduleValue");
     }
   }
