@@ -116,9 +116,10 @@ export function isMicrosoftTokenExpired(credentials: OAuthCredentials): boolean 
   return new Date(credentials.expires_at).getTime() < Date.now() + 60_000;
 }
 
-export async function refreshMicrosoftTokens(
+async function requestMicrosoftTokens(
   credentials: OAuthCredentials,
-  opts: Pick<MicrosoftGraphRequestOptions, "fetchFn" | "scope" | "tenant" | "timeoutMs"> = {},
+  scope: string | undefined,
+  opts: Pick<MicrosoftGraphRequestOptions, "fetchFn" | "tenant" | "timeoutMs">,
 ): Promise<OAuthCredentials> {
   const fetchImpl = opts.fetchFn ?? fetch;
   const body = new URLSearchParams({
@@ -127,7 +128,6 @@ export async function refreshMicrosoftTokens(
     client_id: credentials.client_id,
     client_secret: credentials.client_secret,
   });
-  const scope = opts.scope ?? credentials.scope;
   if (scope) body.set("scope", scope);
 
   const response = await fetchImpl(microsoftTokenEndpoint(opts.tenant ?? credentials.tenant ?? DEFAULT_TENANT), {
@@ -159,6 +159,30 @@ export async function refreshMicrosoftTokens(
     tenant: opts.tenant ?? credentials.tenant,
     expires_at: new Date(Date.now() + (data.expires_in ?? 3600) * 1000).toISOString(),
   };
+}
+
+/**
+ * Entra refuses a refresh that asks for scopes beyond what the user consented
+ * to. When a connector's requested scope list grows, every connector authorized
+ * before that change would fail its next refresh and take the whole sync down
+ * with it — not just the feature the new scope was for.
+ *
+ * So a widened request falls back to the grant already held. Everything covered
+ * by the original consent keeps working, the new capability degrades on its own,
+ * and reconnecting is what actually upgrades the grant.
+ */
+export async function refreshMicrosoftTokens(
+  credentials: OAuthCredentials,
+  opts: Pick<MicrosoftGraphRequestOptions, "fetchFn" | "scope" | "tenant" | "timeoutMs"> = {},
+): Promise<OAuthCredentials> {
+  const requestedScope = opts.scope ?? credentials.scope;
+  try {
+    return await requestMicrosoftTokens(credentials, requestedScope, opts);
+  } catch (err) {
+    const grantedScope = credentials.scope;
+    if (!grantedScope || grantedScope === requestedScope) throw err;
+    return requestMicrosoftTokens(credentials, grantedScope, opts);
+  }
 }
 
 export async function ensureValidMicrosoftToken(

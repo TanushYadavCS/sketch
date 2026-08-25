@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMicrosoftGraphClient } from "./microsoft-graph";
+import { createMicrosoftGraphClient, refreshMicrosoftTokens } from "./microsoft-graph";
 import type { AccessTokenProvider, OAuthCredentials } from "./types";
 
 describe("microsoftGraphRequest with accessTokenProvider", () => {
@@ -48,3 +48,64 @@ describe("microsoftGraphRequest with accessTokenProvider", () => {
     );
   });
 });
+
+describe("refreshMicrosoftTokens scope escalation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to the granted scope when the widened scope is rejected", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "invalid_grant", error_description: "AADSTS65001" }), { status: 400 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "fresh", expires_in: 3600, scope: "Calendars.Read" }), {
+          status: 200,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const refreshed = await refreshMicrosoftTokens(
+      {
+        type: "oauth",
+        access_token: "stale",
+        refresh_token: "refresh",
+        client_id: "client",
+        client_secret: "secret",
+        expires_at: "1970-01-01T00:00:00.000Z",
+        scope: "Calendars.Read",
+      },
+      { scope: "Calendars.Read Chat.Read" },
+    );
+
+    expect(refreshed.access_token).toBe("fresh");
+    expect(refreshed.scope).toBe("Calendars.Read");
+    expect(scopeOf(fetchMock, 0)).toBe("Calendars.Read Chat.Read");
+    expect(scopeOf(fetchMock, 1)).toBe("Calendars.Read");
+  });
+
+  it("surfaces the failure when the granted scope is the one rejected", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("nope", { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      refreshMicrosoftTokens({
+        type: "oauth",
+        access_token: "stale",
+        refresh_token: "refresh",
+        client_id: "client",
+        client_secret: "secret",
+        expires_at: "1970-01-01T00:00:00.000Z",
+        scope: "Calendars.Read",
+      }),
+    ).rejects.toThrow(/Microsoft token refresh failed \(400\)/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+function scopeOf(fetchMock: ReturnType<typeof vi.fn>, call: number): string | null {
+  const init = fetchMock.mock.calls[call][1] as { body: URLSearchParams };
+  return init.body.get("scope");
+}
