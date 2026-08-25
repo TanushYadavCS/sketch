@@ -1,7 +1,7 @@
 import type { AgentDetailResponse } from "@/lib/api";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -23,6 +23,7 @@ vi.mock("@tanstack/react-router", () => ({
       {children}
     </a>
   ),
+  useNavigate: () => vi.fn(),
 }));
 
 const detailResponse: AgentDetailResponse = {
@@ -94,6 +95,26 @@ describe("Summarizer task creation copy", () => {
     expect(
       screen.getByText("Tasks appear on linked projects. Task owners can update status; admins can monitor progress."),
     ).toBeInTheDocument();
+  });
+
+  it("deletes an individual summarizer without deleting its generated summaries", async () => {
+    const update = vi.fn();
+    server.use(
+      http.put("/api/agents/conversation_summary/config", async ({ request }) => {
+        update(await request.json());
+        return HttpResponse.json({ agent: { ...detailResponse.agent, routes: [] } });
+      }),
+    );
+
+    const user = userEvent.setup();
+    useAgentHandlers();
+    renderWithProviders(<SummariserConfigPage agentKey="conversation_summary" routeId="route-1" />);
+
+    await user.click(await screen.findByRole("button", { name: "Delete summariser" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("Existing generated summaries will remain available.");
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ routes: [] }));
   });
 
   it("shows persisted Slack and WhatsApp DMs as source options without exposing phone numbers", async () => {

@@ -5,7 +5,18 @@
  * the route; sections toggle in place.
  */
 import { type AgentConfig, type AgentRoute, api } from "@/lib/api";
-import { ArrowLeftIcon, CheckCircleIcon, PencilSimpleIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, CheckCircleIcon, PencilSimpleIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
+import { Button } from "@sketch/ui/components/button";
 import {
   Sheet,
   SheetContent,
@@ -18,7 +29,7 @@ import { Switch } from "@sketch/ui/components/switch";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { RunsPanel } from "./agent-outputs-view";
@@ -122,9 +133,11 @@ function SummariserContent({
   running: boolean;
 }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { lookup } = useSourceOptions(agent);
   const [editing, setEditing] = useState<RouteField>(null);
   const [tab, setTab] = useState<Tab>("config");
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["agents", "detail", agentKey] });
@@ -142,6 +155,15 @@ function SummariserContent({
     onSuccess: invalidate,
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to update"),
   });
+  const deleteMutation = useMutation({
+    mutationFn: () => api.agents.updateConfig(agentKey, { routes: agent.routes.filter((r) => r.id !== route.id) }),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Summariser deleted");
+      void navigate({ to: "/agents" });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to delete summariser"),
+  });
 
   return (
     <>
@@ -158,16 +180,30 @@ function SummariserContent({
             Summariser{route.owner ? ` · ${route.owner.name}` : ""} · delivers {deliversLabel(route).toLowerCase()}
           </p>
         </div>
-        <span className="flex shrink-0 items-center gap-2 text-[12px] font-medium text-muted-foreground">
-          <Switch
-            checked={route.enabled}
-            disabled={save.isPending}
-            onCheckedChange={(enabled) => save.mutate({ ...route, enabled })}
-            aria-label="Summariser active"
-            className="data-[state=checked]:bg-emerald-500"
-          />
-          {route.enabled ? "On" : "Off"}
-        </span>
+        <div className="flex shrink-0 items-center gap-3">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setDeleteOpen(true)}
+            disabled={deleteMutation.isPending}
+            className="h-7 gap-1.5 text-[11px] text-muted-foreground hover:text-destructive"
+            aria-label="Delete summariser"
+          >
+            <TrashIcon size={13} aria-hidden />
+            Delete
+          </Button>
+          <span className="flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
+            <Switch
+              checked={route.enabled}
+              disabled={save.isPending}
+              onCheckedChange={(enabled) => save.mutate({ ...route, enabled })}
+              aria-label="Summariser active"
+              className="data-[state=checked]:bg-emerald-500"
+            />
+            {route.enabled ? "On" : "Off"}
+          </span>
+        </div>
       </header>
 
       <div className="mt-6 flex items-center gap-6 border-b border-border">
@@ -202,6 +238,37 @@ function SummariserContent({
           onSaved={invalidate}
         />
       ) : null}
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this summariser?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the summariser and stops its future runs. Existing generated summaries will remain available.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={(event) => {
+                event.preventDefault();
+                deleteMutation.mutate();
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? (
+                <>
+                  <SpinnerGapIcon size={14} className="animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

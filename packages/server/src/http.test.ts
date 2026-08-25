@@ -2440,6 +2440,27 @@ describe("Users API", () => {
           platform: "slack",
         })
         .execute();
+      const conversation = await db
+        .insertInto("conversations")
+        .values({
+          platform: "whatsapp",
+          kind: "direct",
+          provider_conversation_id: "manager-conversation",
+          display_name: "Manager conversation",
+          last_seen_message_id: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("conversation_messages")
+        .values({
+          conversation_id: conversation.id,
+          provider_message_id: "manager-message",
+          sender_name: "Manager",
+          sender_user_id: manager.id,
+          received_at: new Date().toISOString(),
+        })
+        .execute();
 
       const res = await app.request(`/api/users/${manager.id}`, {
         method: "DELETE",
@@ -2459,6 +2480,13 @@ describe("Users API", () => {
           .where((eb) => eb.or([eb("sender_user_id", "=", manager.id), eb("recipient_user_id", "=", manager.id)]))
           .execute(),
       ).resolves.toEqual([]);
+      await expect(
+        db
+          .selectFrom("conversation_messages")
+          .select("sender_user_id")
+          .where("provider_message_id", "=", "manager-message")
+          .executeTakeFirst(),
+      ).resolves.toEqual({ sender_user_id: null });
     });
 
     it("returns 404 for unknown id", async () => {

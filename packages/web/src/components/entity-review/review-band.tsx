@@ -321,6 +321,7 @@ export function BirthInspectSheet({
             evidence={evidence}
             childTasks={childTasks}
             childTaskCount={childTaskCount}
+            onClose={onClose}
             onResolved={() => {
               onResolved();
               onClose();
@@ -337,17 +338,20 @@ function BirthInspectBody({
   evidence,
   childTasks,
   childTaskCount,
+  onClose,
   onResolved,
 }: {
   row: EntityReviewQueueRow;
   evidence: EntityReviewEvidenceRow[];
   childTasks: ChildTask[];
   childTaskCount: number;
+  onClose: () => void;
   onResolved: () => void;
 }) {
   const [mergeOpen, setMergeOpen] = useState(false);
   const [name, setName] = useState(row.proposed_name);
   const mutations = useReviewMutations(row, onResolved);
+  const dismissClosesOnly = row.entity_type === "person";
   const origin = birthOrigin(row);
   const trimmedName = name.trim();
   const nameOverride = trimmedName && trimmedName !== row.proposed_name ? trimmedName : undefined;
@@ -505,7 +509,7 @@ function BirthInspectBody({
         <Button
           size="sm"
           variant="outline"
-          onClick={() => mutations.dismiss()}
+          onClick={() => (dismissClosesOnly ? onClose() : mutations.dismiss())}
           disabled={mutations.isPending}
           className="ml-auto h-7 gap-1 text-[11px] text-muted-foreground hover:text-foreground"
           data-testid="birth-inspect-dismiss"

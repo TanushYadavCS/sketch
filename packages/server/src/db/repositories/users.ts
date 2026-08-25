@@ -427,6 +427,11 @@ function createUserRepositoryWithContext(
         .deleteFrom("inbox_messages")
         .where((eb) => eb.or([eb("sender_user_id", "=", id), eb("recipient_user_id", "=", id)]))
         .execute();
+      await db
+        .updateTable("conversation_messages")
+        .set({ sender_user_id: null })
+        .where("sender_user_id", "=", id)
+        .execute();
       await db.updateTable("users").set({ reports_to: null }).where("reports_to", "=", id).execute();
       await db.updateTable("channels").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
       await db.updateTable("whatsapp_groups").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
