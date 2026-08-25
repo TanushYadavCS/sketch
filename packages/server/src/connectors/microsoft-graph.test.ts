@@ -100,7 +100,28 @@ describe("refreshMicrosoftTokens scope escalation", () => {
         expires_at: "1970-01-01T00:00:00.000Z",
         scope: "Calendars.Read",
       }),
-    ).rejects.toThrow(/Microsoft token refresh failed \(400\)/);
+    ).rejects.toThrow(/token refresh failed \(400\)/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a server error under a narrower scope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("boom", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      refreshMicrosoftTokens(
+        {
+          type: "oauth",
+          access_token: "stale",
+          refresh_token: "refresh",
+          client_id: "client",
+          client_secret: "secret",
+          expires_at: "1970-01-01T00:00:00.000Z",
+          scope: "Calendars.Read",
+        },
+        { scope: "Calendars.Read Chat.Read" },
+      ),
+    ).rejects.toThrow(/token refresh failed \(503\)/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

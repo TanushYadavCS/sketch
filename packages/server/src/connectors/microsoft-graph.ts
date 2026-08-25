@@ -139,7 +139,7 @@ async function requestMicrosoftTokens(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Microsoft token refresh failed (${response.status}): ${text}`);
+    throw new MicrosoftGraphError("token refresh", response.status, text);
   }
 
   const data = (await response.json()) as {
@@ -170,6 +170,10 @@ async function requestMicrosoftTokens(
  * So a widened request falls back to the grant already held. Everything covered
  * by the original consent keeps working, the new capability degrades on its own,
  * and reconnecting is what actually upgrades the grant.
+ *
+ * Only a 400 triggers the retry: that is how Entra reports a rejected grant. A
+ * 5xx or a network failure is not a consent problem, and retrying it under a
+ * narrower scope would mask the real error behind a second identical failure.
  */
 export async function refreshMicrosoftTokens(
   credentials: OAuthCredentials,
@@ -180,7 +184,8 @@ export async function refreshMicrosoftTokens(
     return await requestMicrosoftTokens(credentials, requestedScope, opts);
   } catch (err) {
     const grantedScope = credentials.scope;
-    if (!grantedScope || grantedScope === requestedScope) throw err;
+    const rejectedGrant = err instanceof MicrosoftGraphError && err.status === 400;
+    if (!rejectedGrant || !grantedScope || grantedScope === requestedScope) throw err;
     return requestMicrosoftTokens(credentials, grantedScope, opts);
   }
 }

@@ -379,14 +379,21 @@ export function meetingChatToEvent(chat: TeamsMeetingChat): TeamsCalendarEvent |
   if (!chat.id || typeof joinUrl !== "string" || joinUrl.length === 0) return null;
   if (chat.onlineMeetingInfo?.calendarEventId) return null;
 
-  const startedAt = chat.createdDateTime ?? null;
+  /**
+   * `sourceCreatedAt` drives pruning, the removal window and the rolling
+   * `sourceCreatedBefore` tombstone, so an observation without one can never
+   * age out. A chat carrying no timestamp at all is not worth discovering.
+   */
+  const startedAt = chat.createdDateTime ?? chat.lastUpdatedDateTime ?? null;
+  if (!startedAt) return null;
+
   return {
     id: chat.id,
     subject: chat.topic ?? null,
     isOnlineMeeting: true,
     onlineMeetingProvider: "teamsForBusiness",
     onlineMeeting: { joinUrl },
-    start: startedAt ? { dateTime: startedAt, timeZone: "UTC" } : null,
+    start: { dateTime: startedAt, timeZone: "UTC" },
     end: null,
     lastModifiedDateTime: chat.lastUpdatedDateTime ?? startedAt,
   };
@@ -797,6 +804,24 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
             observations[eventKey] = observation;
           } else {
             delete observations[eventKey];
+          }
+        } else if (eventKey && !observations[eventKey]) {
+          /**
+           * Discovered but not inspected — the join URL would not resolve, or
+           * its transcripts were unreadable. Without a record of it the cursor
+           * advances past the meeting and nothing ever looks again, so a
+           * transient Graph failure loses the transcript permanently. Record it
+           * as pending so the retry watermark keeps pulling `since` back to it
+           * until the retry cutoff.
+           */
+          const observation: TeamsObservedMeeting = {
+            transcriptIds: [],
+            sourceCreatedAt: graphDateTime(event.start?.dateTime) ?? graphDateTime(event.end?.dateTime),
+            observedAt: now,
+            ...(chatEventKeys.has(eventKey) ? { origin: "chat" as const } : {}),
+          };
+          if (isWithinPendingTranscriptRetry(observation, pendingRetryCutoff)) {
+            observations[eventKey] = observation;
           }
         }
         return result.items;

@@ -160,6 +160,43 @@ describe("Teams connector", () => {
     expect(removals.map((record) => record.providerFileId)).not.toContain("transcript-chat");
   });
 
+  it("retries a chat meeting that was discovered but could not be resolved", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph({ chatMeetingUnresolvable: true });
+
+    const first = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    expect(first.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+
+    const cursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    vi.restoreAllMocks();
+    mockTeamsChatGraph();
+    const second = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(second.map((item) => item.providerFileId).sort()).toEqual(["transcript-chat", "transcript-good"]);
+  });
+
   it("keeps chat-discovered transcripts when chat discovery later becomes unauthorized", async () => {
     const connector = createTeamsConnector({
       maxInflight: 2,
@@ -788,7 +825,12 @@ function mockTeamsGraph() {
  * a call was launched straight from a Teams chat.
  */
 function mockTeamsChatGraph(
-  opts: { chatsStatus?: number; chatMirrorsCalendarEvent?: boolean; chatTranscriptPending?: boolean } = {},
+  opts: {
+    chatsStatus?: number;
+    chatMirrorsCalendarEvent?: boolean;
+    chatTranscriptPending?: boolean;
+    chatMeetingUnresolvable?: boolean;
+  } = {},
 ): void {
   const calendarJoinUrl = "https://teams.microsoft.com/l/meetup-join/good";
   const chatJoinUrl = opts.chatMirrorsCalendarEvent
@@ -828,6 +870,7 @@ function mockTeamsChatGraph(
     if (url.pathname === "/v1.0/me/onlineMeetings") {
       const filter = url.searchParams.get("$filter") ?? "";
       const isChat = filter.includes("meetup-join/chat");
+      if (isChat && opts.chatMeetingUnresolvable) return jsonResponse({ value: [] });
       return jsonResponse({
         value: [
           {
