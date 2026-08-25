@@ -155,6 +155,31 @@ describe("ReviewBand birth rows", () => {
     expect(screen.getByText("Priya Shah")).toBeInTheDocument();
   });
 
+  it("still dismisses non-person inspect rows", async () => {
+    const team = birthRow({ proposed_name: "Canvas Platform" });
+    const dismiss = vi.fn();
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [team], total: 1 })),
+      http.get("/api/entity-review/:id", () => HttpResponse.json({ row: team, evidence: [] })),
+      http.post("/api/entity-review/:id/dismiss", async ({ params, request }) => {
+        dismiss({ id: params.id, body: await request.json() });
+        return HttpResponse.json({ row: { ...team, status: "dismissed" }, idempotent: false });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewBand types={["team"]} />);
+
+    await user.click(await screen.findByTestId("birth-inspect"));
+    await user.click(await screen.findByTestId("birth-inspect-dismiss"));
+
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(1));
+    expect(dismiss.mock.calls[0][0]).toMatchObject({
+      id: "rev-1",
+      body: { candidateGeneratedAt: "2026-06-28T00:00:00.000Z" },
+    });
+  });
+
   it("lists the tasks under a tracker seed in the inspect sheet", async () => {
     server.use(
       http.get("/api/entity-review", () => HttpResponse.json({ rows: [birthRow()], total: 1 })),
