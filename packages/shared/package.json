@@ -1,6 +1,6 @@
 {
   "name": "@sketch/shared",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "license": "Elastic-2.0",
   "type": "module",

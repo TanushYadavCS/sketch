@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.2] -- 2026-08-25
+
+- Unifies chat history into `ReadChatHistory` with cross-chat scope, time bounds, and platform filters; retires `SearchChatHistory`.
+- Enables SendMessage to post to Slack channels and WhatsApp groups behind a single membership gate that resolves any verified identity.
+- Adds Graph v2 project-minting pipeline: review-gated verdicts, durable weekly mint engine, agentic judge, evidence-aware classification, declared affiliations, and rejection retirement.
+- Adds admin curation MCP mount with seven read-only graph tools, a verdict store, and a `propose_graph_verdicts` tool for curating project relationships.
+- Adds project-cleanup adjudication pass with a ledgered CLI, plus approval UI that applies graph verdicts with undo.
+- Stabilizes automation builder sessions with persisted checkpoints, plan-only guards, user-scoped leases, cancellation propagation, pause/resume controls, and response muting.
+- Makes automation builder integration-first and side-effect safe.
+- Stabilizes automation takeover routing so browser locks route to the web builder, background poller surfaces pending requests, and channel approvals preserve lock fences.
+- Fixes automation takeover approvals to carry session and generation fences through Slack and WhatsApp confirmations.
+- Hardens web-chat integration connection cards with deterministic app identification, provider-aware connection state, sanitized URLs, and OAuth callback preservation.
+- Improves search to index file names, summaries, and paths alongside document bodies; widens vector `ef_search` and pushes filters into the KNN query.
+- Adds dev-tools Search trace with final output capture and a synthesis button that answers queries from stored results.
+- Fixes dev-tools search trace timestamps as bigint on Postgres, preventing silent transaction rollbacks that broke tracing on every Postgres tenant.
+- Caps chat-history tool-schema row-id ceilings at INT4_MAX so models no longer advertise `Number.MAX_SAFE_INTEGER` to the agent.
+- Stops the agent from authoring skills unprompted by removing skill-writing instructions from the system prompt.
+- Fixes WhatsApp history backfill starvation by skipping disabled groups and correcting anchor timestamps from seconds to milliseconds.
+- Fixes `ReadChatHistory` to treat blank optionals as omitted, accept placeholder-filled parameters, and normalize redundant combos with most-specific-wins logic instead of rejecting.
+- Authorizes Slack chat-history reads through `access_scope_members` with typed principals, replacing the stale passive-participant table.
+- Treats blank optional send arguments (e.g. empty `threadTs`, `recipientUserId`) as absent instead of invalid, preventing agent retry loops.
+- Reports wrong `anchorMessageId` as a bad anchor error instead of an access denial.
+- Makes `ReadChatHistory` optionals fully nullable and stops junk anchor values from breaking reads.
+- Fixes automation builder to open source chats from Recents instead of landing on "Chat unavailable".
+- Fixes one-time schedules to allow due executions.
+- Aligns entity key readers with stored normalized match keys and answers collision checks from the lookup index.
+- Consolidates name normalizers into `entities/name-keys`.
+
 ## [1.4.1] -- 2026-08-18
 
 - Adds delivery-suppressed test runs to the automation builder, executing through the run path while suppressing configured Slack and WhatsApp delivery.
