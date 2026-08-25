@@ -34,6 +34,15 @@ const DEFAULT_MAX_INFLIGHT = 4;
 const DEFAULT_MAX_MEETINGS = 500;
 const DEFAULT_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_PENDING_TRANSCRIPT_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * `/me/chats` can only be filtered on `lastUpdatedDateTime`, which tracks
+ * renames and membership changes rather than transcript availability. A chat
+ * whose only timestamp equals the cursor watermark is excluded by a strict
+ * `gt`, so a meeting still waiting on its transcript could never be revisited.
+ * Overlap the window to keep those in range — meeting chats are few, so
+ * re-listing a slice of them each run is cheap.
+ */
+const CHAT_DISCOVERY_OVERLAP_MS = 60 * 60 * 1000;
 
 interface TeamsEmailAddress {
   name?: string | null;
@@ -348,8 +357,9 @@ async function listCalendarEvents(graph: GraphClient, since: string, until: stri
 }
 
 async function listMeetingChats(graph: GraphClient, since: string): Promise<TeamsMeetingChat[]> {
+  const from = new Date(new Date(since).getTime() - CHAT_DISCOVERY_OVERLAP_MS).toISOString();
   return listAll<TeamsMeetingChat>(graph, "/me/chats", {
-    $filter: `chatType eq 'meeting' and lastUpdatedDateTime gt ${since}`,
+    $filter: `chatType eq 'meeting' and lastUpdatedDateTime gt ${from}`,
     $select: "id,topic,createdDateTime,lastUpdatedDateTime,onlineMeetingInfo",
     $top: "50",
   });
@@ -389,22 +399,22 @@ export function meetingChatToEvent(chat: TeamsMeetingChat): TeamsCalendarEvent |
  *
  * Connectors authorized before `Chat.Read` was requested hold a token without
  * it, so this listing fails until the user reconsents. Calendar discovery must
- * keep working meanwhile, so the failure is logged and swallowed — and reported
- * via `listed` so the removal sweep does not read an unlistable chat as a
- * deleted meeting and tombstone transcripts that are still there.
+ * keep working meanwhile, so the failure is logged and swallowed. Nothing reads
+ * absence from this listing as a deletion, so a failed run simply discovers
+ * fewer meetings.
  */
 async function discoverChatMeetings(
   graph: GraphClient,
   since: string,
   calendarEvents: TeamsCalendarEvent[],
   logger: Logger,
-): Promise<{ events: TeamsCalendarEvent[]; listed: boolean }> {
+): Promise<TeamsCalendarEvent[]> {
   let chats: TeamsMeetingChat[];
   try {
     chats = await listMeetingChats(graph, since);
   } catch (err) {
     logger.warn({ err }, "Skipping Teams meeting chat discovery");
-    return { events: [], listed: false };
+    return [];
   }
 
   const seenJoinUrls = new Set(
@@ -418,7 +428,7 @@ async function discoverChatMeetings(
     seenJoinUrls.add(joinUrl);
     events.push(event);
   }
-  return { events, listed: true };
+  return events;
 }
 
 async function resolveOnlineMeeting(graph: GraphClient, joinUrl: string): Promise<TeamsOnlineMeeting | null> {
@@ -742,11 +752,9 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
       nextCursor = null;
 
       const calendarEvents = (await listCalendarEvents(graph, since, now)).filter(isTeamsEvent);
-      const chatDiscovery = await discoverChatMeetings(graph, since, calendarEvents, logger);
-      const events = [...calendarEvents, ...chatDiscovery.events];
-      const chatEventKeys = new Set(
-        chatDiscovery.events.map(meetingObservationKey).filter((key): key is string => key !== null),
-      );
+      const chatEvents = await discoverChatMeetings(graph, since, calendarEvents, logger);
+      const events = [...calendarEvents, ...chatEvents];
+      const chatEventKeys = new Set(chatEvents.map(meetingObservationKey).filter((key): key is string => key !== null));
       const currentEventKeys = new Set<string>();
       for (const event of events) {
         const eventKey = meetingObservationKey(event);
@@ -763,11 +771,13 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
       const processableEvents = [...events].sort((a, b) => eventStartMs(b) - eventStartMs(a)).slice(0, runMaxMeetings);
 
       const inspectedEventKeys = new Set<string>();
+      const seenTranscriptIds = new Set<string>();
       const removalRecords: SourceItemRemovalRecord[] = [];
 
       const syncMeetingStreaming = async (event: TeamsCalendarEvent): Promise<SyncedItem[]> => {
         const eventKey = meetingObservationKey(event);
         const result = await syncMeeting(graph, event, ownerEmail ?? null, logger);
+        for (const transcriptId of result.transcriptIds) seenTranscriptIds.add(transcriptId);
         if (eventKey && result.inspected) {
           inspectedEventKeys.add(eventKey);
           const previousTranscriptIds = new Set(observations[eventKey]?.transcriptIds ?? []);
@@ -804,7 +814,15 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
 
       for (const [eventKey, observation] of Object.entries(observations)) {
         if (currentEventKeys.has(eventKey) || inspectedEventKeys.has(eventKey)) continue;
-        if (!chatDiscovery.listed && observation.origin === "chat") continue;
+        /**
+         * `/me/calendarView` returns every event in the window, so a calendar
+         * meeting missing from it really is gone. The chat listing is filtered
+         * on `lastUpdatedDateTime` instead, so a chat can be absent simply
+         * because nothing touched it — absence is not deletion, and treating it
+         * as such would tombstone transcripts that still exist. Chat-origin
+         * observations age out through `pruneObservedMeetings` instead.
+         */
+        if (observation.origin === "chat") continue;
         if (!observationFallsInRange(observation, since, now)) continue;
         for (const providerFileId of observation.transcriptIds) {
           removalRecords.push({ providerFileId, reason: "teams_meeting_removed" });
@@ -812,7 +830,15 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
         delete observations[eventKey];
       }
 
+      /**
+       * One meeting can be observed under two keys — a chat that later gains a
+       * calendar event, or join URLs that differ in encoding between the two
+       * listings. Dropping the stale key must not tombstone a transcript the
+       * surviving key just re-ingested, so a transcript seen anywhere in this
+       * run is never removed by it.
+       */
       for (const record of removalRecords) {
+        if (record.providerFileId && seenTranscriptIds.has(record.providerFileId)) continue;
         await onSourceItemRemoved?.(record);
       }
 

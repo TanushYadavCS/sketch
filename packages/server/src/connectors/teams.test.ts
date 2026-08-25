@@ -118,6 +118,48 @@ describe("Teams connector", () => {
     expect(items.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
   });
 
+  it("revisits a chat meeting whose transcript only appears on a later run", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph({ chatTranscriptPending: true });
+
+    const first = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    expect(first.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+
+    const cursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    vi.restoreAllMocks();
+    mockTeamsChatGraph();
+    const removals: Array<{ providerFileId?: string; reason: string }> = [];
+    const second = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(second.map((item) => item.providerFileId).sort()).toEqual(["transcript-chat", "transcript-good"]);
+    expect(removals.map((record) => record.providerFileId)).not.toContain("transcript-chat");
+  });
+
   it("keeps chat-discovered transcripts when chat discovery later becomes unauthorized", async () => {
     const connector = createTeamsConnector({
       maxInflight: 2,
@@ -745,7 +787,9 @@ function mockTeamsGraph() {
  * ("Meeting with Ranjith") that has no calendar event, mirroring a tenant where
  * a call was launched straight from a Teams chat.
  */
-function mockTeamsChatGraph(opts: { chatsStatus?: number; chatMirrorsCalendarEvent?: boolean } = {}): void {
+function mockTeamsChatGraph(
+  opts: { chatsStatus?: number; chatMirrorsCalendarEvent?: boolean; chatTranscriptPending?: boolean } = {},
+): void {
   const calendarJoinUrl = "https://teams.microsoft.com/l/meetup-join/good";
   const chatJoinUrl = opts.chatMirrorsCalendarEvent
     ? calendarJoinUrl
@@ -760,6 +804,14 @@ function mockTeamsChatGraph(opts: { chatsStatus?: number; chatMirrorsCalendarEve
 
     if (url.pathname === "/v1.0/me/chats") {
       if (opts.chatsStatus) return new Response("forbidden", { status: opts.chatsStatus });
+      /**
+       * Honour the `lastUpdatedDateTime gt {from}` filter the connector sends.
+       * The chat's only timestamp is its creation time, so a connector that
+       * queried straight from the cursor watermark would filter this chat out
+       * on the retry run and never revisit it.
+       */
+      const from = (url.searchParams.get("$filter") ?? "").match(/lastUpdatedDateTime gt (\S+)/)?.[1];
+      if (from && CHAT_CREATED.toISOString() <= from) return jsonResponse({ value: [] });
       return jsonResponse({
         value: [
           {
@@ -791,6 +843,7 @@ function mockTeamsChatGraph(opts: { chatsStatus?: number; chatMirrorsCalendarEve
       /^\/v1\.0\/me\/onlineMeetings\/(meeting-good|meeting-chat)\/transcripts$/,
     );
     if (transcriptList) {
+      if (transcriptList[1] === "meeting-chat" && opts.chatTranscriptPending) return jsonResponse({ value: [] });
       const id = transcriptList[1] === "meeting-chat" ? "transcript-chat" : "transcript-good";
       return jsonResponse({ value: [{ id, createdDateTime: TEAMS_TRANSCRIPT_CREATED.toISOString() }] });
     }
