@@ -412,6 +412,26 @@ describe("executeAutomation agent steps", () => {
     expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
   });
 
+  it("executes a due one-time task without rejecting its schedule as stale", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const params = makeParams({
+      runAgent,
+      task: makeTask({
+        schedule_type: "once",
+        schedule_value: new Date(Date.now() - 1_000).toISOString(),
+      }),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
   it("does not deliver successful final output for silent workflows", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
