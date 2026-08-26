@@ -17,21 +17,24 @@ import {
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import type { GeminiGenerator } from "./gemini-generate";
 
-export type ConnectorType =
-  | "google_drive"
-  | "google_calendar"
-  | "gmail"
-  | "outlook"
-  | "outlook_calendar"
-  | "teams"
-  | "clickup"
-  | "notion"
-  | "linear"
-  | "fireflies"
-  | "otter"
-  | "zoho_crm"
-  | "whatsapp"
-  | "slack";
+export const CONNECTOR_TYPES = [
+  "google_drive",
+  "google_calendar",
+  "gmail",
+  "outlook",
+  "outlook_calendar",
+  "teams",
+  "clickup",
+  "notion",
+  "linear",
+  "fireflies",
+  "otter",
+  "zoho_crm",
+  "whatsapp",
+  "slack",
+] as const;
+
+export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
 
 export const WHATSAPP_CONNECTOR_TYPE = "whatsapp" satisfies ConnectorType;
 export const SLACK_CONNECTOR_TYPE = "slack" satisfies ConnectorType;

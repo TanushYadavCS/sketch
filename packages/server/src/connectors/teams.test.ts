@@ -13,6 +13,7 @@ const TEAMS_EVENT_START = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 const TEAMS_EVENT_END = new Date(TEAMS_EVENT_START.getTime() + 60 * 60 * 1000);
 const TEAMS_EVENT_MODIFIED = new Date(TEAMS_EVENT_END.getTime() + 5 * 60 * 1000);
 const TEAMS_TRANSCRIPT_CREATED = new Date(TEAMS_EVENT_START.getTime() + 45 * 60 * 1000);
+const CHAT_CREATED = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
 const sortedEmailPrincipals = (emails: string[]) =>
   toEmailPrincipals(emails).sort((left, right) => left.value.localeCompare(right.value));
@@ -74,6 +75,169 @@ describe("Teams connector", () => {
       { name: "Owner User", email: "owner@canvasx.ai" },
     ]);
     expect(items[0].accessPrincipals).toEqual(sortedEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
+  });
+
+  it("ingests a chat-started meeting that has no calendar event", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph();
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId).sort()).toEqual(["transcript-chat", "transcript-good"]);
+    const chatItem = items.find((item) => item.providerFileId === "transcript-chat");
+    expect(chatItem).toMatchObject({
+      fileName: "Meeting with Ranjith",
+      fileType: "meeting_transcript",
+      sourceCreatedAt: CHAT_CREATED.toISOString(),
+    });
+    expect(chatItem?.content).toContain("Ihab: Started this from the chat.");
+  });
+
+  it("does not ingest a meeting twice when its chat and calendar event share a join URL", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph({ chatMirrorsCalendarEvent: true });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+  });
+
+  it("revisits a chat meeting whose transcript only appears on a later run", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph({ chatTranscriptPending: true });
+
+    const first = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    expect(first.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+
+    const cursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    vi.restoreAllMocks();
+    mockTeamsChatGraph();
+    const removals: Array<{ providerFileId?: string; reason: string }> = [];
+    const second = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(second.map((item) => item.providerFileId).sort()).toEqual(["transcript-chat", "transcript-good"]);
+    expect(removals.map((record) => record.providerFileId)).not.toContain("transcript-chat");
+  });
+
+  it("retries a chat meeting that was discovered but could not be resolved", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    mockTeamsChatGraph({ chatMeetingUnresolvable: true });
+
+    const first = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    expect(first.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+
+    const cursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    vi.restoreAllMocks();
+    mockTeamsChatGraph();
+    const second = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(second.map((item) => item.providerFileId).sort()).toEqual(["transcript-chat", "transcript-good"]);
+  });
+
+  it("keeps chat-discovered transcripts when chat discovery later becomes unauthorized", async () => {
+    const connector = createTeamsConnector({
+      maxInflight: 2,
+      processingLagMs: 2 * 24 * 60 * 60 * 1000,
+      retryBaseMs: 0,
+    });
+    mockTeamsChatGraph();
+    await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    const cursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    vi.restoreAllMocks();
+    mockTeamsChatGraph({ chatsStatus: 403 });
+    const removals: Array<{ providerFileId?: string; reason: string }> = [];
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 7 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["transcript-good"]);
+    expect(removals.map((record) => record.providerFileId)).not.toContain("transcript-chat");
   });
 
   it("honors Retry-After while retrying Microsoft Graph throttles", async () => {
@@ -647,6 +811,100 @@ function mockTeamsGraph() {
           "00:00:02.000 --> 00:00:04.000",
           "<v Owner User>We will send the recap.</v>",
         ].join("\n"),
+        { status: 200, headers: { "Content-Type": "text/vtt" } },
+      );
+    }
+
+    throw new Error(`unexpected fetch ${url.toString()}`);
+  });
+}
+
+/**
+ * Mock one calendar meeting ("Acme kickoff") alongside one chat-started meeting
+ * ("Meeting with Ranjith") that has no calendar event, mirroring a tenant where
+ * a call was launched straight from a Teams chat.
+ */
+function mockTeamsChatGraph(
+  opts: {
+    chatsStatus?: number;
+    chatMirrorsCalendarEvent?: boolean;
+    chatTranscriptPending?: boolean;
+    chatMeetingUnresolvable?: boolean;
+  } = {},
+): void {
+  const calendarJoinUrl = "https://teams.microsoft.com/l/meetup-join/good";
+  const chatJoinUrl = opts.chatMirrorsCalendarEvent
+    ? calendarJoinUrl
+    : "https://teams.microsoft.com/l/meetup-join/chat";
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+    const url = new URL(input.toString());
+
+    if (url.pathname === "/v1.0/me/calendarView") {
+      return jsonResponse({ value: [teamsEvent("event-good", "Acme kickoff", calendarJoinUrl)] });
+    }
+
+    if (url.pathname === "/v1.0/me/chats") {
+      if (opts.chatsStatus) return new Response("forbidden", { status: opts.chatsStatus });
+      /**
+       * Honour the `lastUpdatedDateTime gt {from}` filter the connector sends.
+       * The chat's only timestamp is its creation time, so a connector that
+       * queried straight from the cursor watermark would filter this chat out
+       * on the retry run and never revisit it.
+       */
+      const from = (url.searchParams.get("$filter") ?? "").match(/lastUpdatedDateTime gt (\S+)/)?.[1];
+      if (from && CHAT_CREATED.toISOString() <= from) return jsonResponse({ value: [] });
+      return jsonResponse({
+        value: [
+          {
+            id: "19:meeting_chat@thread.v2",
+            topic: "Meeting with Ranjith",
+            createdDateTime: CHAT_CREATED.toISOString(),
+            lastUpdatedDateTime: CHAT_CREATED.toISOString(),
+            onlineMeetingInfo: { joinWebUrl: chatJoinUrl, calendarEventId: null },
+          },
+        ],
+      });
+    }
+
+    if (url.pathname === "/v1.0/me/onlineMeetings") {
+      const filter = url.searchParams.get("$filter") ?? "";
+      const isChat = filter.includes("meetup-join/chat");
+      if (isChat && opts.chatMeetingUnresolvable) return jsonResponse({ value: [] });
+      return jsonResponse({
+        value: [
+          {
+            id: isChat ? "meeting-chat" : "meeting-good",
+            subject: isChat ? "Meeting with Ranjith" : "Acme kickoff",
+            joinWebUrl: isChat ? chatJoinUrl : calendarJoinUrl,
+          },
+        ],
+      });
+    }
+
+    const transcriptList = url.pathname.match(
+      /^\/v1\.0\/me\/onlineMeetings\/(meeting-good|meeting-chat)\/transcripts$/,
+    );
+    if (transcriptList) {
+      if (transcriptList[1] === "meeting-chat" && opts.chatTranscriptPending) return jsonResponse({ value: [] });
+      const id = transcriptList[1] === "meeting-chat" ? "transcript-chat" : "transcript-good";
+      return jsonResponse({ value: [{ id, createdDateTime: TEAMS_TRANSCRIPT_CREATED.toISOString() }] });
+    }
+
+    if (/^\/v1\.0\/me\/onlineMeetings\/(meeting-good|meeting-chat)\/recordings$/.test(url.pathname)) {
+      return jsonResponse({ value: [] });
+    }
+
+    if (url.pathname === "/v1.0/me/onlineMeetings/meeting-chat/transcripts/transcript-chat/content") {
+      return new Response(
+        ["WEBVTT", "", "00:00:00.000 --> 00:00:02.000", "<v Ihab>Started this from the chat.</v>"].join("\n"),
+        { status: 200, headers: { "Content-Type": "text/vtt" } },
+      );
+    }
+
+    if (url.pathname === "/v1.0/me/onlineMeetings/meeting-good/transcripts/transcript-good/content") {
+      return new Response(
+        ["WEBVTT", "", "00:00:00.000 --> 00:00:02.000", "<v Jane Doe>Confirmed the launch plan.</v>"].join("\n"),
         { status: 200, headers: { "Content-Type": "text/vtt" } },
       );
     }

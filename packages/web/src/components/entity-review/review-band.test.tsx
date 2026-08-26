@@ -136,6 +136,50 @@ describe("ReviewBand birth rows", () => {
     expect(screen.queryByTestId("reconcile-proposed")).not.toBeInTheDocument();
   });
 
+  it("closes a person inspect sheet without removing the person from review", async () => {
+    const person = birthRow({ entity_type: "person", proposed_name: "Priya Shah" });
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [person], total: 1 })),
+      http.get("/api/entity-review/:id", () => HttpResponse.json({ row: person, evidence: [] })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewBand types={["person"]} />);
+
+    await user.click(await screen.findByTestId("birth-inspect"));
+    expect(await screen.findByTestId("birth-inspect-dismiss")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("birth-inspect-dismiss"));
+
+    await waitFor(() => expect(screen.queryByTestId("birth-inspect-dismiss")).not.toBeInTheDocument());
+    expect(screen.getByText("Priya Shah")).toBeInTheDocument();
+  });
+
+  it("still dismisses non-person inspect rows", async () => {
+    const team = birthRow({ proposed_name: "Canvas Platform" });
+    const dismiss = vi.fn();
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [team], total: 1 })),
+      http.get("/api/entity-review/:id", () => HttpResponse.json({ row: team, evidence: [] })),
+      http.post("/api/entity-review/:id/dismiss", async ({ params, request }) => {
+        dismiss({ id: params.id, body: await request.json() });
+        return HttpResponse.json({ row: { ...team, status: "dismissed" }, idempotent: false });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewBand types={["team"]} />);
+
+    await user.click(await screen.findByTestId("birth-inspect"));
+    await user.click(await screen.findByTestId("birth-inspect-dismiss"));
+
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(1));
+    expect(dismiss.mock.calls[0][0]).toMatchObject({
+      id: "rev-1",
+      body: { candidateGeneratedAt: "2026-06-28T00:00:00.000Z" },
+    });
+  });
+
   it("lists the tasks under a tracker seed in the inspect sheet", async () => {
     server.use(
       http.get("/api/entity-review", () => HttpResponse.json({ rows: [birthRow()], total: 1 })),

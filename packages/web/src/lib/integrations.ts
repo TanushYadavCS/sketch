@@ -152,7 +152,7 @@ const OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
 const TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
   "Create or open a Microsoft Entra app registration for the tenant you want Teams users to sign in with",
   "In Authentication, add the Web redirect URI shown below exactly",
-  "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
+  "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, Chat.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
   "Have a tenant admin grant admin consent for transcript and recording permissions if your tenant requires it",
   "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
   "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
