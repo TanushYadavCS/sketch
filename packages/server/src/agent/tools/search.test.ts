@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod/v4";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
@@ -134,8 +135,54 @@ afterEach(async () => {
   await db.destroy();
 });
 
-it("accepts WhatsApp as a search source filter", () => {
-  expect(searchToolSchema.source.safeParse("whatsapp").success).toBe(true);
+it("accepts Teams as a search source filter and returns only Teams files", async () => {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "cfg-search-tools-teams",
+      connector_type: "teams",
+      auth_type: "oauth",
+      credentials: "{}",
+      created_by: "admin",
+    })
+    .execute();
+  await db
+    .insertInto("indexed_files")
+    .values([
+      {
+        id: "file-teams-source",
+        connector_config_id: "cfg-search-tools-teams",
+        provider_file_id: "file-teams-source",
+        file_name: "Teams source reachability",
+        file_type: "meeting_transcript",
+        content_category: "document",
+        source: "teams",
+        content: "source filter reachability marker",
+        source_updated_at: now,
+        synced_at: now,
+      },
+      {
+        id: "file-drive-source",
+        connector_config_id: "cfg-search-tools",
+        provider_file_id: "file-drive-source",
+        file_name: "Drive source reachability",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "source filter reachability marker",
+        source_updated_at: now,
+        synced_at: now,
+      },
+    ])
+    .execute();
+
+  const parsed = z.object(searchToolSchema).parse({ query: "reachability marker", source: "teams", limit: 10 });
+  const result = await handleSearch(parsed, deps());
+  const text = result.content[0]?.text ?? "";
+
+  expect(text).toContain("Teams source reachability");
+  expect(text).not.toContain("Drive source reachability");
 });
 
 it("normalizes legacy person subtypes in search and context output", async () => {

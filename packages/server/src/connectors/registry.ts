@@ -4,13 +4,13 @@
  * ConnectorType lives in types.ts (to avoid circular deps with the Connector interface).
  * This file is the single source of truth for:
  * - Factory map (which function creates which connector)
- * - Valid connector type list (for API validation)
+ * - VALID_CONNECTOR_TYPES compatibility export
  * - getConnector() lookup
  *
- * Adding a new connector: add the type to ConnectorType in types.ts,
+ * Adding a new connector: add it to CONNECTOR_TYPES in types.ts,
  * then add the factory here. That's it — no other files need updating.
  */
-import type { Connector, ConnectorType } from "./types";
+import { CONNECTOR_TYPES, type Connector, type ConnectorType } from "./types";
 
 import { createClickUpConnector } from "./clickup";
 import { createFirefliesConnector } from "./fireflies";
@@ -44,7 +44,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   slack: createSlackIndexingConnector,
 };
 
-export const VALID_CONNECTOR_TYPES: ConnectorType[] = Object.keys(connectorFactories) as ConnectorType[];
+export const VALID_CONNECTOR_TYPES = CONNECTOR_TYPES as unknown as ConnectorType[];
 
 export function getConnector(type: ConnectorType): Connector {
   const factory = connectorFactories[type];

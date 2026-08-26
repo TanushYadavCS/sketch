@@ -11,6 +11,7 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
   KIND_TO_RULES,
+  SEARCHABLE_SOURCES,
   browseFiles,
   filterAccessibleFileIds,
   getFileContent,
@@ -19,6 +20,7 @@ import {
   search,
   searchFiles,
 } from "./search";
+import { CONNECTOR_TYPES } from "./types";
 
 /** Insert a minimal indexed_files row for testing path matching. */
 async function insertFile(db: Kysely<DB>, id: string, sourcePath: string, source = "google_drive") {
@@ -282,6 +284,17 @@ describe("KIND_TO_RULES", () => {
   it("maps message kind to local conversation, WhatsApp, and Slack slice sources", () => {
     expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp", "slack"] }]);
   });
+
+  it("keeps searchable sources in sync with connector types and kind rules", () => {
+    const expectedSources = [...new Set([...CONNECTOR_TYPES, "conversation", "local"])].sort();
+    const searchableSources = new Set<string>(SEARCHABLE_SOURCES);
+    const kindSources = [
+      ...new Set(Object.values(KIND_TO_RULES).flatMap((rules) => rules.flatMap((rule) => rule.sources ?? []))),
+    ];
+
+    expect([...searchableSources].sort()).toEqual(expectedSources);
+    expect(kindSources.filter((source) => !searchableSources.has(source))).toEqual([]);
+  });
 });
 
 describe("filterAccessibleFileIds — 3-tier RBAC", () => {
@@ -465,20 +478,22 @@ describe("search — recency browse applies RBAC before limit", () => {
     opts: {
       content?: string | null;
       fileAccessEmails?: string[];
+      fileType?: string;
       manualShareEmails?: string[];
       shareWithEveryone?: boolean;
+      source?: string;
     } = {},
   ) {
     await db
       .insertInto("indexed_files")
       .values({
         id,
-        connector_config_id: "connector-meetings",
+        connector_config_id: opts.source === "teams" ? "connector-meetings-teams" : "connector-meetings",
         provider_file_id: id,
         file_name: `${id}.txt`,
-        file_type: "transcript",
+        file_type: opts.fileType ?? "transcript",
         content_category: "document",
-        source: "fireflies",
+        source: opts.source ?? "fireflies",
         source_path: `/meetings/${id}`,
         provider_url: null,
         content: opts.content ?? null,
@@ -520,13 +535,22 @@ describe("search — recency browse applies RBAC before limit", () => {
     db = await createTestDb();
     await db
       .insertInto("connector_configs")
-      .values({
-        id: "connector-meetings",
-        connector_type: "fireflies",
-        auth_type: "api_key",
-        credentials: "{}",
-        created_by: "admin",
-      })
+      .values([
+        {
+          id: "connector-meetings",
+          connector_type: "fireflies",
+          auth_type: "api_key",
+          credentials: "{}",
+          created_by: "admin",
+        },
+        {
+          id: "connector-meetings-teams",
+          connector_type: "teams",
+          auth_type: "oauth",
+          credentials: "{}",
+          created_by: "admin",
+        },
+      ])
       .execute();
   });
 
@@ -552,6 +576,26 @@ describe("search — recency browse applies RBAC before limit", () => {
     });
 
     expect(results.map((r) => r.id)).toEqual(["accessible"]);
+  });
+
+  it("returns Teams meeting transcripts from empty-query recency browse without sweeping other Teams files", async () => {
+    await insertMeeting("teams-other-type", "2026-04-30T11:00:00.000Z", {
+      source: "teams",
+      fileType: "chat_message",
+    });
+    await insertMeeting("teams-transcript", "2026-04-30T10:00:00.000Z", {
+      source: "teams",
+      fileType: "meeting_transcript",
+    });
+    await insertMeeting("fireflies-transcript", "2026-04-30T09:00:00.000Z");
+
+    const results = await search(db, "", {
+      kindRules: KIND_TO_RULES.meeting,
+      sortBy: "recency",
+      limit: 10,
+    });
+
+    expect(results.map((r) => r.id)).toEqual(["teams-transcript", "fireflies-transcript"]);
   });
 
   it("includes manually shared and org-wide files in non-empty search", async () => {
