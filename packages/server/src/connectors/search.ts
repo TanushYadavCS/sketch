@@ -28,7 +28,7 @@ import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-met
 import type { EmailAddr } from "./email/normalized-email";
 import { createEnrichmentQueryEmbedder, resolveOpenRouterEnrichmentConfig } from "./enrichment-providers";
 import type { SearchCandidate, StageKey, StageReporter, VectorChunkHit } from "./enrichment-stage-report";
-import { type AccessPrincipalInput, normalizeAccessPrincipals } from "./types";
+import { type AccessPrincipalInput, CONNECTOR_TYPES, type ConnectorType, normalizeAccessPrincipals } from "./types";
 import {
   type ScoredVector,
   VECTOR_HIT_DISPLAY_CAP,
@@ -50,6 +50,14 @@ export interface SearchResult {
   /** FTS5 relevance rank (lower = more relevant). */
   relevance: number;
 }
+
+export type SearchableSource = ConnectorType | "conversation" | "local";
+
+function buildSearchableSources(connectorTypes: readonly ConnectorType[]): [SearchableSource, ...SearchableSource[]] {
+  return ["conversation", "local", ...connectorTypes];
+}
+
+export const SEARCHABLE_SOURCES = buildSearchableSources(CONNECTOR_TYPES);
 
 export interface SearchOptions {
   /** Filter by source provider. */
@@ -384,7 +392,7 @@ export type KindRule = { sources?: string[]; fileTypes?: string[] };
  * sweeps in tasks under `kind: "doc"` — so we discriminate on file_type too.
  */
 export const KIND_TO_RULES: Record<string, KindRule[]> = {
-  meeting: [{ sources: ["fireflies", "otter"] }],
+  meeting: [{ sources: ["fireflies", "otter"] }, { sources: ["teams"], fileTypes: ["meeting_transcript"] }],
   doc: [
     { sources: ["google_drive"], fileTypes: ["document", "presentation"] },
     { sources: ["notion"], fileTypes: ["page"] },

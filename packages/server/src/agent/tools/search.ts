@@ -1,7 +1,13 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 import { resolveViewerPrincipals } from "../../access/principals";
-import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "../../connectors/search";
+import {
+  KIND_TO_RULES,
+  SEARCHABLE_SOURCES,
+  filterAccessibleFileIds,
+  getFileContent,
+  search,
+} from "../../connectors/search";
 import type { AccessPrincipal } from "../../connectors/types";
 import type { DevSearchTraceOrigin, DevSearchTraceStatus } from "../../db/repositories/dev-search-traces";
 import { createEntityRepository } from "../../db/repositories/entities";
@@ -40,12 +46,11 @@ export const searchToolSchema = {
     .enum(["meeting", "doc", "task", "message"])
     .optional()
     .describe(
-      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation/WhatsApp/Slack.",
+      "Semantic content kind. meeting=Teams/Fireflies/Otter meeting transcripts, " +
+        "doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, " +
+        "message=conversation/WhatsApp/Slack.",
     ),
-  source: z
-    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "whatsapp", "slack", "local"])
-    .optional()
-    .describe("Filter to a specific source. Omit to search all."),
+  source: z.enum(SEARCHABLE_SOURCES).optional().describe("Filter to a specific source. Omit to search all."),
   sortBy: z
     .enum(["relevance", "recency"])
     .optional()
