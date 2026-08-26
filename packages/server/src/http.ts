@@ -133,6 +133,7 @@ interface AppDeps {
     Partial<Pick<TaskScheduler, "removeTaskRuntime">> &
     Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
+  isAdminReadAllEnabled?: () => Promise<boolean>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   cliIntegrations?: ReturnType<typeof createCliIntegrationService>;
@@ -641,6 +642,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         settings,
         inboxMessagesRepo: inboxMessages,
         runAgent: deps.runAgent,
+        ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
         buildMcpServers: deps.buildMcpServers,
         loadIntegrationProvider: deps.loadIntegrationProvider,
         cliIntegrations: deps.cliIntegrations,

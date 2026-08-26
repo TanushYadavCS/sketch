@@ -1,6 +1,6 @@
 import type { Expression, Kysely } from "kysely";
 import { authorizedTargets } from "../../access/membership";
-import { resolveViewerPrincipals } from "../../access/principals";
+import { resolveMembershipPrincipals } from "../../access/principals";
 import type { AccessPrincipal } from "../../connectors/types";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
@@ -73,7 +73,7 @@ export class ChatHistoryAccessResolver {
 
   async hasUsableIdentity(): Promise<boolean> {
     try {
-      return (await resolveViewerPrincipals(this.deps)).length > 0;
+      return (await resolveMembershipPrincipals(this.deps)).length > 0;
     } catch (error) {
       this.deps.logger?.warn({ err: error }, "Chat history principal resolution failed closed");
       return false;
@@ -130,7 +130,7 @@ export class ChatHistoryAccessResolver {
     if (!this.deps.db || !this.deps.currentUserId || targets.length === 0) return new Set();
     let principals: AccessPrincipal[] = [];
     try {
-      principals = await resolveViewerPrincipals(this.deps);
+      principals = await resolveMembershipPrincipals(this.deps);
     } catch (error) {
       this.deps.logger?.warn({ err: error }, "Chat history principal resolution failed closed");
     }

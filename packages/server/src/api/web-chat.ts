@@ -94,6 +94,7 @@ interface WebChatRouteDeps {
   settings: SettingsRepo;
   inboxMessagesRepo: InboxMessagesRepo;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
+  isAdminReadAllEnabled?: () => Promise<boolean>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   cliIntegrations?: CliIntegrationCardResolver;
@@ -2126,6 +2127,8 @@ function automationBuilderTaskContext(params: {
 export function webChatRoutes(deps: WebChatRouteDeps) {
   const routes = new Hono();
   const toolConfig = { BASE_URL: deps.config.BASE_URL, PORT: deps.config.PORT };
+  const isAdminReadAllEnabled =
+    deps.isAdminReadAllEnabled ?? (async () => (await deps.settings.get())?.admin_can_read_all_files === 1);
 
   routes.get("/progress-settings", async (c) => {
     const currentUser = await deps.users.findById(c.get("sub"));
@@ -2960,6 +2963,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             db: deps.db,
             workspaceKey: currentUser.id,
             threadTs: conversationId,
+            isAdminReadAllEnabled,
             userMessage,
             workspaceDir,
             claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,

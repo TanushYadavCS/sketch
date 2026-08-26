@@ -73,6 +73,7 @@ export interface SearchOptions {
    * When omitted, no user-level filtering is applied.
    */
   userPrincipals?: AccessPrincipalInput[];
+  accessBypassReason?: "admin";
   slackEntitySyncEnabled?: boolean;
 }
 
@@ -176,8 +177,9 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
  * and by the frontend file detail sheet.
  *
  * Access control:
- *   - `userPrincipals === undefined` → trusted bypass (server/agent boot paths,
- *     admin bypass when the org setting is on). Returns the file unfiltered.
+ *   - `userPrincipals === undefined` → trusted bypass (server boot paths and
+ *     interactive admin agent/web content reads when the org setting is on).
+ *     Returns the file unfiltered.
  *   - `userPrincipals === []`        → caller has no resolvable principal → fail closed.
  *     Returns null regardless of the file's access shape. Prevents an unauth'd
  *     user from inheriting visibility through the empty-array path.
@@ -1082,15 +1084,17 @@ export async function hybridSearch(
     label: "Access filter",
     kind: "code",
     status: principalList.length > 0 ? "done" : "skipped",
-    ...(principalList.length > 0
-      ? {
-          summary: {
-            principals: principalList.length,
-            allowed: accessFiltered.length,
-            denied: filteredFiles.length - accessFiltered.length,
-          },
-        }
-      : { error: "No principals supplied — access filter not applied" }),
+    ...(opts?.accessBypassReason === "admin"
+      ? { error: "skipped — admin bypass" }
+      : principalList.length > 0
+        ? {
+            summary: {
+              principals: principalList.length,
+              allowed: accessFiltered.length,
+              denied: filteredFiles.length - accessFiltered.length,
+            },
+          }
+        : { error: "No principals supplied — access filter not applied" }),
   });
 
   // ── 7. Build final results ─────────────────────────────────
@@ -1847,6 +1851,7 @@ export async function search(
     after?: string;
     before?: string;
     userPrincipals?: AccessPrincipalInput[];
+    accessBypassReason?: "admin";
     slackEntitySyncEnabled?: boolean;
     entityId?: string;
     entityIds?: string[];
@@ -2041,6 +2046,7 @@ export async function search(
     limit: fetchLimit,
     queryEmbedding,
     userPrincipals: opts?.userPrincipals,
+    ...(opts?.accessBypassReason ? { accessBypassReason: opts.accessBypassReason } : {}),
     slackEntitySyncEnabled: opts?.slackEntitySyncEnabled,
     fileIds,
     entityFileIds,

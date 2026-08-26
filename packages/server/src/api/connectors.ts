@@ -1173,7 +1173,8 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const userPrincipals = viewerPrincipals(getContentViewer(c));
+    const contentViewer = getContentViewer(c);
+    const userPrincipals = contentViewer.isAdmin ? undefined : viewerPrincipals(contentViewer);
     const results = await search(db, parsed.data.query, {
       source: parsed.data.source,
       category: parsed.data.category,

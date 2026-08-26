@@ -4,13 +4,13 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod/v4";
 import { authorizedTargets } from "../../access/membership";
+import { resolveMembershipPrincipals } from "../../access/principals";
 import { fileAccessFilterSql } from "../../connectors/search";
 import type { AccessPrincipal } from "../../connectors/types";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
 import { withoutBlankStrings } from "./optional-params";
-import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const SLACK_CHANNEL_HISTORY_TOOL_NAME = "SlackChannelHistory";
@@ -574,7 +574,7 @@ export async function handleSlackChannelHistory(
 ): Promise<ToolResult> {
   if (!deps.db) return deniedResult();
 
-  const userPrincipals = await resolveUserPrincipals(deps);
+  const userPrincipals = await resolveMembershipPrincipals(deps);
   if (userPrincipals.length === 0) return deniedResult();
 
   const limit = normalizeSlackChannelHistoryLimit(args.limit);

@@ -169,6 +169,7 @@ export interface SketchMcpDeps {
   currentUserEmail?: string | null;
   currentUserName?: string | null;
   slackEntitySyncEnabled?: boolean;
+  adminReadAllEnabled?: boolean;
   /** Mirrors DEV_TOOLS_ENABLED. Gates dev-tools search-trace capture; off means no capture at all. */
   devToolsEnabled?: boolean;
   /** Pre-assigned trace id, set only by the dev-tools search runner so it can read the

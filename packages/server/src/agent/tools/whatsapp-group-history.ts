@@ -3,6 +3,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
 import { authorizedTargets } from "../../access/membership";
+import { resolveMembershipPrincipals } from "../../access/principals";
 import type { StoredConversationMessage } from "../../db/repositories/conversations";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
@@ -13,7 +14,6 @@ import {
 } from "../../whatsapp/identity-resolution";
 import { stripPersonalNumberTokens } from "../../whatsapp/privacy";
 import { withoutBlankStrings } from "./optional-params";
-import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const WHATSAPP_GROUP_HISTORY_TOOL_NAME = "WhatsAppGroupHistory";
@@ -552,7 +552,7 @@ export async function handleWhatsAppGroupHistory(
 ): Promise<ToolResult> {
   if (!deps.db) return deniedResult();
 
-  const userPrincipals = await resolveUserPrincipals(deps);
+  const userPrincipals = await resolveMembershipPrincipals(deps);
   if (userPrincipals.length === 0) return deniedResult();
 
   const limit = normalizeWhatsAppGroupHistoryLimit(args.limit);
