@@ -3,7 +3,7 @@ import type { SearchableUserRepo } from "../agent/tools/types";
 import type { DB } from "../db/schema";
 import type { WorkflowDelivery } from "../workflows/delivery";
 import { authorizedTargets } from "./membership";
-import { resolveViewerPrincipals } from "./principals";
+import { resolveMembershipPrincipals } from "./principals";
 
 export function isSharedDeliveryTarget(targetType: WorkflowDelivery["targetType"]): boolean {
   return targetType === "channel" || targetType === "group" || targetType === "thread";
@@ -19,7 +19,7 @@ export async function deliveryAuthorizationError(params: {
 
   const principals =
     params.userId && params.userRepo
-      ? await resolveViewerPrincipals({
+      ? await resolveMembershipPrincipals({
           db: params.db,
           currentUserId: params.userId,
           userRepo: params.userRepo,

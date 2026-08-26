@@ -331,6 +331,7 @@ export interface RunAgentParams {
   integrationUserName?: string | null;
   integrationUserEmail?: string | null;
   slackEntitySyncEnabled?: boolean;
+  isAdminReadAllEnabled?: () => Promise<boolean>;
   devToolsEnabled?: boolean;
   userPhone?: string | null;
   logger: Logger;
@@ -784,7 +785,7 @@ export function replaySdkStreamMessages(messages: readonly unknown[]): SdkStream
   };
 }
 
-async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult> {
+async function runAgentWithAiSdk(params: RunAgentParams, adminReadAllEnabled: boolean): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const startHeapMb = heapUsedMb();
   const isFresh = params.sessionMode === "fresh";
@@ -948,6 +949,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         transcriptionEnabled: Boolean(transcriptionConfig),
         visionAnalysisEnabled: visualAnalysisAllowed,
         visionConfig,
+        adminReadAllEnabled,
       });
     const customTools = await customToolsProvider.createTools(params);
     const questionToolNames = [
@@ -1173,14 +1175,25 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
 }
 
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
+  const adminReadAllEnabled = await resolveAdminReadAllEnabled(params);
   if (params.agentRuntime === "aisdk") {
-    return runAgentWithAiSdk(params);
+    return runAgentWithAiSdk(params, adminReadAllEnabled);
   }
 
-  return runAgentWithClaudeSdk(params);
+  return runAgentWithClaudeSdk(params, adminReadAllEnabled);
 }
 
-async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentResult> {
+async function resolveAdminReadAllEnabled(params: RunAgentParams): Promise<boolean> {
+  if (!params.isAdminReadAllEnabled) return false;
+  try {
+    return (await params.isAdminReadAllEnabled()) === true;
+  } catch (err) {
+    params.logger.warn({ err }, "Admin read-all setting resolution failed closed for agent run");
+    return false;
+  }
+}
+
+async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled: boolean): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const startHeapMb = heapUsedMb();
   const isFresh = params.sessionMode === "fresh";
@@ -1306,6 +1319,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     currentUserEmail: params.userEmail ?? null,
     currentUserName: params.userName,
     slackEntitySyncEnabled: params.slackEntitySyncEnabled,
+    adminReadAllEnabled,
     devToolsEnabled: params.devToolsEnabled,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,

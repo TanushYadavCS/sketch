@@ -1,7 +1,12 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleSendMessageToTarget } from "./agent/tools/messaging";
+import { handleSearchEntities } from "./agent/tools/search";
+import { SLACK_CHANNEL_HISTORY_DENIED_TEXT, handleSlackChannelHistory } from "./agent/tools/slack-channel-history";
+import { UploadCollector } from "./agent/tools/types";
 import type { createServer } from "./bootstrap";
 import { seedSlackOrganizationDomain } from "./bootstrap";
+import { createSettingsRepository } from "./db/repositories/settings";
 import { upsertSlackPersonEntity } from "./db/repositories/slack-entity-sync";
 import { createUserRepository } from "./db/repositories/users";
 import type { DB } from "./db/schema";
@@ -119,6 +124,188 @@ describe("bootstrap", () => {
     const h = await boot({ SLACK_ENTITY_SYNC: false });
 
     await expect(h.db.selectFrom("user_entity_link_sweep_runs").selectAll().execute()).resolves.toEqual([]);
+  });
+
+  it("keeps admin read-all bypass out of automation, invoke, and membership authorization paths", async () => {
+    const h = await boot({}, false, false, false);
+    const users = createUserRepository(h.db);
+    const settings = createSettingsRepository(h.db);
+    const apiKey = "sk_admin_file_parity_route";
+    await settings.ensure();
+    await settings.update({
+      onboardingCompletedAt: new Date().toISOString(),
+      sketchApiKey: apiKey,
+      adminCanReadAllFiles: true,
+    });
+    const admin = await users.create({
+      name: "Admin",
+      email: "admin@example.com",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    const target = await users.create({
+      name: "Target",
+      email: "target@example.com",
+      emailVerified: true,
+      authRole: "member",
+    });
+    const now = new Date("2026-08-26T00:00:00.000Z").toISOString();
+    await h.db
+      .insertInto("connector_configs")
+      .values({
+        id: "cfg-no-escape",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: admin.id,
+      })
+      .execute();
+    await h.db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-no-escape",
+        connector_config_id: "cfg-no-escape",
+        scope_type: "drive",
+        provider_scope_id: "private",
+      })
+      .execute();
+    await h.db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-no-escape",
+        connector_config_id: "cfg-no-escape",
+        provider_file_id: "provider-no-escape",
+        file_name: "Admin bypass private file",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "admin bypass private payload",
+        synced_at: now,
+        source_updated_at: now,
+        access_scope_id: "scope-no-escape",
+      })
+      .execute();
+    await h.db
+      .insertInto("entities")
+      .values({
+        id: "entity-no-escape",
+        name: "Admin Bypass Entity",
+        source_type: "project",
+        status: "confirmed",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+    await h.db
+      .insertInto("entity_mentions")
+      .values({
+        id: "mention-no-escape",
+        entity_id: "entity-no-escape",
+        indexed_file_id: "file-no-escape",
+        chunk_index: 0,
+        context_snippet: "admin bypass entity context",
+        confidence: "INFERRED",
+        source: "llm_extraction",
+        relation: "mentioned",
+        mentioned_at: now,
+      })
+      .execute();
+
+    const automationEntityResult = await handleSearchEntities(
+      { queries: ["Admin Bypass Entity"] },
+      {
+        uploadCollector: new UploadCollector(),
+        workspaceDir: "/tmp",
+        db: h.db,
+        userRepo: users,
+        currentUserId: admin.id,
+        adminReadAllEnabled: true,
+        publicMcp: { filterEntityMetadata: true },
+      },
+    );
+    expect(automationEntityResult.content[0]?.text).toBe("No entities found matching those queries.");
+
+    const { runAgent } = await import("./agent/runner");
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      messageSent: true,
+      sessionId: "invoke-session",
+      costUsd: 0,
+      auxCostUsd: 0,
+      pendingUploads: [],
+      pendingIntegrationConnections: [],
+      trace: { progressEvents: [], finalText: "done", automationArtifacts: [] },
+      rawUsage: {
+        model: "mock",
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        durationApiMs: 0,
+        numTurns: 1,
+        stopReason: "stop",
+        errorSubtype: null,
+        isResumedSession: false,
+        totalAttachments: 0,
+        imageCount: 0,
+        nonImageCount: 0,
+        mimeTypes: [],
+        fileSizes: [],
+        promptMode: "text",
+        toolCalls: [],
+        auxLlmCalls: [],
+        sdkCostUsd: 0,
+      },
+    });
+    const invoke = await request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        requesterUserId: admin.id,
+        message: "try admin bypass",
+        target: { type: "user", userId: target.id },
+      }),
+    });
+    expect(invoke.status).toBe(200);
+    await invoke.text();
+    const invokedParams = vi.mocked(runAgent).mock.calls.at(-1)?.[0];
+    expect(invokedParams).toMatchObject({ currentUserId: admin.id, contextType: "dm" });
+    expect(invokedParams).not.toHaveProperty("isAdminReadAllEnabled");
+
+    const sendTargetMessage = vi.fn().mockResolvedValue({ messageRef: "sent" });
+    const sendResult = await handleSendMessageToTarget(
+      {
+        message: "private payload",
+        target: { platform: "slack", targetType: "channel", targetId: "C-private" },
+      },
+      {
+        db: h.db,
+        currentUserId: admin.id,
+        userRepo: users,
+        sendTargetMessage,
+      },
+    );
+    expect(sendResult.content[0]?.text).toContain("not a known member");
+    expect(sendTargetMessage).not.toHaveBeenCalled();
+
+    const historyResult = await handleSlackChannelHistory(
+      {
+        channelRef: "conversation:1",
+        startedAt: "2026-08-26T00:00:00.000Z",
+        endedAt: "2026-08-26T01:00:00.000Z",
+      },
+      {
+        uploadCollector: new UploadCollector(),
+        workspaceDir: "/tmp",
+        db: h.db,
+        userRepo: users,
+        currentUserId: admin.id,
+        adminReadAllEnabled: true,
+      },
+    );
+    expect(historyResult.content[0]?.text).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
   });
 
   it("starts the user entity link sweep when Slack entity sync is enabled", async () => {

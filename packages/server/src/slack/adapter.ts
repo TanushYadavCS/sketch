@@ -196,6 +196,7 @@ export interface SlackAdapterDeps {
     userCache: UserCache;
   };
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
+  isAdminReadAllEnabled?: () => Promise<boolean>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   cliIntegrations?: RunAgentParams["cliIntegrations"];
@@ -760,6 +761,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     const result = await runAgent({
       db,
       workspaceKey,
+      ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
       workspaceDir,
       claudeConfigDir: config.CLAUDE_CONFIG_DIR,
       userName: requester.name,
@@ -1283,6 +1285,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             const result = await runAgent({
               db,
               workspaceKey: user.id,
+              ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
               seedAuxCalls: eagerAuxCalls,
               userMessage,
               workspaceDir,
@@ -1817,6 +1820,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             const result = await runAgent({
               db,
               workspaceKey: channelWorkspaceKey,
+              ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
               seedAuxCalls: eagerAuxCalls,
               userMessage,
               workspaceDir,

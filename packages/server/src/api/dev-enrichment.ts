@@ -233,8 +233,9 @@ export function devEnrichmentRoutes(
    * agent's own search is the `dev_tools` origin, which is what lets the feed tell a test
    * run apart from live traffic.
    *
-   * Principals are the calling admin's own, so the trace answers "what would I see". To
-   * ask what another user would see, open that user's own search from the feed.
+   * Visibility matches the calling admin's content-read route, including the read-all
+   * setting when enabled. To ask what another user would see, open that user's own
+   * search from the feed.
    */
   routes.post("/search-runs", async (c) => {
     const forbidden = requireAdmin(c);
@@ -252,6 +253,7 @@ export function devEnrichmentRoutes(
       currentUserId: c.get("sub") as string,
       userRepo: createUserRepository(db, { slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC }),
       slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC,
+      adminReadAllEnabled: c.get("adminCanReadAllFiles") === true,
       devToolsEnabled: true,
       devSearchTraceId: traceId,
       geminiConfig: { maxRpm: appConfig?.GEMINI_MAX_RPM, maxRetries: appConfig?.GEMINI_MAX_RETRIES },

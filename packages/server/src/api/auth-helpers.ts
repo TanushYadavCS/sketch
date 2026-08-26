@@ -91,7 +91,7 @@ export function getFileViewer(c: Context): FileViewer {
  * `admin_can_read_all_files` setting. By default admin role grants ops access
  * (manage connectors, see metadata) but does NOT confer read access to private
  * contents. Orgs that need it can flip the setting on from Settings → Access.
- * The agent file-content tool stays on email rails regardless of this setting.
+ * Interactive agent content-read tools use the same gated admin bypass.
  */
 export function getContentViewer(c: Context): FileViewer {
   const bypass = c.get("adminCanReadAllFiles") === true;

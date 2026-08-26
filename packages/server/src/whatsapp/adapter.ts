@@ -167,6 +167,7 @@ export interface WhatsAppAdapterDeps {
   };
   queue: QueueManager;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
+  isAdminReadAllEnabled?: () => Promise<boolean>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   cliIntegrations?: RunAgentParams["cliIntegrations"];
@@ -484,6 +485,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const result = await runAgent({
         db,
         workspaceKey,
+        ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
         userMessage: resumeWork.continuationText,
         resumeSessionId: resumeWork.context.sessionId,
         workspaceDir: params.workspaceDir,
@@ -1269,6 +1271,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           const result = await runAgent({
             db,
             workspaceKey: dmWorkspaceKey,
+            ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
             seedAuxCalls: eagerAuxCalls,
             userMessage,
             workspaceDir,
@@ -1626,6 +1629,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const result = await runAgent({
           db,
           workspaceKey: groupWorkspaceKey,
+          ...(deps.isAdminReadAllEnabled ? { isAdminReadAllEnabled: deps.isAdminReadAllEnabled } : {}),
           seedAuxCalls: eagerAuxCalls,
           userMessage,
           workspaceDir,

@@ -395,8 +395,10 @@ function AccessSection() {
             <p className="text-sm font-medium">Admins can read all file content</p>
             <p className="mt-1 text-xs text-muted-foreground">
               When off, admins manage connectors and see file metadata but not file content unless explicitly shared.
-              When on, admins can read any file's content. The agent's file-content tool stays on email rails either
-              way.
+              When on, admins can read any file's content everywhere: the Files pages, search, the daily brief, and the
+              agent in live conversations (web chat, DMs, and group chats). Scheduled and automated runs stay on each
+              member's own access. Content an admin surfaces in a group chat becomes part of that conversation. Member
+              access is unchanged either way.
             </p>
           </div>
           <Switch

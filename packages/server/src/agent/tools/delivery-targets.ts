@@ -2,7 +2,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { sql } from "kysely";
 import { z } from "zod/v4";
 import { authorizedTargets } from "../../access/membership";
-import { resolveViewerPrincipals } from "../../access/principals";
+import { resolveMembershipPrincipals } from "../../access/principals";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 const searchDeliveryTargetsSchema = {
@@ -105,7 +105,7 @@ export async function handleSearchDeliveryTargets(
   const offset = cursor?.offset ?? 0;
   const pageEnd = offset + limit;
   const matches: DeliveryTargetMatch[] = [];
-  const viewerPrincipals = await resolveViewerPrincipals(deps).catch((error) => {
+  const viewerPrincipals = await resolveMembershipPrincipals(deps).catch((error) => {
     deps.logger?.warn({ err: error }, "Delivery target principal resolution failed closed");
     return [];
   });

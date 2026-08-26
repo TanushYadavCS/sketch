@@ -1,8 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
-import { resolveViewerPrincipals } from "../../access/principals";
+import { resolveContentPrincipals } from "../../access/principals";
 import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "../../connectors/search";
-import type { AccessPrincipal } from "../../connectors/types";
 import type { DevSearchTraceOrigin, DevSearchTraceStatus } from "../../db/repositories/dev-search-traces";
 import { createEntityRepository } from "../../db/repositories/entities";
 import { createSearchTraceCapture } from "./search-trace";
@@ -97,10 +96,8 @@ export type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSc
 export type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
 export type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
-export { resolveViewerPrincipals } from "../../access/principals";
-
-export async function resolveUserPrincipals(deps: SketchMcpDeps): Promise<AccessPrincipal[]> {
-  return resolveViewerPrincipals(deps);
+function contentPrincipalDeps(deps: SketchMcpDeps) {
+  return { ...deps, adminBypass: { enabled: deps.adminReadAllEnabled === true } };
 }
 
 async function filterEntityRowsForPublic<
@@ -108,7 +105,8 @@ async function filterEntityRowsForPublic<
 >(deps: SketchMcpDeps, rows: T[]): Promise<T[]> {
   if (!deps.publicMcp?.filterEntityMetadata || !deps.db || rows.length === 0) return rows;
 
-  const userPrincipals = await resolveUserPrincipals(deps);
+  const userPrincipals = await resolveContentPrincipals(contentPrincipalDeps(deps));
+  if (userPrincipals === undefined) return rows;
   if (userPrincipals.length === 0) return [];
 
   const mentions = await deps.db
@@ -258,8 +256,8 @@ export async function handleSearch(
   }
 
   const effectiveLimit = resultLimit ?? (sortBy === "recency" ? 3 : 10);
-  const userPrincipals = await resolveUserPrincipals(deps);
-  if (deps.publicMcp && userPrincipals.length === 0) {
+  const userPrincipals = await resolveContentPrincipals(contentPrincipalDeps(deps));
+  if (deps.publicMcp && userPrincipals !== undefined && userPrincipals.length === 0) {
     const label = trimmedQuery ? `"${trimmedQuery}"` : "the given filters";
     return done("empty", `No results found for ${label}.`, 0, "public MCP caller resolved to no principals");
   }
@@ -275,6 +273,7 @@ export async function handleSearch(
     entityIdsMode,
     sortBy,
     userPrincipals,
+    ...(userPrincipals === undefined ? { accessBypassReason: "admin" as const } : {}),
     slackEntitySyncEnabled: deps.slackEntitySyncEnabled,
     skipAutoEntityBoost,
     geminiMaxRpm: deps.geminiConfig?.maxRpm,
@@ -407,8 +406,8 @@ export async function handleGetEntityContext(
   }
 
   const requestedLimit = limit ?? 20;
-  const userPrincipals = await resolveUserPrincipals(deps);
-  if (userPrincipals.length === 0) {
+  const userPrincipals = await resolveContentPrincipals(contentPrincipalDeps(deps));
+  if (userPrincipals !== undefined && userPrincipals.length === 0) {
     return { content: [{ type: "text", text: "No mentions found for this entity." }] };
   }
   const rawMentions = await entityRepo.getMentionsForEntity(entityId, {
@@ -416,12 +415,15 @@ export async function handleGetEntityContext(
     since,
   });
 
-  const accessibleIds = await filterAccessibleFileIds(
-    deps.db,
-    rawMentions.map((m) => m.indexed_file_id),
-    userPrincipals,
-    deps.slackEntitySyncEnabled ?? true,
-  );
+  const accessibleIds =
+    userPrincipals === undefined
+      ? new Set(rawMentions.map((m) => m.indexed_file_id))
+      : await filterAccessibleFileIds(
+          deps.db,
+          rawMentions.map((m) => m.indexed_file_id),
+          userPrincipals,
+          deps.slackEntitySyncEnabled ?? true,
+        );
 
   const mentions = rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)).slice(0, requestedLimit);
 
@@ -471,8 +473,8 @@ export async function handleGetFileContent({ fileId }: GetFileContentArgs, deps:
   if (!deps.db) {
     return { content: [{ type: "text", text: "File content not available." }] };
   }
-  const userPrincipals = await resolveUserPrincipals(deps);
-  if (deps.publicMcp && userPrincipals.length === 0) {
+  const userPrincipals = await resolveContentPrincipals(contentPrincipalDeps(deps));
+  if (deps.publicMcp && userPrincipals !== undefined && userPrincipals.length === 0) {
     return { content: [{ type: "text", text: `File ${fileId} not found.` }] };
   }
   const file = await getFileContent(deps.db, fileId, userPrincipals, deps.slackEntitySyncEnabled ?? true);
