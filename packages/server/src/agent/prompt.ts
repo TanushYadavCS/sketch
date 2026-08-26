@@ -354,13 +354,15 @@ function sourceLabel(source: string): { label: string; noun: string } {
 export function buildRuntimeCapabilitiesContext(agentEnv?: Record<string, string>): string {
   const available = Object.values(cliIntegrationAppDefinitions)
     .filter((definition) => definition.credentialFields.every((field) => Boolean(agentEnv?.[field.envName])))
-    .map((definition) => definition.id);
+    .map((definition) => definition.name);
+  if (agentEnv?.CANVAS_CLI) available.unshift("Canvas");
   return [
     "## Runtime Capabilities",
     "",
     available.length > 0
-      ? `Available managed integrations for this run: ${available.join(", ")}. Load the matching managed skill and follow its provider-specific API or CLI instructions.`
-      : "No managed integrations are available for this run. If a task requires one, ask the user to connect or request access in Sketch Integrations.",
+      ? `Available managed skill integrations for this run: ${available.join(", ")}. Load the matching skill and follow its provider-specific API or CLI instructions.`
+      : "No managed skill integrations are available for this run. If a task requires one, check the provider configuration before asking the user to connect or request access in Sketch Integrations.",
+    "Never claim that an integration is unavailable or recommend reconnecting unless a provider, configuration, or connection check in the current turn supports that conclusion.",
   ].join("\n");
 }
 

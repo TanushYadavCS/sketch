@@ -860,11 +860,6 @@ async function runAgentWithAiSdk(params: RunAgentParams, adminReadAllEnabled: bo
     order: ["org", "workspace"],
     logger: params.logger,
   });
-  const systemAppend = `${prependClaudeMdContext({
-    claudeMdContext: claudeMdContext.appendedSystemContext,
-    systemContext: baseSystemAppend,
-  })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
-
   const promptContent =
     images.length > 0 && visionConfig
       ? userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed })
@@ -933,11 +928,17 @@ async function runAgentWithAiSdk(params: RunAgentParams, adminReadAllEnabled: bo
     );
     logger.debug({ userEmail: integrationUserEmail }, "Integration access resolved (user context)");
   }
+  const effectiveAgentEnv = { ...params.agentEnv, ...integrationAccess.envVars };
+  const effectiveParams = { ...params, agentEnv: effectiveAgentEnv };
+  const systemAppend = `${prependClaudeMdContext({
+    claudeMdContext: claudeMdContext.appendedSystemContext,
+    systemContext: baseSystemAppend,
+  })}\n\n${buildRuntimeCapabilitiesContext(effectiveAgentEnv)}`;
 
   try {
     const workspaceTools = createAgentRuntimeWorkspaceTools({
       scope,
-      env: buildAgentChildEnv(integrationAccess.envVars, params.agentEnv),
+      env: buildAgentChildEnv({}, effectiveAgentEnv),
       toolNames: resolveAgentRuntimeWorkspaceToolNames(params.agentAllowedTools),
       logger,
     });
@@ -959,7 +960,7 @@ async function runAgentWithAiSdk(params: RunAgentParams, adminReadAllEnabled: bo
     const mcpToolsProvider = params.agentRuntimeExtensions?.mcpTools ?? createDefaultAgentRuntimeMcpToolProvider();
     const mcpTools = await mcpToolsProvider.createTools(params);
     const skillsProvider = params.agentRuntimeExtensions?.skills ?? createDefaultAgentRuntimeSkillsProvider();
-    const skillTools = await skillsProvider.createSkillTool(params);
+    const skillTools = await skillsProvider.createSkillTool(effectiveParams);
     const tools = { ...workspaceTools, ...customTools, ...mcpTools, ...skillTools };
     const shouldStopAfterCreateAutomationSkill =
       params.stopAfterCreateAutomationSkill ??
@@ -1225,7 +1226,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
   const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
 
-  const systemAppend = `${buildSystemContext({
+  const baseSystemAppend = buildSystemContext({
     platform: params.responseSurface ?? params.platform,
     deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
@@ -1235,7 +1236,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
     automationBuilderChat: params.automationBuilderChat,
-  })}\n\n${buildRuntimeCapabilitiesContext(params.agentEnv)}`;
+  });
 
   const sdkBuiltInTools = resolveSdkBuiltInTools(params.agentAllowedTools);
 
@@ -1353,17 +1354,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled
     }
   }
 
-  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
-    agentAllowedTools: params.agentAllowedTools,
-    agentEnv: params.agentEnv,
-    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
-    blockImageReads: visualAnalysisAllowed,
-  });
   const canUseToolTimings: CanUseToolTiming[] = [];
-  const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
-    canUseToolTimings.push({ toolName, calledAt: Date.now() });
-    return baseCanUseTool(toolName, input);
-  };
 
   // Start per-run brokered access for skill-mode integrations.
   // The agent sees only harmless launcher paths and broker metadata; the
@@ -1389,6 +1380,18 @@ async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled
     );
     logger.debug({ userEmail: integrationUserEmail }, "Integration access resolved (user context)");
   }
+  const effectiveAgentEnv = { ...params.agentEnv, ...integrationAccess.envVars };
+  const systemAppend = `${baseSystemAppend}\n\n${buildRuntimeCapabilitiesContext(effectiveAgentEnv)}`;
+  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
+    agentAllowedTools: params.agentAllowedTools,
+    agentEnv: effectiveAgentEnv,
+    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+    blockImageReads: visualAnalysisAllowed,
+  });
+  const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
+    canUseToolTimings.push({ toolName, calledAt: Date.now() });
+    return baseCanUseTool(toolName, input);
+  };
 
   /**
    * Runs a single SDK query() pass and processes its message stream. When the
@@ -1417,7 +1420,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams, adminReadAllEnabled
         env: {
           ...process.env,
           ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
-          ...buildAgentChildEnv(integrationAccess.envVars, params.agentEnv),
+          ...buildAgentChildEnv({}, effectiveAgentEnv),
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,

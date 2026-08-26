@@ -886,13 +886,16 @@ describe("runAgent AI SDK runtime path", () => {
     const provider = brokerCapableProvider(cliPath);
     const loadIntegrationProvider = vi.fn().mockResolvedValue(provider);
     const command = `$CANVAS_CLI env-check "$CANVAS_CLI" "${outputPath}" "$AGENT_ONLY"`;
+    const model = bashThenTextModel(command, "brokered done");
+    const capture: { systemPrompt?: string } = {};
 
     const result = await runAgent(
-      makeRunParams(bashThenTextModel(command, "brokered done"), {
+      makeRunParams(model, {
         userEmail: "alice@example.com",
         integrationUserEmail: "owner@example.com",
         loadIntegrationProvider,
         agentEnv: { AGENT_ONLY: "agent-value" },
+        agentRuntimeProvider: capturingProvider(model, capture),
       }),
     );
     const brokerOutput = await readBrokerCliOutput(outputPath);
@@ -904,6 +907,9 @@ describe("runAgent AI SDK runtime path", () => {
     });
     expect(loadIntegrationProvider).toHaveBeenCalled();
     expect(provider.getBrokerSpec).toHaveBeenCalledWith({ userEmail: "owner@example.com", claudeConfigDir: workspace });
+    expect(capture.systemPrompt).toContain("Available managed skill integrations for this run: Canvas");
+    expect(capture.systemPrompt).not.toContain("Google Calendar");
+    expect(capture.systemPrompt).not.toContain("No managed skill integrations are available");
     expect(brokerOutput).toMatchObject({
       mode: "env-check",
       agentValue: "agent-value",

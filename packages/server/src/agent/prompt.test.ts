@@ -1,11 +1,38 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAutomationMessageDeliveryLines,
+  buildRuntimeCapabilitiesContext,
   buildSketchContext,
   buildSystemContext,
   formatTimeAgo,
   getImageAttachmentPathsFromSketchContext,
 } from "./prompt";
+
+describe("buildRuntimeCapabilitiesContext", () => {
+  it("exposes Canvas generically when its brokered CLI is available", () => {
+    const result = buildRuntimeCapabilitiesContext({ CANVAS_CLI: "/private/launcher" });
+
+    expect(result).toContain("Available managed skill integrations for this run: Canvas");
+    expect(result).not.toContain("Google Calendar");
+    expect(result).not.toContain("/private/launcher");
+    expect(result).not.toContain("No managed skill integrations are available");
+  });
+
+  it("keeps direct managed integrations supplemental to Canvas", () => {
+    const result = buildRuntimeCapabilitiesContext({ CANVAS_CLI: "launcher", GH_TOKEN: "secret" });
+
+    expect(result).toContain("Available managed skill integrations for this run: Canvas, GitHub");
+    expect(result).not.toContain("launcher");
+    expect(result).not.toContain("secret");
+  });
+
+  it("requires a current-turn check before claiming an integration is unavailable", () => {
+    const result = buildRuntimeCapabilitiesContext();
+
+    expect(result).toContain("check the provider configuration");
+    expect(result).toContain("check in the current turn supports that conclusion");
+  });
+});
 
 describe("buildAutomationMessageDeliveryLines", () => {
   it("provides Slack-safe human-readable delivery rules", () => {

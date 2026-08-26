@@ -456,6 +456,34 @@ describe("runAgent", () => {
     expect(callArgs.options.systemPrompt).not.toContain("Alice");
   });
 
+  it("describes brokered Canvas access in the Claude SDK prompt", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    let capturedSystemPrompt = "";
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      capturedSystemPrompt = (args as { options: { systemPrompt: string } }).options.systemPrompt;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-canvas-prompt" };
+        yield { type: "result", session_id: "sess-canvas-prompt", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    await runAgent(
+      makeBaseParams({
+        loadIntegrationProvider: vi.fn().mockResolvedValue({
+          getBrokerSpec: vi.fn().mockReturnValue({
+            cliPath: process.execPath,
+            credentialEnv: {},
+            launcherEnvName: "CANVAS_CLI",
+          }),
+        } as never),
+      }),
+    );
+
+    expect(capturedSystemPrompt).toContain("Available managed skill integrations for this run: Canvas");
+    expect(capturedSystemPrompt).not.toContain("Google Calendar");
+    expect(capturedSystemPrompt).not.toContain("No managed skill integrations are available");
+  });
+
   it("passes allowlisted WebSearch and WebFetch through to the Claude SDK runtime without a degradation note", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const capturedOptions: unknown[] = [];
